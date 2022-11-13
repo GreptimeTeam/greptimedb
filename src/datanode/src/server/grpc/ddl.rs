@@ -15,8 +15,7 @@ use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
 
 use crate::error::{
-    self, BumpTableIdSnafu, ColumnDefaultConstraintSnafu, IllegalCreateRequestSnafu,
-    MissingFieldSnafu, Result,
+    self, BumpTableIdSnafu, ColumnDefaultConstraintSnafu, MissingFieldSnafu, Result,
 };
 use crate::instance::Instance;
 use crate::sql::SqlRequest;
@@ -33,20 +32,35 @@ impl Instance {
             );
             table_id
         } else {
-            let table_id = self
-                .table_id_provider
-                .as_ref()
-                .context(IllegalCreateRequestSnafu)
-                .unwrap()
-                .next_table_id()
-                .await
-                .context(BumpTableIdSnafu)
-                .unwrap();
-            info!(
-                "Creating table {:?}.{:?}.{:?} with table id from catalog manager: {}",
-                &expr.catalog_name, &expr.schema_name, expr.table_name, table_id
-            );
-            table_id
+            match self.table_id_provider.as_ref() {
+                None => {
+                    return AdminResultBuilder::default()
+                        .status_code(StatusCode::Internal as u32)
+                        .err_msg("Table id provider absent in standalone mode".to_string())
+                        .build();
+                }
+                Some(table_id_provider) => {
+                    match table_id_provider
+                        .next_table_id()
+                        .await
+                        .context(BumpTableIdSnafu)
+                    {
+                        Ok(table_id) => {
+                            info!(
+                        "Creating table {:?}.{:?}.{:?} with table id from catalog manager: {}",
+                        &expr.catalog_name, &expr.schema_name, expr.table_name, table_id
+                    );
+                            table_id
+                        }
+                        Err(e) => {
+                            return AdminResultBuilder::default()
+                                .status_code(e.status_code() as u32)
+                                .err_msg(e.to_string())
+                                .build();
+                        }
+                    }
+                }
+            }
         };
 
         let request = create_expr_to_request(table_id, expr).await;

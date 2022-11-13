@@ -97,11 +97,14 @@ async fn write_data(
         let row_count = record_batch.num_rows();
         let insert_batch = convert_record_batch(record_batch).into();
         let insert_expr = InsertExpr {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
             table_name: TABLE_NAME.to_string(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values {
                 values: vec![insert_batch],
             })),
             options: HashMap::default(),
+            region_number: 0,
         };
         let now = Instant::now();
         db.insert(insert_expr).await.unwrap();

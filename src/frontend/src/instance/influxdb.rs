@@ -17,8 +17,7 @@ impl InfluxdbLineProtocolHandler for Instance {
         match self.mode {
             Mode::Standalone => {
                 let exprs: Vec<InsertExpr> = request.try_into()?;
-                self.database()
-                    .batch_insert(exprs)
+                self.handle_inserts(&exprs)
                     .await
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu {

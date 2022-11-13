@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use api::v1::codec::InsertBatch;
 use api::v1::{column, column::SemanticType, insert_expr, Column, ColumnDataType, InsertExpr};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::writer::Precision;
 use table::requests::InsertRequest;
 
@@ -133,6 +134,8 @@ impl DataPoint {
 
     // TODO(fys): will remove in the future.
     pub fn as_grpc_insert(&self) -> InsertExpr {
+        let catalog_name = DEFAULT_CATALOG_NAME.to_string();
+        let schema_name = DEFAULT_SCHEMA_NAME.to_string();
         let mut columns = Vec::with_capacity(2 + self.tags.len());
 
         let ts_column = Column {
@@ -177,11 +180,14 @@ impl DataPoint {
             row_count: 1,
         };
         InsertExpr {
+            catalog_name,
+            schema_name,
             table_name: self.metric.clone(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values {
                 values: vec![batch.into()],
             })),
             options: HashMap::default(),
+            region_number: 0,
         }
     }
 

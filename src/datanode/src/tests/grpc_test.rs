@@ -225,9 +225,12 @@ async fn insert_and_assert(db: &Database) {
     }
     .into()];
     let expr = InsertExpr {
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
         table_name: "demo".to_string(),
         expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
         options: HashMap::default(),
+        region_number: 0,
     };
     let result = db.insert(expr).await;
     result.unwrap();

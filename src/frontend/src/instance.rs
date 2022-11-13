@@ -198,22 +198,40 @@ impl Instance {
             .context(AlterTableSnafu)
     }
 
+    pub async fn handle_inserts(&self, insert_expr: &[InsertExpr]) -> Result<Output> {
+        let mut success = 0;
+        for expr in insert_expr {
+            if let Output::AffectedRows(rows) = self.handle_insert(expr).await? {
+                success += rows;
+            }
+        }
+        Ok(Output::AffectedRows(success))
+    }
+
     /// Handle all inserts
-    pub async fn handle_insert(&self, expr: &InsertExpr) -> Result<Output> {
-        let table_name = &expr.table_name;
+    pub async fn handle_insert(&self, insert_expr: &InsertExpr) -> Result<Output> {
+        let table_name = &insert_expr.table_name;
         let catalog_name = "greptime";
         let schema_name = "public";
 
-        if let Some(exprs) = &expr.expr {
-            match exprs {
+        if let Some(expr) = &insert_expr.expr {
+            match expr {
                 api::v1::insert_expr::Expr::Values(values) => {
-                    self.handle_insert_values(catalog_name, schema_name, table_name, values)
-                        .await
+                    // TODO(hl): gRPC should also support partitioning.
+                    let region_number = 0;
+                    self.handle_insert_values(
+                        catalog_name,
+                        schema_name,
+                        table_name,
+                        region_number,
+                        values,
+                    )
+                    .await
                 }
                 api::v1::insert_expr::Expr::Sql(_) => {
                     // Frontend does not comprehend insert request that is raw SQL string
                     self.database()
-                        .insert(expr.clone())
+                        .insert(insert_expr.clone())
                         .await
                         .and_then(Output::try_from)
                         .context(InsertSnafu)
@@ -233,6 +251,7 @@ impl Instance {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
+        region_number: u32,
         values: &insert_expr::Values,
     ) -> Result<Output> {
         let insert_batches = common_insert::insert_batches(&values.values).unwrap();
@@ -245,7 +264,10 @@ impl Instance {
         .await?;
         self.database()
             .insert(InsertExpr {
+                catalog_name: catalog_name.to_string(),
+                schema_name: schema_name.to_string(),
                 table_name: table_name.to_string(),
+                region_number,
                 options: Default::default(),
                 expr: Some(insert_expr::Expr::Values(values.clone())),
             })
@@ -457,42 +479,42 @@ impl SqlQueryHandler for Instance {
                 .and_then(|object_result| object_result.try_into())
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
-            Statement::Insert(insert) => {
-                match self.mode {
-                    Mode::Standalone => {
-                        // TODO(dennis): respect schema_name when inserting data
-                        let (_catalog_name, _schema_name, table_name) = insert
-                            .full_table_name()
-                            .context(error::ParseSqlSnafu)
-                            .map_err(BoxedError::new)
-                            .context(server_error::ExecuteInsertSnafu {
-                                msg: "Failed to get table name",
-                            })?;
+            Statement::Insert(insert) => match self.mode {
+                Mode::Standalone => {
+                    let (catalog_name, schema_name, table_name) = insert
+                        .full_table_name()
+                        .context(error::ParseSqlSnafu)
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteInsertSnafu {
+                            msg: "Failed to get table name",
+                        })?;
 
-                        let expr = InsertExpr {
-                            table_name,
-                            expr: Some(insert_expr::Expr::Sql(query.to_string())),
-                            options: HashMap::default(),
-                        };
-                        self.database()
-                            .insert(expr)
-                            .await
-                            .and_then(Output::try_from)
-                            .map_err(BoxedError::new)
-                            .context(server_error::ExecuteQuerySnafu { query })
-                    }
-                    Mode::Distributed => {
-                        let affected = self
-                            .sql_dist_insert(insert)
-                            .await
-                            .map_err(BoxedError::new)
-                            .context(server_error::ExecuteInsertSnafu {
-                                msg: "execute insert failed",
-                            })?;
-                        Ok(Output::AffectedRows(affected))
-                    }
+                    let expr = InsertExpr {
+                        catalog_name,
+                        schema_name,
+                        table_name,
+                        expr: Some(insert_expr::Expr::Sql(query.to_string())),
+                        region_number: 0,
+                        options: HashMap::default(),
+                    };
+                    self.database()
+                        .insert(expr)
+                        .await
+                        .and_then(Output::try_from)
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteQuerySnafu { query })
                 }
-            }
+                Mode::Distributed => {
+                    let affected = self
+                        .sql_dist_insert(insert)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteInsertSnafu {
+                            msg: "execute insert failed",
+                        })?;
+                    Ok(Output::AffectedRows(affected))
+                }
+            },
             Statement::CreateTable(create) => {
                 let expr = self
                     .create_to_expr(create)
@@ -872,9 +894,12 @@ mod tests {
         }
         .into()];
         let insert_expr = InsertExpr {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
             table_name: "demo".to_string(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
             options: HashMap::default(),
+            region_number: 0,
         };
         let object_expr = ObjectExpr {
             header: Some(ExprHeader::default()),

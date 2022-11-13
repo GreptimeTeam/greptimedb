@@ -1,7 +1,4 @@
-use std::ops::Deref;
-
 use api::result::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
-use api::v1::codec::RegionNumber;
 use api::v1::{
     admin_expr, insert_expr, object_expr, select_expr, AdminExpr, AdminResult, CreateDatabaseExpr,
     ObjectExpr, ObjectResult, SelectExpr,
@@ -165,16 +162,8 @@ impl GrpcQueryHandler for Instance {
                         reason: "missing `expr` in `InsertExpr`",
                     })?;
 
-                // TODO(fys): _region_id is for later use.
-                let _region_id: Option<RegionNumber> = insert_expr
-                    .options
-                    .get("region_id")
-                    .map(|id| {
-                        id.deref()
-                            .try_into()
-                            .context(servers::error::DecodeRegionNumberSnafu)
-                    })
-                    .transpose()?;
+                // TODO(fys): _region_number is for later use.
+                let _region_number: u32 = insert_expr.region_number;
 
                 match expr {
                     insert_expr::Expr::Values(values) => {
