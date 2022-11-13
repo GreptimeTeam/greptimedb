@@ -235,9 +235,32 @@ impl Instance {
         table_name: &str,
         values: &insert_expr::Values,
     ) -> Result<Output> {
-        info!("------- handle insert values");
         let insert_batches = common_insert::insert_batches(&values.values).unwrap();
+        self.create_or_alter_table_on_demand(
+            catalog_name,
+            schema_name,
+            table_name,
+            &insert_batches,
+        )
+        .await?;
+        self.database()
+            .insert(InsertExpr {
+                table_name: table_name.to_string(),
+                options: Default::default(),
+                expr: Some(insert_expr::Expr::Values(values.clone())),
+            })
+            .await
+            .and_then(Output::try_from)
+            .context(InsertSnafu)
+    }
 
+    async fn create_or_alter_table_on_demand(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        insert_batches: &[InsertBatch],
+    ) -> Result<()> {
         // check if table already exist:
         // - if table does not exist, create table by inferred CreateExpr
         // - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
@@ -261,7 +284,7 @@ impl Instance {
                     catalog_name,
                     schema_name,
                     table_name,
-                    &insert_batches,
+                    insert_batches,
                 )
                 .await?;
                 info!(
@@ -272,7 +295,7 @@ impl Instance {
             Some(table) => {
                 let schema = table.schema();
                 if let Some(add_columns) =
-                    common_insert::find_new_columns(&schema, &insert_batches).unwrap()
+                    common_insert::find_new_columns(&schema, insert_batches).unwrap()
                 {
                     self.add_new_columns_to_table(table_name, add_columns)
                         .await?;
@@ -284,15 +307,11 @@ impl Instance {
             }
         };
 
-        self.database()
-            .insert(InsertExpr {
-                table_name: table_name.to_string(),
-                options: Default::default(),
-                expr: Some(insert_expr::Expr::Values(values.clone())),
-            })
-            .await
-            .and_then(Output::try_from)
-            .context(InsertSnafu)
+        info!(
+            "Table already exists: {}.{}.{}",
+            catalog_name, schema_name, table_name
+        );
+        Ok(())
     }
 
     /// Infer create table expr from inserting data
@@ -376,6 +395,11 @@ impl Instance {
         let schema_provider = Self::get_schema(catalog_provider, &schema)?;
 
         let insert_request = insert_to_request(&schema_provider, *insert)?;
+
+        let batch = crate::table::insert::insert_request_to_insert_batch(&insert_request).unwrap();
+
+        self.create_or_alter_table_on_demand(&catalog, &schema, &table, &[batch])
+            .await?;
 
         let table = schema_provider
             .table(&table)

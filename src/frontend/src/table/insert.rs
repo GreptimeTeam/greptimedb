@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::codec;
+use api::v1::codec::InsertBatch;
 use api::v1::insert_expr;
 use api::v1::insert_expr::Expr;
 use api::v1::Column;
@@ -73,12 +74,12 @@ impl DistTable {
     }
 }
 
-fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<InsertExpr> {
+pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<InsertBatch> {
     let mut row_count = None;
 
     let columns = insert
         .columns_values
-        .into_iter()
+        .iter()
         .map(|(column_name, vector)| {
             match row_count {
                 Some(rows) => ensure!(
@@ -97,12 +98,12 @@ fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<Inse
                 .context(error::ColumnDataTypeSnafu)?;
 
             let mut column = Column {
-                column_name,
+                column_name: column_name.clone(),
                 datatype: datatype.datatype() as i32,
                 ..Default::default()
             };
 
-            column.push_vals(0, vector);
+            column.push_vals(0, vector.clone());
             Ok(column)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -111,7 +112,12 @@ fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<Inse
         columns,
         row_count: row_count.map(|rows| rows as u32).unwrap_or(0),
     };
+    Ok(insert_batch)
+}
 
+fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<InsertExpr> {
+    let table_name = insert.table_name.clone();
+    let insert_batch = insert_request_to_insert_batch(&insert)?;
     let mut options = HashMap::with_capacity(1);
     options.insert(
         // TODO(fys): Temporarily hard code here
@@ -120,7 +126,7 @@ fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<Inse
     );
 
     Ok(InsertExpr {
-        table_name: insert.table_name,
+        table_name,
         options,
         expr: Some(Expr::Values(insert_expr::Values {
             values: vec![insert_batch.into()],
