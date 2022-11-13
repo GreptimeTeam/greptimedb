@@ -296,11 +296,16 @@ pub enum Error {
         source: frontend::error::Error,
     },
 
-    #[snafu(display("Cannot execute SQL directly on datanode in distributed mode"))]
-    IllegalCreateRequest,
+    #[snafu(display(
+        "Table id provider not found, annot execute SQL directly on datanode in distributed mode"
+    ))]
+    TableIdProviderNotFound { backtrace: Backtrace },
 
     #[snafu(display("Failed to bump table id, source: {}", source))]
-    BumpTableId { source: table::error::Error },
+    BumpTableId {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -372,7 +377,7 @@ impl ErrorExt for Error {
             Error::BuildFrontend { source, .. } | Error::StartFrontend { source, .. } => {
                 source.status_code()
             }
-            Error::IllegalCreateRequest => StatusCode::Unsupported,
+            Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
             Error::BumpTableId { source, .. } => source.status_code(),
         }
     }

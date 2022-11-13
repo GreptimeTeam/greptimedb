@@ -47,8 +47,8 @@ use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterTableOnInsertionSnafu, AlterTableSnafu, BuildCreateExprOnInsertionSnafu,
     BumpTableIdSnafu, CatalogNotFoundSnafu, CatalogSnafu, ConvertColumnDefaultConstraintSnafu,
-    CreateTableOnInsertionSnafu, CreateTableSnafu, InsertSnafu, Result, SchemaNotFoundSnafu,
-    SelectSnafu,
+    CreateTableOnInsertionSnafu, CreateTableSnafu, DeserializeInsertBatchSnafu,
+    FindNewColumnsOnInsertionSnafu, InsertSnafu, Result, SchemaNotFoundSnafu, SelectSnafu,
 };
 use crate::frontend::{FrontendOptions, Mode};
 use crate::sql::insert_to_request;
@@ -222,8 +222,9 @@ impl Instance {
     pub async fn handle_inserts(&self, insert_expr: &[InsertExpr]) -> Result<Output> {
         let mut success = 0;
         for expr in insert_expr {
-            if let Output::AffectedRows(rows) = self.handle_insert(expr).await? {
-                success += rows;
+            match self.handle_insert(expr).await? {
+                Output::AffectedRows(rows) => success += rows,
+                _ => unreachable!("Insert should not yield output other than AffectedRows"),
             }
         }
         Ok(Output::AffectedRows(success))
@@ -275,7 +276,8 @@ impl Instance {
         region_number: u32,
         values: &insert_expr::Values,
     ) -> Result<Output> {
-        let insert_batches = common_insert::insert_batches(&values.values).unwrap();
+        let insert_batches =
+            common_insert::insert_batches(&values.values).context(DeserializeInsertBatchSnafu)?;
         self.create_or_alter_table_on_demand(
             catalog_name,
             schema_name,
@@ -322,6 +324,10 @@ impl Instance {
             .context(CatalogSnafu)?
         {
             None => {
+                info!(
+                    "Table {}.{}.{} does not exist, try create table",
+                    catalog_name, schema_name, table_name,
+                );
                 self.create_table_by_insert_batches(
                     catalog_name,
                     schema_name,
@@ -336,9 +342,13 @@ impl Instance {
             }
             Some(table) => {
                 let schema = table.schema();
-                if let Some(add_columns) =
-                    common_insert::find_new_columns(&schema, insert_batches).unwrap()
+                if let Some(add_columns) = common_insert::find_new_columns(&schema, insert_batches)
+                    .context(FindNewColumnsOnInsertionSnafu)?
                 {
+                    info!(
+                        "Find new columns {:?} on insertion, try to alter table: {}.{}.{}",
+                        add_columns, catalog_name, schema_name, table_name
+                    );
                     self.add_new_columns_to_table(table_name, add_columns)
                         .await?;
                     info!(
@@ -348,11 +358,6 @@ impl Instance {
                 }
             }
         };
-
-        info!(
-            "Table already exists: {}.{}.{}",
-            catalog_name, schema_name, table_name
-        );
         Ok(())
     }
 
@@ -438,7 +443,7 @@ impl Instance {
 
         let insert_request = insert_to_request(&schema_provider, *insert)?;
 
-        let batch = crate::table::insert::insert_request_to_insert_batch(&insert_request).unwrap();
+        let batch = crate::table::insert::insert_request_to_insert_batch(&insert_request)?;
 
         self.create_or_alter_table_on_demand(&catalog, &schema, &table, &[batch])
             .await?;

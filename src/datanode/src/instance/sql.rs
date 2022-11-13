@@ -11,8 +11,8 @@ use sql::statements::statement::Statement;
 use table::requests::CreateDatabaseRequest;
 
 use crate::error::{
-    BumpTableIdSnafu, CatalogNotFoundSnafu, CatalogSnafu, ExecuteSqlSnafu,
-    IllegalCreateRequestSnafu, ParseSqlSnafu, Result, SchemaNotFoundSnafu,
+    BumpTableIdSnafu, CatalogNotFoundSnafu, CatalogSnafu, ExecuteSqlSnafu, ParseSqlSnafu, Result,
+    SchemaNotFoundSnafu, TableIdProviderNotFoundSnafu,
 };
 use crate::instance::Instance;
 use crate::metric;
@@ -70,7 +70,7 @@ impl Instance {
                 let table_id = self
                     .table_id_provider
                     .as_ref()
-                    .context(IllegalCreateRequestSnafu)?
+                    .context(TableIdProviderNotFoundSnafu)?
                     .next_table_id()
                     .await
                     .context(BumpTableIdSnafu)?;

@@ -242,6 +242,18 @@ pub enum Error {
         source: common_insert::error::Error,
     },
 
+    #[snafu(display("Failed to find new columns on insertion: {}", source))]
+    FindNewColumnsOnInsertion {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
+    #[snafu(display("Failed to deserialize insert batching: {}", source))]
+    DeserializeInsertBatch {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
@@ -329,6 +341,8 @@ impl ErrorExt for Error {
             Error::CreateTableOnInsertion { source, .. } => source.status_code(),
             Error::AlterTableOnInsertion { source, .. } => source.status_code(),
             Error::Select { source, .. } => source.status_code(),
+            Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
+            Error::DeserializeInsertBatch { source, .. } => source.status_code(),
         }
     }
 
