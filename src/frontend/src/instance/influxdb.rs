@@ -45,6 +45,8 @@ impl Instance {
 
         for insert in inserts {
             let self_clone = self.clone();
+
+            // TODO(fys): need a separate runtime here
             let join = tokio::spawn(async move {
                 let catalog = self_clone.get_catalog(&insert.catalog_name)?;
                 let schema = Self::get_schema(catalog, &insert.schema_name)?;
@@ -63,7 +65,7 @@ impl Instance {
         let mut affected = 0;
 
         for join in joins {
-            affected += join.await.unwrap()?;
+            affected += join.await.context(error::JoinTaskSnafu)??;
         }
 
         Ok(affected)

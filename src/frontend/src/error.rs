@@ -195,10 +195,16 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
-    CatalogNotFound { catalog_name: String },
+    CatalogNotFound {
+        catalog_name: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Failed to find schema, schema info: {}", schema_info))]
-    SchemaNotFound { schema_info: String },
+    SchemaNotFound {
+        schema_info: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Table occurs error, source: {}", source))]
     Table {

@@ -66,6 +66,9 @@ pub struct Instance {
     client: Client,
     /// catalog manager is None in standalone mode, datanode will keep their own
     catalog_manager: Option<FrontendCatalogManager>,
+    // TODO(fys): it should be a trait that corresponds to two implementations:
+    // Standalone and Distributed, then the code behind it doesn't need to use so
+    // many match statements.
     mode: Mode,
 }
 
