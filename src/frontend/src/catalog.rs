@@ -20,6 +20,7 @@ use crate::partitioning::range::RangePartitionRule;
 use crate::table::route::TableRoutes;
 use crate::table::DistTable;
 
+#[derive(Clone)]
 pub struct FrontendCatalogManager {
     backend: KvBackendRef,
     table_routes: Arc<TableRoutes>,

@@ -193,6 +193,33 @@ pub enum Error {
         table_name: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
+    CatalogNotFound {
+        catalog_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to find schema, schema info: {}", schema_info))]
+    SchemaNotFound {
+        schema_info: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Table occurs error, source: {}", source))]
+    Table {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Failed to get catalog manager"))]
+    CatalogManager { backtrace: Backtrace },
+
+    #[snafu(display("Failed to get full table name, source: {}", source))]
+    FullTableName {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -208,6 +235,7 @@ impl ErrorExt for Error {
             | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. }
             | Error::ColumnValuesNumberMismatch { .. }
+            | Error::CatalogManager { .. }
             | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
 
             Error::RuntimeResource { source, .. } => source.status_code(),
@@ -215,6 +243,10 @@ impl ErrorExt for Error {
             Error::StartServer { source, .. } => source.status_code(),
 
             Error::ParseSql { source } => source.status_code(),
+
+            Error::FullTableName { source, .. } => source.status_code(),
+
+            Error::Table { source } => source.status_code(),
 
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::ConvertScalarValue { source, .. } => source.status_code(),
@@ -234,7 +266,9 @@ impl ErrorExt for Error {
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
-            Error::JoinTask { .. } => StatusCode::Unexpected,
+            Error::JoinTask { .. }
+            | Error::SchemaNotFound { .. }
+            | Error::CatalogNotFound { .. } => StatusCode::Unexpected,
             Error::Catalog { source, .. } => source.status_code(),
             Error::ParseCatalogEntry { source, .. } => source.status_code(),
 
