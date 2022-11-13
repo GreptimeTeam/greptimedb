@@ -42,6 +42,8 @@ impl FrontendCatalogManager {
     }
 }
 
+// FIXME(hl): Frontend only needs a CatalogList, should replace with trait upcasting
+// as soon as it's stable: https://github.com/rust-lang/rust/issues/65991
 #[async_trait::async_trait]
 impl CatalogManager for FrontendCatalogManager {
     async fn start(&self) -> catalog::error::Result<()> {
