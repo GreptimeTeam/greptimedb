@@ -8,7 +8,7 @@ use crate::error::{BuildingContextSnafu, Result};
 
 type CtxFnRef = Arc<dyn Fn(&Context) -> bool + Send + Sync>;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct Context {
     pub exec_info: ExecInfo,
     pub client_info: ClientInfo,
@@ -82,7 +82,7 @@ impl CtxBuilder {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct ExecInfo {
     pub catalog: Option<String>,
     pub schema: Option<String>,
@@ -102,26 +102,26 @@ impl Default for ExecInfo {
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Clone)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct ClientInfo {
     pub client_host: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct UserInfo {
     pub username: Option<String>,
     pub from_channel: Channel,
     pub auth_method: AuthMethod,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Channel {
     GRPC,
     HTTP,
     MYSQL,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthMethod {
     None,
     Password {
@@ -138,13 +138,13 @@ impl Default for AuthMethod {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthHashMethod {
     DoubleSha1,
     Sha256,
 }
 
-#[derive(Default, Serialize, Deserialize, Clone)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct Quota {
     pub total: u64,
     pub consumed: u64,
