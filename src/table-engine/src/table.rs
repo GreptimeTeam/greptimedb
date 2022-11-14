@@ -41,8 +41,8 @@ use crate::manifest::action::*;
 use crate::manifest::TableManifest;
 
 #[inline]
-fn table_manifest_dir(table_name: &str) -> String {
-    format!("{}/manifest/", table_name)
+fn table_manifest_dir(table_dir: &str) -> String {
+    format!("{}/manifest/", table_dir)
 }
 
 /// [Table] implementation.
@@ -341,11 +341,12 @@ impl<R: Region> MitoTable<R> {
 
     pub async fn create(
         table_name: &str,
+        table_dir: &str,
         table_info: TableInfo,
         region: R,
         object_store: ObjectStore,
     ) -> Result<MitoTable<R>> {
-        let manifest = TableManifest::new(&table_manifest_dir(table_name), object_store);
+        let manifest = TableManifest::new(&table_manifest_dir(table_dir), object_store);
 
         // TODO(dennis): save manifest version into catalog?
         let _manifest_version = manifest
@@ -377,10 +378,11 @@ impl<R: Region> MitoTable<R> {
 
     pub async fn open(
         table_name: &str,
+        table_dir: &str,
         region: R,
         object_store: ObjectStore,
     ) -> Result<MitoTable<R>> {
-        let manifest = TableManifest::new(&table_manifest_dir(table_name), object_store);
+        let manifest = TableManifest::new(&table_manifest_dir(table_dir), object_store);
 
         let mut table_info = Self::recover_table_info(table_name, &manifest)
             .await?

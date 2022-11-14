@@ -307,8 +307,9 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             }
         }
 
+        let table_dir = table_dir(schema_name, table_name);
         let opts = CreateOptions {
-            parent_dir: table_dir(schema_name, table_name),
+            parent_dir: table_dir.clone(),
         };
 
         let region = self
@@ -338,7 +339,14 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .context(error::BuildTableInfoSnafu { table_name })?;
 
         let table = Arc::new(
-            MitoTable::create(table_name, table_info, region, self.object_store.clone()).await?,
+            MitoTable::create(
+                table_name,
+                &table_dir,
+                table_info,
+                region,
+                self.object_store.clone(),
+            )
+            .await?,
         );
 
         logging::info!("Mito engine created table: {:?}.", table.table_info());
@@ -379,9 +387,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             }
 
             let engine_ctx = StorageEngineContext::default();
+            let table_dir = table_dir(schema_name, table_name);
             let opts = OpenOptions {
-                parent_dir: table_dir(schema_name, table_name),
+                parent_dir: table_dir.to_string(),
             };
+            println!("{}", table_dir);
 
             let table_id = request.table_id;
             // TODO(dennis): supports multi regions;
@@ -399,8 +409,9 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 Some(region) => region,
             };
 
-            let table =
-                Arc::new(MitoTable::open(table_name, region, self.object_store.clone()).await?);
+            let table = Arc::new(
+                MitoTable::open(table_name, &table_dir, region, self.object_store.clone()).await?,
+            );
 
             self.tables
                 .write()
@@ -799,8 +810,8 @@ mod tests {
 
         let ctx = EngineContext::default();
         let open_req = OpenTableRequest {
-            catalog_name: String::new(),
-            schema_name: String::new(),
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: test_util::TABLE_NAME.to_string(),
             // the test table id is 1
             table_id: 1,
