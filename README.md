@@ -91,15 +91,10 @@ about Kubernetes deployment, check our [docs](https://greptime.com/docs).
    mysql -h 127.0.0.1 -P 4002
    ```
 
-2. Create a database;
-   ```SQL
-   CREATE DATABASE hello_greptime;
-   ```
-
-3. Create table:
+2. Create table:
 
    ```SQL
-   CREATE TABLE hello_greptime.monitor (
+   CREATE TABLE monitor (
      host STRING,
      ts TIMESTAMP,
      cpu DOUBLE DEFAULT 0,
@@ -108,18 +103,18 @@ about Kubernetes deployment, check our [docs](https://greptime.com/docs).
      PRIMARY KEY(host)) ENGINE=mito WITH(regions=1);
    ```
 
-4. Insert data:
+3. Insert data:
 
    ```SQL
-   INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
-   INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host2', 77.7, 2048, 1660897956000);
-   INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host2', 77.7, 2048, 1660897956000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
    ```
 
-5. Query data:
+4. Query data:
 
    ```SQL
-   mysql> SELECT * FROM hello_greptime.monitor;
+   mysql> SELECT * FROM monitor;
    +-------+---------------------+------+--------+
    | host  | ts                  | cpu  | memory |
    +-------+---------------------+------+--------+
