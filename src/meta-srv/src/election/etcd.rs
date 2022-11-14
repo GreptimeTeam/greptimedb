@@ -1,9 +1,18 @@
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
+use common_telemetry::info;
+use common_telemetry::warn;
 use etcd_client::Client;
+use snafu::OptionExt;
 use snafu::ResultExt;
 
 use super::Election;
+use crate::election::ELECTION_KEY;
+use crate::election::LEASE_SECS;
+use crate::election::PROCLAIM_PERIOD_SECS;
 use crate::error;
 use crate::error::Result;
 use crate::metasrv::ElectionRef;
@@ -13,6 +22,7 @@ use crate::metasrv::LeaderValue;
 pub struct EtcdElection {
     leader_value: String,
     client: Client,
+    is_leader: Arc<AtomicBool>,
 }
 
 impl EtcdElection {
@@ -29,6 +39,7 @@ impl EtcdElection {
         Ok(Arc::new(Self {
             leader_value,
             client,
+            is_leader: Arc::new(AtomicBool::new(false)),
         }))
     }
 }
@@ -38,15 +49,75 @@ impl Election for EtcdElection {
     type Leader = LeaderValue;
 
     fn is_leader(&self) -> bool {
-        todo!()
+        self.is_leader.load(Ordering::Relaxed)
     }
 
     async fn campaign(&self) -> Result<()> {
-        todo!()
+        let mut lease_client = self.client.lease_client();
+        let mut election_client = self.client.election_client();
+        let res = lease_client
+            .grant(LEASE_SECS, None)
+            .await
+            .context(error::EtcdFailedSnafu)?;
+        let lease_id = res.id();
+
+        info!("Election grant ttl: {:?}, id: {:?}", res.ttl(), lease_id);
+
+        // campaign
+        let res = election_client
+            .campaign(ELECTION_KEY, self.leader_value.clone(), lease_id)
+            .await
+            .context(error::EtcdFailedSnafu)?;
+
+        if let Some(leader) = res.leader() {
+            info!(
+                "Becoming leader: {:?}, leaseId: {:?}",
+                leader.name_str(),
+                leader.lease()
+            );
+
+            let (mut keeper, mut receiver) = self
+                .client
+                .lease_client()
+                .keep_alive(lease_id)
+                .await
+                .context(error::EtcdFailedSnafu)?;
+
+            let mut interval = tokio::time::interval(Duration::from_secs(PROCLAIM_PERIOD_SECS));
+            loop {
+                interval.tick().await;
+                keeper.keep_alive().await.context(error::EtcdFailedSnafu)?;
+
+                if let Some(res) = receiver.message().await.context(error::EtcdFailedSnafu)? {
+                    if res.ttl() > 0 {
+                        self.is_leader.store(true, Ordering::Relaxed);
+                    } else {
+                        warn!("Already lost leader status, will re-initiate election");
+                        break;
+                    }
+                }
+            }
+
+            self.is_leader.store(false, Ordering::Relaxed);
+        }
+
+        Ok(())
     }
 
     async fn leader(&self) -> Result<LeaderValue> {
-        todo!()
+        if self.is_leader.load(Ordering::Relaxed) {
+            Ok(LeaderValue(self.leader_value.clone()))
+        } else {
+            let res = self
+                .client
+                .election_client()
+                .leader(ELECTION_KEY)
+                .await
+                .context(error::EtcdFailedSnafu)?;
+            let leader_value = res.kv().context(error::NoLeaderSnafu)?.value();
+            let leader_value = String::from_utf8_lossy(leader_value).to_string();
+            Ok(LeaderValue(leader_value))
+        }
     }
 
     async fn resign(&self) -> Result<()> {

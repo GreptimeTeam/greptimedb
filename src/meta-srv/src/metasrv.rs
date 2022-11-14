@@ -1,4 +1,3 @@
-use std::fmt;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -108,11 +107,12 @@ impl MetaSrv {
             common_runtime::spawn_bg(async move {
                 while started.load(Ordering::Relaxed) {
                     let res = election.campaign().await;
-
                     if res.is_err() {
-                        warn!("MetaSrv campaign error: {:?}", res);
+                        warn!("MetaSrv election error: {:?}", res);
                     }
+                    info!("MetaSrv re-initiate election");
                 }
+                info!("MetaSrv stopped");
             });
         }
 
@@ -167,11 +167,5 @@ impl MetaSrv {
             election,
             skip_all,
         }
-    }
-}
-
-impl Drop for MetaSrv {
-    fn drop(&mut self) {
-        self.shutdown();
     }
 }

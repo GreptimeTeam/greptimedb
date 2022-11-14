@@ -106,6 +106,9 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("MetaSrv has no leader at this moment"))]
+    NoLeader { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -134,6 +137,7 @@ impl ErrorExt for Error {
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
             | Error::DecodeTableRoute { .. }
+            | Error::NoLeader { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }
