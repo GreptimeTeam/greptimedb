@@ -631,7 +631,7 @@ impl GrpcQueryHandler for Instance {
                     }),
             }
         } else {
-            unreachable!()
+            server_error::InvalidQuerySnafu { reason: "empty query" }.build()
         }
     }
 }
