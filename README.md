@@ -71,6 +71,12 @@ Start GreptimeDB from source code, in standalone mode.
 cargo run -- standalone start
 ```
 
+Or if you built from docker
+
+```
+docker run -p 4002:4002 -v "$(pwd):/tmp/greptimedb" greptime/greptimedb standalone start
+```
+
 For more startup options, greptimedb's **distributed mode** and information
 about kubenetes deployment, check our [docs](https://greptime.com/docs).
 
@@ -128,6 +134,7 @@ You can always cleanup test database by removing `/tmp/greptimedb`.
 ## Resources
 
 - [Pre-built binaries](https://github.com/GreptimeTeam/greptimedb/releases)
+- [Docker images](https://hub.docker.com/r/greptime/greptimedb)
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
   kubernetes deployment
 - [Java Client](https://github.com/GreptimeTeam/greptimedb-client-java)
