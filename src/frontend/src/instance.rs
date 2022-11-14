@@ -145,13 +145,13 @@ impl Instance {
                 });
                 let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
                 let datanode_clients = Arc::new(DatanodeClients::new());
-                let catalog_manager = FrontendCatalogManager::new(
+                let catalog_manager = Arc::new(FrontendCatalogManager::new(
                     meta_backend,
                     table_routes,
                     datanode_clients.clone(),
-                );
+                ));
 
-                instance.catalog_manager = Some(Arc::new(catalog_manager.clone()));
+                instance.catalog_manager = Some(catalog_manager.clone());
 
                 Some(DistInstance::new(
                     meta_client,
@@ -178,11 +178,15 @@ impl Instance {
     }
 
     pub async fn handle_select(&self, expr: Select) -> Result<Output> {
-        self.database()
-            .select(expr)
-            .await
-            .and_then(Output::try_from)
-            .context(SelectSnafu)
+        if let Some(dist_instance) = &self.dist_instance {
+            dist_instance.handle_select(expr).await
+        } else {
+            self.database()
+                .select(expr)
+                .await
+                .and_then(Output::try_from)
+                .context(SelectSnafu)
+        }
     }
 
     /// Convert `CreateTable` statement to `CreateExpr` gRPC request.

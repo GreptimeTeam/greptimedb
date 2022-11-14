@@ -80,6 +80,6 @@ fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
         .unwrap();
 
     let factory = QueryEngineFactory::new(catalog_list);
-    let query_engine = factory.query_engine().clone();
+    let query_engine = factory.query_engine();
     Arc::new(DummyInstance::new(query_engine))
 }

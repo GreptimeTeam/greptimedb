@@ -214,7 +214,7 @@ mod tests {
                 .unwrap(),
         );
         let factory = QueryEngineFactory::new(catalog_list.clone());
-        let query_engine = factory.query_engine().clone();
+        let query_engine = factory.query_engine();
         let sql_handler = SqlHandler::new(table_engine, catalog_list);
 
         let stmt = match query_engine.sql_to_statement(sql).unwrap() {

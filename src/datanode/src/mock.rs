@@ -44,7 +44,7 @@ impl Instance {
         );
 
         let factory = QueryEngineFactory::new(catalog_manager.clone());
-        let query_engine = factory.query_engine().clone();
+        let query_engine = factory.query_engine();
 
         let sql_handler = SqlHandler::new(mock_engine.clone(), catalog_manager.clone());
         let physical_planner = PhysicalPlanner::new(query_engine.clone());
@@ -100,7 +100,7 @@ impl Instance {
         ));
 
         let factory = QueryEngineFactory::new(catalog_manager.clone());
-        let query_engine = factory.query_engine().clone();
+        let query_engine = factory.query_engine();
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 

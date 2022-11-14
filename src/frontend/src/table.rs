@@ -652,8 +652,6 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    // FIXME(LFC): Remove ignore when auto create table upon insertion is ready.
-    #[ignore]
     async fn test_dist_table_scan() {
         common_telemetry::init_default_ut_logging();
         let table = Arc::new(new_dist_table().await);
@@ -774,11 +772,11 @@ mod test {
             client: meta_client.clone(),
         });
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
-        let catalog_manager = FrontendCatalogManager::new(
+        let catalog_manager = Arc::new(FrontendCatalogManager::new(
             meta_backend,
             table_routes.clone(),
             datanode_clients.clone(),
-        );
+        ));
         let dist_instance = DistInstance::new(
             meta_client.clone(),
             catalog_manager,

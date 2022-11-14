@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
+use client::Select;
 use common_catalog::{TableGlobalKey, TableGlobalValue};
 use common_query::Output;
 use common_telemetry::debug;
@@ -12,6 +13,7 @@ use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, RouteResponse, TableName,
     TableRoute,
 };
+use query::{QueryEngineFactory, QueryEngineRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::CreateTable;
 use sql::statements::{
@@ -31,20 +33,23 @@ use crate::partitioning::{PartitionBound, PartitionDef};
 #[derive(Clone)]
 pub(crate) struct DistInstance {
     meta_client: Arc<MetaClient>,
-    catalog_manager: FrontendCatalogManager,
+    catalog_manager: Arc<FrontendCatalogManager>,
     datanode_clients: Arc<DatanodeClients>,
+    query_engine: QueryEngineRef,
 }
 
 impl DistInstance {
     pub(crate) fn new(
         meta_client: Arc<MetaClient>,
-        catalog_manager: FrontendCatalogManager,
+        catalog_manager: Arc<FrontendCatalogManager>,
         datanode_clients: Arc<DatanodeClients>,
     ) -> Self {
+        let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
         Self {
             meta_client,
             catalog_manager,
             datanode_clients,
+            query_engine,
         }
     }
 
@@ -94,6 +99,18 @@ impl DistInstance {
         }
 
         Ok(Output::AffectedRows(region_routes.len()))
+    }
+
+    pub(crate) async fn handle_select(&self, select: Select) -> Result<Output> {
+        let Select::Sql(sql) = select;
+        let plan = self
+            .query_engine
+            .sql_to_plan(&sql)
+            .with_context(|_| error::ExecuteSqlSnafu { sql: sql.clone() })?;
+        self.query_engine
+            .execute(&plan)
+            .await
+            .context(error::ExecuteSqlSnafu { sql })
     }
 
     async fn create_table_in_meta(&self, create_table: &CreateTable) -> Result<RouteResponse> {

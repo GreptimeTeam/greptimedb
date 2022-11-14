@@ -259,8 +259,7 @@ mod tests {
             .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
             .unwrap();
 
-        let factory = QueryEngineFactory::new(catalog_list);
-        factory.query_engine().clone()
+        QueryEngineFactory::new(catalog_list).query_engine()
     }
 
     #[test]

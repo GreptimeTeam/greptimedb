@@ -96,7 +96,7 @@ impl Instance {
             }
         };
 
-        let query_engine = factory.query_engine().clone();
+        let query_engine = factory.query_engine();
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
