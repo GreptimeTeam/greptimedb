@@ -7,4 +7,3 @@ coverage:
     patch: off
 ignore:
   - "**/error*.rs" # ignore all error.rs files
-  
