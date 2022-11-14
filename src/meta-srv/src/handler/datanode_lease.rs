@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::PutRequest;
 use common_telemetry::info;
@@ -22,7 +20,7 @@ impl HeartbeatHandler for DatanodeLeaseHandler {
         ctx: &Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if ctx.skip_all.load(Ordering::Relaxed) {
+        if ctx.is_skip_all() {
             return Ok(());
         }
 
@@ -47,7 +45,7 @@ impl HeartbeatHandler for DatanodeLeaseHandler {
                 ..Default::default()
             };
 
-            let _ = ctx.kv_store.put(put).await?;
+            ctx.kv_store.put(put).await?;
         }
 
         Ok(())

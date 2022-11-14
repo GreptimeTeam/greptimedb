@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use api::v1::meta::Error;
 use api::v1::meta::HeartbeatRequest;
 
@@ -26,7 +24,7 @@ impl HeartbeatHandler for CheckLeaderHandler {
 
         if let Some(header) = &mut acc.header {
             header.error = Some(Error::is_not_leader());
-            ctx.skip_all.store(true, Ordering::Relaxed);
+            ctx.set_skip_all();
         }
 
         Ok(())

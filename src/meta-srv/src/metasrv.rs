@@ -49,6 +49,16 @@ pub struct Context {
     pub skip_all: Arc<AtomicBool>,
 }
 
+impl Context {
+    pub fn is_skip_all(&self) -> bool {
+        self.skip_all.load(Ordering::Relaxed)
+    }
+
+    pub fn set_skip_all(&self) {
+        self.skip_all.store(true, Ordering::Relaxed);
+    }
+}
+
 pub struct LeaderValue(pub String);
 
 pub type SelectorRef = Arc<dyn Selector<Context = Context, Output = Vec<Peer>>>;
@@ -107,8 +117,8 @@ impl MetaSrv {
             common_runtime::spawn_bg(async move {
                 while started.load(Ordering::Relaxed) {
                     let res = election.campaign().await;
-                    if res.is_err() {
-                        warn!("MetaSrv election error: {:?}", res);
+                    if let Err(e) = res {
+                        warn!("MetaSrv election error: {}", e);
                     }
                     info!("MetaSrv re-initiate election");
                 }

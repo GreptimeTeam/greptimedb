@@ -92,7 +92,10 @@ impl Election for EtcdElection {
                     if res.ttl() > 0 {
                         self.is_leader.store(true, Ordering::Relaxed);
                     } else {
-                        warn!("Already lost leader status, lease: {}, will re-initiate election", leader.lease());
+                        warn!(
+                            "Already lost leader status, lease: {}, will re-initiate election",
+                            leader.lease()
+                        );
                         break;
                     }
                 }
