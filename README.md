@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="/docs/logo-text-padding.png" alt="GreptimeDB Logo">
+    <img src="/docs/logo-text-padding.png" alt="GreptimeDB Logo" width="400px"></img>
 </p>
 
 <h3 align="center">
@@ -9,7 +9,7 @@
 <p align="center">
     <a href="https://codecov.io/gh/GrepTimeTeam/greptimedb"><img src="https://codecov.io/gh/GrepTimeTeam/greptimedb/branch/develop/graph/badge.svg?token=FITFDI3J3C"></img></a>
     &nbsp;
-    <a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml"><img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="Continuous integration for developing"></img></a>
+    <a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml"><img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="CI"></img></a>
     &nbsp;
     <a href="https://github.com/greptimeTeam/greptimedb/blob/master/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
 </p>
