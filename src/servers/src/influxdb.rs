@@ -4,7 +4,6 @@ use api::v1::{
     insert_expr::{self, Expr},
     InsertExpr,
 };
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::{LinesWriter, Precision};
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
@@ -18,6 +17,7 @@ pub const DEFAULT_TIME_PRECISION: Precision = Precision::NANOSECOND;
 
 pub struct InfluxdbRequest {
     pub precision: Option<Precision>,
+    pub db: String,
     pub lines: String,
 }
 
@@ -32,12 +32,13 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertRequest> {
             .context(InfluxdbLineProtocolSnafu)?;
         let line_len = lines.len();
         let mut writers: HashMap<TableName, LineWriter> = HashMap::new();
+        let db = &value.db;
 
         for line in lines {
             let table_name = line.series.measurement;
             let writer = writers
                 .entry(table_name.to_string())
-                .or_insert_with(|| LineWriter::with_lines(table_name, line_len));
+                .or_insert_with(|| LineWriter::with_lines(db, table_name, line_len));
 
             let tags = line.series.tag_set;
             if let Some(tags) = tags {
@@ -81,8 +82,7 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
     type Error = Error;
 
     fn try_from(value: &InfluxdbRequest) -> Result<Self, Self::Error> {
-        // InfluxDB uses default catalog name and schema name
-        let schema_name = DEFAULT_SCHEMA_NAME.to_string();
+        let schema_name = value.db.to_string();
 
         let mut writers: HashMap<TableName, LinesWriter> = HashMap::new();
         let lines = parse_lines(&value.lines)
@@ -192,12 +192,14 @@ monitor2,host=host3 cpu=66.5 1663840496100023102
 monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
 
         let influxdb_req = &InfluxdbRequest {
+            db: "influxdb".to_string(),
             precision: None,
             lines: lines.to_string(),
         };
         let insert_reqs: Vec<InsertRequest> = influxdb_req.try_into().unwrap();
 
         for insert_req in insert_reqs {
+            assert_eq!("influxdb", insert_req.schema_name);
             match &insert_req.table_name[..] {
                 "monitor1" => assert_table_1(&insert_req),
                 "monitor2" => assert_table_2(&insert_req),
@@ -216,6 +218,7 @@ monitor2,host=host3 cpu=66.5 1663840496100023102
 monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
 
         let influxdb_req = &InfluxdbRequest {
+            db: "public".to_string(),
             precision: None,
             lines: lines.to_string(),
         };
@@ -225,6 +228,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         assert_eq!(2, insert_exprs.len());
 
         for expr in insert_exprs {
+            assert_eq!("public", expr.schema_name);
             let values = match expr.expr.unwrap() {
                 Expr::Values(vals) => vals,
                 Expr::Sql(_) => panic!(),

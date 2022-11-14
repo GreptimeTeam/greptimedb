@@ -329,7 +329,6 @@ impl HttpServer {
             router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
         }
 
-        // TODO(fys): Creating influxdb's database when we can create greptime schema.
         if let Some(influxdb_handler) = self.influxdb_handler.clone() {
             let influxdb_router =
                 Router::with_state(influxdb_handler).route("/write", routing::post(influxdb_write));

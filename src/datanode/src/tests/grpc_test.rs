@@ -24,12 +24,13 @@ use crate::tests::test_util::{self, TestGuard};
 
 async fn setup_grpc_server(
     name: &str,
-    port: usize,
+    datanode_port: usize,
+    frontend_port: usize,
 ) -> (String, TestGuard, Arc<GrpcServer>, Arc<GrpcServer>) {
     common_telemetry::init_default_ut_logging();
 
     let (mut opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
-    let datanode_grpc_addr = format!("127.0.0.1:{}", port);
+    let datanode_grpc_addr = format!("127.0.0.1:{}", datanode_port);
     opts.rpc_addr = datanode_grpc_addr.clone();
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
     instance.start().await.unwrap();
@@ -43,7 +44,7 @@ async fn setup_grpc_server(
             .unwrap(),
     );
 
-    let fe_grpc_addr = format!("127.0.0.1:{}", port + 1);
+    let fe_grpc_addr = format!("127.0.0.1:{}", frontend_port);
     let fe_opts = FrontendOptions {
         mode: Standalone,
         datanode_rpc_addr: datanode_grpc_addr.clone(),
@@ -95,7 +96,7 @@ async fn setup_grpc_server(
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auto_create_table() {
     let (addr, _guard, fe_grpc_server, dn_grpc_server) =
-        setup_grpc_server("auto_create_table", 3991).await;
+        setup_grpc_server("auto_create_table", 3992, 3993).await;
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new("greptime", grpc_client);
@@ -162,7 +163,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
 async fn test_insert_and_select() {
     common_telemetry::init_default_ut_logging();
     let (addr, _guard, fe_grpc_server, dn_grpc_server) =
-        setup_grpc_server("insert_and_select", 3990).await;
+        setup_grpc_server("insert_and_select", 3990, 3991).await;
 
     let grpc_client = Client::with_urls(vec![addr]);
 

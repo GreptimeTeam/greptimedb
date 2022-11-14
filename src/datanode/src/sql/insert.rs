@@ -7,6 +7,7 @@ use snafu::OptionExt;
 use snafu::ResultExt;
 use sql::ast::Value as SqlValue;
 use sql::statements::{self, insert::Insert};
+use table::engine::TableReference;
 use table::requests::*;
 
 use crate::error::{
@@ -17,13 +18,19 @@ use crate::sql::{SqlHandler, SqlRequest};
 
 impl SqlHandler {
     pub(crate) async fn insert(&self, req: InsertRequest) -> Result<Output> {
-        let table_name = &req.table_name.to_string();
-        let table = self.get_table(table_name)?;
+        // FIXME(dennis): table_ref is used in InsertSnafu and the req is consumed
+        // in `insert`, so we have to clone catalog_name etc.
+        let table_ref = TableReference {
+            catalog: &req.catalog_name.to_string(),
+            schema: &req.schema_name.to_string(),
+            table: &req.table_name.to_string(),
+        };
 
-        let affected_rows = table
-            .insert(req)
-            .await
-            .context(InsertSnafu { table_name })?;
+        let table = self.get_table(&table_ref)?;
+
+        let affected_rows = table.insert(req).await.with_context(|_| InsertSnafu {
+            table_name: table_ref.to_string(),
+        })?;
 
         Ok(Output::AffectedRows(affected_rows))
     }
