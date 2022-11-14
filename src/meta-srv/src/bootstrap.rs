@@ -5,6 +5,7 @@ use snafu::ResultExt;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 
+use crate::election::etcd::EtcdElection;
 use crate::error;
 use crate::metasrv::MetaSrv;
 use crate::metasrv::MetaSrvOptions;
@@ -14,6 +15,7 @@ use crate::service::store::etcd::EtcdStore;
 // Bootstrap the rpc server to serve incoming request
 pub async fn bootstrap_meta_srv(opts: MetaSrvOptions) -> crate::Result<()> {
     let kv_store = EtcdStore::with_endpoints([&opts.store_addr]).await?;
+    let election = EtcdElection::with_endpoints(&opts.server_addr, [&opts.store_addr]).await?;
 
     let listener = TcpListener::bind(&opts.bind_addr)
         .await
@@ -22,7 +24,8 @@ pub async fn bootstrap_meta_srv(opts: MetaSrvOptions) -> crate::Result<()> {
         })?;
     let listener = TcpListenerStream::new(listener);
 
-    let meta_srv = MetaSrv::new(opts, kv_store, None).await;
+    let meta_srv = MetaSrv::new(opts, kv_store, None, Some(election)).await;
+    meta_srv.start().await;
 
     tonic::transport::Server::builder()
         .accept_http1(true) // for admin services

@@ -30,6 +30,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
     use api::v1::meta::{HeartbeatResponse, RequestHeader};
@@ -42,8 +43,11 @@ mod tests {
     async fn test_handle_heartbeat_resp_header() {
         let kv_store = Arc::new(MemStore::new());
         let ctx = Context {
+            datanode_lease_secs: 30,
             server_addr: "0.0.0.0:0000".to_string(),
             kv_store,
+            election: None,
+            skip_all: Arc::new(AtomicBool::new(false)),
         };
 
         let req = HeartbeatRequest {

@@ -41,7 +41,7 @@ pub async fn mock(
     selector: Option<SelectorRef>,
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
-    let meta_srv = MetaSrv::new(opts, kv_store, selector).await;
+    let meta_srv = MetaSrv::new(opts, kv_store, selector, None).await;
     let (client, server) = tokio::io::duplex(1024);
     tokio::spawn(async move {
         tonic::transport::Server::builder()

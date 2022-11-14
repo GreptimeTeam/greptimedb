@@ -1,14 +1,16 @@
+use std::sync::atomic::Ordering;
+
 use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::PutRequest;
 use common_telemetry::info;
 use common_time::util as time_util;
 
-use super::Context;
 use super::HeartbeatAccumulator;
 use super::HeartbeatHandler;
 use crate::error::Result;
 use crate::keys::LeaseKey;
 use crate::keys::LeaseValue;
+use crate::metasrv::Context;
 
 pub struct DatanodeLeaseHandler;
 
@@ -20,6 +22,10 @@ impl HeartbeatHandler for DatanodeLeaseHandler {
         ctx: &Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
+        if ctx.skip_all.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         let HeartbeatRequest { header, peer, .. } = req;
         if let Some(ref peer) = peer {
             let key = LeaseKey {
@@ -41,7 +47,7 @@ impl HeartbeatHandler for DatanodeLeaseHandler {
                 ..Default::default()
             };
 
-            let _ = ctx.kv_store().put(put).await?;
+            let _ = ctx.kv_store.put(put).await?;
         }
 
         Ok(())
