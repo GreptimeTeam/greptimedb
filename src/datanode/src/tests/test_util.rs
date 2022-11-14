@@ -4,6 +4,7 @@ use std::sync::Arc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use frontend::frontend::Mode;
 use snafu::ResultExt;
 use table::engine::EngineContext;
 use table::engine::TableEngineRef;
@@ -32,6 +33,7 @@ pub fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGua
         storage: ObjectStoreConfig::File {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
         },
+        mode: Mode::Standalone,
         ..Default::default()
     };
     (

@@ -19,9 +19,13 @@ async fn create_datanode_instance() -> Arc<DatanodeInstance> {
 }
 
 pub(crate) async fn create_frontend_instance() -> Arc<Instance> {
-    let datanode_instance = create_datanode_instance().await;
+    let datanode_instance: Arc<DatanodeInstance> = create_datanode_instance().await;
+    let dn_catalog_manager = datanode_instance.catalog_manager().clone();
     let (_, client) = create_datanode_client(datanode_instance).await;
-    Arc::new(Instance::with_client(client))
+    Arc::new(Instance::with_client_and_catalog_manager(
+        client,
+        dn_catalog_manager,
+    ))
 }
 
 pub(crate) async fn create_datanode_client(

@@ -7,7 +7,8 @@ use catalog::error::{
 };
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
-    CatalogList, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSchemaRequest,
+    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
 };
 use common_catalog::{CatalogKey, SchemaKey, TableGlobalKey, TableGlobalValue};
 use futures::StreamExt;
@@ -38,6 +39,45 @@ impl FrontendCatalogManager {
             table_routes,
             datanode_clients,
         }
+    }
+}
+
+// FIXME(hl): Frontend only needs a CatalogList, should replace with trait upcasting
+// as soon as it's stable: https://github.com/rust-lang/rust/issues/65991
+#[async_trait::async_trait]
+impl CatalogManager for FrontendCatalogManager {
+    async fn start(&self) -> catalog::error::Result<()> {
+        Ok(())
+    }
+
+    async fn register_table(
+        &self,
+        _request: RegisterTableRequest,
+    ) -> catalog::error::Result<usize> {
+        unimplemented!()
+    }
+
+    async fn register_schema(
+        &self,
+        _request: RegisterSchemaRequest,
+    ) -> catalog::error::Result<usize> {
+        unimplemented!()
+    }
+
+    async fn register_system_table(
+        &self,
+        _request: RegisterSystemTableRequest,
+    ) -> catalog::error::Result<()> {
+        unimplemented!()
+    }
+
+    fn table(
+        &self,
+        _catalog: &str,
+        _schema: &str,
+        _table_name: &str,
+    ) -> catalog::error::Result<Option<TableRef>> {
+        unimplemented!()
     }
 }
 

@@ -145,9 +145,8 @@ async fn start_server(
     server_and_addr: Option<(Box<dyn Server>, SocketAddr)>,
 ) -> servers::error::Result<Option<SocketAddr>> {
     if let Some((server, addr)) = server_and_addr {
-        let res = server.start(addr).await.map(Some)?;
         info!("Starting server at {}", addr);
-        Ok(res)
+        server.start(addr).await.map(Some)
     } else {
         Ok(None)
     }

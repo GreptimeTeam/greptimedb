@@ -17,8 +17,7 @@ impl InfluxdbLineProtocolHandler for Instance {
         match self.mode {
             Mode::Standalone => {
                 let exprs: Vec<InsertExpr> = request.try_into()?;
-                self.database()
-                    .batch_insert(exprs)
+                self.handle_inserts(&exprs)
                     .await
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu {
@@ -45,7 +44,14 @@ impl Instance {
 
         for insert in inserts {
             let self_clone = self.clone();
-
+            let insert_batch = crate::table::insert::insert_request_to_insert_batch(&insert)?;
+            self.create_or_alter_table_on_demand(
+                &insert.catalog_name,
+                &insert.schema_name,
+                &insert.table_name,
+                &[insert_batch],
+            )
+            .await?;
             // TODO(fys): need a separate runtime here
             let join = tokio::spawn(async move {
                 let catalog = self_clone.get_catalog(&insert.catalog_name)?;

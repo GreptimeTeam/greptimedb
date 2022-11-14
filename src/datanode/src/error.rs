@@ -284,16 +284,15 @@ pub enum Error {
     #[snafu(display("Insert batch is empty"))]
     EmptyInsertBatch,
 
-    #[snafu(display("Failed to build frontend instance, source: {}", source))]
-    BuildFrontend {
-        #[snafu(backtrace)]
-        source: frontend::error::Error,
-    },
+    #[snafu(display(
+        "Table id provider not found, cannot execute SQL directly on datanode in distributed mode"
+    ))]
+    TableIdProviderNotFound { backtrace: Backtrace },
 
-    #[snafu(display("Failed to start frontend instance, source: {}", source))]
-    StartFrontend {
+    #[snafu(display("Failed to bump table id, source: {}", source))]
+    BumpTableId {
         #[snafu(backtrace)]
-        source: frontend::error::Error,
+        source: table::error::Error,
     },
 }
 
@@ -363,9 +362,8 @@ impl ErrorExt for Error {
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::InsertData { source, .. } => source.status_code(),
             Error::EmptyInsertBatch => StatusCode::InvalidArguments,
-            Error::BuildFrontend { source, .. } | Error::StartFrontend { source, .. } => {
-                source.status_code()
-            }
+            Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
+            Error::BumpTableId { source, .. } => source.status_code(),
         }
     }
 

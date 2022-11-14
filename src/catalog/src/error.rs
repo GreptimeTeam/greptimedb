@@ -171,12 +171,6 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to bump table id"))]
-    BumpTableId { msg: String, backtrace: Backtrace },
-
-    #[snafu(display("Failed to parse table id from metasrv, data: {:?}", data))]
-    ParseTableId { data: String, backtrace: Backtrace },
-
     #[snafu(display("Failed to deserialize partition rule from string: {:?}", data))]
     DeserializePartitionRule {
         data: String,
@@ -232,9 +226,6 @@ impl ErrorExt for Error {
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableSchema { source, .. } => source.status_code(),
-            Error::BumpTableId { .. } | Error::ParseTableId { .. } => {
-                StatusCode::StorageUnavailable
-            }
             Error::DeserializePartitionRule { .. } => StatusCode::Unexpected,
             Error::InvalidSchemaInCatalog { .. } => StatusCode::Unexpected,
             Error::Internal { source, .. } => source.status_code(),

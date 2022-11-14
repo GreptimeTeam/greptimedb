@@ -11,6 +11,7 @@ use api::v1::{
     codec::SelectResult, column, column::SemanticType, insert_expr, Column, ColumnDataType,
     InsertExpr,
 };
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision::MILLISECOND;
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt};
@@ -339,6 +340,8 @@ pub fn write_request_to_insert_exprs(mut request: WriteRequest) -> Result<Vec<In
 
 // TODO(fys): it will remove in the future.
 fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
+    let schema_name = DEFAULT_SCHEMA_NAME.to_string();
+
     // TODO(dennis): save exemplars into a column
     let labels = std::mem::take(&mut timeseries.labels);
     let samples = std::mem::take(&mut timeseries.samples);
@@ -399,6 +402,7 @@ fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
         row_count: row_count as u32,
     };
     Ok(InsertExpr {
+        schema_name,
         table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
         })?,
@@ -407,6 +411,7 @@ fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
             values: vec![batch.into()],
         })),
         options: HashMap::default(),
+        region_number: 0,
     })
 }
 

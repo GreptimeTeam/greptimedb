@@ -18,12 +18,14 @@ common-catalog = { path = "../common/catalog" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+common-insert = { path = "../common/insert" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 
 datatypes = { path = "../datatypes" }
 futures = "0.3"
+futures-util = "0.3"
 itertools = "0.10"
 meta-client = { path = "../meta-client" }
 moka = { version = "0.9", features = ["future"] }

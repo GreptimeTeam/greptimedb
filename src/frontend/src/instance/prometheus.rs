@@ -94,11 +94,15 @@ impl PrometheusProtocolHandler for Instance {
         match self.mode {
             Mode::Standalone => {
                 let exprs = prometheus::write_request_to_insert_exprs(request)?;
-
-                self.database()
-                    .batch_insert(exprs)
+                let futures = exprs
+                    .iter()
+                    .map(|e| self.handle_insert(e))
+                    .collect::<Vec<_>>();
+                let res = futures_util::future::join_all(futures)
                     .await
-                    .map_err(BoxedError::new)
+                    .into_iter()
+                    .collect::<Result<Vec<_>, crate::error::Error>>();
+                res.map_err(BoxedError::new)
                     .context(error::ExecuteInsertSnafu {
                         msg: "failed to write prometheus remote request",
                     })?;
@@ -167,6 +171,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prometheus_remote_write_and_read() {
+        common_telemetry::init_default_ut_logging();
         let instance = tests::create_frontend_instance().await;
 
         let write_request = WriteRequest {
@@ -174,7 +179,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(instance.write(write_request).await.is_ok());
+        instance.write(write_request).await.unwrap();
 
         let read_request = ReadRequest {
             queries: vec![

@@ -124,8 +124,6 @@ impl Database {
         obj_result.try_into()
     }
 
-    // TODO(jiachun) update/delete
-
     pub async fn object(&self, expr: ObjectExpr) -> Result<GrpcObjectResult> {
         let res = self.objects(vec![expr]).await?.pop().unwrap();
         Ok(res)

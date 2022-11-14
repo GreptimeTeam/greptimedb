@@ -4,6 +4,7 @@ use api::v1::{
     insert_expr::{self, Expr},
     InsertExpr,
 };
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::{LinesWriter, Precision};
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
@@ -80,6 +81,9 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
     type Error = Error;
 
     fn try_from(value: &InfluxdbRequest) -> Result<Self, Self::Error> {
+        // InfluxDB uses default catalog name and schema name
+        let schema_name = DEFAULT_SCHEMA_NAME.to_string();
+
         let mut writers: HashMap<TableName, LinesWriter> = HashMap::new();
         let lines = parse_lines(&value.lines)
             .collect::<influxdb_line_protocol::Result<Vec<_>>>()
@@ -150,11 +154,13 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
         Ok(writers
             .into_iter()
             .map(|(table_name, writer)| InsertExpr {
+                schema_name: schema_name.clone(),
                 table_name,
                 expr: Some(Expr::Values(insert_expr::Values {
                     values: vec![writer.finish().into()],
                 })),
                 options: HashMap::default(),
+                region_number: 0,
             })
             .collect())
     }

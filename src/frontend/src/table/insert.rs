@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::codec;
+use api::v1::codec::InsertBatch;
 use api::v1::insert_expr;
 use api::v1::insert_expr::Expr;
 use api::v1::Column;
@@ -73,12 +74,12 @@ impl DistTable {
     }
 }
 
-fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<InsertExpr> {
+pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<InsertBatch> {
     let mut row_count = None;
 
     let columns = insert
         .columns_values
-        .into_iter()
+        .iter()
         .map(|(column_name, vector)| {
             match row_count {
                 Some(rows) => ensure!(
@@ -97,12 +98,12 @@ fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<Inse
                 .context(error::ColumnDataTypeSnafu)?;
 
             let mut column = Column {
-                column_name,
+                column_name: column_name.clone(),
                 datatype: datatype.datatype() as i32,
                 ..Default::default()
             };
 
-            column.push_vals(0, vector);
+            column.push_vals(0, vector.clone());
             Ok(column)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -111,32 +112,28 @@ fn to_insert_expr(region_id: RegionNumber, insert: InsertRequest) -> Result<Inse
         columns,
         row_count: row_count.map(|rows| rows as u32).unwrap_or(0),
     };
+    Ok(insert_batch)
+}
 
-    let mut options = HashMap::with_capacity(1);
-    options.insert(
-        // TODO(fys): Temporarily hard code here
-        "region_id".to_string(),
-        codec::RegionNumber { id: region_id }.into(),
-    );
-
+fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<InsertExpr> {
+    let table_name = insert.table_name.clone();
+    let insert_batch = insert_request_to_insert_batch(&insert)?;
     Ok(InsertExpr {
-        table_name: insert.table_name,
-        options,
+        schema_name: insert.schema_name,
+        table_name,
         expr: Some(Expr::Values(insert_expr::Values {
             values: vec![insert_batch.into()],
         })),
+        region_number,
+        options: Default::default(),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, ops::Deref};
+    use std::collections::HashMap;
 
-    use api::v1::{
-        codec::{self, InsertBatch},
-        insert_expr::Expr,
-        ColumnDataType, InsertExpr,
-    };
+    use api::v1::{codec::InsertBatch, insert_expr::Expr, ColumnDataType, InsertExpr};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::{prelude::ConcreteDataType, types::StringType, vectors::VectorBuilder};
     use table::requests::InsertRequest;
@@ -205,8 +202,7 @@ mod tests {
             }
         }
 
-        let bytes = insert_expr.options.get("region_id").unwrap();
-        let region_id: codec::RegionNumber = bytes.deref().try_into().unwrap();
-        assert_eq!(12, region_id.id);
+        let region_number = insert_expr.region_number;
+        assert_eq!(12, region_number);
     }
 }

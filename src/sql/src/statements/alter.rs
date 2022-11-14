@@ -1,4 +1,4 @@
-use api::v1::{alter_expr, AlterExpr};
+use api::v1::{alter_expr, AddColumn, AlterExpr};
 use sqlparser::ast::{ColumnDef, ObjectName, TableConstraint};
 
 use crate::error::UnsupportedAlterTableStatementSnafu;
@@ -51,8 +51,11 @@ impl TryFrom<AlterTable> for AlterExpr {
                 .fail();
             }
             AlterTableOperation::AddColumn { column_def } => {
-                alter_expr::Kind::AddColumn(api::v1::AddColumn {
-                    column_def: Some(sql_column_def_to_grpc_column_def(column_def)?),
+                alter_expr::Kind::AddColumns(api::v1::AddColumns {
+                    add_columns: vec![AddColumn {
+                        column_def: Some(sql_column_def_to_grpc_column_def(column_def)?),
+                        is_key: false,
+                    }],
                 })
             }
         };

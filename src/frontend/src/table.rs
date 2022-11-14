@@ -1,4 +1,3 @@
-mod insert;
 pub(crate) mod route;
 
 use std::any::Any;
@@ -30,6 +29,7 @@ use crate::mock::{DatanodeInstance, TableScanPlan};
 use crate::partitioning::{Operator, PartitionExpr, PartitionRuleRef};
 use crate::spliter::WriteSpliter;
 use crate::table::route::TableRoutes;
+pub mod insert;
 
 #[derive(Clone)]
 pub struct DistTable {

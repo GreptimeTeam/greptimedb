@@ -121,7 +121,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Invaild InsertRequest, reason: {}", reason))]
+    #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
     InvalidInsertRequest {
         reason: String,
         backtrace: Backtrace,
@@ -192,6 +192,66 @@ pub enum Error {
     FindTableRoutes {
         table_name: String,
         backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to bump table id when creating table, source: {}", source))]
+    BumpTableId {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Failed to create table, source: {}", source))]
+    CreateTable {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to alter table, source: {}", source))]
+    AlterTable {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to insert values to table, source: {}", source))]
+    Insert {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to select from table, source: {}", source))]
+    Select {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to create table on insertion, source: {}", source))]
+    CreateTableOnInsertion {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to alter table on insertion, source: {}", source))]
+    AlterTableOnInsertion {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to build CreateExpr on insertion: {}", source))]
+    BuildCreateExprOnInsertion {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
+    #[snafu(display("Failed to find new columns on insertion: {}", source))]
+    FindNewColumnsOnInsertion {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
+    #[snafu(display("Failed to deserialize insert batching: {}", source))]
+    DeserializeInsertBatch {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
     },
 
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
@@ -266,13 +326,23 @@ impl ErrorExt for Error {
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
-            Error::JoinTask { .. }
-            | Error::SchemaNotFound { .. }
-            | Error::CatalogNotFound { .. } => StatusCode::Unexpected,
+            Error::JoinTask { .. } => StatusCode::Unexpected,
             Error::Catalog { source, .. } => source.status_code(),
             Error::ParseCatalogEntry { source, .. } => source.status_code(),
 
             Error::RequestMeta { source } => source.status_code(),
+            Error::BumpTableId { source, .. } => source.status_code(),
+            Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
+            Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
+            Error::CreateTable { source, .. } => source.status_code(),
+            Error::AlterTable { source, .. } => source.status_code(),
+            Error::Insert { source, .. } => source.status_code(),
+            Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
+            Error::CreateTableOnInsertion { source, .. } => source.status_code(),
+            Error::AlterTableOnInsertion { source, .. } => source.status_code(),
+            Error::Select { source, .. } => source.status_code(),
+            Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
+            Error::DeserializeInsertBatch { source, .. } => source.status_code(),
         }
     }
 

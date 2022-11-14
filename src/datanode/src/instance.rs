@@ -13,6 +13,7 @@ use object_store::{services::fs::Builder, util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use snafu::prelude::*;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
+use table::table::TableIdProviderRef;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
@@ -35,6 +36,7 @@ pub struct Instance {
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) physical_planner: PhysicalPlanner,
     pub(crate) script_executor: ScriptExecutor,
+    pub(crate) table_id_provider: Option<TableIdProviderRef>,
     #[allow(unused)]
     pub(crate) meta_client: Option<Arc<MetaClient>>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
@@ -66,7 +68,7 @@ impl Instance {
         ));
 
         // create remote catalog manager
-        let (catalog_manager, factory) = match opts.mode {
+        let (catalog_manager, factory, table_id_provider) = match opts.mode {
             Mode::Standalone => {
                 let catalog = Arc::new(
                     catalog::local::LocalCatalogManager::try_new(table_engine.clone())
@@ -74,7 +76,11 @@ impl Instance {
                         .context(CatalogSnafu)?,
                 );
                 let factory = QueryEngineFactory::new(catalog.clone());
-                (catalog as CatalogManagerRef, factory)
+                (
+                    catalog.clone() as CatalogManagerRef,
+                    factory,
+                    Some(catalog as TableIdProviderRef),
+                )
             }
 
             Mode::Distributed => {
@@ -86,7 +92,7 @@ impl Instance {
                     }),
                 ));
                 let factory = QueryEngineFactory::new(catalog.clone());
-                (catalog as CatalogManagerRef, factory)
+                (catalog as CatalogManagerRef, factory, None)
             }
         };
 
@@ -110,6 +116,7 @@ impl Instance {
             script_executor,
             meta_client,
             heartbeat_task,
+            table_id_provider,
         })
     }
 
