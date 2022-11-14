@@ -186,12 +186,13 @@ impl Instance {
     }
 
     /// Convert `CreateTable` statement to `CreateExpr` gRPC request.
-    fn create_to_expr(table_id: Option<u32>, create: &CreateTable) -> Result<CreateExpr> {
+    fn create_to_expr(
+        table_id: Option<u32>,
+        region_ids: Vec<u32>,
+        create: &CreateTable,
+    ) -> Result<CreateExpr> {
         let (catalog_name, schema_name, table_name) =
             table_idents_to_full_name(&create.name).context(error::ParseSqlSnafu)?;
-
-        // FIXME(hl): Region id should be generated from metasrv
-        let region_ids = vec![0];
 
         let time_index = find_time_index(&create.constraints)?;
         let expr = CreateExpr {
@@ -577,7 +578,7 @@ impl SqlQueryHandler for Instance {
                         ),
                         None => None,
                     };
-                    let expr = Self::create_to_expr(table_id, &create)
+                    let expr = Self::create_to_expr(table_id, vec![0], &create)
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteQuerySnafu { query })?;
                     self.handle_create_table(expr)
