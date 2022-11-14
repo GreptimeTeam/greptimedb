@@ -1,9 +1,15 @@
 use std::fmt::Display;
 
 use async_trait::async_trait;
+use client::api::v1::codec::SelectResult;
+use client::api::v1::column::SemanticType;
+use client::api::v1::ColumnDataType;
 use client::{Client, Database as DB, Error as ClientError, ObjectResult, Select};
+use comfy_table::{Cell, Table};
 use sqlness::{Database, Environment};
 use tokio::process::{Child, Command};
+
+use crate::util;
 
 pub struct Env {}
 
@@ -73,8 +79,72 @@ struct ResultDisplayer {
 impl Display for ResultDisplayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.result {
-            Ok(result) => write!(f, "{:?}", result),
+            Ok(result) => match result {
+                ObjectResult::Select(select_result) => {
+                    write!(
+                        f,
+                        "{}",
+                        SelectResultDisplayer {
+                            result: select_result
+                        }
+                        .display()
+                    )
+                }
+                ObjectResult::Mutate(mutate_result) => {
+                    write!(f, "{:?}", mutate_result)
+                }
+            },
             Err(e) => write!(f, "Failed to execute, error: {:?}", e),
         }
+    }
+}
+
+struct SelectResultDisplayer<'a> {
+    result: &'a SelectResult,
+}
+
+impl SelectResultDisplayer<'_> {
+    fn display(&self) -> impl Display {
+        let mut table = Table::new();
+        table.load_preset("||--+-++|    ++++++");
+
+        if self.result.row_count == 0 {
+            return table;
+        }
+
+        let mut headers = vec![];
+        for column in &self.result.columns {
+            headers.push(Cell::new(format!(
+                "{}, #{:?}, #{:?}",
+                column.column_name,
+                SemanticType::from_i32(column.semantic_type).unwrap(),
+                ColumnDataType::from_i32(column.datatype).unwrap()
+            )));
+        }
+        table.set_header(headers);
+
+        let col_count = self.result.columns.len();
+        let row_count = self.result.row_count as usize;
+        let columns = self
+            .result
+            .columns
+            .iter()
+            .map(|col| {
+                util::values_to_string(
+                    ColumnDataType::from_i32(col.datatype).unwrap(),
+                    col.values.clone().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for row_index in 0..row_count {
+            let mut row = Vec::with_capacity(col_count);
+            for col_index in 0..col_count {
+                row.push(columns[col_index][row_index].clone())
+            }
+            table.add_row(row);
+        }
+
+        table
     }
 }

@@ -2,6 +2,7 @@ use env::Env;
 use sqlness::{ConfigBuilder, Runner};
 
 mod env;
+mod util;
 
 #[tokio::main]
 async fn main() {
