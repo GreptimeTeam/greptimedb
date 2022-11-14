@@ -134,11 +134,13 @@ You can always cleanup test database by removing `/tmp/greptimedb`.
 
 ## Resources
 
-- [Pre-built binaries](https://github.com/GreptimeTeam/greptimedb/releases)
-- [Docker images](https://hub.docker.com/r/greptime/greptimedb)
+- [Pre-built Binaries](https://github.com/GreptimeTeam/greptimedb/releases):
+  downloadable pre-built binaries for Linux and MacOS
+- [Docker Images](https://hub.docker.com/r/greptime/greptimedb): pre-built
+  Docker images
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
   kubernetes deployment
-- [Java Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+- [GreptimeDB Java Client](https://github.com/GreptimeTeam/greptimedb-client-java)
 
 ## Community
 
