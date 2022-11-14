@@ -4,5 +4,7 @@ coverage:
     project:
       default:
         threshold: 1%
+    patch: off
 ignore:
   - "**/error*.rs" # ignore all error.rs files
+  
