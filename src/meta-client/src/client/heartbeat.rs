@@ -21,6 +21,7 @@ use tonic::Streaming;
 use super::Id;
 use crate::error;
 use crate::error::Result;
+use crate::rpc::util;
 
 pub struct HeartbeatSender {
     id: Id,
@@ -70,7 +71,11 @@ impl HeartbeatStream {
     /// Fetch the next message from this stream.
     #[inline]
     pub async fn message(&mut self) -> Result<Option<HeartbeatResponse>> {
-        self.stream.message().await.context(error::TonicStatusSnafu)
+        let res = self.stream.message().await.context(error::TonicStatusSnafu);
+        if let Ok(Some(ref heartbeat)) = res {
+            util::check_response_header(heartbeat.header.as_ref())?;
+        }
+        res
     }
 }
 
@@ -106,7 +111,8 @@ impl Client {
     }
 
     pub async fn heartbeat(&mut self) -> Result<(HeartbeatSender, HeartbeatStream)> {
-        let inner = self.inner.read().await;
+        let mut inner = self.inner.write().await;
+        inner.ask_leader().await?;
         inner.heartbeat().await
     }
 
