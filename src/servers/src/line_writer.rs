@@ -135,6 +135,7 @@ impl LineWriter {
 mod tests {
     use std::sync::Arc;
 
+    use common_catalog::consts::DEFAULT_SCHEMA_NAME;
     use common_time::Timestamp;
     use datatypes::{value::Value, vectors::Vector};
 

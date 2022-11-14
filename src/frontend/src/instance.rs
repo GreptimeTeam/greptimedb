@@ -631,7 +631,10 @@ impl GrpcQueryHandler for Instance {
                     }),
             }
         } else {
-            server_error::InvalidQuerySnafu { reason: "empty query" }.build()
+            server_error::InvalidQuerySnafu {
+                reason: "empty query",
+            }
+            .fail()
         }
     }
 }
