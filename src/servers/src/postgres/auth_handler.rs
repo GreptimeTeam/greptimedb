@@ -36,8 +36,11 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
     where
         C: ClientInfo,
     {
-        let mut params = HashMap::with_capacity(1);
+        let mut params = HashMap::with_capacity(4);
         params.insert("server_version".to_owned(), self.version.to_owned());
+        params.insert("server_encoding".to_owned(), "UTF8".to_owned());
+        params.insert("client_encoding".to_owned(), "UTF8".to_owned());
+        params.insert("DateStyle".to_owned(), "ISO YMD".to_owned());
 
         Some(params)
     }
