@@ -359,6 +359,21 @@ pub enum Error {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
+
+    #[snafu(display("Unsupported expr type: {}", name))]
+    UnsupportedExpr { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to create a RecordBatch, source: {}", source))]
+    NewRecordBatch {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to do vector computation, source: {}", source))]
+    VectorComputation {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -387,7 +402,8 @@ impl ErrorExt for Error {
             Error::Table { source } => source.status_code(),
 
             Error::ConvertColumnDefaultConstraint { source, .. }
-            | Error::ConvertScalarValue { source, .. } => source.status_code(),
+            | Error::ConvertScalarValue { source, .. }
+            | Error::VectorComputation { source } => source.status_code(),
 
             Error::ConnectDatanode { source, .. }
             | Error::RequestDatanode { source }
@@ -402,7 +418,8 @@ impl ErrorExt for Error {
             | Error::FindRegionRoutes { .. }
             | Error::FindLeaderPeer { .. }
             | Error::FindRegionPartition { .. }
-            | Error::IllegalTableRoutesData { .. } => StatusCode::Internal,
+            | Error::IllegalTableRoutesData { .. }
+            | Error::UnsupportedExpr { .. } => StatusCode::Internal,
 
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
                 StatusCode::Unexpected
@@ -434,6 +451,7 @@ impl ErrorExt for Error {
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
             Error::InsertBatchToRequest { source, .. } => source.status_code(),
+            Error::NewRecordBatch { source } => source.status_code(),
         }
     }
 

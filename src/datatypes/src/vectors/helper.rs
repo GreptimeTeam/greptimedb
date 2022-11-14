@@ -4,10 +4,12 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::Array;
+use arrow::compute;
 use arrow::datatypes::DataType as ArrowDataType;
 use datafusion_common::ScalarValue;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
+use crate::arrow_array::StringArray;
 use crate::error::{ConversionSnafu, Result, UnknownVectorSnafu};
 use crate::scalars::*;
 use crate::vectors::date::DateVector;
@@ -193,6 +195,16 @@ impl Helper {
     pub fn try_into_vectors(arrays: &[ArrayRef]) -> Result<Vec<VectorRef>> {
         arrays.iter().map(Self::try_into_vector).collect()
     }
+
+    pub fn like_utf8(names: Vec<String>, s: &str) -> Result<VectorRef> {
+        let array = StringArray::from_slice(&names);
+
+        let filter =
+            compute::like::like_utf8_scalar(&array, s).context(error::ArrowComputeSnafu)?;
+
+        let result = compute::filter::filter(&array, &filter).context(error::ArrowComputeSnafu)?;
+        Helper::try_into_vector(result)
+    }
 }
 
 #[cfg(test)]
@@ -249,5 +261,30 @@ mod tests {
         for i in 0..vector.len() {
             assert_eq!(Value::DateTime(DateTime::new(42)), vector.get(i));
         }
+    }
+
+    #[test]
+    fn test_like_utf8() {
+        fn assert_vector(expected: Vec<&str>, actual: &VectorRef) {
+            let actual = actual.as_any().downcast_ref::<StringVector>().unwrap();
+            assert_eq!(*actual, StringVector::from(expected));
+        }
+
+        let names: Vec<String> = vec!["greptime", "hello", "public", "world"]
+            .into_iter()
+            .map(|x| x.to_string())
+            .collect();
+
+        let ret = Helper::like_utf8(names.clone(), "%ll%").unwrap();
+        assert_vector(vec!["hello"], &ret);
+
+        let ret = Helper::like_utf8(names.clone(), "%time").unwrap();
+        assert_vector(vec!["greptime"], &ret);
+
+        let ret = Helper::like_utf8(names.clone(), "%ld").unwrap();
+        assert_vector(vec!["world"], &ret);
+
+        let ret = Helper::like_utf8(names, "%").unwrap();
+        assert_vector(vec!["greptime", "hello", "public", "world"], &ret);
     }
 }
