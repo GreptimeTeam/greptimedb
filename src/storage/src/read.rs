@@ -109,8 +109,10 @@ pub trait BatchOp {
     /// to zero.
     ///
     /// # Panics
-    /// Panics if `batch` and `prev` have different number of columns (unless `prev` is
+    /// Panics if
+    /// - `batch` and `prev` have different number of columns (unless `prev` is
     /// empty).
+    /// - `selected.len()` is less than the number of rows.
     fn find_unique(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>);
 
     /// Filters the `batch`, returns elements matching the `filter` (i.e. where the values
