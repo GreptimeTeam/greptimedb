@@ -1,5 +1,5 @@
-mod dedup;
 mod filter;
+mod find_unique;
 mod replicate;
 
 use arrow::bitmap::MutableBitmap;
@@ -19,22 +19,22 @@ pub trait VectorOp {
     /// Panics if `offsets.len() != self.len()`.
     fn replicate(&self, offsets: &[usize]) -> VectorRef;
 
-    /// Dedup elements in `self` and mark `i-th` bit of `selected` to `true` if the `i-th` element
-    /// of `self` is retained.
+    /// Mark `i-th` bit of `selected` to `true` if the `i-th` element of `self` is unique, which
+    /// means there is no elements behind it have same value as it.
     ///
     /// The caller should ensure
     /// 1. the length of `selected` bitmap is equal to `vector.len()`.
     /// 2. `vector` and `prev_vector` are sorted.
     ///
     /// If there are multiple duplicate elements, this function retains the **first** element.
-    /// If the first element of `self` is equal to the last element of `prev_vector`, then that
-    /// first element is also considered as duplicated and won't be retained.
+    /// The first element is considered as unique if the first element of `self` is different
+    /// from its previous element, that is the last element of `prev_vector`.
     ///
     /// # Panics
     /// Panics if
     /// - `selected.len() < self.len()`.
     /// - `prev_vector` and `self` have different data types.
-    fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>);
+    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>);
 
     /// Filters the vector, returns elements matching the `filter` (i.e. where the values are true).
     ///
@@ -49,9 +49,9 @@ macro_rules! impl_scalar_vector_op {
                 replicate::$replicate(self, offsets)
             }
 
-            fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+            fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
                 let prev_vector = prev_vector.map(|pv| pv.as_any().downcast_ref::<$VectorType>().unwrap());
-                dedup::dedup_scalar(self, selected, prev_vector);
+                find_unique::find_unique_scalar(self, selected, prev_vector);
             }
 
             fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
@@ -76,9 +76,9 @@ impl VectorOp for ConstantVector {
         replicate::replicate_constant(self, offsets)
     }
 
-    fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
         let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<ConstantVector>());
-        dedup::dedup_constant(self, selected, prev_vector);
+        find_unique::find_unique_constant(self, selected, prev_vector);
     }
 
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
@@ -91,9 +91,9 @@ impl VectorOp for NullVector {
         replicate::replicate_null(self, offsets)
     }
 
-    fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
         let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<NullVector>());
-        dedup::dedup_null(self, selected, prev_vector);
+        find_unique::find_unique_null(self, selected, prev_vector);
     }
 
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
@@ -109,10 +109,10 @@ where
         replicate::replicate_primitive(self, offsets)
     }
 
-    fn dedup(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
         let prev_vector =
             prev_vector.and_then(|pv| pv.as_any().downcast_ref::<PrimitiveVector<T>>());
-        dedup::dedup_scalar(self, selected, prev_vector);
+        find_unique::find_unique_scalar(self, selected, prev_vector);
     }
 
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
