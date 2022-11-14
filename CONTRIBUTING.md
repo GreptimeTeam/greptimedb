@@ -30,7 +30,7 @@ Also, there are things that we are not looking for, because they don't match the
 
 GreptimeDB uses the [Apache 2.0 license](https://github.com/greptimedb/greptimedb/blob/master/LICENSE) to strike a balance between open contribution and allowing you to use the software however you would like to.
 
-## Getting started
+## Getting Started
 
 ### Submitting Issues
 
