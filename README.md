@@ -11,7 +11,7 @@
     &nbsp;
     <a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml"><img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="CI"></img></a>
     &nbsp;
-    <a href="https://github.com/greptimeTeam/greptimedb/blob/master/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
+    <a href="https://github.com/greptimeTeam/greptimedb/blob/develop/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
 </p>
 
 <p align="center">
@@ -135,7 +135,15 @@ You can always cleanup test database by removing `/tmp/greptimedb`.
   Docker images
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
   Kubernetes deployment
-- [GreptimeDB Java Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+- [GreptimeDB Java
+  Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+
+## Project Status
+
+This project is in its early stage and under heavy development. We move fast and
+break things. Benchmark on development branch may not represent its potential
+performance. We release pre-built binaries constantly for functional
+evaluation. Do not use it in production at the moment.
 
 ## Community
 
