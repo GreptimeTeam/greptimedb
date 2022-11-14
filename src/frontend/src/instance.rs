@@ -172,7 +172,8 @@ impl Instance {
         if let Some(dist_instance) = &self.dist_instance {
             dist_instance.handle_select(expr).await
         } else {
-            // FIXME(dennis): use table name in sq
+            // TODO(LFC): Find a better way to execute query between Frontend and Datanode in standalone mode.
+            // Otherwise we have to parse SQL first to get schema name. Maybe not GRPC.
             self.database(DEFAULT_SCHEMA_NAME)
                 .select(expr)
                 .await
