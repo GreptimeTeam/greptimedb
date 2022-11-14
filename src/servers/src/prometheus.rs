@@ -11,7 +11,6 @@ use api::v1::{
     codec::SelectResult, column, column::SemanticType, insert_expr, Column, ColumnDataType,
     InsertExpr,
 };
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision::MILLISECOND;
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt};
@@ -329,18 +328,21 @@ fn timeseries_to_insert_request(mut timeseries: TimeSeries) -> Result<InsertRequ
 
 // TODO(fys): it will remove in the future.
 /// Cast a remote write request into gRPC's InsertExpr.
-pub fn write_request_to_insert_exprs(mut request: WriteRequest) -> Result<Vec<InsertExpr>> {
+pub fn write_request_to_insert_exprs(
+    database: &str,
+    mut request: WriteRequest,
+) -> Result<Vec<InsertExpr>> {
     let timeseries = std::mem::take(&mut request.timeseries);
 
     timeseries
         .into_iter()
-        .map(timeseries_to_insert_expr)
+        .map(|timeseries| timeseries_to_insert_expr(database, timeseries))
         .collect()
 }
 
 // TODO(fys): it will remove in the future.
-fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
-    let schema_name = DEFAULT_SCHEMA_NAME.to_string();
+fn timeseries_to_insert_expr(database: &str, mut timeseries: TimeSeries) -> Result<InsertExpr> {
+    let schema_name = database.to_string();
 
     // TODO(dennis): save exemplars into a column
     let labels = std::mem::take(&mut timeseries.labels);
@@ -654,8 +656,11 @@ mod tests {
             ..Default::default()
         };
 
-        let exprs = write_request_to_insert_exprs(write_request).unwrap();
+        let exprs = write_request_to_insert_exprs("prometheus", write_request).unwrap();
         assert_eq!(3, exprs.len());
+        assert_eq!("prometheus", exprs[0].schema_name);
+        assert_eq!("prometheus", exprs[1].schema_name);
+        assert_eq!("prometheus", exprs[2].schema_name);
         assert_eq!("metric1", exprs[0].table_name);
         assert_eq!("metric2", exprs[1].table_name);
         assert_eq!("metric3", exprs[2].table_name);

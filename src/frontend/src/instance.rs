@@ -160,6 +160,10 @@ impl Instance {
         Database::new("greptime", self.client.clone())
     }
 
+    pub fn get_database(&self, database: &str) -> Database {
+        Database::new(database, self.client.clone())
+    }
+
     // TODO(fys): temporarily hard code
     pub fn admin(&self) -> Admin {
         Admin::new("greptime", self.client.clone())

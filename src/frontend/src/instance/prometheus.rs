@@ -90,10 +90,10 @@ async fn handle_remote_queries(
 
 #[async_trait]
 impl PrometheusProtocolHandler for Instance {
-    async fn write(&self, request: WriteRequest) -> ServerResult<()> {
+    async fn write(&self, database: &str, request: WriteRequest) -> ServerResult<()> {
         match self.mode {
             Mode::Standalone => {
-                let exprs = prometheus::write_request_to_insert_exprs(request)?;
+                let exprs = prometheus::write_request_to_insert_exprs(database, request)?;
                 let futures = exprs
                     .iter()
                     .map(|e| self.handle_insert(e))
@@ -122,11 +122,11 @@ impl PrometheusProtocolHandler for Instance {
         Ok(())
     }
 
-    async fn read(&self, request: ReadRequest) -> ServerResult<PrometheusResponse> {
+    async fn read(&self, database: &str, request: ReadRequest) -> ServerResult<PrometheusResponse> {
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
-        let results = handle_remote_queries(&self.database(), &request.queries).await?;
+        let results = handle_remote_queries(&self.get_database(database), &request.queries).await?;
 
         match response_type {
             ResponseType::Samples => {
@@ -179,7 +179,9 @@ mod tests {
             ..Default::default()
         };
 
-        instance.write(write_request).await.unwrap();
+        let db = "prometheus";
+
+        instance.write(db, write_request).await.unwrap();
 
         let read_request = ReadRequest {
             queries: vec![
@@ -214,7 +216,7 @@ mod tests {
             ..Default::default()
         };
 
-        let resp = instance.read(read_request).await.unwrap();
+        let resp = instance.read(db, read_request).await.unwrap();
         assert_eq!(resp.content_type, "application/x-protobuf");
         assert_eq!(resp.content_encoding, "snappy");
         let body = prometheus::snappy_decompress(&resp.body).unwrap();
