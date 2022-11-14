@@ -47,8 +47,8 @@ fn region_id(table_id: TableId, n: u32) -> RegionId {
 }
 
 #[inline]
-fn table_dir(table_name: &str) -> String {
-    format!("{}/", table_name)
+fn table_dir(schema_name: &str, table_name: &str) -> String {
+    format!("{}/{}/", schema_name, table_name)
 }
 
 /// [TableEngine] implementation.
@@ -308,7 +308,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         }
 
         let opts = CreateOptions {
-            parent_dir: table_dir(table_name),
+            parent_dir: table_dir(schema_name, table_name),
         };
 
         let region = self
@@ -380,7 +380,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
             let engine_ctx = StorageEngineContext::default();
             let opts = OpenOptions {
-                parent_dir: table_dir(table_name),
+                parent_dir: table_dir(schema_name, table_name),
             };
 
             let table_id = request.table_id;
@@ -613,8 +613,8 @@ mod tests {
 
     #[test]
     fn test_table_dir() {
-        assert_eq!("test_table/", table_dir("test_table"));
-        assert_eq!("demo/", table_dir("demo"));
+        assert_eq!("public/test_table/", table_dir("public", "test_table"));
+        assert_eq!("prometheus/demo/", table_dir("prometheus", "demo"));
     }
 
     #[tokio::test]
