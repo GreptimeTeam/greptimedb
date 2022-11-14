@@ -37,13 +37,9 @@ struct StartCommand {
     #[clap(long)]
     node_id: Option<u64>,
     #[clap(long)]
-    http_addr: Option<String>,
-    #[clap(long)]
     rpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
-    #[clap(long)]
-    postgres_addr: Option<String>,
     #[clap(long)]
     metasrv_addr: Option<String>,
     #[clap(short, long)]
@@ -76,17 +72,11 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             DatanodeOptions::default()
         };
 
-        if let Some(addr) = cmd.http_addr {
-            opts.http_addr = addr;
-        }
         if let Some(addr) = cmd.rpc_addr {
             opts.rpc_addr = addr;
         }
         if let Some(addr) = cmd.mysql_addr {
             opts.mysql_addr = addr;
-        }
-        if let Some(addr) = cmd.postgres_addr {
-            opts.postgres_addr = addr;
         }
 
         match (cmd.metasrv_addr, cmd.node_id) {
@@ -129,10 +119,8 @@ mod tests {
     fn test_read_from_config_file() {
         let cmd = StartCommand {
             node_id: None,
-            http_addr: None,
             rpc_addr: None,
             mysql_addr: None,
-            postgres_addr: None,
             metasrv_addr: None,
             config_file: Some(format!(
                 "{}/../../config/datanode.example.toml",
@@ -140,7 +128,6 @@ mod tests {
             )),
         };
         let options: DatanodeOptions = cmd.try_into().unwrap();
-        assert_eq!("0.0.0.0:3000".to_string(), options.http_addr);
         assert_eq!("0.0.0.0:3001".to_string(), options.rpc_addr);
         assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal_dir);
         assert_eq!("0.0.0.0:3306".to_string(), options.mysql_addr);
@@ -152,9 +139,6 @@ mod tests {
         assert_eq!(5000, options.meta_client_opts.connect_timeout_millis);
         assert_eq!(3000, options.meta_client_opts.timeout_millis);
         assert!(options.meta_client_opts.tcp_nodelay);
-
-        assert_eq!("0.0.0.0:5432".to_string(), options.postgres_addr);
-        assert_eq!(4, options.postgres_runtime_size);
 
         match options.storage {
             ObjectStoreConfig::File { data_dir } => {
@@ -169,10 +153,8 @@ mod tests {
             Mode::Standalone,
             DatanodeOptions::try_from(StartCommand {
                 node_id: None,
-                http_addr: None,
                 rpc_addr: None,
                 mysql_addr: None,
-                postgres_addr: None,
                 metasrv_addr: None,
                 config_file: None
             })
@@ -184,10 +166,8 @@ mod tests {
             Mode::Distributed,
             DatanodeOptions::try_from(StartCommand {
                 node_id: Some(42),
-                http_addr: None,
                 rpc_addr: None,
                 mysql_addr: None,
-                postgres_addr: None,
                 metasrv_addr: Some("127.0.0.1:3002".to_string()),
                 config_file: None
             })
@@ -197,20 +177,16 @@ mod tests {
 
         assert!(DatanodeOptions::try_from(StartCommand {
             node_id: None,
-            http_addr: None,
             rpc_addr: None,
             mysql_addr: None,
-            postgres_addr: None,
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             config_file: None,
         })
         .is_err());
         assert!(DatanodeOptions::try_from(StartCommand {
             node_id: Some(42),
-            http_addr: None,
             rpc_addr: None,
             mysql_addr: None,
-            postgres_addr: None,
             metasrv_addr: None,
             config_file: None,
         })
