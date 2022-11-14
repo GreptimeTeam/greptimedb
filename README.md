@@ -44,9 +44,8 @@ for years. Based on their best-practices, GreptimeDB is born to give you:
 
 #### Build from Source
 
-##### Prerequisite
+To compile GreptimeDB from source, you'll need:
 
-To compile GreptimeDB from source, you'll need the following:
 - C/C++ Toolchain: provides basic tools for compiling and linking. This is
   available as `build-essential` on ubuntu and similar name on other platforms.
 - Rust: the easiest way to install Rust is to use
@@ -67,13 +66,13 @@ docker build --network host -f docker/Dockerfile -t greptimedb .
 
 ### Run
 
-Start GreptimeDB from source code, in standalone mode.
+Start GreptimeDB from source code, in standalone mode:
 
 ```
 cargo run -- standalone start
 ```
 
-Or if you built from docker
+Or if you built from docker:
 
 ```
 docker run -p 4002:4002 -v "$(pwd):/tmp/greptimedb" greptime/greptimedb standalone start
