@@ -79,6 +79,10 @@ impl<S: LogStore> TesterBase<S> {
             .unwrap()
     }
 
+    pub async fn replay_inner(&self, recovered_metadata: RecoveredMetadataMap) {
+        self.region.replay_inner(recovered_metadata).await.unwrap()
+    }
+
     /// Scan all data.
     pub async fn full_scan(&self) -> Vec<(i64, Option<i64>)> {
         logging::info!("Full scan with ctx {:?}", self.read_ctx);
