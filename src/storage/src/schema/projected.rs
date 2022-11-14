@@ -488,13 +488,14 @@ mod tests {
     fn test_batch_find_unique() {
         let schema = read_util::new_projected_schema();
         let batch = read_util::new_kv_batch(&[(1000, Some(1)), (2000, Some(2)), (2000, Some(2))]);
-        let mut selected = MutableBitmap::from_len_zeroed(3);
 
+        let mut selected = MutableBitmap::from_len_zeroed(3);
         schema.find_unique(&batch, &mut selected, None);
         assert!(selected.get(0));
         assert!(selected.get(1));
         assert!(!selected.get(2));
 
+        let mut selected = MutableBitmap::from_len_zeroed(3);
         let prev = read_util::new_kv_batch(&[(1000, Some(1))]);
         schema.find_unique(&batch, &mut selected, Some(&prev));
         assert!(!selected.get(0));
