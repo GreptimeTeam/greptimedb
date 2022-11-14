@@ -70,7 +70,8 @@ impl Election for EtcdElection {
 
         if let Some(leader) = res.leader() {
             info!(
-                "Becoming leader: {:?}, leaseId: {:?}",
+                "[{}] becoming leader: {:?}, lease: {}",
+                &self.leader_value,
                 leader.name_str(),
                 leader.lease()
             );
@@ -91,7 +92,7 @@ impl Election for EtcdElection {
                     if res.ttl() > 0 {
                         self.is_leader.store(true, Ordering::Relaxed);
                     } else {
-                        warn!("Already lost leader status, will re-initiate election");
+                        warn!("Already lost leader status, lease: {}, will re-initiate election", leader.lease());
                         break;
                     }
                 }
