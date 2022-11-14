@@ -4,12 +4,14 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::codec;
 use api::v1::codec::InsertBatch;
+use api::v1::column::SemanticType;
 use api::v1::insert_expr;
 use api::v1::insert_expr::Expr;
 use api::v1::Column;
 use api::v1::InsertExpr;
 use api::v1::MutateResult;
 use client::{Database, ObjectResult};
+use datatypes::prelude::ConcreteDataType;
 use snafu::ensure;
 use snafu::OptionExt;
 use snafu::ResultExt;
@@ -97,8 +99,17 @@ pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<InsertBa
                 .try_into()
                 .context(error::ColumnDataTypeSnafu)?;
 
+            // TODO(hl): need refactor
+            let semantic_type =
+                if vector.data_type() == ConcreteDataType::timestamp_millis_datatype() {
+                    SemanticType::Timestamp
+                } else {
+                    SemanticType::Field
+                };
+
             let mut column = Column {
                 column_name: column_name.clone(),
+                semantic_type: semantic_type.into(),
                 datatype: datatype.datatype() as i32,
                 ..Default::default()
             };
