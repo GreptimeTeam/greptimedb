@@ -174,6 +174,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Failed to build context, msg: {}", err_msg))]
+    BuildingContext {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -192,7 +198,8 @@ impl ErrorExt for Error {
             | AlreadyStarted { .. }
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
-            | GrpcReflectionService { .. } => StatusCode::Internal,
+            | GrpcReflectionService { .. }
+            | BuildingContext { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }

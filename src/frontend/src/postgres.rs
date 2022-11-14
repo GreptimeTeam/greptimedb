@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct PostgresOptions {
     pub addr: String,
     pub runtime_size: usize,
+    pub check_pwd: bool,
 }
 
 impl Default for PostgresOptions {
@@ -11,6 +12,7 @@ impl Default for PostgresOptions {
         Self {
             addr: "0.0.0.0:4003".to_string(),
             runtime_size: 2,
+            check_pwd: false,
         }
     }
 }
