@@ -344,6 +344,9 @@ pub enum Error {
         source: client::Error,
     },
 
+    #[snafu(display("Cannot find primary key column by name: {}", msg))]
+    PrimaryKeyNotFound { msg: String, backtrace: Backtrace },
+
     #[snafu(display("Failed to execute sql: {}, source: {}", sql, source))]
     ExecuteSql {
         sql: String,
@@ -422,7 +425,7 @@ impl ErrorExt for Error {
             Error::Select { source, .. } => source.status_code(),
             Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
             Error::DeserializeInsertBatch { source, .. } => source.status_code(),
-
+            Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
         }
     }

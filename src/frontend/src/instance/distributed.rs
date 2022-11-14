@@ -1,13 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::helper::ColumnDataTypeWrapper;
+use api::v1::CreateExpr;
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
 use client::Select;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{TableGlobalKey, TableGlobalValue};
 use common_query::Output;
 use common_telemetry::debug;
-use datatypes::schema::RawSchema;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
 use meta_client::client::MetaClient;
 use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, RouteResponse, TableName,
@@ -15,19 +19,16 @@ use meta_client::rpc::{
 };
 use query::{QueryEngineFactory, QueryEngineRef};
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::create::CreateTable;
-use sql::statements::{
-    column_def_to_schema, sql_data_type_to_concrete_data_type, sql_value_to_value,
-    table_idents_to_full_name,
-};
-use sqlparser::ast::ColumnDef;
+use sql::statements::create::Partitions;
+use sql::statements::sql_value_to_value;
 use sqlparser::ast::Value as SqlValue;
 use table::metadata::RawTableMeta;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Result};
-use crate::instance::{find_primary_keys, find_time_index, Instance};
+use crate::error::{
+    self, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu, PrimaryKeyNotFoundSnafu, Result,
+};
 use crate::partitioning::{PartitionBound, PartitionDef};
 
 #[derive(Clone)]
@@ -53,14 +54,17 @@ impl DistInstance {
         }
     }
 
-    pub(crate) async fn create_table(&self, create_table: &CreateTable) -> Result<Output> {
-        let response = self.create_table_in_meta(create_table).await?;
-
+    pub(crate) async fn create_table(
+        &self,
+        create_table: &mut CreateExpr,
+        partitions: Option<Partitions>,
+    ) -> Result<Output> {
+        let response = self.create_table_in_meta(create_table, partitions).await?;
         let table_routes = response.table_routes;
         ensure!(
             table_routes.len() == 1,
             error::FindTableRoutesSnafu {
-                table_name: create_table.name.to_string()
+                table_name: create_table.table_name.to_string()
             }
         );
         let table_route = table_routes.first().unwrap();
@@ -69,10 +73,10 @@ impl DistInstance {
         ensure!(
             !region_routes.is_empty(),
             error::FindRegionRoutesSnafu {
-                table_name: create_table.name.to_string()
+                table_name: create_table.table_name.to_string()
             }
         );
-
+        create_table.table_id = Some(table_route.table.id as u32);
         self.put_table_global_meta(create_table, table_route)
             .await?;
 
@@ -81,18 +85,16 @@ impl DistInstance {
             let client = Admin::new("greptime", client);
 
             let regions = table_route.find_leader_regions(&datanode);
-            let create_expr = Instance::create_to_expr(
-                Some(table_route.table.id as u32),
-                regions.clone(),
-                create_table,
-            )?;
+            let mut create_expr_for_region = create_table.clone();
+            create_expr_for_region.region_ids = regions;
+
             debug!(
                 "Creating table {:?} on Datanode {:?} with regions {:?}",
-                create_table, datanode, regions,
+                create_table, datanode, create_expr_for_region.region_ids,
             );
 
             client
-                .create(create_expr)
+                .create(create_expr_for_region)
                 .await
                 .and_then(admin_result_to_output)
                 .context(error::InvalidAdminResultSnafu)?;
@@ -113,13 +115,24 @@ impl DistInstance {
             .context(error::ExecuteSqlSnafu { sql })
     }
 
-    async fn create_table_in_meta(&self, create_table: &CreateTable) -> Result<RouteResponse> {
-        let (catalog, schema, table) =
-            table_idents_to_full_name(&create_table.name).context(error::ParseSqlSnafu)?;
-        let table_name = TableName::new(catalog, schema, table);
+    async fn create_table_in_meta(
+        &self,
+        create_table: &CreateExpr,
+        partitions: Option<Partitions>,
+    ) -> Result<RouteResponse> {
+        let table_name = TableName::new(
+            create_table
+                .catalog_name
+                .clone()
+                .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
+            create_table
+                .schema_name
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
+            create_table.table_name.clone(),
+        );
 
-        let partitions = parse_partitions(create_table)?;
-
+        let partitions = parse_partitions(create_table, partitions)?;
         let request = MetaCreateRequest {
             table_name,
             partitions,
@@ -133,7 +146,7 @@ impl DistInstance {
     // TODO(LFC): Maybe move this to FrontendCatalogManager's "register_table" method?
     async fn put_table_global_meta(
         &self,
-        create_table: &CreateTable,
+        create_table: &CreateExpr,
         table_route: &TableRoute,
     ) -> Result<()> {
         let table_name = &table_route.table.table_name;
@@ -156,7 +169,7 @@ impl DistInstance {
 }
 
 fn create_table_global_value(
-    create_table: &CreateTable,
+    create_table: &CreateExpr,
     table_route: &TableRoute,
 ) -> Result<TableGlobalValue> {
     let table_name = &table_route.table.table_name;
@@ -171,43 +184,40 @@ fn create_table_global_value(
         })?
         .id;
 
-    let mut column_schemas = Vec::with_capacity(create_table.columns.len());
-    let time_index = find_time_index(&create_table.constraints)?;
-    for column in create_table.columns.iter() {
-        column_schemas.push(
-            column_def_to_schema(column, column.name.value == time_index)
-                .context(error::ParseSqlSnafu)?,
-        );
+    let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
+    let mut column_name_to_index_map = HashMap::new();
+
+    for (idx, column) in create_table.column_defs.iter().enumerate() {
+        column_schemas.push(create_column_schema(column)?);
+        column_name_to_index_map.insert(column.name.clone(), idx);
     }
-    let timestamp_index = column_schemas.iter().enumerate().find_map(|(i, c)| {
-        if c.name == time_index {
-            Some(i)
-        } else {
-            None
-        }
-    });
+
+    let timestamp_index = column_name_to_index_map
+        .get(&create_table.time_index)
+        .cloned();
+
     let raw_schema = RawSchema {
         column_schemas: column_schemas.clone(),
         timestamp_index,
         version: 0,
     };
 
-    let primary_key_indices = find_primary_keys(&create_table.constraints)?
+    let primary_key_indices = create_table
+        .primary_keys
         .iter()
-        .map(|k| {
-            column_schemas
-                .iter()
-                .enumerate()
-                .find_map(|(i, c)| if &c.name == k { Some(i) } else { None })
-                .unwrap() // unwrap is safe because primary key's column name must have been defined
+        .map(|name| {
+            column_name_to_index_map
+                .get(name)
+                .cloned()
+                .context(PrimaryKeyNotFoundSnafu { msg: name })
         })
-        .collect::<Vec<usize>>();
+        .collect::<Result<Vec<_>>>()?;
 
     let meta = RawTableMeta {
         schema: raw_schema,
         primary_key_indices,
         value_indices: vec![],
-        engine: create_table.engine.clone(),
+        engine: "mito".to_string(),
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
         engine_options: HashMap::new(),
@@ -223,11 +233,37 @@ fn create_table_global_value(
     })
 }
 
-fn parse_partitions(create_table: &CreateTable) -> Result<Vec<MetaPartition>> {
+// Remove this duplication in the future
+fn create_column_schema(column_def: &api::v1::ColumnDef) -> Result<ColumnSchema> {
+    let data_type =
+        ColumnDataTypeWrapper::try_new(column_def.datatype).context(error::ColumnDataTypeSnafu)?;
+    let default_constraint = match &column_def.default_constraint {
+        None => None,
+        Some(v) => Some(ColumnDefaultConstraint::try_from(&v[..]).context(
+            ConvertColumnDefaultConstraintSnafu {
+                column_name: &column_def.name,
+            },
+        )?),
+    };
+    ColumnSchema::new(
+        column_def.name.clone(),
+        data_type.into(),
+        column_def.is_nullable,
+    )
+    .with_default_constraint(default_constraint)
+    .context(ConvertColumnDefaultConstraintSnafu {
+        column_name: &column_def.name,
+    })
+}
+
+fn parse_partitions(
+    create_table: &CreateExpr,
+    partitions: Option<Partitions>,
+) -> Result<Vec<MetaPartition>> {
     // If partitions are not defined by user, use the timestamp column (which has to be existed) as
     // the partition column, and create only one partition.
-    let partition_columns = find_partition_columns(create_table)?;
-    let partition_entries = find_partition_entries(create_table, &partition_columns)?;
+    let partition_columns = find_partition_columns(create_table, &partitions)?;
+    let partition_entries = find_partition_entries(create_table, &partitions, &partition_columns)?;
 
     partition_entries
         .into_iter()
@@ -236,26 +272,28 @@ fn parse_partitions(create_table: &CreateTable) -> Result<Vec<MetaPartition>> {
 }
 
 fn find_partition_entries(
-    create_table: &CreateTable,
+    create_table: &CreateExpr,
+    partitions: &Option<Partitions>,
     partition_columns: &[String],
 ) -> Result<Vec<Vec<PartitionBound>>> {
-    let entries = if let Some(partitions) = &create_table.partitions {
+    let entries = if let Some(partitions) = partitions {
         let column_defs = partition_columns
             .iter()
             .map(|pc| {
                 create_table
-                    .columns
+                    .column_defs
                     .iter()
-                    .find(|c| &c.name.value == pc)
+                    .find(|c| &c.name == pc)
                     // unwrap is safe here because we have checked that partition columns are defined
                     .unwrap()
             })
-            .collect::<Vec<&ColumnDef>>();
+            .collect::<Vec<_>>();
         let mut column_name_and_type = Vec::with_capacity(column_defs.len());
         for column in column_defs {
-            let column_name = &column.name.value;
-            let data_type = sql_data_type_to_concrete_data_type(&column.data_type)
-                .context(error::ParseSqlSnafu)?;
+            let column_name = &column.name;
+            let data_type = ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(column.datatype).context(ColumnDataTypeSnafu)?,
+            );
             column_name_and_type.push((column_name, data_type));
         }
 
@@ -283,34 +321,38 @@ fn find_partition_entries(
     Ok(entries)
 }
 
-fn find_partition_columns(create_table: &CreateTable) -> Result<Vec<String>> {
-    let columns = if let Some(partitions) = &create_table.partitions {
+fn find_partition_columns(
+    create_table: &CreateExpr,
+    partitions: &Option<Partitions>,
+) -> Result<Vec<String>> {
+    let columns = if let Some(partitions) = partitions {
         partitions
             .column_list
             .iter()
             .map(|x| x.value.clone())
-            .collect::<Vec<String>>()
+            .collect::<Vec<_>>()
     } else {
-        vec![find_time_index(&create_table.constraints)?]
+        vec![create_table.time_index.clone()]
     };
     Ok(columns)
 }
 
 #[cfg(test)]
 mod test {
-
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
+    use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
 
-    #[test]
-    fn test_parse_partitions() {
+    #[tokio::test]
+    async fn test_parse_partitions() {
+        common_telemetry::init_default_ut_logging();
         let cases = [
             (
                 r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )  
 PARTITION BY RANGE COLUMNS (b) (
   PARTITION r0 VALUES LESS THAN ('hz'),
   PARTITION r1 VALUES LESS THAN ('sh'),
@@ -321,7 +363,7 @@ ENGINE=mito",
             ),
             (
                 r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
 PARTITION BY RANGE COLUMNS (b, a) (
   PARTITION r0 VALUES LESS THAN ('hz', 10),
   PARTITION r1 VALUES LESS THAN ('sh', 20),
@@ -335,7 +377,10 @@ ENGINE=mito",
             let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
             match &result[0] {
                 Statement::CreateTable(c) => {
-                    let partitions = parse_partitions(c).unwrap();
+                    common_telemetry::info!("{}", sql);
+                    let factory = DefaultCreateExprFactory {};
+                    let expr = factory.create_expr_by_stmt(c).await.unwrap();
+                    let partitions = parse_partitions(&expr, c.partitions.clone()).unwrap();
                     let json = serde_json::to_string(&partitions).unwrap();
                     assert_eq!(json, expected);
                 }
