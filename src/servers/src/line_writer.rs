@@ -163,7 +163,7 @@ mod tests {
         let insert_request = writer.finish();
 
         assert_eq!("demo", insert_request.table_name);
-        assert_eq!("public", insert_request.schema_name);
+        assert_eq!(DEFAULT_SCHEMA_NAME, insert_request.schema_name);
 
         let columns = insert_request.columns_values;
         assert_eq!(5, columns.len());
