@@ -22,18 +22,18 @@
 
 ## What is GreptimeDB
 
-GreptimeDB is an open-source time-series database with special focus on
+GreptimeDB is an open-source time-series database with a special focus on
 scalability, analytical capabilities and efficiency. It's designed to work on
-infrastructure of cloud era, and benefits from its elasticity and commodity
+infrastructure of the cloud era, and urers benefit from its elasticity and commodity
 storage.
 
-The core developers of GreptimeDB have been building time-series data platform
+Our core developers have been building time-series data platform
 for years. Based on their best-practices, GreptimeDB is born to give you:
 
-- A standalone binary that scales to highly-available distributed cluster, with transparent experience from user's perspective
-- Columnar data layout optimised for time-series, compacted, compressed, stored on various storage backends
+- A standalone binary that scales to highly-available distributed cluster, with transparent experience from users' perspective/provide users with transparency/provide a transparent experience for users/transparent to users from all perspectives 
+- Optimized columnar layout for handling time-series data; compacted, compressed, stored on various storage backends
 - Flexible index options, tackling high cardinality issues down
-- Distributed parallel query execution, leveraging elastic computing resource
+- Distributed, parallel query execution, leveraging elastic computing resource
 - Native SQL, and Python scripting for advanced analytical scenarios
 - Widely adopted database protocols and APIs
 - Extensible table engine architecture for extensive workloads
@@ -42,18 +42,18 @@ for years. Based on their best-practices, GreptimeDB is born to give you:
 
 ### Prerequisite
 
-To compile GreptimeDB from source, you'll need the following:
+To compile GreptimeDB from the source, you'll need the following:
 - Rust
 - Protobuf
 
 #### Rust
 
-The easiest way to install Rust is to use [`rustup`](https://rustup.rs/), which will check our `rust-toolchain` file and install correct Rust version for you.
+The easiest way to install Rust is to use [`rustup`](https://rustup.rs/), which checks our `rust-toolchain` file and installs the correct version of Rust for you.
 
 #### Protobuf
 
 `protoc` is required for compiling `.proto` files. `protobuf` is available from
-major package manager on macos and linux distributions. You can find an
+major package manager on macos and linux distributions. You can find the
 installation instructions [here](https://grpc.io/docs/protoc-installation/).
 
 ### Build the Docker Image
@@ -103,7 +103,7 @@ greptimedb
 
 ### SQL Operations
 
-1. Connecting DB by [mysql client](https://dev.mysql.com/downloads/mysql/):
+1. Connect to DB through [mysql client](https://dev.mysql.com/downloads/mysql/):
 
    ```
    # The standalone instance listen on port 4002 by default.
@@ -115,7 +115,7 @@ greptimedb
 CREATE DATABASE hello_greptime;
 ```
 
-2. Create table:
+2. Create a table:
 
    ```SQL
    CREATE TABLE hello_greptime.monitor (
@@ -127,7 +127,7 @@ CREATE DATABASE hello_greptime;
      PRIMARY KEY(host)) ENGINE=mito WITH(regions=1);
    ```
 
-3. Insert data:
+3. Insert some data:
 
    ```SQL
    INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
@@ -135,7 +135,7 @@ CREATE DATABASE hello_greptime;
    INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
    ```
 
-4. Query data:
+4. Query the data:
 
    ```SQL
    mysql> SELECT * FROM hello_greptime.monitor;
@@ -152,8 +152,8 @@ CREATE DATABASE hello_greptime;
 
 # Community
 
-The core team will be thrilled if you participate in any way you like. When you are stuck, try
-asking for help by filing an issue with a detailed description of what you were trying to do
+Our core team is thrilled too see you participate in any ways you like. When you are stuck, try to
+ask for help by filling an issue with a detailed description of what you were trying to do
 and what went wrong. If you have any questions or if you would like to get involved in our
 community, please check out:
 
