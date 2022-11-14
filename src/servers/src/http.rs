@@ -166,7 +166,7 @@ pub struct JsonResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     output: Option<Vec<JsonOutput>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    execution_time_ms: Option<u64>,
+    execution_time_ms: Option<u128>,
 }
 
 impl JsonResponse {
@@ -189,7 +189,7 @@ impl JsonResponse {
     }
 
     fn with_execution_time(mut self, execution_time: u128) -> Self {
-        self.execution_time_ms = Some(execution_time as u64);
+        self.execution_time_ms = Some(execution_time);
         self
     }
 
@@ -234,7 +234,7 @@ impl JsonResponse {
         self.output.as_ref()
     }
 
-    pub fn execution_time_ms(&self) -> Option<u64> {
+    pub fn execution_time_ms(&self) -> Option<u128> {
         self.execution_time_ms
     }
 }
