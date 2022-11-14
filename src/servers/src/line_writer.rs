@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_writer() {
-        let mut writer = LineWriter::with_lines("public", "demo".to_string(), 4);
+        let mut writer = LineWriter::with_lines(DEFAULT_SCHEMA_NAME, "demo".to_string(), 4);
         writer.write_ts("ts", (1665893727685, Precision::MILLISECOND));
         writer.write_tag("host", "host-1");
         writer.write_i64("memory", 10_i64);
