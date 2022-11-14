@@ -42,11 +42,6 @@ for years. Based on their best-practices, GreptimeDB is born to give you:
 
 ### Build
 
-#### Use Pre-built Binaries
-
-Check [our release page](https://github.com/GreptimeTeam/greptimedb/releases) to
-download latest executable binary.
-
 #### Build from Source
 
 ##### Prerequisite
@@ -60,7 +55,7 @@ To compile GreptimeDB from source, you'll need the following:
   find an installation instructions
   [here](https://grpc.io/docs/protoc-installation/).
 
-#### Build Using Docker
+#### Build with Docker
 
 A docker image with necessary dependencies is provided:
 
@@ -130,7 +125,14 @@ CREATE DATABASE hello_greptime;
 
 You can always cleanup test database by removing `/tmp/greptimedb`.
 
-# Community
+## Resources
+
+- [Pre-built binaries](https://github.com/GreptimeTeam/greptimedb/releases)
+- [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
+  kubernetes deployment
+- [Java Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+
+## Community
 
 The core team will be thrilled if you participate in any way you like. When you are stuck, try
 asking for help by filing an issue with a detailed description of what you were trying to do
