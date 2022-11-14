@@ -279,16 +279,19 @@ pub fn select_result_to_timeseries(
 }
 
 /// Cast a remote write request into InsertRequest
-pub fn write_request_to_insert_reqs(mut request: WriteRequest) -> Result<Vec<InsertRequest>> {
+pub fn write_request_to_insert_reqs(
+    db: &str,
+    mut request: WriteRequest,
+) -> Result<Vec<InsertRequest>> {
     let timeseries = std::mem::take(&mut request.timeseries);
 
     timeseries
         .into_iter()
-        .map(timeseries_to_insert_request)
+        .map(|timeseries| timeseries_to_insert_request(db, timeseries))
         .collect()
 }
 
-fn timeseries_to_insert_request(mut timeseries: TimeSeries) -> Result<InsertRequest> {
+fn timeseries_to_insert_request(db: &str, mut timeseries: TimeSeries) -> Result<InsertRequest> {
     // TODO(dennis): save exemplars into a column
     let labels = std::mem::take(&mut timeseries.labels);
     let samples = std::mem::take(&mut timeseries.samples);
@@ -305,7 +308,7 @@ fn timeseries_to_insert_request(mut timeseries: TimeSeries) -> Result<InsertRequ
     })?;
 
     let row_count = samples.len();
-    let mut line_writer = LineWriter::with_lines(table_name, row_count);
+    let mut line_writer = LineWriter::with_lines(db, table_name, row_count);
 
     for sample in samples {
         let ts_millis = sample.timestamp;
@@ -571,11 +574,12 @@ mod tests {
             ..Default::default()
         };
 
-        let reqs = write_request_to_insert_reqs(write_request).unwrap();
+        let reqs = write_request_to_insert_reqs("public", write_request).unwrap();
 
         assert_eq!(3, reqs.len());
 
         let req1 = reqs.get(0).unwrap();
+        assert_eq!("public", req1.schema_name);
         assert_eq!("metric1", req1.table_name);
 
         let columns = &req1.columns_values;
@@ -595,6 +599,7 @@ mod tests {
         assert_vector(&expected, val);
 
         let req2 = reqs.get(1).unwrap();
+        assert_eq!("public", req2.schema_name);
         assert_eq!("metric2", req2.table_name);
 
         let columns = &req2.columns_values;
@@ -618,6 +623,7 @@ mod tests {
         assert_vector(&expected, val);
 
         let req3 = reqs.get(2).unwrap();
+        assert_eq!("public", req3.schema_name);
         assert_eq!("metric3", req3.table_name);
 
         let columns = &req3.columns_values;

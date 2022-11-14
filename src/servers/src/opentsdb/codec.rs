@@ -117,7 +117,7 @@ impl DataPoint {
     }
 
     pub fn as_insert_request(&self) -> InsertRequest {
-        let mut line_writer = LineWriter::with_lines(self.metric.clone(), 1);
+        let mut line_writer = LineWriter::with_lines(DEFAULT_SCHEMA_NAME, self.metric.clone(), 1);
         line_writer.write_ts(
             OPENTSDB_TIMESTAMP_COLUMN_NAME,
             (self.ts_millis(), Precision::MILLISECOND),

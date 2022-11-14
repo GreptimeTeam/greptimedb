@@ -108,7 +108,7 @@ impl PrometheusProtocolHandler for Instance {
                     })?;
             }
             Mode::Distributed(_) => {
-                let inserts = prometheus::write_request_to_insert_reqs(request)?;
+                let inserts = prometheus::write_request_to_insert_reqs(database, request)?;
 
                 self.dist_insert(inserts)
                     .await
