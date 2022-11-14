@@ -52,7 +52,11 @@ impl KvBackend for MetaKvBackend {
         let req = PutRequest::new()
             .with_key(key.to_vec())
             .with_value(val.to_vec());
-        info!("KvBackend put req begin, req: {:?}", req);
+        info!(
+            "KvBackend put req begin, key: {}, req: {:?}",
+            String::from_utf8_lossy(&req.key),
+            req
+        );
         let _ = self.client.put(req).await.context(MetaSrvSnafu)?;
         info!("KvBackend put req end");
         Ok(())

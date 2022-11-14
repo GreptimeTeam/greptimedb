@@ -731,6 +731,12 @@ impl SchemaProvider for RemoteSchemaProvider {
             }
         });
 
+        info!(
+            "Wait table name {} register result on thread {:?}",
+            name_clone,
+            std::thread::current().id()
+        );
+
         let prev = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(v) => v,
             Err(e) => {

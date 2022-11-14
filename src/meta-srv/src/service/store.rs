@@ -30,7 +30,12 @@ impl store_server::Store for MetaSrv {
 
     async fn put(&self, req: Request<PutRequest>) -> GrpcResult<PutResponse> {
         let req = req.into_inner();
-        common_telemetry::info!("MetaSrv put req begin, req: {:?}", req);
+        common_telemetry::info!(
+            "MetaSrv put req begin on thread {:?}, key: {}, req: {:?}",
+            std::thread::current().id(),
+            String::from_utf8_lossy(&req.key),
+            req
+        );
         let res = self.kv_store().put(req).await?;
         common_telemetry::info!("MetaSrv put req end, res: {:?}", res);
 

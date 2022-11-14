@@ -60,9 +60,15 @@ impl Client {
     }
 
     pub async fn put(&self, req: PutRequest) -> Result<PutResponse> {
-        common_telemetry::info!("meta StoreClient put acquire lock, req: {:?}", req);
+        common_telemetry::info!(
+            "meta StoreClient put acquire lock, key: {}",
+            String::from_utf8_lossy(&req.key)
+        );
         let inner = self.inner.read().await;
-        common_telemetry::info!("meta StoreClient put begin, req: {:?}", req);
+        common_telemetry::info!(
+            "meta StoreClient put begin, key: {}",
+            String::from_utf8_lossy(&req.key)
+        );
         let ret = inner.put(req).await;
         common_telemetry::info!("meta StoreClient put end");
         ret
@@ -129,7 +135,11 @@ impl Inner {
     async fn put(&self, mut req: PutRequest) -> Result<PutResponse> {
         let mut client = self.random_client()?;
         req.set_header(self.id);
-        common_telemetry::info!("StoreClient inner put begin, req: {:?}", req);
+        common_telemetry::info!(
+            "StoreClient inner put begin, key: {}, req: {:?}",
+            String::from_utf8_lossy(&req.key),
+            req
+        );
         let res = client.put(req).await.context(error::TonicStatusSnafu)?;
         common_telemetry::info!("StoreClient inner put end");
 
