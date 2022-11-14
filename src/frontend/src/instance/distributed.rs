@@ -71,29 +71,37 @@ impl DistInstance {
         self.put_table_global_meta(create_table, table_route)
             .await?;
 
-        let first_region = &region_routes[0];
-        let datanode = first_region
-            .leader_peer
-            .clone()
-            .context(error::FindLeaderPeerSnafu {
-                region: first_region.region.id,
-                table_name: create_table.name.to_string(),
-            })?;
-        let client = self.datanode_clients.get_client(&datanode).await;
-        let client = Admin::new("greptime", client);
+        for region_route in region_routes {
+            let region_id = region_route.region.id as u32;
+            let datanode =
+                region_route
+                    .leader_peer
+                    .clone()
+                    .context(error::FindLeaderPeerSnafu {
+                        region: region_route.region.id,
+                        table_name: create_table.name.to_string(),
+                    })?;
+            let client = self.datanode_clients.get_client(&datanode).await;
+            let client = Admin::new("greptime", client);
 
-        let create_expr =
-            Instance::create_to_expr(Some(table_route.table.id as u32), create_table)?;
-        debug!(
-            "creating table {:?} on datanode {:?}",
-            create_table, datanode
-        );
+            let create_expr = Instance::create_to_expr(
+                Some(table_route.table.id as u32),
+                vec![region_id],
+                create_table,
+            )?;
+            debug!(
+                "creating table {:?} on datanode {:?}, region id: {}",
+                create_table, datanode, region_id,
+            );
 
-        client
-            .create(create_expr)
-            .await
-            .and_then(admin_result_to_output)
-            .context(error::InvalidAdminResultSnafu)
+            client
+                .create(create_expr)
+                .await
+                .and_then(admin_result_to_output)
+                .context(error::InvalidAdminResultSnafu)?;
+        }
+
+        Ok(Output::AffectedRows(region_routes.len()))
     }
 
     async fn create_table_in_meta(&self, create_table: &CreateTable) -> Result<RouteResponse> {
