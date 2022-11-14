@@ -29,9 +29,7 @@ impl Environment for Env {
 
     /// Stop one [`Database`].
     async fn stop(&self, _mode: &str, mut database: Self::DB) {
-        if let Err(e) = database.server_process.kill().await {
-            eprintln!("Cannot kill the server process, error: {:?}", e);
-        }
+        database.server_process.kill().await.unwrap()
     }
 }
 
@@ -143,8 +141,8 @@ impl SelectResultDisplayer<'_> {
 
         for row_index in 0..row_count {
             let mut row = Vec::with_capacity(col_count);
-            for col_index in 0..col_count {
-                row.push(columns[col_index][row_index].clone())
+            for col in columns.iter() {
+                row.push(col[row_index].clone());
             }
             table.add_row(row);
         }

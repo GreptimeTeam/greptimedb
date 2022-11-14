@@ -12,11 +12,7 @@ pub fn values_to_string(data_type: ColumnDataType, values: Values) -> Vec<String
             .into_iter()
             .map(|val| val.to_string())
             .collect(),
-        ColumnDataType::String => values
-            .string_values
-            .into_iter()
-            .map(|val| val.to_string())
-            .collect(),
+        ColumnDataType::String => values.string_values,
         ColumnDataType::Boolean => values
             .bool_values
             .into_iter()
