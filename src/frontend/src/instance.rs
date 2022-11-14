@@ -633,12 +633,11 @@ impl GrpcQueryHandler for Instance {
 #[async_trait]
 impl GrpcAdminHandler for Instance {
     async fn exec_admin_request(&self, mut expr: AdminExpr) -> server_error::Result<AdminResult> {
-        match &mut expr.expr {
-            Some(api::v1::admin_expr::Expr::Create(create)) => {
-                create.table_id = None;
-            }
-            _ => {}
-        };
+        // Force the default to be `None` rather than `Some(0)` comes from gRPC decode.
+        // Related issue: #480
+        if let Some(api::v1::admin_expr::Expr::Create(create)) = &mut expr.expr {
+            create.table_id = None;
+        }
         self.admin()
             .do_request(expr.clone())
             .await
