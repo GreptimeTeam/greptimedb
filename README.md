@@ -1,12 +1,46 @@
-# GreptimeDB
+<p align="center">
+    <img src="/docs/logo-text-padding.png" alt="GreptimeDB Logo" width="400px"></img>
+</p>
 
-[![codecov](https://codecov.io/gh/GrepTimeTeam/greptimedb/branch/develop/graph/badge.svg?token=FITFDI3J3C)](https://codecov.io/gh/GrepTimeTeam/greptimedb)
+<h3 align="center">
+    The next-generation hybrid timeseries/analytics processing database in the cloud
+</h3>
 
-GreptimeDB: the next-generation hybrid timeseries/analytics processing database in the cloud.
+<p align="center">
+    <a href="https://codecov.io/gh/GrepTimeTeam/greptimedb"><img src="https://codecov.io/gh/GrepTimeTeam/greptimedb/branch/develop/graph/badge.svg?token=FITFDI3J3C"></img></a>
+    &nbsp;
+    <a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml"><img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="CI"></img></a>
+    &nbsp;
+    <a href="https://github.com/greptimeTeam/greptimedb/blob/master/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
+</p>
+
+<p align="center">
+    <a href="https://twitter.com/greptime"><img src="https://img.shields.io/badge/twitter-follow_us-1d9bf0.svg"></a>
+    &nbsp;
+    <a href="https://www.linkedin.com/company/greptime/"><img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg"></a>
+</p>
+
+## What is GreptimeDB
+
+GreptimeDB is an open-source time-series database with special focus on
+scalability, analytical capabilities and efficiency. It's designed to work on
+infrastructure of cloud era, and benefits from its elasticity and commodity
+storage.
+
+The core developers of GreptimeDB have been building time-series data platform
+for years. Based on their best-practices, GreptimeDB is born to give you:
+
+- A standalone binary that scales to highly-available distributed cluster, with transparent experience from user's perspective
+- Columnar data layout optimised for time-series, compacted, compressed, stored on various storage backends
+- Flexible index options, tackling high cardinality issues down
+- Distributed parallel query execution, leveraging elastic computing resource
+- Native SQL, and Python scripting for advanced analytical scenarios
+- Widely adopted database protocols and APIs
+- Extensible table engine architecture for extensive workloads
 
 ## Getting Started
 
-### Prerequisites
+### Prerequisite
 
 To compile GreptimeDB from source, you'll need the following:
 - Rust
@@ -115,6 +149,35 @@ CREATE DATABASE hello_greptime;
    3 rows in set (0.01 sec)
    ```
    You can delete your data by removing `/tmp/greptimedb`.
+
+# Community
+
+The core team will be thrilled if you participate in any way you like. When you are stuck, try
+asking for help by filing an issue with a detailed description of what you were trying to do
+and what went wrong. If you have any questions or if you would like to get involved in our
+community, please check out:
+
+- GreptimeDB Community on [Slack](https://greptime.com/slack)
+- GreptimeDB GitHub [Discussions](https://github.com/GreptimeTeam/greptimedb/discussions)
+- Greptime official [Website](https://greptime.com)
+
+In addition, you may:
+
+- View our official [Blog](https://greptime.com/blog)
+- Connect us with [Linkedin](https://www.linkedin.com/company/greptime/)
+- Follow us on [Twitter](https://twitter.com/greptime)
+
+## Documentation
+
+- GreptimeDB [User Guide](https://greptime.com/docs/user-guide)
+- GreptimeDB [Developer Guide](https://greptime.com/docs/developer-guide)
+
+## License
+
+GreptimeDB uses the [Apache 2.0 license][1] to strike a balance between
+open contributions and allowing you to use the software however you want.
+
+[1]: <https://github.com/greptimeTeam/greptimedb/blob/develop/LICENSE>
 
 ## Contributing
 
