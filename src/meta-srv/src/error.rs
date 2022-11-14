@@ -1,5 +1,6 @@
 use common_error::prelude::*;
-use tonic::{Code, Status};
+use tonic::Code;
+use tonic::Status;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]

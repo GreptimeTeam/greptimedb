@@ -16,8 +16,8 @@ use api::v1::meta::RangeResponse;
 use tonic::Request;
 use tonic::Response;
 
-use super::GrpcResult;
 use crate::metasrv::MetaSrv;
+use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
 impl store_server::Store for MetaSrv {

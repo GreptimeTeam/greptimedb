@@ -18,7 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tonic::Streaming;
 
-use super::Id;
+use crate::client::Id;
 use crate::error;
 use crate::error::Result;
 use crate::rpc::util;
@@ -72,7 +72,7 @@ impl HeartbeatStream {
     #[inline]
     pub async fn message(&mut self) -> Result<Option<HeartbeatResponse>> {
         let res = self.stream.message().await.context(error::TonicStatusSnafu);
-        if let Ok(Some(ref heartbeat)) = res {
+        if let Ok(Some(heartbeat)) = &res {
             util::check_response_header(heartbeat.header.as_ref())?;
         }
         res

@@ -23,10 +23,10 @@ use etcd_client::Txn;
 use etcd_client::TxnOp;
 use etcd_client::TxnOpResponse;
 
-use super::kv::KvStore;
-use super::kv::KvStoreRef;
 use crate::error;
 use crate::error::Result;
+use crate::service::store::kv::KvStore;
+use crate::service::store::kv::KvStoreRef;
 
 #[derive(Clone)]
 pub struct EtcdStore {

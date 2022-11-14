@@ -9,7 +9,7 @@ use etcd_client::Client;
 use snafu::OptionExt;
 use snafu::ResultExt;
 
-use super::Election;
+use crate::election::Election;
 use crate::election::ELECTION_KEY;
 use crate::election::LEASE_SECS;
 use crate::election::PROCLAIM_PERIOD_SECS;
@@ -18,11 +18,10 @@ use crate::error::Result;
 use crate::metasrv::ElectionRef;
 use crate::metasrv::LeaderValue;
 
-#[derive(Clone)]
 pub struct EtcdElection {
     leader_value: String,
     client: Client,
-    is_leader: Arc<AtomicBool>,
+    is_leader: AtomicBool,
 }
 
 impl EtcdElection {
@@ -39,7 +38,7 @@ impl EtcdElection {
         Ok(Arc::new(Self {
             leader_value,
             client,
-            is_leader: Arc::new(AtomicBool::new(false)),
+            is_leader: AtomicBool::new(false),
         }))
     }
 }

@@ -74,7 +74,7 @@ impl ResponseHeader {
 
     #[inline]
     pub fn is_not_leader(&self) -> bool {
-        if let Some(ref error) = self.error {
+        if let Some(error) = &self.error {
             if error.code == ErrorCode::NotLeader as i32 {
                 return true;
             }
@@ -99,10 +99,10 @@ impl Error {
     }
 
     #[inline]
-    pub fn not_leader() -> Self {
+    pub fn is_not_leader() -> Self {
         Self {
             code: ErrorCode::NotLeader as i32,
-            err_msg: "Not leader".to_string(),
+            err_msg: "Current server is not leader".to_string(),
         }
     }
 }
@@ -110,7 +110,7 @@ impl Error {
 impl HeartbeatResponse {
     #[inline]
     pub fn is_not_leader(&self) -> bool {
-        if let Some(ref header) = self.header {
+        if let Some(header) = &self.header {
             return header.is_not_leader();
         }
         false

@@ -19,8 +19,8 @@ use snafu::ResultExt;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
-use super::Id;
 use crate::client::load_balance as lb;
+use crate::client::Id;
 use crate::error;
 use crate::error::Result;
 

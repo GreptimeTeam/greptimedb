@@ -19,12 +19,12 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Streaming;
 
-use super::GrpcResult;
-use super::GrpcStream;
 use crate::error;
 use crate::error::Result;
 use crate::metasrv::Context;
 use crate::metasrv::MetaSrv;
+use crate::service::GrpcResult;
+use crate::service::GrpcStream;
 
 static PUSHER_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -47,7 +47,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                 match msg {
                     Ok(req) => {
                         if pusher_key.is_none() {
-                            if let Some(ref peer) = req.peer {
+                            if let Some(peer) = &req.peer {
                                 let key = format!(
                                     "{}-{}-{}",
                                     peer.addr,
@@ -64,7 +64,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                             .await
                             .map_err(|e| e.into());
 
-                        if let Ok(ref res) = res {
+                        if let Ok(res) = &res {
                             quit = res.is_not_leader();
                         }
 

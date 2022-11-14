@@ -5,9 +5,9 @@ use api::v1::meta::PutRequest;
 use common_telemetry::info;
 use common_time::util as time_util;
 
-use super::HeartbeatAccumulator;
-use super::HeartbeatHandler;
 use crate::error::Result;
+use crate::handler::HeartbeatAccumulator;
+use crate::handler::HeartbeatHandler;
 use crate::keys::LeaseKey;
 use crate::keys::LeaseValue;
 use crate::metasrv::Context;
@@ -27,7 +27,7 @@ impl HeartbeatHandler for DatanodeLeaseHandler {
         }
 
         let HeartbeatRequest { header, peer, .. } = req;
-        if let Some(ref peer) = peer {
+        if let Some(peer) = &peer {
             let key = LeaseKey {
                 cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
                 node_id: peer.id,
@@ -51,5 +51,57 @@ impl HeartbeatHandler for DatanodeLeaseHandler {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    use api::v1::meta::Peer;
+    use api::v1::meta::RangeRequest;
+    use api::v1::meta::RequestHeader;
+
+    use super::*;
+    use crate::service::store::memory::MemStore;
+
+    #[tokio::test]
+    async fn test_handle_datanode_lease() {
+        let kv_store = Arc::new(MemStore::new());
+        let ctx = Context {
+            datanode_lease_secs: 30,
+            server_addr: "0.0.0.0:0000".to_string(),
+            kv_store,
+            election: None,
+            skip_all: Arc::new(AtomicBool::new(false)),
+        };
+
+        let req = HeartbeatRequest {
+            header: Some(RequestHeader::new((1, 2))),
+            peer: Some(Peer {
+                id: 3,
+                addr: "127.0.0.1:1111".to_string(),
+            }),
+            ..Default::default()
+        };
+        let mut acc = HeartbeatAccumulator::default();
+
+        let lease_handler = DatanodeLeaseHandler {};
+        lease_handler.handle(&req, &ctx, &mut acc).await.unwrap();
+
+        let key = LeaseKey {
+            cluster_id: 1,
+            node_id: 3,
+        };
+
+        let req = RangeRequest {
+            key: key.try_into().unwrap(),
+            ..Default::default()
+        };
+
+        let res = ctx.kv_store.range(req).await.unwrap();
+
+        assert_eq!(1, res.kvs.len());
     }
 }
