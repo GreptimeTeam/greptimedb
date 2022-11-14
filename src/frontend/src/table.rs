@@ -434,6 +434,8 @@ impl PartitionExec {
 #[allow(clippy::print_stdout)]
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
     use api::v1::codec::InsertBatch;
     use api::v1::column::SemanticType;
     use api::v1::{column, insert_expr, Column, ColumnDataType};
@@ -805,6 +807,9 @@ mod test {
             Statement::CreateTable(c) => c,
             _ => unreachable!(),
         };
+
+        wait_datanodes_alive(kv_store).await;
+
         let _result = dist_instance.create_table(&create_table).await.unwrap();
 
         let table_route = table_routes.get_route(&table_name).await.unwrap();
@@ -840,6 +845,20 @@ mod test {
             table_routes,
             datanode_clients,
         }
+    }
+
+    async fn wait_datanodes_alive(kv_store: KvStoreRef) {
+        let wait = 10;
+        for _ in 0..wait {
+            let datanodes = meta_srv::lease::alive_datanodes(1000, &kv_store, |_, _| true)
+                .await
+                .unwrap();
+            if datanodes.len() >= 4 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await
+        }
+        panic!()
     }
 
     async fn insert_testing_data(
