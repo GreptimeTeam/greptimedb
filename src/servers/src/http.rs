@@ -231,7 +231,7 @@ impl JsonResponse {
     }
 
     pub fn output(&self) -> Option<&[JsonOutput]> {
-        self.output.as_ref().map(|v| v.as_slice())
+        self.output.as_deref()
     }
 
     pub fn execution_time_ms(&self) -> Option<u128> {

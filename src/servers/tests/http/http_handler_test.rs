@@ -36,7 +36,7 @@ async fn test_sql_output_rows() {
     let Json(json) = http_handler::sql(State(query_handler), query).await;
     assert!(json.success(), "{:?}", json);
     assert!(json.error().is_none());
-    &match json.output().expect("assertion failed")[0] {
+    match &json.output().expect("assertion failed")[0] {
         JsonOutput::Records(records) => {
             assert_eq!(1, records.num_rows());
         }
