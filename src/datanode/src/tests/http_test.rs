@@ -53,7 +53,7 @@ async fn test_sql_api() {
 
     let output = body.output().unwrap();
     assert_eq!(output.len(), 1);
-    if let JsonOutput::Records(ref records) = output[0] {
+    if let JsonOutput::Records(records) = &output[0] {
         assert_eq!(records.num_cols(), 1);
         assert_eq!(records.num_rows(), 10);
         assert_eq!(
@@ -89,7 +89,7 @@ async fn test_sql_api() {
     assert!(body.execution_time_ms().is_some());
     let output = body.output().unwrap();
     assert_eq!(output.len(), 1);
-    if let JsonOutput::Records(ref records) = output[0] {
+    if let JsonOutput::Records(records) = &output[0] {
         assert_eq!(records.num_cols(), 4);
         assert_eq!(records.num_rows(), 1);
         assert_eq!(
@@ -123,7 +123,7 @@ async fn test_sql_api() {
     assert!(body.execution_time_ms().is_some());
     let output = body.output().unwrap();
     assert_eq!(output.len(), 1);
-    if let JsonOutput::Records(ref records) = output[0] {
+    if let JsonOutput::Records(records) = &output[0] {
         assert_eq!(records.num_cols(), 2);
         assert_eq!(records.num_rows(), 1);
         assert_eq!(
@@ -152,7 +152,7 @@ async fn test_sql_api() {
     assert!(body.execution_time_ms().is_some());
     let output = body.output().unwrap();
     assert_eq!(output.len(), 1);
-    if let JsonOutput::Records(ref records) = output[0] {
+    if let JsonOutput::Records(records) = &output[0] {
         assert_eq!(records.num_cols(), 2);
         assert_eq!(records.num_rows(), 1);
         assert_eq!(

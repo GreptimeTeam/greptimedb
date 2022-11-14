@@ -230,8 +230,8 @@ impl JsonResponse {
         self.error.as_ref()
     }
 
-    pub fn output(&self) -> Option<&Vec<JsonOutput>> {
-        self.output.as_ref()
+    pub fn output(&self) -> Option<&[JsonOutput]> {
+        self.output.as_ref().map(|v| v.as_slice())
     }
 
     pub fn execution_time_ms(&self) -> Option<u128> {
