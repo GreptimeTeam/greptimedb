@@ -176,7 +176,10 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to build context, msg: {}", err_msg))]
-    BuildingContext { err_msg: String },
+    BuildingContext {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

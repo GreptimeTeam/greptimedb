@@ -62,18 +62,18 @@ impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
         &self,
         _auth_plugin: &str,
         username: &[u8],
-        _salt: &[u8],
-        _auth_data: &[u8],
+        salt: &[u8],
+        auth_data: &[u8],
     ) -> bool {
         // if not specified then **root** will be used
         let username = String::from_utf8_lossy(username);
         let client_addr = self.client_addr.clone();
-        let auth_method = match _auth_data.len() {
+        let auth_method = match auth_data.len() {
             0 => AuthMethod::None,
             _ => AuthMethod::Password {
                 hash_method: DoubleSha1,
-                hashed_value: _auth_data.to_vec(),
-                salt: _salt.to_vec(),
+                hashed_value: auth_data.to_vec(),
+                salt: salt.to_vec(),
             },
         };
 
