@@ -61,8 +61,10 @@ impl BatchHandler {
             Ok(batch_resp)
         };
 
-        // execute request in another runtime to prevent the execution from being cancelled
-        // unexpected by tonic runtime.
+        // Executes requests in another runtime to
+        // 1. prevent the execution from being cancelled unexpected by tonic runtime.
+        // 2. avoid the handler blocks the gRPC runtime because `exec_admin_request` may block
+        // the caller thread.
         let _ = self.runtime.spawn(async move {
             let result = future.await;
 
