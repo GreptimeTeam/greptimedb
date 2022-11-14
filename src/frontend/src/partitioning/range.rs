@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use datatypes::prelude::*;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -54,8 +56,6 @@ pub struct RangePartitionRule {
 }
 
 impl RangePartitionRule {
-    // FIXME(LFC): no allow, for clippy temporarily
-    #[allow(dead_code)]
     pub(crate) fn new(
         column_name: impl Into<String>,
         bounds: Vec<Value>,
@@ -68,24 +68,44 @@ impl RangePartitionRule {
         }
     }
 
-    fn column_name(&self) -> &String {
+    pub(crate) fn column_name(&self) -> &String {
         &self.column_name
     }
 
-    fn all_regions(&self) -> &Vec<RegionNumber> {
+    pub(crate) fn all_regions(&self) -> &Vec<RegionNumber> {
         &self.regions
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bounds(&self) -> &Vec<Value> {
+        &self.bounds
     }
 }
 
 impl PartitionRule for RangePartitionRule {
     type Error = Error;
 
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
     fn partition_columns(&self) -> Vec<String> {
         vec![self.column_name().to_string()]
     }
 
-    fn find_region(&self, _values: &[Value]) -> Result<RegionNumber, Self::Error> {
-        unimplemented!()
+    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Self::Error> {
+        debug_assert_eq!(
+            values.len(),
+            1,
+            "RangePartitionRule can only handle one partition value, actual {}",
+            values.len()
+        );
+        let value = &values[0];
+
+        Ok(match self.bounds.binary_search(value) {
+            Ok(i) => self.regions[i + 1],
+            Err(i) => self.regions[i],
+        })
     }
 
     fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Self::Error> {

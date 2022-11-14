@@ -23,7 +23,7 @@ impl OpentsdbProtocolHandler for Instance {
                         data_point: format!("{:?}", data_point),
                     })?;
             }
-            Mode::Distributed => {
+            Mode::Distributed(_) => {
                 self.dist_insert(vec![data_point.as_insert_request()])
                     .await
                     .map_err(BoxedError::new)

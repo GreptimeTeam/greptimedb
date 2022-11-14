@@ -171,13 +171,6 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to deserialize partition rule from string: {:?}", data))]
-    DeserializePartitionRule {
-        data: String,
-        source: serde_json::error::Error,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Invalid table schema in catalog, source: {:?}", source))]
     InvalidSchemaInCatalog {
         #[snafu(backtrace)]
@@ -226,7 +219,6 @@ impl ErrorExt for Error {
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableSchema { source, .. } => source.status_code(),
-            Error::DeserializePartitionRule { .. } => StatusCode::Unexpected,
             Error::InvalidSchemaInCatalog { .. } => StatusCode::Unexpected,
             Error::Internal { source, .. } => source.status_code(),
         }

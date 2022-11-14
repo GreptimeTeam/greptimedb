@@ -1,3 +1,4 @@
+pub(crate) mod distributed;
 mod influxdb;
 mod opentsdb;
 mod prometheus;
@@ -26,6 +27,7 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
 use common_telemetry::{debug, error, info};
 use datatypes::schema::ColumnSchema;
+use distributed::DistInstance;
 use meta_client::client::MetaClientBuilder;
 use meta_client::MetaClientOpts;
 use servers::error as server_error;
@@ -85,6 +87,8 @@ pub struct Instance {
     // Standalone and Distributed, then the code behind it doesn't need to use so
     // many match statements.
     mode: Mode,
+    // TODO(LFC): Refactor consideration: Can we split Frontend to DistInstance and EmbedInstance?
+    dist_instance: Option<DistInstance>,
 }
 
 impl Default for Instance {
@@ -94,19 +98,29 @@ impl Default for Instance {
             catalog_manager: None,
             table_id_provider: None,
             mode: Mode::Standalone,
+            dist_instance: None,
         }
     }
 }
 
 impl Instance {
     pub async fn try_new(opts: &FrontendOptions) -> Result<Self> {
-        let mut instance = Instance::default();
+        let mut instance = Instance {
+            mode: opts.mode.clone(),
+            ..Default::default()
+        };
+
         let addr = opts.datanode_grpc_addr();
         instance.client.start(vec![addr]);
 
-        let meta_client = match opts.mode {
+        instance.dist_instance = match &opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed => {
+            Mode::Distributed(metasrv_addr) => {
+                info!(
+                    "Creating Frontend instance in distributed mode with Meta server addr {:?}",
+                    metasrv_addr
+                );
+
                 let meta_config = MetaClientOpts::default();
                 let channel_config = ChannelConfig::new()
                     .timeout(Duration::from_millis(meta_config.timeout_millis))
@@ -115,26 +129,36 @@ impl Instance {
 
                 let channel_manager = ChannelManager::with_config(channel_config);
 
-                let meta_client = MetaClientBuilder::new(0, 0)
+                let mut meta_client = MetaClientBuilder::new(0, 0)
                     .enable_router()
                     .enable_store()
                     .channel_manager(channel_manager)
                     .build();
-                Some(Arc::new(meta_client))
-            }
-        };
+                meta_client
+                    .start(metasrv_addr)
+                    .await
+                    .context(error::StartMetaClientSnafu)?;
+                let meta_client = Arc::new(meta_client);
 
-        instance.catalog_manager = if let Some(meta_client) = meta_client {
-            let meta_backend = Arc::new(MetaKvBackend {
-                client: meta_client.clone(),
-            });
-            let table_routes = Arc::new(TableRoutes::new(meta_client));
-            let datanode_clients = Arc::new(DatanodeClients::new());
-            let catalog_manager =
-                FrontendCatalogManager::new(meta_backend, table_routes, datanode_clients);
-            Some(Arc::new(catalog_manager))
-        } else {
-            None
+                let meta_backend = Arc::new(MetaKvBackend {
+                    client: meta_client.clone(),
+                });
+                let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
+                let datanode_clients = Arc::new(DatanodeClients::new());
+                let catalog_manager = FrontendCatalogManager::new(
+                    meta_backend,
+                    table_routes,
+                    datanode_clients.clone(),
+                );
+
+                instance.catalog_manager = Some(Arc::new(catalog_manager.clone()));
+
+                Some(DistInstance::new(
+                    meta_client,
+                    catalog_manager,
+                    datanode_clients,
+                ))
+            }
         };
         Ok(instance)
     }
@@ -162,16 +186,13 @@ impl Instance {
     }
 
     /// Convert `CreateTable` statement to `CreateExpr` gRPC request.
-    async fn create_to_expr(&self, create: CreateTable) -> Result<CreateExpr> {
+    fn create_to_expr(
+        table_id: Option<u32>,
+        region_ids: Vec<u32>,
+        create: &CreateTable,
+    ) -> Result<CreateExpr> {
         let (catalog_name, schema_name, table_name) =
             table_idents_to_full_name(&create.name).context(error::ParseSqlSnafu)?;
-
-        let table_id = match &self.table_id_provider {
-            Some(provider) => Some(provider.next_table_id().await.context(BumpTableIdSnafu)?),
-            None => None,
-        };
-        // FIXME(hl): Region id should be generated from metasrv
-        let region_ids = vec![0];
 
         let time_index = find_time_index(&create.constraints)?;
         let expr = CreateExpr {
@@ -184,7 +205,7 @@ impl Instance {
             primary_keys: find_primary_keys(&create.constraints)?,
             create_if_not_exists: create.if_not_exists,
             // TODO(LFC): Fill in other table options.
-            table_options: HashMap::from([("engine".to_string(), create.engine)]),
+            table_options: HashMap::from([("engine".to_string(), create.engine.clone())]),
             table_id,
             region_ids,
         };
@@ -478,6 +499,7 @@ impl Instance {
             catalog_manager: Some(catalog),
             table_id_provider: None,
             mode: Mode::Standalone,
+            dist_instance: None,
         }
     }
 }
@@ -526,7 +548,7 @@ impl SqlQueryHandler for Instance {
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteQuerySnafu { query })
                 }
-                Mode::Distributed => {
+                Mode::Distributed(_) => {
                     let affected = self
                         .sql_dist_insert(insert)
                         .await
@@ -538,15 +560,32 @@ impl SqlQueryHandler for Instance {
                 }
             },
             Statement::CreateTable(create) => {
-                let expr = self
-                    .create_to_expr(create)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })?;
-                self.handle_create_table(expr)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })
+                if let Some(dist_instance) = &self.dist_instance {
+                    dist_instance
+                        .create_table(&create)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteQuerySnafu { query })
+                } else {
+                    let table_id = match &self.table_id_provider {
+                        Some(provider) => Some(
+                            provider
+                                .next_table_id()
+                                .await
+                                .context(BumpTableIdSnafu)
+                                .map_err(BoxedError::new)
+                                .context(server_error::ExecuteQuerySnafu { query })?,
+                        ),
+                        None => None,
+                    };
+                    let expr = Self::create_to_expr(table_id, vec![0], &create)
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteQuerySnafu { query })?;
+                    self.handle_create_table(expr)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteQuerySnafu { query })
+                }
             }
 
             Statement::ShowDatabases(_) | Statement::ShowTables(_) => self

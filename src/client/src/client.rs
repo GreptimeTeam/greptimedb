@@ -128,8 +128,11 @@ impl Client {
             .context(error::IllegalGrpcClientStateSnafu {
                 err_msg: "No available peer found",
             })?;
-        let mut client = self.make_client(peer)?;
-        let result = client.batch(req).await.context(error::TonicStatusSnafu)?;
+        let mut client = self.make_client(&peer)?;
+        let result = client
+            .batch(req)
+            .await
+            .context(error::TonicStatusSnafu { addr: peer })?;
         Ok(result.into_inner())
     }
 

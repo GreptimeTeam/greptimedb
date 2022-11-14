@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use datafusion_expr::Operator;
 use datatypes::value::Value;
 use snafu::ensure;
@@ -30,7 +32,7 @@ use crate::partitioning::{PartitionBound, PartitionExpr, PartitionRule};
 ///
 /// Please refer to MySQL's ["RANGE COLUMNS Partitioning"](https://dev.mysql.com/doc/refman/8.0/en/partitioning-columns-range.html)
 /// document for more details.
-struct RangeColumnsPartitionRule {
+pub struct RangeColumnsPartitionRule {
     column_list: Vec<String>,
     value_lists: Vec<Vec<PartitionBound>>,
     regions: Vec<RegionNumber>,
@@ -61,9 +63,7 @@ struct RangeColumnsPartitionRule {
 impl RangeColumnsPartitionRule {
     // It's assured that input arguments are valid because they are checked in SQL parsing stage.
     // So we can skip validating them.
-    // FIXME(LFC): no allow, for clippy temporarily
-    #[allow(dead_code)]
-    fn new(
+    pub(crate) fn new(
         column_list: Vec<String>,
         value_lists: Vec<Vec<PartitionBound>>,
         regions: Vec<RegionNumber>,
@@ -108,10 +108,29 @@ impl RangeColumnsPartitionRule {
             first_column_regions,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn column_list(&self) -> &Vec<String> {
+        &self.column_list
+    }
+
+    #[cfg(test)]
+    pub(crate) fn value_lists(&self) -> &Vec<Vec<PartitionBound>> {
+        &self.value_lists
+    }
+
+    #[cfg(test)]
+    pub(crate) fn regions(&self) -> &Vec<RegionNumber> {
+        &self.regions
+    }
 }
 
 impl PartitionRule for RangeColumnsPartitionRule {
     type Error = Error;
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
     fn partition_columns(&self) -> Vec<String> {
         self.column_list.clone()

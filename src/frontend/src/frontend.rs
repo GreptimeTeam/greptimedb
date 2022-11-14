@@ -85,5 +85,6 @@ where
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Standalone,
-    Distributed,
+    // with meta server's addr
+    Distributed(Vec<String>),
 }

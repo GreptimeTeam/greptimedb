@@ -158,6 +158,7 @@ fn partition_insert_request(
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::{collections::HashMap, result::Result, sync::Arc};
 
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -421,6 +422,10 @@ mod tests {
     // );
     impl PartitionRule for MockPartitionRule {
         type Error = Error;
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
 
         fn partition_columns(&self) -> Vec<String> {
             vec!["id".to_string()]
