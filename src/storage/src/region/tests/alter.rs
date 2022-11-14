@@ -423,23 +423,6 @@ async fn test_replay_metadata_after_open() {
     raw_metadata.version = version + 1;
     recovered_metadata.insert(committed_sequence, (manifest_version + 1, raw_metadata));
     tester.base().replay_inner(recovered_metadata).await;
-    // The same with init schema, because metadata's sequence is equals to last commited sequence,
-    // So we don't apply it.
     let schema = tester.schema();
-    check_schema_names(&schema, &["timestamp", "v0"]);
-
-    let mut recovered_metadata = BTreeMap::new();
-    let desc = RegionDescBuilder::new(REGION_NAME)
-        .push_key_column(("k1", LogicalTypeId::Int32, false))
-        .push_key_column(("k2", LogicalTypeId::Int32, false))
-        .push_value_column(("v0", LogicalTypeId::Float32, true))
-        .push_value_column(("v1", LogicalTypeId::Float32, true))
-        .build();
-    let metadata: &RegionMetadata = &desc.try_into().unwrap();
-    let mut raw_metadata: RawRegionMetadata = metadata.into();
-    raw_metadata.version = version + 2;
-    recovered_metadata.insert(committed_sequence + 1, (manifest_version + 2, raw_metadata));
-    tester.base().replay_inner(recovered_metadata).await;
-    let schema = tester.schema();
-    check_schema_names(&schema, &["k1", "k2", "timestamp", "v0", "v1"]);
+    check_schema_names(&schema, &["k1", "timestamp", "v0"]);
 }

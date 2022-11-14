@@ -392,16 +392,24 @@ impl WriterInner {
 
             // Apply metadata after last WAL entry
             while let Some((sequence_before_alter, _)) = next_apply_metadata {
-                if sequence_before_alter > last_sequence {
-                    self.apply_metadata(
-                        &writer_ctx,
-                        sequence_before_alter,
-                        next_apply_metadata,
-                        version_control,
-                    )?;
+                assert!(
+                    sequence_before_alter >= last_sequence,
+                    "The sequence in metadata after last WAL entry is less than last sequence, \
+                         metadata sequence: {}, last_sequence: {}, region_id: {}, region_name: {}",
+                    sequence_before_alter,
+                    last_sequence,
+                    writer_ctx.shared.id,
+                    writer_ctx.shared.name
+                );
 
-                    num_recovered_metadata += 1;
-                }
+                self.apply_metadata(
+                    &writer_ctx,
+                    sequence_before_alter,
+                    next_apply_metadata,
+                    version_control,
+                )?;
+
+                num_recovered_metadata += 1;
                 next_apply_metadata = recovered_metadata.pop_first();
             }
 
