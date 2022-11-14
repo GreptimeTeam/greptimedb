@@ -232,6 +232,18 @@ pub enum Error {
         source: common_time::error::Error,
     },
 
+    #[snafu(display("Failed to create a new RecordBatch, source: {}", source))]
+    NewRecordBatch {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to create a new RecordBatches, source: {}", source))]
+    NewRecordBatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
     #[snafu(display("Failed to access catalog, source: {}", source))]
     Catalog {
         #[snafu(backtrace)]
