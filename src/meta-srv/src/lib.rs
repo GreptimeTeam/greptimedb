@@ -3,7 +3,7 @@ pub mod bootstrap;
 pub mod error;
 pub mod handler;
 mod keys;
-mod lease;
+pub mod lease;
 pub mod metasrv;
 #[cfg(feature = "mock")]
 pub mod mocks;

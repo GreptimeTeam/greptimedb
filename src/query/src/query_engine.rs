@@ -59,8 +59,8 @@ impl QueryEngineFactory {
 }
 
 impl QueryEngineFactory {
-    pub fn query_engine(&self) -> &Arc<dyn QueryEngine> {
-        &self.query_engine
+    pub fn query_engine(&self) -> QueryEngineRef {
+        self.query_engine.clone()
     }
 }
 

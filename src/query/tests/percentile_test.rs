@@ -143,6 +143,5 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
         .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
-    let factory = QueryEngineFactory::new(catalog_list);
-    factory.query_engine().clone()
+    QueryEngineFactory::new(catalog_list).query_engine()
 }

@@ -434,6 +434,8 @@ impl PartitionExec {
 #[allow(clippy::print_stdout)]
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
     use api::v1::codec::InsertBatch;
     use api::v1::column::SemanticType;
     use api::v1::{column, insert_expr, Column, ColumnDataType};
@@ -652,8 +654,6 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    // FIXME(LFC): Remove ignore when auto create table upon insertion is ready.
-    #[ignore]
     async fn test_dist_table_scan() {
         common_telemetry::init_default_ut_logging();
         let table = Arc::new(new_dist_table().await);
@@ -774,11 +774,11 @@ mod test {
             client: meta_client.clone(),
         });
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
-        let catalog_manager = FrontendCatalogManager::new(
+        let catalog_manager = Arc::new(FrontendCatalogManager::new(
             meta_backend,
             table_routes.clone(),
             datanode_clients.clone(),
-        );
+        ));
         let dist_instance = DistInstance::new(
             meta_client.clone(),
             catalog_manager,
@@ -807,6 +807,9 @@ mod test {
             Statement::CreateTable(c) => c,
             _ => unreachable!(),
         };
+
+        wait_datanodes_alive(kv_store).await;
+
         let _result = dist_instance.create_table(&create_table).await.unwrap();
 
         let table_route = table_routes.get_route(&table_name).await.unwrap();
@@ -842,6 +845,20 @@ mod test {
             table_routes,
             datanode_clients,
         }
+    }
+
+    async fn wait_datanodes_alive(kv_store: KvStoreRef) {
+        let wait = 10;
+        for _ in 0..wait {
+            let datanodes = meta_srv::lease::alive_datanodes(1000, &kv_store, |_, _| true)
+                .await
+                .unwrap();
+            if datanodes.len() >= 4 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await
+        }
+        panic!()
     }
 
     async fn insert_testing_data(

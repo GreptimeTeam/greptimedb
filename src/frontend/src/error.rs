@@ -343,6 +343,13 @@ pub enum Error {
         #[snafu(backtrace)]
         source: client::Error,
     },
+
+    #[snafu(display("Failed to execute sql: {}, source: {}", sql, source))]
+    ExecuteSql {
+        sql: String,
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -415,6 +422,8 @@ impl ErrorExt for Error {
             Error::Select { source, .. } => source.status_code(),
             Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
             Error::DeserializeInsertBatch { source, .. } => source.status_code(),
+
+            Error::ExecuteSql { source, .. } => source.status_code(),
         }
     }
 
