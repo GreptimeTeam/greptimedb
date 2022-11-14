@@ -923,7 +923,17 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_find_regions() {
-        let table = new_dist_table().await;
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            true,
+        )]));
+        let table = DistTable {
+            table_name: TableName::new("greptime", "public", "foo"),
+            schema,
+            table_routes: Arc::new(TableRoutes::new(Arc::new(MetaClient::default()))),
+            datanode_clients: Arc::new(DatanodeClients::new()),
+        };
 
         // PARTITION BY RANGE (a) (
         //   PARTITION r1 VALUES LESS THAN (10),

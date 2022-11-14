@@ -101,12 +101,12 @@ impl TryFrom<PartitionDef> for MetaPartition {
 
         let column_list = columns
             .into_iter()
-            .map(|x| x.as_bytes().to_vec())
+            .map(|x| x.into_bytes())
             .collect::<Vec<Vec<u8>>>();
 
         let value_list = bounds
             .into_iter()
-            .map(|x| serde_json::to_string(&x).map(|s| s.as_bytes().to_vec()))
+            .map(|x| serde_json::to_string(&x).map(|s| s.into_bytes()))
             .collect::<Result<Vec<Vec<u8>>, serde_json::Error>>()
             .context(error::SerializeJsonSnafu)?;
 
@@ -160,10 +160,10 @@ mod tests {
 
         // MetaPartition -> PartitionDef
         let partition = MetaPartition {
-            column_list: vec!["a".as_bytes().to_vec(), "b".as_bytes().to_vec()],
+            column_list: vec![b"a".to_vec(), b"b".to_vec()],
             value_list: vec![
-                "\"MaxValue\"".as_bytes().to_vec(),
-                "{\"Value\":{\"Int32\":1}}".as_bytes().to_vec(),
+                b"\"MaxValue\"".to_vec(),
+                b"{\"Value\":{\"Int32\":1}}".to_vec(),
             ],
         };
         let def: PartitionDef = partition.try_into().unwrap();

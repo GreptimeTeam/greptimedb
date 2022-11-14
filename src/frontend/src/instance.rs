@@ -105,8 +105,10 @@ impl Default for Instance {
 
 impl Instance {
     pub async fn try_new(opts: &FrontendOptions) -> Result<Self> {
-        let mut instance = Instance::default();
-        instance.mode = opts.mode.clone();
+        let mut instance = Instance {
+            mode: opts.mode.clone(),
+            ..Default::default()
+        };
 
         let addr = opts.datanode_grpc_addr();
         instance.client.start(vec![addr]);
