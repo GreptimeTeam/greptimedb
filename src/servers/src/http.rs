@@ -1,4 +1,4 @@
-mod ctx_ware;
+mod context;
 pub mod handler;
 pub mod influxdb;
 pub mod opentsdb;
@@ -317,7 +317,7 @@ impl HttpServer {
                     // TODO(LFC): make timeout configurable
                     .layer(TimeoutLayer::new(Duration::from_secs(30)))
                     // custom layer
-                    .layer(middleware::from_fn(ctx_ware::build_ctx)),
+                    .layer(middleware::from_fn(context::build_ctx)),
             )
     }
 }

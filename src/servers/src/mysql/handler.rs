@@ -23,7 +23,7 @@ pub struct MysqlInstanceShim {
     query_handler: SqlQueryHandlerRef,
     salt: [u8; 20],
     client_addr: String,
-    ctx: Arc<RwLock<Context>>,
+    ctx: Arc<RwLock<Option<Context>>>,
 }
 
 impl MysqlInstanceShim {
@@ -45,7 +45,7 @@ impl MysqlInstanceShim {
             query_handler,
             salt: scramble,
             client_addr,
-            ctx: Default::default(),
+            ctx: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -61,12 +61,12 @@ impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
     async fn authenticate(
         &self,
         _auth_plugin: &str,
-        _username: &[u8],
+        username: &[u8],
         _salt: &[u8],
         _auth_data: &[u8],
     ) -> bool {
         // if not specified then **root** will be used
-        let username = String::from_utf8_lossy(_username);
+        let username = String::from_utf8_lossy(username);
         let client_addr = self.client_addr.clone();
         let auth_method = match _auth_data.len() {
             0 => AuthMethod::None,
@@ -86,7 +86,7 @@ impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
         {
             Ok(ctx) => {
                 let mut a = self.ctx.write().await;
-                *a = ctx;
+                *a = Some(ctx);
                 true
             }
             Err(e) => {
