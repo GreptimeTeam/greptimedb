@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use client::api::v1::codec::SelectResult;
@@ -8,6 +9,7 @@ use client::{Client, Database as DB, Error as ClientError, ObjectResult, Select}
 use comfy_table::{Cell, Table};
 use sqlness::{Database, Environment};
 use tokio::process::{Child, Command};
+use tokio::time;
 
 use crate::util;
 
@@ -40,6 +42,8 @@ impl Env {
             .args(["run", "--", "datanode", "start"])
             .spawn()
             .unwrap_or_else(|_| panic!("Failed to start datanode"));
+
+        time::sleep(Duration::from_secs(3)).await;
 
         let client = Client::with_urls(vec!["127.0.0.1:3001"]);
         let db = DB::new("greptime", client.clone());

@@ -5436,6 +5436,7 @@ dependencies = [
 [[package]]
 name = "sqlness"
 version = "0.1.0"
+source = "git+https://github.com/waynexia/sqlness.git#096d69d7e67512014b9680b370a859cd0173cdc1"
 dependencies = [
  "async-trait",
  "derive_builder",
