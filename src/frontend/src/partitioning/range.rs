@@ -93,8 +93,19 @@ impl PartitionRule for RangePartitionRule {
         vec![self.column_name().to_string()]
     }
 
-    fn find_region(&self, _values: &[Value]) -> Result<RegionNumber, Self::Error> {
-        unimplemented!()
+    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Self::Error> {
+        debug_assert_eq!(
+            values.len(),
+            1,
+            "RangePartitionRule can only handle one partition value, actual {}",
+            values.len()
+        );
+        let value = &values[0];
+
+        Ok(match self.bounds.binary_search(value) {
+            Ok(i) => self.regions[i + 1],
+            Err(i) => self.regions[i],
+        })
     }
 
     fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Self::Error> {

@@ -167,7 +167,7 @@ mod tests {
         let mode = DatanodeOptions::try_from(StartCommand {
             node_id: Some(42),
             rpc_addr: None,
-            mysql_addr:  None,
+            mysql_addr: None,
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
             config_file: None,
         })

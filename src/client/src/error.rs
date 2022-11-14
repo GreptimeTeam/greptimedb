@@ -25,8 +25,9 @@ pub enum Error {
     #[snafu(display("Missing result header"))]
     MissingHeader,
 
-    #[snafu(display("Tonic internal error, source: {}", source))]
+    #[snafu(display("Tonic internal error, addr: {}, source: {}", addr, source))]
     TonicStatus {
+        addr: String,
         source: tonic::Status,
         backtrace: Backtrace,
     },
