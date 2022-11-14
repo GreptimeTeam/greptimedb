@@ -5,7 +5,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::show::{ShowDatabases, ShowTables};
-use table::engine::{EngineContext, TableEngineRef};
+use table::engine::{EngineContext, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
@@ -54,11 +54,15 @@ impl SqlHandler {
         }
     }
 
-    pub(crate) fn get_table(&self, table_name: &str) -> Result<TableRef> {
+    pub(crate) fn get_table<'a>(&self, table_ref: &'a TableReference) -> Result<TableRef> {
         self.table_engine
-            .get_table(&EngineContext::default(), table_name)
-            .context(GetTableSnafu { table_name })?
-            .context(TableNotFoundSnafu { table_name })
+            .get_table(&EngineContext::default(), table_ref)
+            .with_context(|_| GetTableSnafu {
+                table_name: table_ref.to_string(),
+            })?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })
     }
 
     pub(crate) fn get_default_catalog(&self) -> Result<CatalogProviderRef> {

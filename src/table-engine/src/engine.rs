@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_telemetry::logging;
 use datatypes::schema::SchemaRef;
@@ -13,7 +14,7 @@ use store_api::storage::{
     CreateOptions, EngineContext as StorageEngineContext, OpenOptions, RegionDescriptorBuilder,
     RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
-use table::engine::{EngineContext, TableEngine};
+use table::engine::{EngineContext, TableEngine, TableReference};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::Result as TableResult;
 use table::{
@@ -97,12 +98,16 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         Ok(self.inner.alter_table(ctx, req).await?)
     }
 
-    fn get_table(&self, _ctx: &EngineContext, name: &str) -> TableResult<Option<TableRef>> {
-        Ok(self.inner.get_table(name))
+    fn get_table<'a>(
+        &self,
+        _ctx: &EngineContext,
+        table_ref: &'a TableReference,
+    ) -> TableResult<Option<TableRef>> {
+        Ok(self.inner.get_table(table_ref))
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, name: &str) -> bool {
-        self.inner.get_table(name).is_some()
+    fn table_exists<'a>(&self, _ctx: &EngineContext, table_ref: &'a TableReference) -> bool {
+        self.inner.get_table(table_ref).is_some()
     }
 
     async fn drop_table(
@@ -114,7 +119,6 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     }
 }
 
-/// FIXME(dennis) impl system catalog to keep table metadata.
 struct MitoEngineInner<S: StorageEngine> {
     /// All tables opened by the engine.
     ///
@@ -243,8 +247,13 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let catalog_name = &request.catalog_name;
         let schema_name = &request.schema_name;
         let table_name = &request.table_name;
+        let table_ref = TableReference {
+            catalog: catalog_name,
+            schema: schema_name,
+            table: table_name,
+        };
 
-        if let Some(table) = self.get_table(table_name) {
+        if let Some(table) = self.get_table(&table_ref) {
             if request.create_if_not_exists {
                 return Ok(table);
             } else {
@@ -290,7 +299,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let _lock = self.table_mutex.lock().await;
         // Checks again, read lock should be enough since we are guarded by the mutex.
-        if let Some(table) = self.get_table(table_name) {
+        if let Some(table) = self.get_table(&table_ref) {
             if request.create_if_not_exists {
                 return Ok(table);
             } else {
@@ -337,7 +346,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         self.tables
             .write()
             .unwrap()
-            .insert(table_name.clone(), table.clone());
+            .insert(table_ref.to_string(), table.clone());
 
         Ok(table)
     }
@@ -348,8 +357,16 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         _ctx: &EngineContext,
         request: OpenTableRequest,
     ) -> TableResult<Option<TableRef>> {
+        let catalog_name = &request.catalog_name;
+        let schema_name = &request.schema_name;
         let table_name = &request.table_name;
-        if let Some(table) = self.get_table(table_name) {
+        let table_ref = TableReference {
+            catalog: catalog_name,
+            schema: schema_name,
+            table: table_name,
+        };
+
+        if let Some(table) = self.get_table(&table_ref) {
             // Table has already been opened.
             return Ok(Some(table));
         }
@@ -358,7 +375,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let table = {
             let _lock = self.table_mutex.lock().await;
             // Checks again, read lock should be enough since we are guarded by the mutex.
-            if let Some(table) = self.get_table(table_name) {
+            if let Some(table) = self.get_table(&table_ref) {
                 return Ok(Some(table));
             }
 
@@ -389,7 +406,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             self.tables
                 .write()
                 .unwrap()
-                .insert(table_name.to_string(), table.clone());
+                .insert(table_ref.to_string(), table.clone());
             Some(table as _)
         };
 
@@ -398,14 +415,26 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         Ok(table)
     }
 
-    fn get_table(&self, name: &str) -> Option<TableRef> {
-        self.tables.read().unwrap().get(name).cloned()
+    fn get_table<'a>(&self, table_ref: &'a TableReference) -> Option<TableRef> {
+        self.tables
+            .read()
+            .unwrap()
+            .get(&table_ref.to_string())
+            .cloned()
     }
 
     async fn alter_table(&self, _ctx: &EngineContext, req: AlterTableRequest) -> Result<TableRef> {
+        let catalog_name = req.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
+        let schema_name = req.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = &req.table_name.clone();
+
+        let table_ref = TableReference {
+            catalog: catalog_name,
+            schema: schema_name,
+            table: table_name,
+        };
         let table = self
-            .get_table(table_name)
+            .get_table(&table_ref)
             .context(error::TableNotFoundSnafu { table_name })?;
 
         logging::info!("start altering table {} with request {:?}", table_name, req);
