@@ -391,7 +391,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let opts = OpenOptions {
                 parent_dir: table_dir.to_string(),
             };
-            println!("{}", table_dir);
 
             let table_id = request.table_id;
             // TODO(dennis): supports multi regions;

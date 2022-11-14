@@ -9,6 +9,7 @@ use frontend::frontend::Mode;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
+use object_store::layers::LoggingLayer;
 use object_store::{services::fs::Builder, util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use snafu::prelude::*;
@@ -156,7 +157,9 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         .build()
         .context(error::InitBackendSnafu { dir: &data_dir })?;
 
-    Ok(ObjectStore::new(accessor))
+    let object_store = ObjectStore::new(accessor).layer(LoggingLayer); // Add logging
+
+    Ok(object_store)
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.
