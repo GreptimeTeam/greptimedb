@@ -71,27 +71,19 @@ impl DistInstance {
         self.put_table_global_meta(create_table, table_route)
             .await?;
 
-        for region_route in region_routes {
-            let region_id = region_route.region.id as u32;
-            let datanode =
-                region_route
-                    .leader_peer
-                    .clone()
-                    .context(error::FindLeaderPeerSnafu {
-                        region: region_route.region.id,
-                        table_name: create_table.name.to_string(),
-                    })?;
+        for datanode in table_route.find_leaders() {
             let client = self.datanode_clients.get_client(&datanode).await;
             let client = Admin::new("greptime", client);
 
+            let regions = table_route.find_leader_regions(&datanode);
             let create_expr = Instance::create_to_expr(
                 Some(table_route.table.id as u32),
-                vec![region_id],
+                regions.clone(),
                 create_table,
             )?;
             debug!(
-                "creating table {:?} on datanode {:?}, region id: {}",
-                create_table, datanode, region_id,
+                "Creating table {:?} on Datanode {:?} with regions {:?}",
+                create_table, datanode, regions,
             );
 
             client

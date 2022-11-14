@@ -137,6 +137,30 @@ pub struct TableRoute {
     pub region_routes: Vec<RegionRoute>,
 }
 
+impl TableRoute {
+    pub fn find_leaders(&self) -> Vec<Peer> {
+        self.region_routes
+            .iter()
+            .flat_map(|x| &x.leader_peer)
+            .cloned()
+            .collect::<Vec<Peer>>()
+    }
+
+    pub fn find_leader_regions(&self, datanode: &Peer) -> Vec<u32> {
+        self.region_routes
+            .iter()
+            .filter_map(|x| {
+                if let Some(peer) = &x.leader_peer {
+                    if peer == datanode {
+                        return Some(x.region.id as u32);
+                    }
+                }
+                None
+            })
+            .collect::<Vec<u32>>()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Table {
     pub id: u64,
