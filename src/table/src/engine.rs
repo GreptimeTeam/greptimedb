@@ -58,7 +58,6 @@ pub trait TableEngine: Send + Sync {
     ) -> Result<Option<TableRef>>;
 
     /// Returns true when the given table is exists.
-    /// TODO(hl): support catalog and schema
     fn table_exists<'a>(&self, ctx: &EngineContext, table_ref: &'a TableReference) -> bool;
 
     /// Drops the given table.

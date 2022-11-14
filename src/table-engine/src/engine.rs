@@ -351,7 +351,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         Ok(table)
     }
 
-    // TODO(yingwen): Support catalog and schema name.
     async fn open_table(
         &self,
         _ctx: &EngineContext,

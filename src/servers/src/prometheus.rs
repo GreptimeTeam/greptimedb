@@ -31,7 +31,7 @@ pub struct Metrics {
 
 /// Generate a sql from a remote request query
 /// TODO(dennis): maybe use logical plan in future to prevent sql injection
-pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
+pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
     let start_timestamp_ms = q.start_timestamp_ms;
     let end_timestamp_ms = q.end_timestamp_ms;
 
@@ -92,8 +92,8 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
     Ok((
         table_name.to_string(),
         format!(
-            "select * from {} where {} order by {}",
-            table_name, conditions, TIMESTAMP_COLUMN_NAME,
+            "select * from {}.{} where {} order by {}",
+            db, table_name, conditions, TIMESTAMP_COLUMN_NAME,
         ),
     ))
 }
@@ -523,7 +523,7 @@ mod tests {
             matchers: vec![],
             ..Default::default()
         };
-        let err = query_to_sql(&q).unwrap_err();
+        let err = query_to_sql("public", &q).unwrap_err();
         assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
 
         let q = Query {
@@ -536,9 +536,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (table, sql) = query_to_sql(&q).unwrap();
+        let (table, sql) = query_to_sql("public", &q).unwrap();
         assert_eq!("test", table);
-        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 order by greptime_timestamp", sql);
+        assert_eq!("select * from public.test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 order by greptime_timestamp", sql);
 
         let q = Query {
             start_timestamp_ms: 1000,
@@ -562,9 +562,9 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (table, sql) = query_to_sql(&q).unwrap();
+        let (table, sql) = query_to_sql("public", &q).unwrap();
         assert_eq!("test", table);
-        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 AND job~'*prom*' AND instance!='localhost' order by greptime_timestamp", sql);
+        assert_eq!("select * from public.test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 AND job~'*prom*' AND instance!='localhost' order by greptime_timestamp", sql);
     }
 
     #[test]

@@ -68,7 +68,7 @@ async fn handle_remote_queries(
     let mut results = Vec::with_capacity(queries.len());
 
     for q in queries {
-        let (table_name, sql) = prometheus::query_to_sql(q)?;
+        let (table_name, sql) = prometheus::query_to_sql(db.name(), q)?;
 
         logging::debug!(
             "prometheus remote read, table: {}, sql: {}",
@@ -126,7 +126,7 @@ impl PrometheusProtocolHandler for Instance {
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
-        let results = handle_remote_queries(&self.get_database(database), &request.queries).await?;
+        let results = handle_remote_queries(&self.database(database), &request.queries).await?;
 
         match response_type {
             ResponseType::Samples => {
@@ -165,6 +165,7 @@ mod tests {
     use api::prometheus::remote::{
         label_matcher::Type as MatcherType, Label, LabelMatcher, Sample,
     };
+    use api::v1::CreateDatabaseExpr;
 
     use super::*;
     use crate::tests;
@@ -180,6 +181,13 @@ mod tests {
         };
 
         let db = "prometheus";
+
+        instance
+            .handle_create_database(CreateDatabaseExpr {
+                database_name: db.to_string(),
+            })
+            .await
+            .unwrap();
 
         instance.write(db, write_request).await.unwrap();
 
