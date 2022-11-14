@@ -632,7 +632,13 @@ impl GrpcQueryHandler for Instance {
 
 #[async_trait]
 impl GrpcAdminHandler for Instance {
-    async fn exec_admin_request(&self, expr: AdminExpr) -> server_error::Result<AdminResult> {
+    async fn exec_admin_request(&self, mut expr: AdminExpr) -> server_error::Result<AdminResult> {
+        match &mut expr.expr {
+            Some(api::v1::admin_expr::Expr::Create(create)) => {
+                create.table_id = None;
+            }
+            _ => {}
+        };
         self.admin()
             .do_request(expr.clone())
             .await
