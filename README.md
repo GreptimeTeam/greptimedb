@@ -79,7 +79,7 @@ docker run -p 4002:4002 -v "$(pwd):/tmp/greptimedb" greptime/greptimedb standalo
 ```
 
 For more startup options, greptimedb's **distributed mode** and information
-about kubenetes deployment, check our [docs](https://greptime.com/docs).
+about Kubernetes deployment, check our [docs](https://greptime.com/docs).
 
 ### Connect
 
@@ -92,9 +92,9 @@ about kubenetes deployment, check our [docs](https://greptime.com/docs).
    ```
 
 2. Create a database;
-```SQL
-CREATE DATABASE hello_greptime;
-```
+   ```SQL
+   CREATE DATABASE hello_greptime;
+   ```
 
 3. Create table:
 
@@ -139,7 +139,7 @@ You can always cleanup test database by removing `/tmp/greptimedb`.
 - [Docker Images](https://hub.docker.com/r/greptime/greptimedb): pre-built
   Docker images
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
-  kubernetes deployment
+  Kubernetes deployment
 - [GreptimeDB Java Client](https://github.com/GreptimeTeam/greptimedb-client-java)
 
 ## Community
