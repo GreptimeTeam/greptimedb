@@ -47,7 +47,9 @@ for years. Based on their best-practices, GreptimeDB is born to give you:
 ##### Prerequisite
 
 To compile GreptimeDB from source, you'll need the following:
-- Rust: The easiest way to install Rust is to use
+- C/C++ Toolchain: provides basic tools for compiling and linking. This is
+  available as `build-essential` on ubuntu and similar name on other platforms.
+- Rust: the easiest way to install Rust is to use
   [`rustup`](https://rustup.rs/), which will check our `rust-toolchain` file and
   install correct Rust version for you.
 - Protobuf: `protoc` is required for compiling `.proto` files. `protobuf` is
