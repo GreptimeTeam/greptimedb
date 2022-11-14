@@ -38,72 +38,51 @@ for years. Based on their best-practices, GreptimeDB is born to give you:
 - Widely adopted database protocols and APIs
 - Extensible table engine architecture for extensive workloads
 
-## Getting Started
+## Quick Start
 
-### Prerequisite
+### Build
+
+#### Use Pre-built Binaries
+
+Check [our release page](https://github.com/GreptimeTeam/greptimedb/releases) to
+download latest executable binary.
+
+#### Build from Source
+
+##### Prerequisite
 
 To compile GreptimeDB from source, you'll need the following:
-- Rust
-- Protobuf
+- Rust: The easiest way to install Rust is to use
+  [`rustup`](https://rustup.rs/), which will check our `rust-toolchain` file and
+  install correct Rust version for you.
+- Protobuf: `protoc` is required for compiling `.proto` files. `protobuf` is
+  available from major package manager on macos and linux distributions. You can
+  find an installation instructions
+  [here](https://grpc.io/docs/protoc-installation/).
 
-#### Rust
+#### Build Using Docker
 
-The easiest way to install Rust is to use [`rustup`](https://rustup.rs/), which will check our `rust-toolchain` file and install correct Rust version for you.
-
-#### Protobuf
-
-`protoc` is required for compiling `.proto` files. `protobuf` is available from
-major package manager on macos and linux distributions. You can find an
-installation instructions [here](https://grpc.io/docs/protoc-installation/).
-
-### Build the Docker Image
+A docker image with necessary dependencies is provided:
 
 ```
 docker build --network host -f docker/Dockerfile -t greptimedb .
 ```
 
-## Usage
+### Run
 
-### Start in standalone mode
-
-```
-// Start datanode and frontend with default options.
-cargo run  -- --log-level=debug standalone start
-
-OR
-
-// Start with `http-addr` option.
-cargo run  -- --log-level=debug standalone start --http-addr=0.0.0.0:9999
-
-OR
-
-// Start with `mysql-addr` option.
-cargo run  -- --log-level=debug standalone start --mysql-addr=0.0.0.0:9999
-
-OR
-// Start datanode with `log-dir` and `log-level` options.
-cargo run  -- --log-dir=logs --log-level=debug standalone start --mysql-addr=0.0.0.0:4102
+Start GreptimeDB from source code, in standalone mode.
 
 ```
-
-Start with config file:
-
-```
-cargo run -- --log-dir=logs --log-level=debug standalone start -c ./config/standalone.example.toml
+cargo run -- standalone start
 ```
 
-Start datanode by running docker container:
+For more startup options, greptimedb's **distributed mode** and information
+about kubenetes deployment, check our [docs](https://greptime.com/docs).
 
-```
-docker run -p 3000:3000 \
--p 3001:3001 \
--p 3306:3306 \
-greptimedb
-```
+### Connect
 
-### SQL Operations
-
-1. Connecting DB by [mysql client](https://dev.mysql.com/downloads/mysql/):
+1. Connect to GreptimeDB via standard [MySQL
+   client](https://dev.mysql.com/downloads/mysql/):
 
    ```
    # The standalone instance listen on port 4002 by default.
@@ -115,7 +94,7 @@ greptimedb
 CREATE DATABASE hello_greptime;
 ```
 
-2. Create table:
+3. Create table:
 
    ```SQL
    CREATE TABLE hello_greptime.monitor (
@@ -127,7 +106,7 @@ CREATE DATABASE hello_greptime;
      PRIMARY KEY(host)) ENGINE=mito WITH(regions=1);
    ```
 
-3. Insert data:
+4. Insert data:
 
    ```SQL
    INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
@@ -135,7 +114,7 @@ CREATE DATABASE hello_greptime;
    INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
    ```
 
-4. Query data:
+5. Query data:
 
    ```SQL
    mysql> SELECT * FROM hello_greptime.monitor;
@@ -148,7 +127,8 @@ CREATE DATABASE hello_greptime;
    +-------+---------------------+------+--------+
    3 rows in set (0.01 sec)
    ```
-   You can delete your data by removing `/tmp/greptimedb`.
+
+You can always cleanup test database by removing `/tmp/greptimedb`.
 
 # Community
 
