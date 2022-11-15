@@ -705,6 +705,7 @@ impl GrpcQueryHandler for Instance {
                                 }
                                 .fail();
                             }
+                            // FIXME(hl): refactor
                             self.database(DEFAULT_SCHEMA_NAME)
                                 .object(query.clone())
                                 .await
