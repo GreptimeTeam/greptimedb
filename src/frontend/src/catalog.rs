@@ -72,6 +72,18 @@ impl CatalogManager for FrontendCatalogManager {
         unimplemented!()
     }
 
+    fn schema(
+        &self,
+        catalog: &str,
+        schema: &str,
+    ) -> catalog::error::Result<Option<SchemaProviderRef>> {
+        self.catalog(catalog)?
+            .context(catalog::error::CatalogNotFoundSnafu {
+                catalog_name: catalog,
+            })?
+            .schema(schema)
+    }
+
     fn table(
         &self,
         _catalog: &str,

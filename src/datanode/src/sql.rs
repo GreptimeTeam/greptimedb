@@ -1,8 +1,9 @@
 //! sql handler
 
-use catalog::{schema::SchemaProviderRef, CatalogManagerRef, CatalogProviderRef};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::{CatalogManagerRef, CatalogProviderRef};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
+use query::sql::show_tables;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineRef, TableReference};
@@ -10,8 +11,7 @@ use table::requests::*;
 use table::TableRef;
 
 use crate::error::{
-    CatalogNotFoundSnafu, CatalogSnafu, GetTableSnafu, Result, SchemaNotFoundSnafu,
-    TableNotFoundSnafu,
+    self, CatalogNotFoundSnafu, CatalogSnafu, GetTableSnafu, Result, TableNotFoundSnafu,
 };
 
 mod alter;
@@ -50,7 +50,9 @@ impl SqlHandler {
             SqlRequest::CreateDatabase(req) => self.create_database(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::ShowDatabases(stmt) => self.show_databases(stmt).await,
-            SqlRequest::ShowTables(stmt) => self.show_tables(stmt).await,
+            SqlRequest::ShowTables(stmt) => {
+                show_tables(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+            }
         }
     }
 
@@ -71,20 +73,6 @@ impl SqlHandler {
             .context(CatalogSnafu)?
             .context(CatalogNotFoundSnafu {
                 name: DEFAULT_CATALOG_NAME,
-            })
-    }
-
-    pub(crate) fn get_default_schema(&self) -> Result<SchemaProviderRef> {
-        self.catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                name: DEFAULT_CATALOG_NAME,
-            })?
-            .schema(DEFAULT_SCHEMA_NAME)
-            .context(CatalogSnafu)?
-            .context(SchemaNotFoundSnafu {
-                name: DEFAULT_SCHEMA_NAME,
             })
     }
 

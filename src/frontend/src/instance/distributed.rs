@@ -3,26 +3,23 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::CreateExpr;
-use catalog::{CatalogList, CatalogProviderRef};
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{TableGlobalKey, TableGlobalValue};
 use common_query::Output;
-use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::debug;
-use datatypes::prelude::{ConcreteDataType, VectorRef};
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
-use datatypes::vectors::{Helper, StringVector};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
 use meta_client::client::MetaClient;
 use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, RouteResponse, TableName,
     TableRoute,
 };
+use query::sql::show_tables;
 use query::{QueryEngineFactory, QueryEngineRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
-use sql::statements::show::{ShowKind, ShowTables};
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 use sqlparser::ast::Value as SqlValue;
@@ -119,61 +116,10 @@ impl DistInstance {
                     .await
                     .context(error::ExecuteSqlSnafu { sql })
             }
-            Statement::ShowTables(stmt) => self.show_tables(stmt),
+            Statement::ShowTables(stmt) => show_tables(stmt, self.catalog_manager.clone())
+                .context(error::ExecuteSqlSnafu { sql }),
             _ => unreachable!(),
         }
-    }
-
-    fn show_tables(&self, stmt: ShowTables) -> Result<Output> {
-        // TODO(LFC): supports WHERE
-        ensure!(
-            matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
-            error::UnsupportedExprSnafu {
-                name: stmt.kind.to_string(),
-            }
-        );
-
-        let catalog = self.find_catalog(DEFAULT_CATALOG_NAME)?;
-        let schema = &stmt
-            .database
-            .clone()
-            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
-        let schema = catalog
-            .schema(schema)
-            .context(error::CatalogSnafu)?
-            .context(error::SchemaNotFoundSnafu {
-                schema_info: schema,
-            })?;
-        let tables = schema.table_names().context(error::CatalogSnafu)?;
-
-        let column_schemas = vec![ColumnSchema::new(
-            "Tables",
-            ConcreteDataType::string_datatype(),
-            false,
-        )];
-        let schema = Arc::new(Schema::new(column_schemas));
-
-        let tables = if let ShowKind::Like(ident) = stmt.kind {
-            Helper::like_utf8(tables, &ident.value).context(error::VectorComputationSnafu)?
-        } else {
-            Arc::new(StringVector::from(tables))
-        };
-
-        let columns: Vec<VectorRef> = vec![tables];
-        let recordbatch =
-            RecordBatch::new(schema.clone(), columns).context(error::NewRecordBatchSnafu)?;
-        Ok(Output::RecordBatches(
-            RecordBatches::try_new(schema, vec![recordbatch])
-                .context(error::NewRecordBatchSnafu)?,
-        ))
-    }
-
-    // TODO(LFC): There are some common codes, maybe move to some utility mod?
-    fn find_catalog(&self, catalog_name: &str) -> Result<CatalogProviderRef> {
-        self.catalog_manager
-            .catalog(catalog_name)
-            .context(error::CatalogSnafu)?
-            .context(error::CatalogNotFoundSnafu { catalog_name })
     }
 
     async fn create_table_in_meta(

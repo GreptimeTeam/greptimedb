@@ -89,6 +89,15 @@ impl CatalogManager for MemoryCatalogManager {
         unimplemented!()
     }
 
+    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+        let catalogs = self.catalogs.read().unwrap();
+        if let Some(c) = catalogs.get(catalog) {
+            c.schema(schema)
+        } else {
+            Ok(None)
+        }
+    }
+
     fn table(&self, catalog: &str, schema: &str, table_name: &str) -> Result<Option<TableRef>> {
         let c = self.catalogs.read().unwrap();
         let catalog = if let Some(c) = c.get(catalog) {
