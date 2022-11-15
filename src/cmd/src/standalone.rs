@@ -94,6 +94,7 @@ async fn build_frontend(
         .await
         .context(BuildFrontendSnafu)?;
     frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
+    frontend_instance.set_script_handler(datanode_instance);
     Ok(Frontend::new(fe_opts, frontend_instance))
 }
 

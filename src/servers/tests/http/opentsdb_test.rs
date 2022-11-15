@@ -33,14 +33,6 @@ impl SqlQueryHandler for DummyInstance {
     async fn do_query(&self, _query: &str) -> Result<Output> {
         unimplemented!()
     }
-
-    async fn insert_script(&self, _name: &str, _script: &str) -> Result<()> {
-        unimplemented!()
-    }
-
-    async fn execute_script(&self, _name: &str) -> Result<Output> {
-        unimplemented!()
-    }
 }
 
 fn make_test_app(tx: mpsc::Sender<String>) -> Router {

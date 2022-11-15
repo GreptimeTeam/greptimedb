@@ -31,7 +31,7 @@ use meta_client::MetaClientOpts;
 use servers::error as server_error;
 use servers::query_handler::{
     GrpcAdminHandler, GrpcQueryHandler, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
-    PrometheusProtocolHandler, SqlQueryHandler,
+    PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
 };
 use snafu::prelude::*;
 use sql::statements::create::Partitions;
@@ -59,6 +59,7 @@ pub trait FrontendInstance:
     + OpentsdbProtocolHandler
     + InfluxdbLineProtocolHandler
     + PrometheusProtocolHandler
+    + ScriptHandler
     + Send
     + Sync
     + 'static
@@ -75,6 +76,8 @@ pub struct Instance {
     client: Client,
     /// catalog manager is None in standalone mode, datanode will keep their own
     catalog_manager: Option<CatalogManagerRef>,
+    /// Script handler is None in distributed mode, only works on standalone mode.
+    script_handler: Option<ScriptHandlerRef>,
     create_expr_factory: CreateExprFactoryRef,
     // TODO(fys): it should be a trait that corresponds to two implementations:
     // Standalone and Distributed, then the code behind it doesn't need to use so
@@ -89,6 +92,7 @@ impl Default for Instance {
         Self {
             client: Client::default(),
             catalog_manager: None,
+            script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory {}),
             mode: Mode::Standalone,
             dist_instance: None,
@@ -164,8 +168,24 @@ impl Instance {
         Admin::new(database, self.client.clone())
     }
 
+    pub fn catalog_manager(&self) -> &Option<CatalogManagerRef> {
+        &self.catalog_manager
+    }
+
     pub fn set_catalog_manager(&mut self, catalog_manager: CatalogManagerRef) {
+        debug_assert!(
+            self.catalog_manager.is_none(),
+            "Catalog manager can be set only once!"
+        );
         self.catalog_manager = Some(catalog_manager);
+    }
+
+    pub fn set_script_handler(&mut self, handler: ScriptHandlerRef) {
+        debug_assert!(
+            self.script_handler.is_none(),
+            "Script handler can be set only once!"
+        );
+        self.script_handler = Some(handler);
     }
 
     pub async fn handle_select(&self, expr: Select) -> Result<Output> {
@@ -474,6 +494,7 @@ impl Instance {
         Self {
             client,
             catalog_manager: Some(catalog),
+            script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             mode: Mode::Standalone,
             dist_instance: None,
@@ -581,19 +602,30 @@ impl SqlQueryHandler for Instance {
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu { query })
     }
+}
 
-    async fn insert_script(&self, _name: &str, _script: &str) -> server_error::Result<()> {
-        server_error::NotSupportedSnafu {
-            feat: "Script execution in Frontend",
+#[async_trait]
+impl ScriptHandler for Instance {
+    async fn insert_script(&self, name: &str, script: &str) -> server_error::Result<()> {
+        if let Some(handler) = &self.script_handler {
+            handler.insert_script(name, script).await
+        } else {
+            server_error::NotSupportedSnafu {
+                feat: "Script execution in Frontend",
+            }
+            .fail()
         }
-        .fail()
     }
 
-    async fn execute_script(&self, _script: &str) -> server_error::Result<Output> {
-        server_error::NotSupportedSnafu {
-            feat: "Script execution in Frontend",
+    async fn execute_script(&self, script: &str) -> server_error::Result<Output> {
+        if let Some(handler) = &self.script_handler {
+            handler.execute_script(script).await
+        } else {
+            server_error::NotSupportedSnafu {
+                feat: "Script execution in Frontend",
+            }
+            .fail()
         }
-        .fail()
     }
 }
 
