@@ -2,10 +2,10 @@ use api::v1::meta::HeartbeatRequest;
 use api::v1::meta::ResponseHeader;
 use api::v1::meta::PROTOCOL_VERSION;
 
-use super::Context;
-use super::HeartbeatAccumulator;
-use super::HeartbeatHandler;
 use crate::error::Result;
+use crate::handler::HeartbeatAccumulator;
+use crate::handler::HeartbeatHandler;
+use crate::metasrv::Context;
 
 pub struct ResponseHeaderHandler;
 
@@ -30,19 +30,24 @@ impl HeartbeatHandler for ResponseHeaderHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
     use api::v1::meta::{HeartbeatResponse, RequestHeader};
 
     use super::*;
-    use crate::{handler::Context, service::store::noop::NoopKvStore};
+    use crate::handler::Context;
+    use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_handle_heartbeat_resp_header() {
-        let kv_store = Arc::new(NoopKvStore {});
+        let kv_store = Arc::new(MemStore::new());
         let ctx = Context {
+            datanode_lease_secs: 30,
             server_addr: "0.0.0.0:0000".to_string(),
             kv_store,
+            election: None,
+            skip_all: Arc::new(AtomicBool::new(false)),
         };
 
         let req = HeartbeatRequest {

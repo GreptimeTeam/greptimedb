@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::RegisterTableRequest;
+use catalog::{RegisterSchemaRequest, RegisterTableRequest};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_telemetry::tracing::info;
+use common_telemetry::tracing::log::error;
 use datatypes::schema::SchemaBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::TableConstraint;
-use sql::statements::create_table::CreateTable;
+use sql::statements::create::CreateTable;
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use store_api::storage::consts::TIME_INDEX_NAME;
 use table::engine::EngineContext;
@@ -15,18 +17,60 @@ use table::metadata::TableId;
 use table::requests::*;
 
 use crate::error::{
-    self, ConstraintNotSupportedSnafu, CreateSchemaSnafu, CreateTableSnafu,
-    InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu, Result,
+    self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateSchemaSnafu,
+    CreateTableSnafu, InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu,
+    RegisterSchemaSnafu, Result, SchemaNotFoundSnafu,
 };
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn create(&self, req: CreateTableRequest) -> Result<Output> {
+    pub(crate) async fn create_database(&self, req: CreateDatabaseRequest) -> Result<Output> {
+        let schema = req.db_name;
+        let req = RegisterSchemaRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: schema.clone(),
+        };
+        self.catalog_manager
+            .register_schema(req)
+            .await
+            .context(RegisterSchemaSnafu)?;
+
+        info!("Successfully created database: {:?}", schema);
+        Ok(Output::AffectedRows(1))
+    }
+
+    pub(crate) async fn create_table(&self, req: CreateTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
+        // first check if catalog and schema exist
+        let catalog = self
+            .catalog_manager
+            .catalog(&req.catalog_name)
+            .context(CatalogSnafu)?
+            .with_context(|| {
+                error!(
+                    "Failed to create table {}.{}.{}, catalog not found",
+                    &req.catalog_name, &req.schema_name, &req.table_name
+                );
+                CatalogNotFoundSnafu {
+                    name: &req.catalog_name,
+                }
+            })?;
+        catalog
+            .schema(&req.schema_name)
+            .context(CatalogSnafu)?
+            .with_context(|| {
+                error!(
+                    "Failed to create table {}.{}.{}, schema not found",
+                    &req.catalog_name, &req.schema_name, &req.table_name
+                );
+                SchemaNotFoundSnafu {
+                    name: &req.schema_name,
+                }
+            })?;
+
         // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
         let table_id = req.id;
-
         let table = self
             .table_engine
             .create_table(&ctx, req)
@@ -52,7 +96,7 @@ impl SqlHandler {
         Ok(Output::AffectedRows(1))
     }
 
-    /// Converts [CreateTable] to [SqlRequest::Create].
+    /// Converts [CreateTable] to [SqlRequest::CreateTable].
     pub(crate) fn create_to_request(
         &self,
         table_id: TableId,
@@ -126,6 +170,8 @@ impl SqlHandler {
             }
         );
 
+        ensure!(ts_index != usize::MAX, error::MissingTimestampColumnSnafu);
+
         if primary_keys.is_empty() {
             info!(
                 "Creating table: {:?}.{:?}.{} but primary key not set, use time index column: {}",
@@ -137,13 +183,15 @@ impl SqlHandler {
         let columns_schemas: Vec<_> = stmt
             .columns
             .iter()
-            .map(|column| column_def_to_schema(column).context(error::ParseSqlSnafu))
+            .enumerate()
+            .map(|(index, column)| {
+                column_def_to_schema(column, index == ts_index).context(error::ParseSqlSnafu)
+            })
             .collect::<Result<Vec<_>>>()?;
 
         let schema = Arc::new(
             SchemaBuilder::try_from(columns_schemas)
                 .context(CreateSchemaSnafu)?
-                .timestamp_index(Some(ts_index))
                 .build()
                 .context(CreateSchemaSnafu)?,
         );
@@ -181,7 +229,7 @@ mod tests {
         let mut res = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
         assert_eq!(1, res.len());
         match res.pop().unwrap() {
-            Statement::Create(c) => c,
+            Statement::CreateTable(c) => c,
             _ => {
                 panic!("Unexpected statement!")
             }
@@ -222,7 +270,7 @@ mod tests {
                       PRIMARY KEY(host)) engine=mito with(regions=1);"#,
         );
         let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
-        assert_matches!(error, Error::CreateSchema { .. });
+        assert_matches!(error, Error::MissingTimestampColumn { .. });
     }
 
     /// If primary key is not specified, time index should be used as primary key.

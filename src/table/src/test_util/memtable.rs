@@ -13,6 +13,7 @@ use datatypes::vectors::UInt32Vector;
 use futures::task::{Context, Poll};
 use futures::Stream;
 use snafu::prelude::*;
+use store_api::storage::RegionNumber;
 
 use crate::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
 use crate::metadata::{
@@ -29,12 +30,21 @@ pub struct MemTable {
 
 impl MemTable {
     pub fn new(table_name: impl Into<String>, recordbatch: RecordBatch) -> Self {
+        Self::new_with_region(table_name, recordbatch, vec![0])
+    }
+
+    pub fn new_with_region(
+        table_name: impl Into<String>,
+        recordbatch: RecordBatch,
+        regions: Vec<RegionNumber>,
+    ) -> Self {
         Self::new_with_catalog(
             table_name,
             recordbatch,
             0,
             "greptime".to_string(),
             "public".to_string(),
+            regions,
         )
     }
 
@@ -44,6 +54,7 @@ impl MemTable {
         table_id: TableId,
         catalog_name: String,
         schema_name: String,
+        regions: Vec<RegionNumber>,
     ) -> Self {
         let schema = recordbatch.schema.clone();
 
@@ -56,6 +67,7 @@ impl MemTable {
             .engine_options(Default::default())
             .options(Default::default())
             .created_on(Default::default())
+            .region_numbers(regions)
             .build()
             .unwrap();
 

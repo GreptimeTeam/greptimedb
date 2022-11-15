@@ -2,7 +2,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMeta;
@@ -242,7 +242,7 @@ fn new_query_engine_factory(table: MemTable) -> QueryEngineFactory {
 
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogList::default());
+    let catalog_list = Arc::new(MemoryCatalogManager::default());
 
     schema_provider.register_table(table_name, table).unwrap();
     catalog_provider

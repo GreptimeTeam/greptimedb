@@ -1,26 +1,72 @@
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::result::AdminResultBuilder;
 use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
+use common_telemetry::{error, info};
 use datatypes::schema::ColumnDefaultConstraint;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use snafu::prelude::*;
+use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
 
-use crate::error::{self, CatalogSnafu, ColumnDefaultConstraintSnafu, MissingFieldSnafu, Result};
+use crate::error::{
+    self, BumpTableIdSnafu, ColumnDefaultConstraintSnafu, MissingFieldSnafu, Result,
+};
 use crate::instance::Instance;
-use crate::server::grpc::handler::AdminResultBuilder;
 use crate::sql::SqlRequest;
 
 impl Instance {
+    /// Handle gRPC create table requests.
     pub(crate) async fn handle_create(&self, expr: CreateExpr) -> AdminResult {
-        let request = self.create_expr_to_request(expr).await;
+        // Respect CreateExpr's table id and region ids if present, or allocate table id
+        // from local table id provider and set region id to 0.
+        let table_id = if let Some(table_id) = expr.table_id {
+            info!(
+                "Creating table {:?}.{:?}.{:?} with table id from frontend: {}",
+                expr.catalog_name, expr.schema_name, expr.table_name, table_id
+            );
+            table_id
+        } else {
+            match self.table_id_provider.as_ref() {
+                None => {
+                    return AdminResultBuilder::default()
+                        .status_code(StatusCode::Internal as u32)
+                        .err_msg("Table id provider absent in standalone mode".to_string())
+                        .build();
+                }
+                Some(table_id_provider) => {
+                    match table_id_provider
+                        .next_table_id()
+                        .await
+                        .context(BumpTableIdSnafu)
+                    {
+                        Ok(table_id) => {
+                            info!(
+                        "Creating table {:?}.{:?}.{:?} with table id from catalog manager: {}",
+                        &expr.catalog_name, &expr.schema_name, expr.table_name, table_id
+                    );
+                            table_id
+                        }
+                        Err(e) => {
+                            error!(e;"Failed to create table id when creating table: {:?}.{:?}.{:?}", &expr.catalog_name, &expr.schema_name, expr.table_name);
+                            return AdminResultBuilder::default()
+                                .status_code(e.status_code() as u32)
+                                .err_msg(e.to_string())
+                                .build();
+                        }
+                    }
+                }
+            }
+        };
+
+        let request = create_expr_to_request(table_id, expr).await;
         let result = futures::future::ready(request)
-            .and_then(|request| self.sql_handler().execute(SqlRequest::Create(request)))
+            .and_then(|request| self.sql_handler().execute(SqlRequest::CreateTable(request)))
             .await;
         match result {
             Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
@@ -37,7 +83,7 @@ impl Instance {
     }
 
     pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> AdminResult {
-        let request = match self.alter_expr_to_request(expr).transpose() {
+        let request = match alter_expr_to_request(expr).transpose() {
             Some(req) => req,
             None => {
                 return AdminResultBuilder::default()
@@ -62,77 +108,76 @@ impl Instance {
                 .build(),
         }
     }
+}
 
-    async fn create_expr_to_request(&self, expr: CreateExpr) -> Result<CreateTableRequest> {
-        let schema = create_table_schema(&expr)?;
-
-        let primary_key_indices = expr
-            .primary_keys
-            .iter()
-            .map(|key| {
-                schema
-                    .column_index_by_name(key)
-                    .context(error::KeyColumnNotFoundSnafu { name: key })
-            })
-            .collect::<Result<Vec<usize>>>()?;
-
-        let catalog_name = expr
-            .catalog_name
-            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-        let schema_name = expr
-            .schema_name
-            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
-
-        let table_id = self
-            .catalog_manager()
-            .next_table_id()
-            .await
-            .context(CatalogSnafu)?;
-
-        let region_id = expr
-            .table_options
-            .get(&"region_id".to_string())
-            .unwrap()
-            .parse::<u32>()
-            .unwrap();
-
-        Ok(CreateTableRequest {
-            id: table_id,
-            catalog_name,
-            schema_name,
-            table_name: expr.table_name,
-            desc: expr.desc,
-            schema,
-            region_numbers: vec![region_id],
-            primary_key_indices,
-            create_if_not_exists: expr.create_if_not_exists,
-            table_options: expr.table_options,
+async fn create_expr_to_request(table_id: TableId, expr: CreateExpr) -> Result<CreateTableRequest> {
+    let schema = create_table_schema(&expr)?;
+    let primary_key_indices = expr
+        .primary_keys
+        .iter()
+        .map(|key| {
+            schema
+                .column_index_by_name(key)
+                .context(error::KeyColumnNotFoundSnafu { name: key })
         })
-    }
+        .collect::<Result<Vec<usize>>>()?;
 
-    fn alter_expr_to_request(&self, expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
-        match expr.kind {
-            Some(Kind::AddColumn(add_column)) => {
-                let column_def = add_column.column_def.context(MissingFieldSnafu {
+    let catalog_name = expr
+        .catalog_name
+        .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
+    let schema_name = expr
+        .schema_name
+        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+
+    let region_ids = if expr.region_ids.is_empty() {
+        vec![0]
+    } else {
+        expr.region_ids
+    };
+
+    Ok(CreateTableRequest {
+        id: table_id,
+        catalog_name,
+        schema_name,
+        table_name: expr.table_name,
+        desc: expr.desc,
+        schema,
+        region_numbers: region_ids,
+        primary_key_indices,
+        create_if_not_exists: expr.create_if_not_exists,
+        table_options: expr.table_options,
+    })
+}
+
+fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
+    match expr.kind {
+        Some(Kind::AddColumns(add_columns)) => {
+            let mut add_column_requests = vec![];
+            for add_column_expr in add_columns.add_columns {
+                let column_def = add_column_expr.column_def.context(MissingFieldSnafu {
                     field: "column_def",
                 })?;
-                let alter_kind = AlterKind::AddColumns {
-                    columns: vec![AddColumnRequest {
-                        column_schema: create_column_schema(&column_def)?,
-                        // FIXME(dennis): supports adding key column
-                        is_key: false,
-                    }],
-                };
-                let request = AlterTableRequest {
-                    catalog_name: expr.catalog_name,
-                    schema_name: expr.schema_name,
-                    table_name: expr.table_name,
-                    alter_kind,
-                };
-                Ok(Some(request))
+
+                let schema = create_column_schema(&column_def)?;
+                add_column_requests.push(AddColumnRequest {
+                    column_schema: schema,
+                    is_key: add_column_expr.is_key,
+                })
             }
-            None => Ok(None),
+
+            let alter_kind = AlterKind::AddColumns {
+                columns: add_column_requests,
+            };
+
+            let request = AlterTableRequest {
+                catalog_name: expr.catalog_name,
+                schema_name: expr.schema_name,
+                table_name: expr.table_name,
+                alter_kind,
+            };
+            Ok(Some(request))
         }
+        None => Ok(None),
     }
 }
 
@@ -142,23 +187,30 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
         .iter()
         .map(create_column_schema)
         .collect::<Result<Vec<ColumnSchema>>>()?;
-    let ts_index = column_schemas
-        .iter()
-        .enumerate()
-        .find_map(|(i, column)| {
-            if column.name == expr.time_index {
-                Some(i)
+
+    ensure!(
+        column_schemas
+            .iter()
+            .any(|column| column.name == expr.time_index),
+        error::KeyColumnNotFoundSnafu {
+            name: &expr.time_index,
+        }
+    );
+
+    let column_schemas = column_schemas
+        .into_iter()
+        .map(|column_schema| {
+            if column_schema.name == expr.time_index {
+                column_schema.with_time_index(true)
             } else {
-                None
+                column_schema
             }
         })
-        .context(error::KeyColumnNotFoundSnafu {
-            name: &expr.time_index,
-        })?;
+        .collect::<Vec<_>>();
+
     Ok(Arc::new(
         SchemaBuilder::try_from(column_schemas)
             .context(error::CreateSchemaSnafu)?
-            .timestamp_index(Some(ts_index))
             .build()
             .context(error::CreateSchemaSnafu)?,
     ))
@@ -184,8 +236,7 @@ fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
+    use common_catalog::consts::MIN_USER_TABLE_ID;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::value::Value;
 
@@ -200,7 +251,7 @@ mod tests {
         instance.start().await.unwrap();
 
         let expr = testing_create_expr();
-        let request = instance.create_expr_to_request(expr).await.unwrap();
+        let request = create_expr_to_request(1024, expr).await.unwrap();
         assert_eq!(request.id, common_catalog::consts::MIN_USER_TABLE_ID);
         assert_eq!(request.catalog_name, "greptime".to_string());
         assert_eq!(request.schema_name, "public".to_string());
@@ -212,7 +263,7 @@ mod tests {
 
         let mut expr = testing_create_expr();
         expr.primary_keys = vec!["host".to_string(), "not-exist-column".to_string()];
-        let result = instance.create_expr_to_request(expr).await;
+        let result = create_expr_to_request(1025, expr).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -305,9 +356,6 @@ mod tests {
                 default_constraint: None,
             },
         ];
-        let table_options = [("region_id".to_string(), "0".to_string())]
-            .into_iter()
-            .collect::<HashMap<_, _>>();
         CreateExpr {
             catalog_name: None,
             schema_name: None,
@@ -317,21 +365,23 @@ mod tests {
             time_index: "ts".to_string(),
             primary_keys: vec!["ts".to_string(), "host".to_string()],
             create_if_not_exists: true,
-            table_options,
+            table_options: Default::default(),
+            table_id: Some(MIN_USER_TABLE_ID),
+            region_ids: vec![0],
         }
     }
 
     fn expected_table_schema() -> SchemaRef {
         let column_schemas = vec![
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
+                .with_time_index(true),
             ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ];
         Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
-                .timestamp_index(Some(1))
                 .build()
                 .unwrap(),
         )

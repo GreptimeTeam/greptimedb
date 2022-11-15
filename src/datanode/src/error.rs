@@ -1,6 +1,5 @@
 use std::any::Any;
 
-use api::serde::DecodeError;
 use common_error::prelude::*;
 use datatypes::arrow::error::ArrowError;
 use storage::error::Error as StorageError;
@@ -92,14 +91,9 @@ pub enum Error {
     #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
     Insert {
         table_name: String,
+        #[snafu(backtrace)]
         source: TableError,
     },
-
-    #[snafu(display("Illegal insert data"))]
-    IllegalInsertData,
-
-    #[snafu(display("Failed to convert bytes to insert batch, source: {}", source))]
-    DecodeInsert { source: DecodeError },
 
     #[snafu(display("Failed to start server, source: {}", source))]
     StartServer {
@@ -186,6 +180,12 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Failed to register a new schema, source: {}", source))]
+    RegisterSchema {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
     #[snafu(display("Failed to decode as physical plan, source: {}", source))]
     IntoPhysicalPlan {
         #[snafu(backtrace)]
@@ -257,17 +257,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Duplicated timestamp column in gRPC requests, exists {}, duplicated: {}",
-        exists,
-        duplicated
-    ))]
-    DuplicatedTimestampColumn {
-        exists: String,
-        duplicated: String,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to access catalog, source: {}", source))]
     Catalog {
         #[snafu(backtrace)]
@@ -284,6 +273,26 @@ pub enum Error {
     MetaClientInit {
         #[snafu(backtrace)]
         source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Failed to insert data, source: {}", source))]
+    InsertData {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
+    #[snafu(display("Insert batch is empty"))]
+    EmptyInsertBatch,
+
+    #[snafu(display(
+        "Table id provider not found, cannot execute SQL directly on datanode in distributed mode"
+    ))]
+    TableIdProviderNotFound { backtrace: Backtrace },
+
+    #[snafu(display("Failed to bump table id, source: {}", source))]
+    BumpTableId {
+        #[snafu(backtrace)]
+        source: table::error::Error,
     },
 }
 
@@ -316,8 +325,6 @@ impl ErrorExt for Error {
             | Error::ConvertSchema { source, .. } => source.status_code(),
 
             Error::ColumnValuesNumberMismatch { .. }
-            | Error::IllegalInsertData { .. }
-            | Error::DecodeInsert { .. }
             | Error::InvalidSql { .. }
             | Error::KeyColumnNotFound { .. }
             | Error::InvalidPrimaryKey { .. }
@@ -326,8 +333,7 @@ impl ErrorExt for Error {
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::ConstraintNotSupported { .. }
-            | Error::ParseTimestamp { .. }
-            | Error::DuplicatedTimestampColumn { .. } => StatusCode::InvalidArguments,
+            | Error::ParseTimestamp { .. } => StatusCode::InvalidArguments,
 
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }
@@ -336,6 +342,7 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
+            | Error::RegisterSchema { .. }
             | Error::Conversion { .. }
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }
@@ -353,6 +360,10 @@ impl ErrorExt for Error {
 
             Error::ArrowComputation { .. } => StatusCode::Unexpected,
             Error::MetaClientInit { source, .. } => source.status_code(),
+            Error::InsertData { source, .. } => source.status_code(),
+            Error::EmptyInsertBatch => StatusCode::InvalidArguments,
+            Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
+            Error::BumpTableId { source, .. } => source.status_code(),
         }
     }
 

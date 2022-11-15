@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
@@ -18,7 +18,7 @@ use table::test_util::MemTable;
 pub fn create_query_engine() -> Arc<dyn QueryEngine> {
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogList::default());
+    let catalog_list = Arc::new(MemoryCatalogManager::default());
 
     let mut column_schemas = vec![];
     let mut columns = vec![];
@@ -53,8 +53,7 @@ pub fn create_query_engine() -> Arc<dyn QueryEngine> {
         .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
-    let factory = QueryEngineFactory::new(catalog_list);
-    factory.query_engine().clone()
+    QueryEngineFactory::new(catalog_list).query_engine()
 }
 
 pub async fn get_numbers_from_table<'s, T>(

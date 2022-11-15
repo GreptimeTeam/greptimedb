@@ -5,8 +5,6 @@ use common_query::logical_plan::Expr;
 use datafusion_common::ScalarValue;
 use store_api::storage::RegionId;
 
-use crate::mock::DatanodeId;
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -123,13 +121,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to get Datanode instance: {:?}", datanode))]
-    DatanodeInstance {
-        datanode: DatanodeId,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Invaild InsertRequest, reason: {}", reason))]
+    #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
     InvalidInsertRequest {
         reason: String,
         backtrace: Backtrace,
@@ -142,10 +134,230 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Table not found: {}", table_name))]
+    TableNotFound {
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Column {} not found in table {}", column_name, table_name))]
+    ColumnNotFound {
+        column_name: String,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Columns and values number mismatch, columns: {}, values: {}",
+        columns,
+        values,
+    ))]
+    ColumnValuesNumberMismatch {
+        columns: usize,
+        values: usize,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to join task, source: {}", source))]
     JoinTask {
         source: common_runtime::JoinError,
         backtrace: Backtrace,
+    },
+
+    #[snafu(display("General catalog error: {}", source))]
+    Catalog {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
+    #[snafu(display("Failed to serialize or deserialize catalog entry: {}", source))]
+    CatalogEntrySerde {
+        #[snafu(backtrace)]
+        source: common_catalog::error::Error,
+    },
+
+    #[snafu(display("Failed to start Meta client, source: {}", source))]
+    StartMetaClient {
+        #[snafu(backtrace)]
+        source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Failed to request Meta, source: {}", source))]
+    RequestMeta {
+        #[snafu(backtrace)]
+        source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Failed to get cache, error: {}", err_msg))]
+    GetCache {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to find table routes for table {}", table_name))]
+    FindTableRoutes {
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to bump table id when creating table, source: {}", source))]
+    BumpTableId {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Failed to create table, source: {}", source))]
+    CreateTable {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to alter table, source: {}", source))]
+    AlterTable {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to insert values to table, source: {}", source))]
+    Insert {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to select from table, source: {}", source))]
+    Select {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to create table on insertion, source: {}", source))]
+    CreateTableOnInsertion {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to alter table on insertion, source: {}", source))]
+    AlterTableOnInsertion {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to build CreateExpr on insertion: {}", source))]
+    BuildCreateExprOnInsertion {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
+    #[snafu(display("Failed to find new columns on insertion: {}", source))]
+    FindNewColumnsOnInsertion {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
+    #[snafu(display("Failed to deserialize insert batching: {}", source))]
+    DeserializeInsertBatch {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
+    #[snafu(display("Failed to deserialize insert batching: {}", source))]
+    InsertBatchToRequest {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
+    #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
+    CatalogNotFound {
+        catalog_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to find schema, schema info: {}", schema_info))]
+    SchemaNotFound {
+        schema_info: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Table occurs error, source: {}", source))]
+    Table {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Failed to get catalog manager"))]
+    CatalogManager { backtrace: Backtrace },
+
+    #[snafu(display("Failed to get full table name, source: {}", source))]
+    FullTableName {
+        #[snafu(backtrace)]
+        source: sql::error::Error,
+    },
+
+    #[snafu(display("Failed to find region routes for table {}", table_name))]
+    FindRegionRoutes {
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to serialize value to json, source: {}", source))]
+    SerializeJson {
+        source: serde_json::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to deserialize value from json, source: {}", source))]
+    DeserializeJson {
+        source: serde_json::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to find leader peer for region {} in table {}",
+        region,
+        table_name
+    ))]
+    FindLeaderPeer {
+        region: u64,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to find partition info for region {} in table {}",
+        region,
+        table_name
+    ))]
+    FindRegionPartition {
+        region: u64,
+        table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Illegal table routes data for table {}, error message: {}",
+        table_name,
+        err_msg
+    ))]
+    IllegalTableRoutesData {
+        table_name: String,
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid admin result, source: {}", source))]
+    InvalidAdminResult {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Cannot find primary key column by name: {}", msg))]
+    PrimaryKeyNotFound { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to execute sql: {}, source: {}", sql, source))]
+    ExecuteSql {
+        sql: String,
+        #[snafu(backtrace)]
+        source: query::error::Error,
     },
 }
 
@@ -154,13 +366,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ConnectDatanode { .. }
-            | Error::ParseAddr { .. }
+            Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::FindRegion { .. }
             | Error::FindRegions { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. }
+            | Error::ColumnValuesNumberMismatch { .. }
+            | Error::CatalogManager { .. }
             | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
 
             Error::RuntimeResource { source, .. } => source.status_code(),
@@ -169,20 +382,58 @@ impl ErrorExt for Error {
 
             Error::ParseSql { source } => source.status_code(),
 
+            Error::FullTableName { source, .. } => source.status_code(),
+
+            Error::Table { source } => source.status_code(),
+
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::ConvertScalarValue { source, .. } => source.status_code(),
 
-            Error::RequestDatanode { source } => source.status_code(),
+            Error::ConnectDatanode { source, .. }
+            | Error::RequestDatanode { source }
+            | Error::InvalidAdminResult { source } => source.status_code(),
 
             Error::ColumnDataType { .. }
             | Error::FindDatanode { .. }
-            | Error::DatanodeInstance { .. } => StatusCode::Internal,
+            | Error::GetCache { .. }
+            | Error::FindTableRoutes { .. }
+            | Error::SerializeJson { .. }
+            | Error::DeserializeJson { .. }
+            | Error::FindRegionRoutes { .. }
+            | Error::FindLeaderPeer { .. }
+            | Error::FindRegionPartition { .. }
+            | Error::IllegalTableRoutesData { .. } => StatusCode::Internal,
 
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
                 StatusCode::Unexpected
             }
             Error::ExecOpentsdbPut { .. } => StatusCode::Internal,
+
+            Error::TableNotFound { .. } => StatusCode::TableNotFound,
+            Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
+
             Error::JoinTask { .. } => StatusCode::Unexpected,
+            Error::Catalog { source, .. } => source.status_code(),
+            Error::CatalogEntrySerde { source, .. } => source.status_code(),
+
+            Error::StartMetaClient { source } | Error::RequestMeta { source } => {
+                source.status_code()
+            }
+            Error::BumpTableId { source, .. } => source.status_code(),
+            Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
+            Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
+            Error::CreateTable { source, .. } => source.status_code(),
+            Error::AlterTable { source, .. } => source.status_code(),
+            Error::Insert { source, .. } => source.status_code(),
+            Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
+            Error::CreateTableOnInsertion { source, .. } => source.status_code(),
+            Error::AlterTableOnInsertion { source, .. } => source.status_code(),
+            Error::Select { source, .. } => source.status_code(),
+            Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
+            Error::DeserializeInsertBatch { source, .. } => source.status_code(),
+            Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
+            Error::ExecuteSql { source, .. } => source.status_code(),
+            Error::InsertBatchToRequest { source, .. } => source.status_code(),
         }
     }
 

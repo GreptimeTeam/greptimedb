@@ -11,8 +11,8 @@ mod tests {
     use catalog::remote::{
         KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider,
     };
-    use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+    use catalog::{CatalogList, CatalogManager, RegisterTableRequest};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_catalog::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use datatypes::schema::Schema;
     use futures_util::StreamExt;
@@ -61,7 +61,9 @@ mod tests {
         );
     }
 
-    async fn prepare_components(node_id: u64) -> (KvBackendRef, TableEngineRef, CatalogManagerRef) {
+    async fn prepare_components(
+        node_id: u64,
+    ) -> (KvBackendRef, TableEngineRef, Arc<RemoteCatalogManager>) {
         let backend = Arc::new(MockKvBackend::default()) as KvBackendRef;
         let table_engine = Arc::new(MockTableEngine::default());
         let catalog_manager =
@@ -276,20 +278,5 @@ mod tests {
             HashSet::from([schema_name.clone()]),
             new_catalog.schema_names().unwrap().into_iter().collect()
         )
-    }
-
-    #[tokio::test]
-    async fn test_next_table_id() {
-        let node_id = 42;
-        let (_, _, catalog_manager) = prepare_components(node_id).await;
-        assert_eq!(
-            MIN_USER_TABLE_ID,
-            catalog_manager.next_table_id().await.unwrap()
-        );
-
-        assert_eq!(
-            MIN_USER_TABLE_ID + 1,
-            catalog_manager.next_table_id().await.unwrap()
-        );
     }
 }

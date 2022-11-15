@@ -15,7 +15,7 @@ use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::builtins::PyList;
 use rustpython_vm::pymodule;
 use rustpython_vm::{
-    builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt},
+    builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyStr},
     AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
 };
 
@@ -50,14 +50,15 @@ fn collect_diff_types_string(values: &[ScalarValue], ty: &DataType) -> String {
 ///
 /// supported scalar are(leftside is python data type, right side is rust type):
 ///
-/// | Python | Rust |
-/// | ------ | ---- |
-/// | integer| i64  |
-/// | float  | f64  |
-/// | bool   | bool |
-/// | vector | array|
+/// | Python |  Rust  |
+/// | ------ | ------ |
+/// | integer| i64    |
+/// | float  | f64    |
+/// | str    | String |
+/// | bool   | bool   |
+/// | vector | array  |
 /// | list   | `ScalarValue::List` |
-fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DFColValue> {
+pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DFColValue> {
     if is_instance::<PyVector>(&obj, vm) {
         let ret = obj
             .payload::<PyVector>()
@@ -67,6 +68,9 @@ fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DF
         // Note that a `PyBool` is also a `PyInt`, so check if it is a bool first to get a more precise type
         let ret = obj.try_into_value::<bool>(vm)?;
         Ok(DFColValue::Scalar(ScalarValue::Boolean(Some(ret))))
+    } else if is_instance::<PyStr>(&obj, vm) {
+        let ret = obj.try_into_value::<String>(vm)?;
+        Ok(DFColValue::Scalar(ScalarValue::Utf8(Some(ret))))
     } else if is_instance::<PyInt>(&obj, vm) {
         let ret = obj.try_into_value::<i64>(vm)?;
         Ok(DFColValue::Scalar(ScalarValue::Int64(Some(ret))))
@@ -92,10 +96,10 @@ fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResult<DF
             .collect::<Result<_, _>>()?;
 
         if ret.is_empty() {
-            //TODO(dennis): empty list, we set type as f64.
+            // TODO(dennis): empty list, we set type as null.
             return Ok(DFColValue::Scalar(ScalarValue::List(
                 None,
-                Box::new(DataType::Float64),
+                Box::new(DataType::Null),
             )));
         }
 

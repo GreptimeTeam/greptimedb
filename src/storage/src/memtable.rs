@@ -4,6 +4,7 @@ mod inserter;
 pub mod tests;
 mod version;
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use datatypes::vectors::VectorRef;
@@ -12,7 +13,7 @@ use store_api::storage::{consts, OpType, SequenceNumber};
 use crate::error::Result;
 use crate::memtable::btree::BTreeMemtable;
 pub use crate::memtable::inserter::Inserter;
-pub use crate::memtable::version::{MemtableSet, MemtableVersion};
+pub use crate::memtable::version::MemtableVersion;
 use crate::read::Batch;
 use crate::schema::{ProjectedSchemaRef, RegionSchemaRef};
 
@@ -36,8 +37,13 @@ pub trait Memtable: Send + Sync + std::fmt::Debug {
     /// Iterates the memtable.
     fn iter(&self, ctx: &IterContext) -> Result<BoxedBatchIterator>;
 
-    /// Returns the estimated bytes allocated by this memtable from heap.
+    /// Returns the estimated bytes allocated by this memtable from heap. Result
+    /// of this method may be larger than the estimated based on [`num_rows`] because
+    /// of the implementor's pre-alloc behavior.
     fn bytes_allocated(&self) -> usize;
+
+    /// Return the number of rows contained in this memtable.
+    fn num_rows(&self) -> usize;
 }
 
 pub type MemtableRef = Arc<dyn Memtable>;
@@ -100,7 +106,7 @@ pub trait BatchIterator: Iterator<Item = Result<Batch>> + Send + Sync {
 pub type BoxedBatchIterator = Box<dyn BatchIterator>;
 
 pub trait MemtableBuilder: Send + Sync + std::fmt::Debug {
-    fn build(&self, id: MemtableId, schema: RegionSchemaRef) -> MemtableRef;
+    fn build(&self, schema: RegionSchemaRef) -> MemtableRef;
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
@@ -140,11 +146,14 @@ impl KeyValues {
     }
 }
 
-#[derive(Debug)]
-pub struct DefaultMemtableBuilder;
+#[derive(Debug, Default)]
+pub struct DefaultMemtableBuilder {
+    memtable_id: AtomicU32,
+}
 
 impl MemtableBuilder for DefaultMemtableBuilder {
-    fn build(&self, id: MemtableId, schema: RegionSchemaRef) -> MemtableRef {
+    fn build(&self, schema: RegionSchemaRef) -> MemtableRef {
+        let id = self.memtable_id.fetch_add(1, Ordering::Relaxed);
         Arc::new(BTreeMemtable::new(id, schema))
     }
 }

@@ -22,6 +22,8 @@ pub struct FrontendOptions {
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
+    pub mode: Mode,
+    pub datanode_rpc_addr: String,
 }
 
 impl Default for FrontendOptions {
@@ -34,14 +36,15 @@ impl Default for FrontendOptions {
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
+            mode: Mode::Standalone,
+            datanode_rpc_addr: "127.0.0.1:3001".to_string(),
         }
     }
 }
 
 impl FrontendOptions {
-    // TODO(LFC) Get Datanode address from Meta.
     pub(crate) fn datanode_grpc_addr(&self) -> String {
-        "127.0.0.1:3001".to_string()
+        self.datanode_rpc_addr.clone()
     }
 }
 
@@ -71,9 +74,17 @@ where
             .context(error::IllegalFrontendStateSnafu {
                 err_msg: "Frontend instance not initialized",
             })?;
-        instance.start(&self.opts).await?;
+        instance.start().await?;
 
         let instance = Arc::new(instance);
         Services::start(&self.opts, instance).await
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Standalone,
+    // with meta server's addr
+    Distributed(Vec<String>),
 }

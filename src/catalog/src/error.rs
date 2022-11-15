@@ -48,13 +48,19 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid system catalog entry type: {:?}", entry_type))]
-    InvalidEntryType { entry_type: Option<u8> },
+    InvalidEntryType {
+        entry_type: Option<u8>,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Invalid system catalog key: {:?}", key))]
-    InvalidKey { key: Option<String> },
+    InvalidKey {
+        key: Option<String>,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Catalog value is not present"))]
-    EmptyValue,
+    EmptyValue { backtrace: Backtrace },
 
     #[snafu(display("Failed to deserialize value, source: {}", source))]
     ValueDeserialize {
@@ -63,13 +69,25 @@ pub enum Error {
     },
 
     #[snafu(display("Cannot find catalog by name: {}", catalog_name))]
-    CatalogNotFound { catalog_name: String },
+    CatalogNotFound {
+        catalog_name: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Cannot find schema, schema info: {}", schema_info))]
-    SchemaNotFound { schema_info: String },
+    SchemaNotFound {
+        schema_info: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Table {} already exists", table))]
     TableExists { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Schema {} already exists", schema))]
+    SchemaExists {
+        schema: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Failed to register table"))]
     RegisterTable {
@@ -85,7 +103,10 @@ pub enum Error {
     },
 
     #[snafu(display("Table not found while opening table, table info: {}", table_info))]
-    TableNotFound { table_info: String },
+    TableNotFound {
+        table_info: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Failed to read system catalog table records"))]
     ReadSystemCatalog {
@@ -97,7 +118,7 @@ pub enum Error {
         "Failed to insert table creation record to system catalog, source: {}",
         source
     ))]
-    InsertTableRecord {
+    InsertCatalogRecord {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
@@ -150,11 +171,17 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to bump table id"))]
-    BumpTableId { msg: String, backtrace: Backtrace },
+    #[snafu(display("Invalid table schema in catalog, source: {:?}", source))]
+    InvalidSchemaInCatalog {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 
-    #[snafu(display("Failed to parse table id from metasrv, data: {:?}", data))]
-    ParseTableId { data: String, backtrace: Backtrace },
+    #[snafu(display("Catalog internal error: {}", source))]
+    Internal {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -171,7 +198,7 @@ impl ErrorExt for Error {
             | Error::CatalogStateInconsistent { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
-            | Error::EmptyValue
+            | Error::EmptyValue { .. }
             | Error::ValueDeserialize { .. }
             | Error::Io { .. } => StatusCode::StorageUnavailable,
 
@@ -181,19 +208,19 @@ impl ErrorExt for Error {
 
             Error::RegisterTable { .. } => StatusCode::Internal,
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
+            Error::SchemaExists { .. } => StatusCode::InvalidArguments,
 
             Error::OpenSystemCatalog { source, .. }
             | Error::CreateSystemCatalog { source, .. }
-            | Error::InsertTableRecord { source, .. }
+            | Error::InsertCatalogRecord { source, .. }
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. } => source.status_code(),
             Error::MetaSrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableSchema { source, .. } => source.status_code(),
-            Error::BumpTableId { .. } | Error::ParseTableId { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            Error::InvalidSchemaInCatalog { .. } => StatusCode::Unexpected,
+            Error::Internal { source, .. } => source.status_code(),
         }
     }
 
@@ -233,7 +260,7 @@ mod tests {
 
         assert_eq!(
             StatusCode::Unexpected,
-            Error::InvalidKey { key: None }.status_code()
+            InvalidKeySnafu { key: None }.build().status_code()
         );
 
         assert_eq!(
@@ -274,7 +301,7 @@ mod tests {
         );
         assert_eq!(
             StatusCode::StorageUnavailable,
-            Error::EmptyValue.status_code()
+            EmptyValueSnafu {}.build().status_code()
         );
     }
 

@@ -22,6 +22,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+common-insert = { path = "../common/insert" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
   "simd",
 ] }
@@ -50,6 +51,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
+frontend = { path = "../frontend" }
 
 [dependencies.arrow]
 package = "arrow2"

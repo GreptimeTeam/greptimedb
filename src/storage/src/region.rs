@@ -21,7 +21,7 @@ use crate::manifest::{
     region::RegionManifest,
 };
 use crate::memtable::MemtableBuilderRef;
-use crate::metadata::{RegionMetaImpl, RegionMetadata};
+use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
 pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
@@ -97,6 +97,7 @@ pub struct StoreConfig<S> {
     pub flush_strategy: FlushStrategyRef,
 }
 
+pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
 pub type RecoveredMetadataMap = BTreeMap<SequenceNumber, (ManifestVersion, RawRegionMetadata)>;
 
 impl<S: LogStore> RegionImpl<S> {
@@ -120,7 +121,10 @@ impl<S: LogStore> RegionImpl<S> {
             )))
             .await?;
 
-        let version = Version::with_manifest_version(metadata, manifest_version);
+        let mutable_memtable = store_config
+            .memtable_builder
+            .build(metadata.schema().clone());
+        let version = Version::with_manifest_version(metadata, manifest_version, mutable_memtable);
         let region = RegionImpl::new(version, store_config);
 
         Ok(region)
@@ -160,11 +164,15 @@ impl<S: LogStore> RegionImpl<S> {
         _opts: &OpenOptions,
     ) -> Result<Option<RegionImpl<S>>> {
         // Load version meta data from manifest.
-        let (version, mut recovered_metadata) =
-            match Self::recover_from_manifest(&store_config.manifest).await? {
-                (None, _) => return Ok(None),
-                (Some(v), m) => (v, m),
-            };
+        let (version, mut recovered_metadata) = match Self::recover_from_manifest(
+            &store_config.manifest,
+            &store_config.memtable_builder,
+        )
+        .await?
+        {
+            (None, _) => return Ok(None),
+            (Some(v), m) => (v, m),
+        };
 
         logging::debug!(
             "Region recovered version from manifest, version: {:?}",
@@ -179,12 +187,19 @@ impl<S: LogStore> RegionImpl<S> {
             recovered_metadata.split_off(&(flushed_sequence + 1));
         // apply the last flushed metadata
         if let Some((sequence, (manifest_version, metadata))) = recovered_metadata.pop_last() {
-            let metadata = Arc::new(
+            let metadata: RegionMetadataRef = Arc::new(
                 metadata
                     .try_into()
                     .context(error::InvalidRawRegionSnafu { region: &name })?,
             );
-            version_control.freeze_mutable_and_apply_metadata(metadata, manifest_version);
+            let mutable_memtable = store_config
+                .memtable_builder
+                .build(metadata.schema().clone());
+            version_control.freeze_mutable_and_apply_metadata(
+                metadata,
+                manifest_version,
+                mutable_memtable,
+            );
 
             logging::debug!(
                 "Applied the last flushed metadata to region: {}, sequence: {}, manifest: {}",
@@ -236,6 +251,7 @@ impl<S: LogStore> RegionImpl<S> {
 
     async fn recover_from_manifest(
         manifest: &RegionManifest,
+        memtable_builder: &MemtableBuilderRef,
     ) -> Result<(Option<Version>, RecoveredMetadataMap)> {
         let (start, end) = Self::manifest_scan_range();
         let mut iter = manifest.scan(start, end).await?;
@@ -252,13 +268,17 @@ impl<S: LogStore> RegionImpl<S> {
                 match (action, version) {
                     (RegionMetaAction::Change(c), None) => {
                         let region = c.metadata.name.clone();
-                        let region_metadata = c
+                        let region_metadata: RegionMetadata = c
                             .metadata
                             .try_into()
                             .context(error::InvalidRawRegionSnafu { region })?;
+                        // Use current schema to build a memtable. This might be replaced later
+                        // in `freeze_mutable_and_apply_metadata()`.
+                        let memtable = memtable_builder.build(region_metadata.schema().clone());
                         version = Some(Version::with_manifest_version(
                             Arc::new(region_metadata),
                             last_manifest_version,
+                            memtable,
                         ));
                         for (manifest_version, action) in actions.drain(..) {
                             version = Self::replay_edit(manifest_version, action, version);
@@ -326,6 +346,10 @@ impl<S: LogStore> RegionImpl<S> {
         self.inner.version_control().committed_sequence()
     }
 
+    fn current_manifest_version(&self) -> ManifestVersion {
+        self.inner.version_control().current_manifest_version()
+    }
+
     async fn wait_flush_done(&self) -> Result<()> {
         self.inner.writer.wait_flush_done().await
     }
@@ -333,6 +357,22 @@ impl<S: LogStore> RegionImpl<S> {
     /// Write to inner, also the `RegionWriter` directly.
     async fn write_inner(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
         self.inner.write(ctx, request).await
+    }
+
+    // Replay metadata to inner.
+    async fn replay_inner(&self, recovered_metadata: RecoveredMetadataMap) -> Result<()> {
+        let inner = &self.inner;
+        let writer_ctx = WriterContext {
+            shared: &inner.shared,
+            flush_strategy: &inner.flush_strategy,
+            flush_scheduler: &inner.flush_scheduler,
+            sst_layer: &inner.sst_layer,
+            wal: &inner.wal,
+            writer: &inner.writer,
+            manifest: &inner.manifest,
+        };
+
+        inner.writer.replay(recovered_metadata, writer_ctx).await
     }
 }
 

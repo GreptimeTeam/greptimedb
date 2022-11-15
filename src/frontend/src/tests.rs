@@ -19,12 +19,18 @@ async fn create_datanode_instance() -> Arc<DatanodeInstance> {
 }
 
 pub(crate) async fn create_frontend_instance() -> Arc<Instance> {
-    let datanode_instance = create_datanode_instance().await;
-    let client = create_datanode_client(datanode_instance).await;
-    Arc::new(Instance::with_client(client))
+    let datanode_instance: Arc<DatanodeInstance> = create_datanode_instance().await;
+    let dn_catalog_manager = datanode_instance.catalog_manager().clone();
+    let (_, client) = create_datanode_client(datanode_instance).await;
+    Arc::new(Instance::with_client_and_catalog_manager(
+        client,
+        dn_catalog_manager,
+    ))
 }
 
-pub(crate) async fn create_datanode_client(datanode_instance: Arc<DatanodeInstance>) -> Client {
+pub(crate) async fn create_datanode_client(
+    datanode_instance: Arc<DatanodeInstance>,
+) -> (String, Client) {
     let (client, server) = tokio::io::duplex(1024);
 
     let runtime = Arc::new(
@@ -49,8 +55,8 @@ pub(crate) async fn create_datanode_client(datanode_instance: Arc<DatanodeInstan
     // Move client to an option so we can _move_ the inner value
     // on the first attempt to connect. All other attempts will fail.
     let mut client = Some(client);
-    // "http://[::]:50051" is just a placeholder, does not actually connect to it,
-    let addr = "[::].50051";
+    // "0.0.0.0:3001" is just a placeholder, does not actually connect to it.
+    let addr = "0.0.0.0:3001";
     let channel_manager = ChannelManager::new();
     channel_manager
         .reset_with_connector(
@@ -71,5 +77,8 @@ pub(crate) async fn create_datanode_client(datanode_instance: Arc<DatanodeInstan
             }),
         )
         .unwrap();
-    Client::with_manager_and_urls(channel_manager, vec![addr])
+    (
+        addr.to_string(),
+        Client::with_manager_and_urls(channel_manager, vec![addr]),
+    )
 }

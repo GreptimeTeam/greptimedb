@@ -1,10 +1,11 @@
 mod mock_engine;
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::vectors::VectorRef;
 use log_store::fs::noop::NoopLogStore;
 use object_store::{services::fs::Builder, ObjectStore};
 use storage::config::EngineConfig as StorageEngineConfig;
@@ -13,6 +14,7 @@ use table::engine::EngineContext;
 use table::engine::TableEngine;
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::CreateTableRequest;
+use table::requests::InsertRequest;
 use table::TableRef;
 use tempdir::TempDir;
 
@@ -24,6 +26,19 @@ pub use crate::table::test_util::mock_engine::MockRegion;
 
 pub const TABLE_NAME: &str = "demo";
 
+/// Create a InsertRequest with default catalog and schema.
+pub fn new_insert_request(
+    table_name: String,
+    columns_values: HashMap<String, VectorRef>,
+) -> InsertRequest {
+    InsertRequest {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name,
+        columns_values,
+    }
+}
+
 pub fn schema_for_test() -> Schema {
     let column_schemas = vec![
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
@@ -33,12 +48,12 @@ pub fn schema_for_test() -> Schema {
             "ts",
             ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
             true,
-        ),
+        )
+        .with_time_index(true),
     ];
 
     SchemaBuilder::try_from(column_schemas)
         .unwrap()
-        .timestamp_index(Some(3))
         .build()
         .expect("ts must be timestamp column")
 }

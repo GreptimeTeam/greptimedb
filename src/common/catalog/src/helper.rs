@@ -118,12 +118,11 @@ pub struct TableGlobalValue {
     pub id: TableId,
     /// Id of datanode that created the global table info kv. only for debugging.
     pub node_id: u64,
+    // TODO(LFC): Maybe remove it?
     /// Allocation of region ids across all datanodes.
     pub regions_id_map: HashMap<u64, Vec<u32>>,
-    /// Node id -> region ids
+    // TODO(LFC): Too much for assembling the table schema that DistTable needs, find another way.
     pub meta: RawTableMeta,
-    /// Partition rules for table
-    pub partition_rules: String,
 }
 
 /// Table regional info that varies between datanode, so it contains a `node_id` field.
@@ -331,7 +330,6 @@ mod tests {
             node_id: 0,
             regions_id_map: HashMap::from([(0, vec![1, 2, 3])]),
             meta,
-            partition_rules: "{}".to_string(),
         };
         let serialized = serde_json::to_string(&value).unwrap();
         let deserialized = TableGlobalValue::parse(&serialized).unwrap();

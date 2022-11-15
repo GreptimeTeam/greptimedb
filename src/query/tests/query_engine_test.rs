@@ -3,7 +3,7 @@ mod pow;
 use std::sync::Arc;
 
 use arrow::array::UInt32Array;
-use catalog::local::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
@@ -150,7 +150,7 @@ async fn test_udf() -> Result<()> {
 fn create_query_engine() -> Arc<dyn QueryEngine> {
     let schema_provider = Arc::new(MemorySchemaProvider::new());
     let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-    let catalog_list = Arc::new(MemoryCatalogList::default());
+    let catalog_list = Arc::new(MemoryCatalogManager::default());
 
     // create table with primitives, and all columns' length are even
     let mut column_schemas = vec![];
@@ -216,8 +216,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
         .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
-    let factory = QueryEngineFactory::new(catalog_list);
-    factory.query_engine().clone()
+    QueryEngineFactory::new(catalog_list).query_engine()
 }
 
 async fn get_numbers_from_table<'s, T>(

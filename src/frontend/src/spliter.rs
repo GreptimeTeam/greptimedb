@@ -5,7 +5,7 @@ use datatypes::vectors::VectorBuilder;
 use datatypes::vectors::VectorRef;
 use snafu::ensure;
 use snafu::OptionExt;
-use store_api::storage::RegionId;
+use store_api::storage::RegionNumber;
 use table::requests::InsertRequest;
 
 use crate::error::Error;
@@ -15,7 +15,7 @@ use crate::error::InvalidInsertRequestSnafu;
 use crate::error::Result;
 use crate::partitioning::PartitionRuleRef;
 
-pub type DistInsertRequest = HashMap<RegionId, InsertRequest>;
+pub type DistInsertRequest = HashMap<RegionNumber, InsertRequest>;
 
 pub struct WriteSpliter {
     partition_rule: PartitionRuleRef<Error>,
@@ -41,11 +41,11 @@ impl WriteSpliter {
     fn split_partitioning_values(
         &self,
         values: &[VectorRef],
-    ) -> Result<HashMap<RegionId, Vec<usize>>> {
+    ) -> Result<HashMap<RegionNumber, Vec<usize>>> {
         if values.is_empty() {
             return Ok(HashMap::default());
         }
-        let mut region_map: HashMap<RegionId, Vec<usize>> = HashMap::new();
+        let mut region_map: HashMap<RegionNumber, Vec<usize>> = HashMap::new();
         let row_count = values[0].len();
         for idx in 0..row_count {
             let region_id = match self
@@ -113,9 +113,9 @@ fn partition_values(partition_columns: &[VectorRef], idx: usize) -> Vec<Value> {
 
 fn partition_insert_request(
     insert: &InsertRequest,
-    region_map: HashMap<RegionId, Vec<usize>>,
+    region_map: HashMap<RegionNumber, Vec<usize>>,
 ) -> DistInsertRequest {
-    let mut dist_insert: HashMap<RegionId, HashMap<&str, VectorBuilder>> =
+    let mut dist_insert: HashMap<RegionNumber, HashMap<&str, VectorBuilder>> =
         HashMap::with_capacity(region_map.len());
 
     let column_count = insert.columns_values.len();
@@ -133,6 +133,8 @@ fn partition_insert_request(
         }
     }
 
+    let catalog_name = &insert.catalog_name;
+    let schema_name = &insert.schema_name;
     let table_name = &insert.table_name;
     dist_insert
         .into_iter()
@@ -144,6 +146,8 @@ fn partition_insert_request(
             (
                 region_id,
                 InsertRequest {
+                    catalog_name: catalog_name.to_string(),
+                    schema_name: schema_name.to_string(),
                     table_name: table_name.to_string(),
                     columns_values,
                 },
@@ -154,18 +158,22 @@ fn partition_insert_request(
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::{collections::HashMap, result::Result, sync::Arc};
 
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::{
         data_type::ConcreteDataType,
         types::{BooleanType, StringType},
         value::Value,
         vectors::VectorBuilder,
     };
+    use serde::{Deserialize, Serialize};
+    use store_api::storage::RegionNumber;
     use table::requests::InsertRequest;
 
     use super::{
-        check_req, find_partitioning_values, partition_insert_request, partition_values, RegionId,
+        check_req, find_partitioning_values, partition_insert_request, partition_values,
         WriteSpliter,
     };
     use crate::{
@@ -242,13 +250,13 @@ mod tests {
     #[test]
     fn test_partition_insert_request() {
         let insert = mock_insert_request();
-        let mut region_map: HashMap<RegionId, Vec<usize>> = HashMap::with_capacity(2);
+        let mut region_map: HashMap<RegionNumber, Vec<usize>> = HashMap::with_capacity(2);
         region_map.insert(1, vec![2, 0]);
         region_map.insert(2, vec![1]);
 
         let dist_insert = partition_insert_request(&insert, region_map);
 
-        let r1_insert = dist_insert.get(&1_u64).unwrap();
+        let r1_insert = dist_insert.get(&1_u32).unwrap();
         assert_eq!("demo", r1_insert.table_name);
         let expected: Value = 3_i16.into();
         assert_eq!(expected, r1_insert.columns_values.get("id").unwrap().get(0));
@@ -283,7 +291,7 @@ mod tests {
                 .get(1)
         );
 
-        let r2_insert = dist_insert.get(&2_u64).unwrap();
+        let r2_insert = dist_insert.get(&2_u32).unwrap();
         assert_eq!("demo", r2_insert.table_name);
         let expected: Value = 2_i16.into();
         assert_eq!(expected, r2_insert.columns_values.get("id").unwrap().get(0));
@@ -371,6 +379,8 @@ mod tests {
         columns_values.insert("id".to_string(), builder.finish());
 
         InsertRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
         }
@@ -396,11 +406,14 @@ mod tests {
         columns_values.insert("id".to_string(), builder.finish());
 
         InsertRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
         }
     }
 
+    #[derive(Debug, Serialize, Deserialize)]
     struct MockPartitionRule;
 
     // PARTITION BY LIST COLUMNS(id) (
@@ -410,11 +423,15 @@ mod tests {
     impl PartitionRule for MockPartitionRule {
         type Error = Error;
 
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
         fn partition_columns(&self) -> Vec<String> {
             vec!["id".to_string()]
         }
 
-        fn find_region(&self, values: &[Value]) -> Result<RegionId, Self::Error> {
+        fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Self::Error> {
             let val = values.get(0).unwrap().to_owned();
             let id_1: Value = 1_i16.into();
             let id_2: Value = 2_i16.into();
@@ -428,7 +445,7 @@ mod tests {
             unreachable!()
         }
 
-        fn find_regions(&self, _: &[PartitionExpr]) -> Result<Vec<RegionId>, Self::Error> {
+        fn find_regions(&self, _: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
             unimplemented!()
         }
     }

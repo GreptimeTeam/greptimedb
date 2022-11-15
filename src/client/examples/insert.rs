@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use api::v1::{codec::InsertBatch, *};
 use client::{Client, Database};
-
 fn main() {
     tracing::subscriber::set_global_default(tracing_subscriber::FmtSubscriber::builder().finish())
         .unwrap();
@@ -16,11 +15,13 @@ async fn run() {
     let db = Database::new("greptime", client);
 
     let expr = InsertExpr {
+        schema_name: "public".to_string(),
         table_name: "demo".to_string(),
         expr: Some(insert_expr::Expr::Values(insert_expr::Values {
             values: insert_batches(),
         })),
         options: HashMap::default(),
+        region_number: 0,
     };
     db.insert(expr).await.unwrap();
 }

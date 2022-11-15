@@ -117,6 +117,8 @@ impl ScriptsTable {
 
         let _ = table
             .insert(InsertRequest {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name: SCRIPTS_TABLE_NAME.to_string(),
                 columns_values,
             })
@@ -202,7 +204,8 @@ fn build_scripts_schema() -> Schema {
             "timestamp".to_string(),
             ConcreteDataType::timestamp_millis_datatype(),
             false,
-        ),
+        )
+        .with_time_index(true),
         ColumnSchema::new(
             "gmt_created".to_string(),
             ConcreteDataType::timestamp_millis_datatype(),
@@ -216,9 +219,5 @@ fn build_scripts_schema() -> Schema {
     ];
 
     // Schema is always valid here
-    SchemaBuilder::try_from(cols)
-        .unwrap()
-        .timestamp_index(Some(3))
-        .build()
-        .unwrap()
+    SchemaBuilder::try_from(cols).unwrap().build().unwrap()
 }

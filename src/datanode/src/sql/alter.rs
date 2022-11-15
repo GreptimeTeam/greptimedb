@@ -1,8 +1,9 @@
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
-use table::engine::EngineContext;
+use table::engine::{EngineContext, TableReference};
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
 
 use crate::error::{self, Result};
@@ -11,14 +12,29 @@ use crate::sql::SqlHandler;
 impl SqlHandler {
     pub(crate) async fn alter(&self, req: AlterTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
-        let table_name = &req.table_name.clone();
-        if !self.table_engine.table_exists(&ctx, table_name) {
-            return error::TableNotFoundSnafu { table_name }.fail();
-        }
+        let catalog_name = req.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
+        let schema_name = req.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
+        let table_name = &req.table_name.to_string();
+        let table_ref = TableReference {
+            catalog: catalog_name,
+            schema: schema_name,
+            table: table_name,
+        };
+
+        let full_table_name = table_ref.to_string();
+
+        ensure!(
+            self.table_engine.table_exists(&ctx, &table_ref),
+            error::TableNotFoundSnafu {
+                table_name: &full_table_name,
+            }
+        );
         self.table_engine
             .alter_table(&ctx, req)
             .await
-            .context(error::AlterTableSnafu { table_name })?;
+            .context(error::AlterTableSnafu {
+                table_name: full_table_name,
+            })?;
         // Tried in MySQL, it really prints "Affected Rows: 0".
         Ok(Output::AffectedRows(0))
     }
@@ -36,7 +52,7 @@ impl SqlHandler {
             }
             AlterTableOperation::AddColumn { column_def } => AlterKind::AddColumns {
                 columns: vec![AddColumnRequest {
-                    column_schema: column_def_to_schema(column_def)
+                    column_schema: column_def_to_schema(column_def, false)
                         .context(error::ParseSqlSnafu)?,
                     // FIXME(dennis): supports adding key column
                     is_key: false,

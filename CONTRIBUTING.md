@@ -52,7 +52,6 @@ GreptimeDB uses the [Apache 2.0 license](https://github.com/GreptimeTeam/greptim
 - Make sure all unit tests are passed.
 - Make sure all clippy warnings are fixed (you can check it locally by running `cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr`).
 
-
 #### `pre-commit` Hooks
 You could setup the [`pre-commit`](https://pre-commit.com/#plugins) hooks to run these checks on every commit automatically.
 
@@ -78,7 +77,6 @@ pre-commit installed at .git/hooks/pre-pus
 ```
 
 now `pre-commit` will run automatically on `git commit`.
-
 
 ### Title
 

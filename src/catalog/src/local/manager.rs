@@ -6,26 +6,25 @@ use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID,
     SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
 };
-use common_recordbatch::RecordBatch;
+use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use common_telemetry::info;
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::lock::Mutex;
-use futures_util::StreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
+use table::table::TableIdProvider;
 use table::TableRef;
 
-use crate::error::Result;
 use crate::error::{
-    CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu,
-    SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu,
-    TableNotFoundSnafu,
+    CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, SchemaNotFoundSnafu,
+    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
-use crate::local::memory::{MemoryCatalogList, MemoryCatalogProvider, MemorySchemaProvider};
+use crate::error::{ReadSystemCatalogSnafu, Result, SchemaExistsSnafu};
+use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
     decode_system_catalog, Entry, SystemCatalogTable, TableEntry, ENTRY_TYPE_INDEX, KEY_INDEX,
     VALUE_INDEX,
@@ -33,14 +32,14 @@ use crate::system::{
 use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
-    CatalogProvider, CatalogProviderRef, RegisterSystemTableRequest, RegisterTableRequest,
-    SchemaProvider,
+    CatalogProvider, CatalogProviderRef, RegisterSchemaRequest, RegisterSystemTableRequest,
+    RegisterTableRequest, SchemaProvider,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
 pub struct LocalCatalogManager {
     system: Arc<SystemCatalog>,
-    catalogs: Arc<MemoryCatalogList>,
+    catalogs: Arc<MemoryCatalogManager>,
     engine: TableEngineRef,
     next_table_id: AtomicU32,
     init_lock: Mutex<bool>,
@@ -70,17 +69,10 @@ impl LocalCatalogManager {
     /// Scan all entries from system catalog table
     pub async fn init(&self) -> Result<()> {
         self.init_system_catalog()?;
-        let mut system_records = self.system.information_schema.system.records().await?;
-        let mut max_table_id = 0;
-        while let Some(records) = system_records
-            .next()
-            .await
-            .transpose()
-            .context(ReadSystemCatalogSnafu)?
-        {
-            let table_id = self.handle_system_catalog_entries(records).await?;
-            max_table_id = max_table_id.max(table_id);
-        }
+        let system_records = self.system.information_schema.system.records().await?;
+        let entries = self.collect_system_catalog_entries(system_records).await?;
+        let max_table_id = self.handle_system_catalog_entries(entries).await?;
+
         info!(
             "All system catalog entries processed, max table id: {}",
             max_table_id
@@ -110,7 +102,6 @@ impl LocalCatalogManager {
         let default_schema = Arc::new(MemorySchemaProvider::new());
 
         // Add numbers table for test
-        // TODO(hl): remove this registration
         let table = Arc::new(NumbersTable::default());
         default_schema.register_table("numbers".to_string(), table)?;
 
@@ -120,47 +111,65 @@ impl LocalCatalogManager {
         Ok(())
     }
 
-    /// Processes records from system catalog table and returns the max table id persisted
-    /// in system catalog table.
-    async fn handle_system_catalog_entries(&self, records: RecordBatch) -> Result<TableId> {
+    /// Collect stream of system catalog entries to `Vec<Entry>`
+    async fn collect_system_catalog_entries(
+        &self,
+        stream: SendableRecordBatchStream,
+    ) -> Result<Vec<Entry>> {
+        let record_batch = common_recordbatch::util::collect(stream)
+            .await
+            .context(ReadSystemCatalogSnafu)?;
+        let rbs = record_batch
+            .into_iter()
+            .map(Self::record_batch_to_entry)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rbs.into_iter().flat_map(Vec::into_iter).collect::<_>())
+    }
+
+    /// Convert `RecordBatch` to a vector of `Entry`.
+    fn record_batch_to_entry(rb: RecordBatch) -> Result<Vec<Entry>> {
         ensure!(
-            records.df_recordbatch.columns().len() >= 6,
+            rb.df_recordbatch.columns().len() >= 6,
             SystemCatalogSnafu {
-                msg: format!(
-                    "Length mismatch: {}",
-                    records.df_recordbatch.columns().len()
-                )
+                msg: format!("Length mismatch: {}", rb.df_recordbatch.columns().len())
             }
         );
 
-        let entry_type = UInt8Vector::try_from_arrow_array(&records.df_recordbatch.columns()[0])
+        let entry_type = UInt8Vector::try_from_arrow_array(&rb.df_recordbatch.columns()[0])
             .with_context(|_| SystemCatalogTypeMismatchSnafu {
-                data_type: records.df_recordbatch.columns()[ENTRY_TYPE_INDEX]
+                data_type: rb.df_recordbatch.columns()[ENTRY_TYPE_INDEX]
                     .data_type()
                     .clone(),
             })?;
 
-        let key = BinaryVector::try_from_arrow_array(&records.df_recordbatch.columns()[1])
+        let key = BinaryVector::try_from_arrow_array(&rb.df_recordbatch.columns()[1])
             .with_context(|_| SystemCatalogTypeMismatchSnafu {
-                data_type: records.df_recordbatch.columns()[KEY_INDEX]
-                    .data_type()
-                    .clone(),
+                data_type: rb.df_recordbatch.columns()[KEY_INDEX].data_type().clone(),
             })?;
 
-        let value = BinaryVector::try_from_arrow_array(&records.df_recordbatch.columns()[3])
+        let value = BinaryVector::try_from_arrow_array(&rb.df_recordbatch.columns()[3])
             .with_context(|_| SystemCatalogTypeMismatchSnafu {
-                data_type: records.df_recordbatch.columns()[VALUE_INDEX]
-                    .data_type()
-                    .clone(),
+                data_type: rb.df_recordbatch.columns()[VALUE_INDEX].data_type().clone(),
             })?;
 
-        let mut max_table_id = 0;
+        let mut res = Vec::with_capacity(rb.num_rows());
         for ((t, k), v) in entry_type
             .iter_data()
             .zip(key.iter_data())
             .zip(value.iter_data())
         {
             let entry = decode_system_catalog(t, k, v)?;
+            res.push(entry);
+        }
+        Ok(res)
+    }
+
+    /// Processes records from system catalog table and returns the max table id persisted
+    /// in system catalog table.
+    async fn handle_system_catalog_entries(&self, entries: Vec<Entry>) -> Result<TableId> {
+        let entries = Self::sort_entries(entries);
+        let mut max_table_id = 0;
+        for entry in entries {
             match entry {
                 Entry::Catalog(c) => {
                     self.catalogs.register_catalog_if_absent(
@@ -190,6 +199,13 @@ impl LocalCatalogManager {
             }
         }
         Ok(max_table_id)
+    }
+
+    /// Sort catalog entries to ensure catalog entries comes first, then schema entries,
+    /// and table entries is the last.
+    fn sort_entries(mut entries: Vec<Entry>) -> Vec<Entry> {
+        entries.sort();
+        entries
     }
 
     async fn open_and_register_table(&self, t: &TableEntry) -> Result<()> {
@@ -264,16 +280,18 @@ impl CatalogList for LocalCatalogManager {
 }
 
 #[async_trait::async_trait]
+impl TableIdProvider for LocalCatalogManager {
+    async fn next_table_id(&self) -> table::Result<TableId> {
+        Ok(self.next_table_id.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[async_trait::async_trait]
 impl CatalogManager for LocalCatalogManager {
     /// Start [LocalCatalogManager] to load all information from system catalog table.
     /// Make sure table engine is initialized before starting [MemoryCatalogManager].
     async fn start(&self) -> Result<()> {
         self.init().await
-    }
-
-    #[inline]
-    async fn next_table_id(&self) -> Result<TableId> {
-        Ok(self.next_table_id.fetch_add(1, Ordering::Relaxed))
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
@@ -319,6 +337,34 @@ impl CatalogManager for LocalCatalogManager {
         Ok(1)
     }
 
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+        let started = self.init_lock.lock().await;
+        ensure!(
+            *started,
+            IllegalManagerStateSnafu {
+                msg: "Catalog manager not started",
+            }
+        );
+        let catalog_name = &request.catalog;
+        let schema_name = &request.schema;
+
+        let catalog = self
+            .catalogs
+            .catalog(catalog_name)?
+            .context(CatalogNotFoundSnafu { catalog_name })?;
+        if catalog.schema(schema_name)?.is_some() {
+            return SchemaExistsSnafu {
+                schema: schema_name,
+            }
+            .fail();
+        }
+        self.system
+            .register_schema(request.catalog, schema_name.clone())
+            .await?;
+        catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
+        Ok(1)
+    }
+
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
         ensure!(
             !*self.init_lock.lock().await,
@@ -349,5 +395,52 @@ impl CatalogManager for LocalCatalogManager {
                 schema_info: format!("{}.{}", catalog_name, schema_name),
             })?;
         schema.table(table_name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+
+    use super::*;
+    use crate::system::{CatalogEntry, SchemaEntry};
+
+    #[test]
+    fn test_sort_entry() {
+        let vec = vec![
+            Entry::Table(TableEntry {
+                catalog_name: "C1".to_string(),
+                schema_name: "S1".to_string(),
+                table_name: "T1".to_string(),
+                table_id: 1,
+            }),
+            Entry::Catalog(CatalogEntry {
+                catalog_name: "C2".to_string(),
+            }),
+            Entry::Schema(SchemaEntry {
+                catalog_name: "C1".to_string(),
+                schema_name: "S1".to_string(),
+            }),
+            Entry::Schema(SchemaEntry {
+                catalog_name: "C2".to_string(),
+                schema_name: "S2".to_string(),
+            }),
+            Entry::Catalog(CatalogEntry {
+                catalog_name: "".to_string(),
+            }),
+            Entry::Table(TableEntry {
+                catalog_name: "C1".to_string(),
+                schema_name: "S1".to_string(),
+                table_name: "T2".to_string(),
+                table_id: 2,
+            }),
+        ];
+        let res = LocalCatalogManager::sort_entries(vec);
+        assert_matches!(res[0], Entry::Catalog(..));
+        assert_matches!(res[1], Entry::Catalog(..));
+        assert_matches!(res[2], Entry::Schema(..));
+        assert_matches!(res[3], Entry::Schema(..));
+        assert_matches!(res[4], Entry::Table(..));
+        assert_matches!(res[5], Entry::Table(..));
     }
 }

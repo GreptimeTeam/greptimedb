@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use common_time::{util, Timestamp};
+use common_time::util;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
-use crate::scalars::ScalarVector;
 use crate::value::Value;
-use crate::vectors::{ConstantVector, TimestampVector, VectorRef};
+use crate::vectors::{Int64Vector, TimestampVector, VectorRef};
 
 const CURRENT_TIMESTAMP: &str = "current_timestamp()";
 
@@ -31,11 +30,11 @@ impl TryFrom<&[u8]> for ColumnDefaultConstraint {
     }
 }
 
-impl TryInto<Vec<u8>> for ColumnDefaultConstraint {
+impl TryFrom<ColumnDefaultConstraint> for Vec<u8> {
     type Error = error::Error;
 
-    fn try_into(self) -> Result<Vec<u8>> {
-        let s = serde_json::to_string(&self).context(error::SerializeSnafu)?;
+    fn try_from(value: ColumnDefaultConstraint) -> std::result::Result<Self, Self::Error> {
+        let s = serde_json::to_string(&value).context(error::SerializeSnafu)?;
         Ok(s.into_bytes())
     }
 }
@@ -107,15 +106,7 @@ impl ColumnDefaultConstraint {
                 match &expr[..] {
                     // TODO(dennis): we only supports current_timestamp right now,
                     //   it's better to use a expression framework in future.
-                    CURRENT_TIMESTAMP => {
-                        // TODO(yingwen): We should coerce the type to the physical type of
-                        // input `data_type`.
-                        let vector =
-                            Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
-                                util::current_time_millis(),
-                            )]));
-                        Ok(Arc::new(ConstantVector::new(vector, num_rows)))
-                    }
+                    CURRENT_TIMESTAMP => create_current_timestamp_vector(data_type, num_rows),
                     _ => error::UnsupportedDefaultExprSnafu { expr }.fail(),
                 }
             }
@@ -143,9 +134,31 @@ impl ColumnDefaultConstraint {
     }
 }
 
+fn create_current_timestamp_vector(
+    data_type: &ConcreteDataType,
+    num_rows: usize,
+) -> Result<VectorRef> {
+    match data_type {
+        ConcreteDataType::Timestamp(_) => Ok(Arc::new(TimestampVector::from_values(
+            std::iter::repeat(util::current_time_millis()).take(num_rows),
+        ))),
+        ConcreteDataType::Int64(_) => Ok(Arc::new(Int64Vector::from_values(
+            std::iter::repeat(util::current_time_millis()).take(num_rows),
+        ))),
+        _ => error::DefaultValueTypeSnafu {
+            reason: format!(
+                "Not support to assign current timestamp to {:?} type",
+                data_type
+            ),
+        }
+        .fail(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
     use crate::vectors::Int32Vector;
 
     #[test]
@@ -224,6 +237,7 @@ mod tests {
     #[test]
     fn test_create_default_vector_by_func() {
         let constraint = ColumnDefaultConstraint::Function(CURRENT_TIMESTAMP.to_string());
+        // Timestamp type.
         let data_type = ConcreteDataType::timestamp_millis_datatype();
         let v = constraint
             .create_default_vector(&data_type, false, 4)
@@ -235,10 +249,32 @@ mod tests {
             v.get(0)
         );
 
+        // Int64 type.
+        let data_type = ConcreteDataType::int64_datatype();
+        let v = constraint
+            .create_default_vector(&data_type, false, 4)
+            .unwrap();
+        assert_eq!(4, v.len());
+        assert!(
+            matches!(v.get(0), Value::Int64(_)),
+            "v {:?} is not timestamp",
+            v.get(0)
+        );
+
         let constraint = ColumnDefaultConstraint::Function("no".to_string());
         let data_type = ConcreteDataType::timestamp_millis_datatype();
         constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap_err();
+    }
+
+    #[test]
+    fn test_create_by_func_and_invalid_type() {
+        let constraint = ColumnDefaultConstraint::Function(CURRENT_TIMESTAMP.to_string());
+        let data_type = ConcreteDataType::boolean_datatype();
+        let err = constraint
+            .create_default_vector(&data_type, false, 4)
+            .unwrap_err();
+        assert!(matches!(err, Error::DefaultValueType { .. }), "{:?}", err);
     }
 }

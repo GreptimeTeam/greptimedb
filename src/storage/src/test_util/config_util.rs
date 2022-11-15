@@ -40,7 +40,7 @@ pub async fn new_store_config(
         log_store,
         sst_layer,
         manifest,
-        memtable_builder: Arc::new(DefaultMemtableBuilder {}),
+        memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
         flush_scheduler,
         flush_strategy: Arc::new(SizeBasedStrategy::default()),
     }

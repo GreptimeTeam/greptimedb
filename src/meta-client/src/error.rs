@@ -46,7 +46,7 @@ pub enum Error {
     #[snafu(display("Failed create heartbeat stream to server"))]
     CreateHeartbeatStream { backtrace: Backtrace },
 
-    #[snafu(display("Route info corruped: {}", err_msg))]
+    #[snafu(display("Route info corrupted: {}", err_msg))]
     RouteInfoCorrupted {
         err_msg: String,
         backtrace: Backtrace,

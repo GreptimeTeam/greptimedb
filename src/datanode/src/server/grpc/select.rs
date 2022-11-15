@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
+use api::result::{build_err_result, ObjectResultBuilder};
 use api::v1::{codec::SelectResult, column::SemanticType, column::Values, Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::BitVec;
@@ -12,7 +13,6 @@ use datatypes::schema::SchemaRef;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, ConversionSnafu, Result};
-use crate::server::grpc::handler::{build_err_result, ObjectResultBuilder};
 
 pub async fn to_object_result(output: Result<Output>) -> ObjectResult {
     let result = match output {

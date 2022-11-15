@@ -234,7 +234,7 @@ impl<'a> ParserContext<'a> {
     }
 
     #[inline]
-    fn peek_token_as_string(&self) -> String {
+    pub(crate) fn peek_token_as_string(&self) -> String {
         self.parser.peek_token().to_string()
     }
 

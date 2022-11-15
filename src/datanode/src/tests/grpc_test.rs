@@ -4,30 +4,38 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::ColumnDataType;
 use api::v1::{
     admin_result, alter_expr::Kind, codec::InsertBatch, column, column::SemanticType, insert_expr,
     AddColumn, AlterExpr, Column, ColumnDef, CreateExpr, InsertExpr, MutateResult,
 };
+use api::v1::{AddColumns, ColumnDataType};
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_runtime::Builder as RuntimeBuilder;
+use frontend::frontend::FrontendOptions;
+use frontend::frontend::Mode::Standalone;
+use frontend::grpc::GrpcOptions;
 use servers::grpc::GrpcServer;
 use servers::server::Server;
 
 use crate::instance::Instance;
 use crate::tests::test_util::{self, TestGuard};
 
-async fn setup_grpc_server(name: &str, port: usize) -> (String, TestGuard, Arc<GrpcServer>) {
+async fn setup_grpc_server(
+    name: &str,
+    datanode_port: usize,
+    frontend_port: usize,
+) -> (String, TestGuard, Arc<GrpcServer>, Arc<GrpcServer>) {
     common_telemetry::init_default_ut_logging();
 
     let (mut opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
-    let addr = format!("127.0.0.1:{}", port);
-    opts.rpc_addr = addr.clone();
+    let datanode_grpc_addr = format!("127.0.0.1:{}", datanode_port);
+    opts.rpc_addr = datanode_grpc_addr.clone();
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
     instance.start().await.unwrap();
 
-    let addr_cloned = addr.clone();
+    let datanode_grpc_addr = datanode_grpc_addr.clone();
     let runtime = Arc::new(
         RuntimeBuilder::default()
             .worker_threads(2)
@@ -36,30 +44,65 @@ async fn setup_grpc_server(name: &str, port: usize) -> (String, TestGuard, Arc<G
             .unwrap(),
     );
 
-    let grpc_server = Arc::new(GrpcServer::new(instance.clone(), instance, runtime));
-    let grpc_server_clone = grpc_server.clone();
+    let fe_grpc_addr = format!("127.0.0.1:{}", frontend_port);
+    let fe_opts = FrontendOptions {
+        mode: Standalone,
+        datanode_rpc_addr: datanode_grpc_addr.clone(),
+        grpc_options: Some(GrpcOptions {
+            addr: fe_grpc_addr.clone(),
+            runtime_size: 8,
+        }),
+        ..Default::default()
+    };
 
+    let datanode_grpc_server = Arc::new(GrpcServer::new(
+        instance.clone(),
+        instance.clone(),
+        runtime.clone(),
+    ));
+
+    let mut fe_instance = frontend::instance::Instance::try_new(&fe_opts)
+        .await
+        .unwrap();
+    fe_instance.set_catalog_manager(instance.catalog_manager.clone());
+
+    let fe_instance_ref = Arc::new(fe_instance);
+    let fe_grpc_server = Arc::new(GrpcServer::new(
+        fe_instance_ref.clone(),
+        fe_instance_ref,
+        runtime,
+    ));
+    let grpc_server_clone = fe_grpc_server.clone();
+
+    let fe_grpc_addr_clone = fe_grpc_addr.clone();
     tokio::spawn(async move {
-        let addr = addr_cloned.parse::<SocketAddr>().unwrap();
+        let addr = fe_grpc_addr_clone.parse::<SocketAddr>().unwrap();
         grpc_server_clone.start(addr).await.unwrap()
+    });
+
+    let dn_grpc_addr_clone = datanode_grpc_addr.clone();
+    let dn_grpc_server_clone = datanode_grpc_server.clone();
+    tokio::spawn(async move {
+        let addr = dn_grpc_addr_clone.parse::<SocketAddr>().unwrap();
+        dn_grpc_server_clone.start(addr).await.unwrap()
     });
 
     // wait for GRPC server to start
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    (addr, guard, grpc_server)
+    (fe_grpc_addr, guard, fe_grpc_server, datanode_grpc_server)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auto_create_table() {
-    let (addr, _guard, grpc_server) = setup_grpc_server("auto_create_table", 3991).await;
+    let (addr, _guard, fe_grpc_server, dn_grpc_server) =
+        setup_grpc_server("auto_create_table", 3992, 3993).await;
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new("greptime", grpc_client);
-
     insert_and_assert(&db).await;
-
-    grpc_server.shutdown().await.unwrap();
+    let _ = fe_grpc_server.shutdown().await;
+    let _ = dn_grpc_server.shutdown().await;
 }
 
 fn expect_data() -> (Column, Column, Column, Column) {
@@ -119,7 +162,8 @@ fn expect_data() -> (Column, Column, Column, Column) {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_insert_and_select() {
     common_telemetry::init_default_ut_logging();
-    let (addr, _guard, grpc_server) = setup_grpc_server("insert_and_select", 3990).await;
+    let (addr, _guard, fe_grpc_server, dn_grpc_server) =
+        setup_grpc_server("insert_and_select", 3990, 3991).await;
 
     let grpc_client = Client::with_urls(vec![addr]);
 
@@ -144,8 +188,11 @@ async fn test_insert_and_select() {
         is_nullable: true,
         default_constraint: None,
     };
-    let kind = Kind::AddColumn(AddColumn {
-        column_def: Some(add_column),
+    let kind = Kind::AddColumns(AddColumns {
+        add_columns: vec![AddColumn {
+            column_def: Some(add_column),
+            is_key: false,
+        }],
     });
     let expr = AlterExpr {
         table_name: "test_table".to_string(),
@@ -159,7 +206,8 @@ async fn test_insert_and_select() {
     // insert
     insert_and_assert(&db).await;
 
-    grpc_server.shutdown().await.unwrap();
+    let _ = fe_grpc_server.shutdown().await;
+    let _ = dn_grpc_server.shutdown().await;
 }
 
 async fn insert_and_assert(db: &Database) {
@@ -177,12 +225,14 @@ async fn insert_and_assert(db: &Database) {
     }
     .into()];
     let expr = InsertExpr {
+        schema_name: "public".to_string(),
         table_name: "demo".to_string(),
         expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
         options: HashMap::default(),
+        region_number: 0,
     };
     let result = db.insert(expr).await;
-    assert!(result.is_ok());
+    result.unwrap();
 
     // select
     let result = db
@@ -248,6 +298,8 @@ fn testing_create_expr() -> CreateExpr {
         time_index: "ts".to_string(),
         primary_keys: vec!["ts".to_string(), "host".to_string()],
         create_if_not_exists: true,
-        table_options: HashMap::from([("region_id".to_string(), "0".to_string())]),
+        table_options: Default::default(),
+        table_id: Some(MIN_USER_TABLE_ID),
+        region_ids: vec![0],
     }
 }

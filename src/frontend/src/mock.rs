@@ -4,7 +4,6 @@ use std::fmt::Formatter;
 use std::sync::Arc;
 
 use api::v1::InsertExpr;
-use catalog::CatalogManagerRef;
 use client::ObjectResult;
 use client::{Database, Select};
 use common_query::prelude::Expr;
@@ -15,15 +14,14 @@ use datafusion::logical_plan::{LogicalPlan as DfLogicPlan, LogicalPlanBuilder};
 use datafusion_expr::Expr as DfExpr;
 use datatypes::prelude::Value;
 use datatypes::schema::SchemaRef;
+use meta_client::rpc::TableName;
 use query::plan::LogicalPlan;
 use table::table::adapter::DfTableProviderAdapter;
-
-pub(crate) type DatanodeId = u64;
+use table::TableRef;
 
 #[derive(Clone)]
-pub(crate) struct DatanodeInstance {
-    pub(crate) datanode_id: DatanodeId,
-    catalog_manager: CatalogManagerRef,
+pub struct DatanodeInstance {
+    table: TableRef,
     db: Database,
 }
 
@@ -34,30 +32,19 @@ impl std::fmt::Debug for DatanodeInstance {
 }
 
 impl DatanodeInstance {
-    #[allow(dead_code)]
-    pub(crate) fn new(
-        datanode_id: DatanodeId,
-        catalog_manager: CatalogManagerRef,
-        db: Database,
-    ) -> Self {
-        Self {
-            datanode_id,
-            catalog_manager,
-            db,
-        }
+    pub(crate) fn new(table: TableRef, db: Database) -> Self {
+        Self { table, db }
     }
 
     pub(crate) async fn grpc_insert(&self, request: InsertExpr) -> client::Result<ObjectResult> {
         self.db.insert(request).await
     }
 
-    #[allow(clippy::print_stdout)]
     pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> RecordBatches {
         let logical_plan = self.build_logical_plan(&plan);
 
         // TODO(LFC): Directly pass in logical plan to GRPC interface when our substrait codec supports filter.
         let sql = to_sql(logical_plan);
-        println!("executing sql \"{}\" in datanode {}", sql, self.datanode_id);
         let result = self.db.select(Select::Sql(sql)).await.unwrap();
 
         let output: Output = result.try_into().unwrap();
@@ -72,13 +59,10 @@ impl DatanodeInstance {
     }
 
     fn build_logical_plan(&self, table_scan: &TableScanPlan) -> LogicalPlan {
-        let catalog = self.catalog_manager.catalog("greptime").unwrap().unwrap();
-        let schema = catalog.schema("public").unwrap().unwrap();
-        let table = schema.table(&table_scan.table_name).unwrap().unwrap();
-        let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
+        let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
 
         let mut builder = LogicalPlanBuilder::scan_with_filters(
-            table_scan.table_name.clone(),
+            &table_scan.table_name.table_name,
             table_provider,
             table_scan.projection.clone(),
             table_scan
@@ -99,7 +83,7 @@ impl DatanodeInstance {
 
 #[derive(Debug)]
 pub(crate) struct TableScanPlan {
-    pub table_name: String,
+    pub table_name: TableName,
     pub projection: Option<Vec<usize>>,
     pub filters: Vec<Expr>,
     pub limit: Option<usize>,

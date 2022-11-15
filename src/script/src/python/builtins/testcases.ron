@@ -1,4 +1,4 @@
-// This is the file for UDF&UDAF binding from datafusion, 
+// This is the file for UDF&UDAF binding from datafusion,
 // including most test for those function(except ApproxMedian which datafusion didn't implement)
 // check src/script/builtins/test.rs::run_builtin_fn_testcases() for more information
 [
@@ -632,7 +632,7 @@ variance_pop(values)"#,
             ty: Float64
         ))
     ),
-    
+
 
 // GrepTime's own UDF
     TestCase(
@@ -782,7 +782,7 @@ sin(num)"#,
         script: r#"
 from greptime import *
 sin(num)"#,
-        expect: Err("Can't cast object of type str into vector or scalar")
+        expect: Err("TypeError: Can't cast type Utf8 to Float64")
     ),
     TestCase(
         input: {},

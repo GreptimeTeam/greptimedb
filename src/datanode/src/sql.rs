@@ -5,7 +5,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::show::{ShowDatabases, ShowTables};
-use table::engine::{EngineContext, TableEngineRef};
+use table::engine::{EngineContext, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
@@ -22,7 +22,8 @@ mod show;
 #[derive(Debug)]
 pub enum SqlRequest {
     Insert(InsertRequest),
-    Create(CreateTableRequest),
+    CreateTable(CreateTableRequest),
+    CreateDatabase(CreateDatabaseRequest),
     Alter(AlterTableRequest),
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
@@ -45,18 +46,23 @@ impl SqlHandler {
     pub async fn execute(&self, request: SqlRequest) -> Result<Output> {
         match request {
             SqlRequest::Insert(req) => self.insert(req).await,
-            SqlRequest::Create(req) => self.create(req).await,
+            SqlRequest::CreateTable(req) => self.create_table(req).await,
+            SqlRequest::CreateDatabase(req) => self.create_database(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::ShowDatabases(stmt) => self.show_databases(stmt).await,
             SqlRequest::ShowTables(stmt) => self.show_tables(stmt).await,
         }
     }
 
-    pub(crate) fn get_table(&self, table_name: &str) -> Result<TableRef> {
+    pub(crate) fn get_table<'a>(&self, table_ref: &'a TableReference) -> Result<TableRef> {
         self.table_engine
-            .get_table(&EngineContext::default(), table_name)
-            .context(GetTableSnafu { table_name })?
-            .context(TableNotFoundSnafu { table_name })
+            .get_table(&EngineContext::default(), table_ref)
+            .with_context(|_| GetTableSnafu {
+                table_name: table_ref.to_string(),
+            })?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })
     }
 
     pub(crate) fn get_default_catalog(&self) -> Result<CatalogProviderRef> {
@@ -127,13 +133,13 @@ mod tests {
                 ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
                 ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
                 ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true),
+                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true)
+                    .with_time_index(true),
             ];
 
             Arc::new(
                 SchemaBuilder::try_from(column_schemas)
                     .unwrap()
-                    .timestamp_index(Some(3))
                     .build()
                     .unwrap(),
             )
@@ -212,7 +218,7 @@ mod tests {
                 .unwrap(),
         );
         let factory = QueryEngineFactory::new(catalog_list.clone());
-        let query_engine = factory.query_engine().clone();
+        let query_engine = factory.query_engine();
         let sql_handler = SqlHandler::new(table_engine, catalog_list);
 
         let stmt = match query_engine.sql_to_statement(sql).unwrap() {

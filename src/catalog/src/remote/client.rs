@@ -1,4 +1,5 @@
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use async_stream::stream;
 use common_telemetry::info;
@@ -10,7 +11,7 @@ use crate::error::{Error, MetaSrvSnafu};
 use crate::remote::{Kv, KvBackend, ValueIter};
 #[derive(Debug)]
 pub struct MetaKvBackend {
-    pub client: MetaClient,
+    pub client: Arc<MetaClient>,
 }
 
 /// Implement `KvBackend` trait for `MetaKvBackend` instead of opendal's `Accessor` since

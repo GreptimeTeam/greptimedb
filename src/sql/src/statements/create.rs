@@ -29,3 +29,8 @@ pub struct PartitionEntry {
     pub name: Ident,
     pub value_list: Vec<SqlValue>,
 }
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct CreateDatabase {
+    pub name: ObjectName,
+}

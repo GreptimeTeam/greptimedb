@@ -124,7 +124,7 @@ mod tests {
         );
 
         let factory = QueryEngineFactory::new(catalog_manager.clone());
-        let query_engine = factory.query_engine().clone();
+        let query_engine = factory.query_engine();
         let mgr = ScriptManager::new(catalog_manager.clone(), query_engine)
             .await
             .unwrap();

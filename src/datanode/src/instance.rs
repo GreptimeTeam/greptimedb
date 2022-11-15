@@ -5,16 +5,20 @@ use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
+use frontend::frontend::Mode;
 use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
 use meta_client::client::{MetaClient, MetaClientBuilder};
+use meta_client::MetaClientOpts;
+use object_store::layers::LoggingLayer;
 use object_store::{services::fs::Builder, util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use snafu::prelude::*;
 use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
+use table::table::TableIdProviderRef;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
-use crate::datanode::{DatanodeOptions, MetaClientOpts, Mode, ObjectStoreConfig};
+use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{self, CatalogSnafu, MetaClientInitSnafu, NewCatalogSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
@@ -33,8 +37,9 @@ pub struct Instance {
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) physical_planner: PhysicalPlanner,
     pub(crate) script_executor: ScriptExecutor,
+    pub(crate) table_id_provider: Option<TableIdProviderRef>,
     #[allow(unused)]
-    pub(crate) meta_client: Option<MetaClient>,
+    pub(crate) meta_client: Option<Arc<MetaClient>>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
 }
 
@@ -47,8 +52,9 @@ impl Instance {
 
         let meta_client = match opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed => {
-                Some(new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?)
+            Mode::Distributed(_) => {
+                let meta_client = new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?;
+                Some(Arc::new(meta_client))
             }
         };
 
@@ -63,7 +69,7 @@ impl Instance {
         ));
 
         // create remote catalog manager
-        let (catalog_manager, factory) = match opts.mode {
+        let (catalog_manager, factory, table_id_provider) = match opts.mode {
             Mode::Standalone => {
                 let catalog = Arc::new(
                     catalog::local::LocalCatalogManager::try_new(table_engine.clone())
@@ -71,10 +77,14 @@ impl Instance {
                         .context(CatalogSnafu)?,
                 );
                 let factory = QueryEngineFactory::new(catalog.clone());
-                (catalog as CatalogManagerRef, factory)
+                (
+                    catalog.clone() as CatalogManagerRef,
+                    factory,
+                    Some(catalog as TableIdProviderRef),
+                )
             }
 
-            Mode::Distributed => {
+            Mode::Distributed(_) => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
                     table_engine.clone(),
                     opts.node_id,
@@ -83,17 +93,17 @@ impl Instance {
                     }),
                 ));
                 let factory = QueryEngineFactory::new(catalog.clone());
-                (catalog as CatalogManagerRef, factory)
+                (catalog as CatalogManagerRef, factory, None)
             }
         };
 
-        let query_engine = factory.query_engine().clone();
+        let query_engine = factory.query_engine();
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed => Some(HeartbeatTask::new(
+            Mode::Distributed(_) => Some(HeartbeatTask::new(
                 opts.node_id, /*node id not set*/
                 opts.rpc_addr.clone(),
                 meta_client.as_ref().unwrap().clone(),
@@ -107,6 +117,7 @@ impl Instance {
             script_executor,
             meta_client,
             heartbeat_task,
+            table_id_provider,
         })
     }
 
@@ -146,7 +157,9 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         .build()
         .context(error::InitBackendSnafu { dir: &data_dir })?;
 
-    Ok(ObjectStore::new(accessor))
+    let object_store = ObjectStore::new(accessor).layer(LoggingLayer); // Add logging
+
+    Ok(object_store)
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.

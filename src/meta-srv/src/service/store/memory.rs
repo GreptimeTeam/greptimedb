@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -17,8 +17,8 @@ use api::v1::meta::RangeResponse;
 use api::v1::meta::ResponseHeader;
 use parking_lot::RwLock;
 
-use super::kv::KvStore;
 use crate::error::Result;
+use crate::service::store::kv::KvStore;
 
 /// Only for mock test
 #[derive(Clone)]
@@ -146,19 +146,26 @@ impl KvStore for MemStore {
 
         let mut memory = self.inner.write();
 
-        let prev_val = memory.get(&key);
+        let (success, prev_kv) = match memory.entry(key) {
+            Entry::Vacant(e) => {
+                let success = expect.is_empty();
+                if success {
+                    e.insert(value);
+                }
+                (success, None)
+            }
+            Entry::Occupied(mut e) => {
+                let key = e.key().clone();
+                let prev_val = e.get().clone();
+                let success = prev_val == expect;
+                if success {
+                    e.insert(value);
+                }
+                (success, Some((key, prev_val)))
+            }
+        };
 
-        let success = prev_val
-            .map(|v| expect.cmp(v) == Ordering::Equal)
-            .unwrap_or(false | expect.is_empty());
-        let prev_kv = prev_val.map(|v| KeyValue {
-            key: key.clone(),
-            value: v.clone(),
-        });
-
-        if success {
-            memory.insert(key, value);
-        }
+        let prev_kv = prev_kv.map(|(key, value)| KeyValue { key, value });
 
         let cluster_id = header.map_or(0, |h| h.cluster_id);
         let header = Some(ResponseHeader::success(cluster_id));

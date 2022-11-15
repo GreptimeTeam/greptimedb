@@ -13,7 +13,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
 use serde::Serializer;
-use table::engine::{EngineContext, TableEngine};
+use table::engine::{EngineContext, TableEngine, TableReference};
 use table::metadata::TableId;
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::test_util::MemTable;
@@ -151,6 +151,7 @@ impl TableEngine for MockTableEngine {
             table_id,
             catalog_name,
             schema_name,
+            vec![0],
         )) as Arc<_>;
 
         let mut tables = self.tables.write().await;
@@ -174,12 +175,28 @@ impl TableEngine for MockTableEngine {
         unimplemented!()
     }
 
-    fn get_table(&self, _ctx: &EngineContext, name: &str) -> table::Result<Option<TableRef>> {
-        futures::executor::block_on(async { Ok(self.tables.read().await.get(name).cloned()) })
+    fn get_table<'a>(
+        &self,
+        _ctx: &EngineContext,
+        table_ref: &'a TableReference,
+    ) -> table::Result<Option<TableRef>> {
+        futures::executor::block_on(async {
+            Ok(self
+                .tables
+                .read()
+                .await
+                .get(&table_ref.to_string())
+                .cloned())
+        })
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, name: &str) -> bool {
-        futures::executor::block_on(async { self.tables.read().await.contains_key(name) })
+    fn table_exists<'a>(&self, _ctx: &EngineContext, table_ref: &'a TableReference) -> bool {
+        futures::executor::block_on(async {
+            self.tables
+                .read()
+                .await
+                .contains_key(&table_ref.to_string())
+        })
     }
 
     async fn drop_table(

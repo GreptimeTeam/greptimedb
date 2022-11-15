@@ -1,5 +1,6 @@
 use common_error::prelude::*;
-use tonic::{Code, Status};
+use tonic::Code;
+use tonic::Status;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -79,6 +80,36 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Cannot parse catalog value, source: {}", source))]
+    InvalidCatalogValue {
+        #[snafu(backtrace)]
+        source: common_catalog::error::Error,
+    },
+
+    #[snafu(display("Unexcepted sequence value: {}", err_msg))]
+    UnexceptedSequenceValue {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to decode table route, source: {}", source))]
+    DecodeTableRoute {
+        source: prost::DecodeError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Table route not found: {}", key))]
+    TableRouteNotFound { key: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to get sequence: {}", err_msg))]
+    NextSequence {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("MetaSrv has no leader at this moment"))]
+    NoLeader { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -106,15 +137,20 @@ impl ErrorExt for Error {
             | Error::TcpBind { .. }
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
+            | Error::DecodeTableRoute { .. }
+            | Error::NoLeader { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }
             | Error::InvalidLeaseKey { .. }
             | Error::ParseNum { .. }
             | Error::InvalidArguments { .. } => StatusCode::InvalidArguments,
-            Error::LeaseKeyFromUtf8 { .. } | Error::InvalidTxnResult { .. } => {
-                StatusCode::Unexpected
-            }
+            Error::LeaseKeyFromUtf8 { .. }
+            | Error::UnexceptedSequenceValue { .. }
+            | Error::TableRouteNotFound { .. }
+            | Error::NextSequence { .. }
+            | Error::InvalidTxnResult { .. } => StatusCode::Unexpected,
+            Error::InvalidCatalogValue { source, .. } => source.status_code(),
         }
     }
 }

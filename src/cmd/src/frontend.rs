@@ -1,5 +1,5 @@
 use clap::Parser;
-use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::frontend::{Frontend, FrontendOptions, Mode};
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::Instance;
@@ -52,12 +52,19 @@ pub struct StartCommand {
     config_file: Option<String>,
     #[clap(short, long)]
     influxdb_enable: Option<bool>,
+    #[clap(long)]
+    metasrv_addr: Option<String>,
 }
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        let opts = self.try_into()?;
-        let mut frontend = Frontend::new(opts, Instance::new());
+        let opts: FrontendOptions = self.try_into()?;
+        let mut frontend = Frontend::new(
+            opts.clone(),
+            Instance::try_new(&opts)
+                .await
+                .context(error::StartFrontendSnafu)?,
+        );
         frontend.start().await.context(error::StartFrontendSnafu)
     }
 }
@@ -102,6 +109,15 @@ impl TryFrom<StartCommand> for FrontendOptions {
         if let Some(enable) = cmd.influxdb_enable {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
+        if let Some(metasrv_addr) = cmd.metasrv_addr {
+            opts.mode = Mode::Distributed(
+                metasrv_addr
+                    .split(',')
+                    .into_iter()
+                    .map(|x| x.trim().to_string())
+                    .collect::<Vec<String>>(),
+            );
+        }
         Ok(opts)
     }
 }
@@ -120,6 +136,7 @@ mod tests {
             opentsdb_addr: Some("127.0.0.1:4321".to_string()),
             influxdb_enable: Some(false),
             config_file: None,
+            metasrv_addr: None,
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();

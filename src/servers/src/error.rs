@@ -68,6 +68,13 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to execute alter: {}, source: {}", query, source))]
+    ExecuteAlter {
+        query: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to insert script with name: {}, source: {}", name, source))]
     InsertScript {
         name: String,
@@ -154,7 +161,25 @@ pub enum Error {
     InvalidPromRemoteReadQueryResult { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to decode region id, source: {}", source))]
-    DecodeRegionId { source: api::DecodeError },
+    DecodeRegionNumber { source: api::DecodeError },
+
+    #[snafu(display("Failed to build gRPC reflection service, source: {}", source))]
+    GrpcReflectionService {
+        source: tonic_reflection::server::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to start frontend service, source: {}", source))]
+    StartFrontend {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to build context, msg: {}", err_msg))]
+    BuildingContext {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -172,12 +197,15 @@ impl ErrorExt for Error {
             | StartGrpc { .. }
             | AlreadyStarted { .. }
             | InvalidPromRemoteReadQueryResult { .. }
-            | TcpBind { .. } => StatusCode::Internal,
+            | TcpBind { .. }
+            | GrpcReflectionService { .. }
+            | BuildingContext { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
             | ExecuteInsert { source, .. }
+            | ExecuteAlter { source, .. }
             | PutOpentsdbDataPoint { source, .. } => source.status_code(),
 
             NotSupported { .. }
@@ -189,11 +217,12 @@ impl ErrorExt for Error {
             | DecodePromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
-            | DecodeRegionId { .. }
+            | DecodeRegionNumber { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } => source.status_code(),
             Hyper { .. } => StatusCode::Unknown,
+            StartFrontend { source, .. } => source.status_code(),
         }
     }
 

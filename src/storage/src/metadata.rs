@@ -383,8 +383,10 @@ impl ColumnMetadata {
     /// would store additional metadatas to the ColumnSchema.
     pub fn to_column_schema(&self) -> Result<ColumnSchema> {
         let desc = &self.desc;
+
         ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable())
             .with_metadata(self.to_metadata())
+            .with_time_index(self.desc.is_time_index())
             .with_default_constraint(desc.default_constraint().cloned())
             .context(ToColumnSchemaSnafu)
     }
@@ -405,6 +407,7 @@ impl ColumnMetadata {
             column_schema.data_type.clone(),
         )
         .is_nullable(column_schema.is_nullable())
+        .is_time_index(column_schema.is_time_index())
         .default_constraint(column_schema.default_constraint().cloned())
         .comment(comment)
         .build()
@@ -1002,6 +1005,7 @@ mod tests {
 
         let timestamp = ColumnDescriptorBuilder::new(2, "ts", ConcreteDataType::int64_datatype())
             .is_nullable(false)
+            .is_time_index(true)
             .build()
             .unwrap();
         let row_key = RowKeyDescriptorBuilder::new(timestamp)
@@ -1021,6 +1025,7 @@ mod tests {
         let timestamp =
             ColumnDescriptorBuilder::new(2, "ts", ConcreteDataType::timestamp_millis_datatype())
                 .is_nullable(false)
+                .is_time_index(true)
                 .build()
                 .unwrap();
         let row_key = RowKeyDescriptorBuilder::new(timestamp)

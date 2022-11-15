@@ -19,7 +19,7 @@ pub enum Error {
     Unsupported { sql: String, keyword: String },
 
     #[snafu(display(
-        "Unexpected token while parsing SQL statement: {}, expected: {}, found: {}, source: {}",
+        "Unexpected token while parsing SQL statement: {}, expected: '{}', found: {}, source: {}",
         sql,
         expected,
         actual,
@@ -92,6 +92,24 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Unsupported ALTER TABLE statement: {}", msg))]
+    UnsupportedAlterTableStatement { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to serialize column default constraint, source: {}", source))]
+    SerializeColumnDefaultConstraint {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to convert data type to gRPC data type defined in proto, source: {}",
+        source
+    ))]
+    ConvertToGrpcDataType {
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -112,6 +130,9 @@ impl ErrorExt for Error {
             InvalidDatabaseName { .. } | ColumnTypeMismatch { .. } | InvalidTableName { .. } => {
                 StatusCode::InvalidArguments
             }
+            UnsupportedAlterTableStatement { .. } => StatusCode::InvalidSyntax,
+            SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
+            ConvertToGrpcDataType { source, .. } => source.status_code(),
         }
     }
 

@@ -1,10 +1,11 @@
-mod insert;
+pub(crate) mod route;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use client::Database;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
@@ -12,26 +13,35 @@ use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::Expr as DfExpr;
 use datafusion::physical_plan::Partitioning;
+use datatypes::prelude::Value;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use meta_client::rpc::{Peer, TableName};
 use snafu::prelude::*;
-use store_api::storage::RegionId;
+use store_api::storage::RegionNumber;
 use table::error::Error as TableError;
 use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::requests::InsertRequest;
 use table::Table;
 use tokio::sync::RwLock;
 
+use crate::datanode::DatanodeClients;
 use crate::error::{self, Error, Result};
-use crate::mock::{DatanodeId, DatanodeInstance, TableScanPlan};
-use crate::partitioning::{Operator, PartitionExpr, PartitionRuleRef};
+use crate::mock::{DatanodeInstance, TableScanPlan};
+use crate::partitioning::columns::RangeColumnsPartitionRule;
+use crate::partitioning::range::RangePartitionRule;
+use crate::partitioning::{
+    Operator, PartitionBound, PartitionDef, PartitionExpr, PartitionRuleRef,
+};
 use crate::spliter::WriteSpliter;
+use crate::table::route::TableRoutes;
+pub mod insert;
 
-struct DistTable {
-    table_name: String,
-    schema: SchemaRef,
-    partition_rule: PartitionRuleRef<Error>,
-    region_dist_map: HashMap<RegionId, DatanodeId>,
-    datanode_instances: HashMap<DatanodeId, DatanodeInstance>,
+#[derive(Clone)]
+pub struct DistTable {
+    pub(crate) table_name: TableName,
+    pub(crate) schema: SchemaRef,
+    pub(crate) table_routes: Arc<TableRoutes>,
+    pub(crate) datanode_clients: Arc<DatanodeClients>,
 }
 
 #[async_trait]
@@ -49,7 +59,9 @@ impl Table for DistTable {
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
-        let spliter = WriteSpliter::with_patition_rule(self.partition_rule.clone());
+        let partition_rule = self.find_partition_rule().await.map_err(TableError::new)?;
+
+        let spliter = WriteSpliter::with_patition_rule(partition_rule);
         let inserts = spliter.split(request).map_err(TableError::new)?;
         let result = match self.dist_insert(inserts).await.map_err(TableError::new)? {
             client::ObjectResult::Select(_) => unreachable!(),
@@ -64,31 +76,32 @@ impl Table for DistTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> table::Result<PhysicalPlanRef> {
-        let regions = self.find_regions(filters).map_err(TableError::new)?;
-        let datanodes = self.find_datanodes(regions).map_err(TableError::new)?;
+        let partition_rule = self.find_partition_rule().await.map_err(TableError::new)?;
 
-        let partition_execs = datanodes
-            .iter()
-            .map(|(datanode, _regions)| {
-                let datanode_instance = self
-                    .datanode_instances
-                    .get(datanode)
-                    .context(error::DatanodeInstanceSnafu {
-                        datanode: *datanode,
-                    })?
-                    .clone();
-                // TODO(LFC): Pass in "regions" when Datanode supports multi regions for a table.
-                Ok(PartitionExec {
-                    table_name: self.table_name.clone(),
-                    datanode_instance,
-                    projection: projection.clone(),
-                    filters: filters.to_vec(),
-                    limit,
-                    batches: Arc::new(RwLock::new(None)),
-                })
-            })
-            .collect::<Result<Vec<PartitionExec>>>()
+        let regions = self
+            .find_regions(partition_rule, filters)
             .map_err(TableError::new)?;
+        let datanodes = self
+            .find_datanodes(regions)
+            .await
+            .map_err(TableError::new)?;
+
+        let mut partition_execs = Vec::with_capacity(datanodes.len());
+        for (datanode, _regions) in datanodes.iter() {
+            let client = self.datanode_clients.get_client(datanode).await;
+            let db = Database::new(&self.table_name.schema_name, client);
+            let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
+
+            // TODO(LFC): Pass in "regions" when Datanode supports multi regions for a table.
+            partition_execs.push(PartitionExec {
+                table_name: self.table_name.clone(),
+                datanode_instance,
+                projection: projection.clone(),
+                filters: filters.to_vec(),
+                limit,
+                batches: Arc::new(RwLock::new(None)),
+            })
+        }
 
         let dist_scan = DistTableScan {
             schema: project_schema(self.schema(), projection),
@@ -104,11 +117,15 @@ impl Table for DistTable {
 
 impl DistTable {
     // TODO(LFC): Finding regions now seems less efficient, should be further looked into.
-    fn find_regions(&self, filters: &[Expr]) -> Result<Vec<RegionId>> {
+    fn find_regions(
+        &self,
+        partition_rule: PartitionRuleRef<Error>,
+        filters: &[Expr],
+    ) -> Result<Vec<RegionNumber>> {
         let regions = if let Some((first, rest)) = filters.split_first() {
-            let mut target = self.find_regions0(first)?;
+            let mut target = self.find_regions0(partition_rule.clone(), first)?;
             for filter in rest {
-                let regions = self.find_regions0(filter)?;
+                let regions = self.find_regions0(partition_rule.clone(), filter)?;
 
                 // When all filters are provided as a collection, it often implicitly states that
                 // "all filters must be satisfied". So we join all the results here.
@@ -119,9 +136,9 @@ impl DistTable {
                     break;
                 }
             }
-            target.into_iter().collect::<Vec<RegionId>>()
+            target.into_iter().collect::<Vec<_>>()
         } else {
-            self.partition_rule.find_regions(&[])?
+            partition_rule.find_regions(&[])?
         };
         ensure!(
             !regions.is_empty(),
@@ -136,7 +153,11 @@ impl DistTable {
     //   - BETWEEN and IN (maybe more)
     //   - expr with arithmetic like "a + 1 < 10" (should have been optimized in logic plan?)
     //   - not comparison or neither "AND" nor "OR" operations, for example, "a LIKE x"
-    fn find_regions0(&self, filter: &Expr) -> Result<HashSet<RegionId>> {
+    fn find_regions0(
+        &self,
+        partition_rule: PartitionRuleRef<Error>,
+        filter: &Expr,
+    ) -> Result<HashSet<RegionNumber>> {
         let expr = filter.df_expr();
         match expr {
             DfExpr::BinaryExpr { left, op, right } if is_compare_op(op) => {
@@ -152,27 +173,28 @@ impl DistTable {
                         .clone()
                         .try_into()
                         .with_context(|_| error::ConvertScalarValueSnafu { value: sv.clone() })?;
-                    return Ok(self
-                        .partition_rule
+                    return Ok(partition_rule
                         .find_regions(&[PartitionExpr::new(column, op, value)])?
                         .into_iter()
-                        .collect::<HashSet<RegionId>>());
+                        .collect::<HashSet<RegionNumber>>());
                 }
             }
             DfExpr::BinaryExpr { left, op, right }
                 if matches!(op, Operator::And | Operator::Or) =>
             {
-                let left_regions = self.find_regions0(&(*left.clone()).into())?;
-                let right_regions = self.find_regions0(&(*right.clone()).into())?;
+                let left_regions =
+                    self.find_regions0(partition_rule.clone(), &(*left.clone()).into())?;
+                let right_regions =
+                    self.find_regions0(partition_rule.clone(), &(*right.clone()).into())?;
                 let regions = match op {
                     Operator::And => left_regions
                         .intersection(&right_regions)
                         .cloned()
-                        .collect::<HashSet<RegionId>>(),
+                        .collect::<HashSet<RegionNumber>>(),
                     Operator::Or => left_regions
                         .union(&right_regions)
                         .cloned()
-                        .collect::<HashSet<RegionId>>(),
+                        .collect::<HashSet<RegionNumber>>(),
                     _ => unreachable!(),
                 };
                 return Ok(regions);
@@ -181,19 +203,30 @@ impl DistTable {
         }
 
         // Returns all regions for not supported partition expr as a safety hatch.
-        Ok(self
-            .partition_rule
+        Ok(partition_rule
             .find_regions(&[])?
             .into_iter()
-            .collect::<HashSet<RegionId>>())
+            .collect::<HashSet<RegionNumber>>())
     }
 
-    fn find_datanodes(&self, regions: Vec<RegionId>) -> Result<HashMap<DatanodeId, Vec<RegionId>>> {
+    async fn find_datanodes(
+        &self,
+        regions: Vec<RegionNumber>,
+    ) -> Result<HashMap<Peer, Vec<RegionNumber>>> {
+        let route = self.table_routes.get_route(&self.table_name).await?;
+
         let mut datanodes = HashMap::new();
         for region in regions.iter() {
-            let datanode = *self
-                .region_dist_map
-                .get(region)
+            let datanode = route
+                .region_routes
+                .iter()
+                .find_map(|x| {
+                    if x.region.id == *region as u64 {
+                        x.leader_peer.clone()
+                    } else {
+                        None
+                    }
+                })
                 .context(error::FindDatanodeSnafu { region: *region })?;
             datanodes
                 .entry(datanode)
@@ -201,6 +234,85 @@ impl DistTable {
                 .push(*region);
         }
         Ok(datanodes)
+    }
+
+    async fn find_partition_rule(&self) -> Result<PartitionRuleRef<Error>> {
+        let route = self.table_routes.get_route(&self.table_name).await?;
+        ensure!(
+            !route.region_routes.is_empty(),
+            error::FindRegionRoutesSnafu {
+                table_name: self.table_name.to_string()
+            }
+        );
+
+        let mut partitions = Vec::with_capacity(route.region_routes.len());
+        for r in route.region_routes.iter() {
+            let partition =
+                r.region
+                    .partition
+                    .clone()
+                    .context(error::FindRegionPartitionSnafu {
+                        region: r.region.id,
+                        table_name: self.table_name.to_string(),
+                    })?;
+            let partition_def: PartitionDef = partition.try_into()?;
+            partitions.push((r.region.id, partition_def));
+        }
+        partitions.sort_by(|a, b| a.1.partition_bounds().cmp(b.1.partition_bounds()));
+
+        ensure!(
+            partitions
+                .windows(2)
+                .all(|w| w[0].1.partition_columns() == w[1].1.partition_columns()),
+            error::IllegalTableRoutesDataSnafu {
+                table_name: self.table_name.to_string(),
+                err_msg: "partition columns of all regions are not the same"
+            }
+        );
+        let partition_columns = partitions[0].1.partition_columns();
+        ensure!(
+            !partition_columns.is_empty(),
+            error::IllegalTableRoutesDataSnafu {
+                table_name: self.table_name.to_string(),
+                err_msg: "no partition columns found"
+            }
+        );
+
+        let regions = partitions
+            .iter()
+            .map(|x| x.0 as u32)
+            .collect::<Vec<RegionNumber>>();
+
+        // TODO(LFC): Serializing and deserializing partition rule is ugly, must find a much more elegant way.
+        let partition_rule: PartitionRuleRef<Error> = match partition_columns.len() {
+            1 => {
+                // Omit the last "MAXVALUE".
+                let bounds = partitions
+                    .iter()
+                    .filter_map(|(_, p)| match &p.partition_bounds()[0] {
+                        PartitionBound::Value(v) => Some(v.clone()),
+                        PartitionBound::MaxValue => None,
+                    })
+                    .collect::<Vec<Value>>();
+                Arc::new(RangePartitionRule::new(
+                    partition_columns[0].clone(),
+                    bounds,
+                    regions,
+                )) as _
+            }
+            _ => {
+                let bounds = partitions
+                    .iter()
+                    .map(|x| x.1.partition_bounds().clone())
+                    .collect::<Vec<Vec<PartitionBound>>>();
+                Arc::new(RangeColumnsPartitionRule::new(
+                    partition_columns.clone(),
+                    bounds,
+                    regions,
+                )) as _
+            }
+        };
+        Ok(partition_rule)
     }
 }
 
@@ -280,7 +392,7 @@ impl PhysicalPlan for DistTableScan {
 
 #[derive(Debug)]
 struct PartitionExec {
-    table_name: String,
+    table_name: TableName,
     datanode_instance: DatanodeInstance,
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
@@ -322,9 +434,13 @@ impl PartitionExec {
 #[allow(clippy::print_stdout)]
 #[cfg(test)]
 mod test {
-    use catalog::RegisterTableRequest;
-    use client::Database;
-    use common_recordbatch::{util, RecordBatch};
+    use std::time::Duration;
+
+    use api::v1::codec::InsertBatch;
+    use api::v1::column::SemanticType;
+    use api::v1::{column, insert_expr, Column, ColumnDataType};
+    use catalog::remote::MetaKvBackend;
+    use common_recordbatch::util;
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datafusion_expr::expr_fn::col;
@@ -332,18 +448,215 @@ mod test {
     use datafusion_expr::lit;
     use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
     use datanode::instance::Instance;
-    use datatypes::prelude::{ConcreteDataType, VectorRef};
+    use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{Int32Vector, UInt32Vector};
-    use table::test_util::MemTable;
+    use meta_client::client::{MetaClient, MetaClientBuilder};
+    use meta_client::rpc::router::RegionRoute;
+    use meta_client::rpc::{Region, Table, TableRoute};
+    use meta_srv::metasrv::MetaSrvOptions;
+    use meta_srv::mocks::MockInfo;
+    use meta_srv::service::store::kv::KvStoreRef;
+    use meta_srv::service::store::memory::MemStore;
+    use sql::parser::ParserContext;
+    use sql::statements::statement::Statement;
+    use sqlparser::dialect::GenericDialect;
     use table::TableRef;
     use tempdir::TempDir;
 
     use super::*;
+    use crate::catalog::FrontendCatalogManager;
+    use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
+    use crate::instance::distributed::DistInstance;
     use crate::partitioning::range::RangePartitionRule;
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_find_partition_rule() {
+        let table_name = TableName::new("greptime", "public", "foo");
+
+        let column_schemas = vec![
+            ColumnSchema::new("ts", ConcreteDataType::uint64_datatype(), false),
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas.clone()));
+
+        let table_routes = Arc::new(TableRoutes::new(Arc::new(MetaClient::default())));
+        let table = DistTable {
+            table_name: table_name.clone(),
+            schema,
+            table_routes: table_routes.clone(),
+            datanode_clients: Arc::new(DatanodeClients::new()),
+        };
+
+        let table_route = TableRoute {
+            table: Table {
+                id: 1,
+                table_name: table_name.clone(),
+                table_schema: vec![],
+            },
+            region_routes: vec![
+                RegionRoute {
+                    region: Region {
+                        id: 3,
+                        name: "r1".to_string(),
+                        partition: Some(
+                            PartitionDef::new(
+                                vec!["a".to_string()],
+                                vec![PartitionBound::Value(10_i32.into())],
+                            )
+                            .try_into()
+                            .unwrap(),
+                        ),
+                        attrs: HashMap::new(),
+                    },
+                    leader_peer: None,
+                    follower_peers: vec![],
+                },
+                RegionRoute {
+                    region: Region {
+                        id: 2,
+                        name: "r2".to_string(),
+                        partition: Some(
+                            PartitionDef::new(
+                                vec!["a".to_string()],
+                                vec![PartitionBound::Value(50_i32.into())],
+                            )
+                            .try_into()
+                            .unwrap(),
+                        ),
+                        attrs: HashMap::new(),
+                    },
+                    leader_peer: None,
+                    follower_peers: vec![],
+                },
+                RegionRoute {
+                    region: Region {
+                        id: 1,
+                        name: "r3".to_string(),
+                        partition: Some(
+                            PartitionDef::new(
+                                vec!["a".to_string()],
+                                vec![PartitionBound::MaxValue],
+                            )
+                            .try_into()
+                            .unwrap(),
+                        ),
+                        attrs: HashMap::new(),
+                    },
+                    leader_peer: None,
+                    follower_peers: vec![],
+                },
+            ],
+        };
+        table_routes
+            .insert_table_route(table_name.clone(), Arc::new(table_route))
+            .await;
+
+        let partition_rule = table.find_partition_rule().await.unwrap();
+        let range_rule = partition_rule
+            .as_any()
+            .downcast_ref::<RangePartitionRule>()
+            .unwrap();
+        assert_eq!(range_rule.column_name(), "a");
+        assert_eq!(range_rule.all_regions(), &vec![3, 2, 1]);
+        assert_eq!(range_rule.bounds(), &vec![10_i32.into(), 50_i32.into()]);
+
+        let table_route = TableRoute {
+            table: Table {
+                id: 1,
+                table_name: table_name.clone(),
+                table_schema: vec![],
+            },
+            region_routes: vec![
+                RegionRoute {
+                    region: Region {
+                        id: 1,
+                        name: "r1".to_string(),
+                        partition: Some(
+                            PartitionDef::new(
+                                vec!["a".to_string(), "b".to_string()],
+                                vec![
+                                    PartitionBound::Value(10_i32.into()),
+                                    PartitionBound::Value("hz".into()),
+                                ],
+                            )
+                            .try_into()
+                            .unwrap(),
+                        ),
+                        attrs: HashMap::new(),
+                    },
+                    leader_peer: None,
+                    follower_peers: vec![],
+                },
+                RegionRoute {
+                    region: Region {
+                        id: 2,
+                        name: "r2".to_string(),
+                        partition: Some(
+                            PartitionDef::new(
+                                vec!["a".to_string(), "b".to_string()],
+                                vec![
+                                    PartitionBound::Value(50_i32.into()),
+                                    PartitionBound::Value("sh".into()),
+                                ],
+                            )
+                            .try_into()
+                            .unwrap(),
+                        ),
+                        attrs: HashMap::new(),
+                    },
+                    leader_peer: None,
+                    follower_peers: vec![],
+                },
+                RegionRoute {
+                    region: Region {
+                        id: 3,
+                        name: "r3".to_string(),
+                        partition: Some(
+                            PartitionDef::new(
+                                vec!["a".to_string(), "b".to_string()],
+                                vec![PartitionBound::MaxValue, PartitionBound::MaxValue],
+                            )
+                            .try_into()
+                            .unwrap(),
+                        ),
+                        attrs: HashMap::new(),
+                    },
+                    leader_peer: None,
+                    follower_peers: vec![],
+                },
+            ],
+        };
+        table_routes
+            .insert_table_route(table_name.clone(), Arc::new(table_route))
+            .await;
+
+        let partition_rule = table.find_partition_rule().await.unwrap();
+        let range_columns_rule = partition_rule
+            .as_any()
+            .downcast_ref::<RangeColumnsPartitionRule>()
+            .unwrap();
+        assert_eq!(range_columns_rule.column_list(), &vec!["a", "b"]);
+        assert_eq!(
+            range_columns_rule.value_lists(),
+            &vec![
+                vec![
+                    PartitionBound::Value(10_i32.into()),
+                    PartitionBound::Value("hz".into()),
+                ],
+                vec![
+                    PartitionBound::Value(50_i32.into()),
+                    PartitionBound::Value("sh".into()),
+                ],
+                vec![PartitionBound::MaxValue, PartitionBound::MaxValue]
+            ]
+        );
+        assert_eq!(range_columns_rule.regions(), &vec![1, 2, 3]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_dist_table_scan() {
+        common_telemetry::init_default_ut_logging();
         let table = Arc::new(new_dist_table().await);
 
         // should scan all regions
@@ -355,21 +668,21 @@ mod test {
 
         // should scan only region 1
         // select a, row_id from numbers where a < 10
-        let projection = Some(vec![0, 1]);
+        let projection = Some(vec![1, 2]);
         let filters = vec![binary_expr(col("a"), Operator::Lt, lit(10)).into()];
         exec_table_scan(table.clone(), projection, filters, None).await;
         println!();
 
         // should scan region 1 and 2
         // select a, row_id from numbers where a < 15
-        let projection = Some(vec![0, 1]);
+        let projection = Some(vec![1, 2]);
         let filters = vec![binary_expr(col("a"), Operator::Lt, lit(15)).into()];
         exec_table_scan(table.clone(), projection, filters, None).await;
         println!();
 
         // should scan region 2 and 3
         // select a, row_id from numbers where a < 40 and a >= 10
-        let projection = Some(vec![0, 1]);
+        let projection = Some(vec![1, 2]);
         let filters = vec![and(
             binary_expr(col("a"), Operator::Lt, lit(40)),
             binary_expr(col("a"), Operator::GtEq, lit(10)),
@@ -380,7 +693,7 @@ mod test {
 
         // should scan all regions
         // select a, row_id from numbers where a < 1000 and row_id == 1
-        let projection = Some(vec![0, 1]);
+        let projection = Some(vec![1, 2]);
         let filters = vec![and(
             binary_expr(col("a"), Operator::Lt, lit(1000)),
             binary_expr(col("row_id"), Operator::Eq, lit(1)),
@@ -420,68 +733,201 @@ mod test {
     }
 
     async fn new_dist_table() -> DistTable {
-        let schema = Arc::new(Schema::new(vec![
+        let column_schemas = vec![
+            ColumnSchema::new("ts", ConcreteDataType::uint64_datatype(), false),
             ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("row_id", ConcreteDataType::uint32_datatype(), true),
-        ]));
+        ];
+        let schema = Arc::new(Schema::new(column_schemas.clone()));
 
-        // PARTITION BY RANGE (a) (
-        //   PARTITION r1 VALUES LESS THAN (10),
-        //   PARTITION r2 VALUES LESS THAN (20),
-        //   PARTITION r3 VALUES LESS THAN (50),
-        //   PARTITION r4 VALUES LESS THAN (MAXVALUE),
-        // )
-        let partition_rule = RangePartitionRule::new(
-            "a",
-            vec![10_i32.into(), 20_i32.into(), 50_i32.into()],
-            vec![1_u64, 2, 3, 4],
+        let kv_store: KvStoreRef = Arc::new(MemStore::default()) as _;
+        let meta_srv =
+            meta_srv::mocks::mock(MetaSrvOptions::default(), kv_store.clone(), None).await;
+
+        let datanode_clients = Arc::new(DatanodeClients::new());
+
+        let mut datanode_instances = HashMap::new();
+        for datanode_id in 1..=4 {
+            let dn_instance = create_datanode_instance(datanode_id, meta_srv.clone()).await;
+            datanode_instances.insert(datanode_id, dn_instance.clone());
+
+            let (addr, client) = crate::tests::create_datanode_client(dn_instance).await;
+            datanode_clients
+                .insert_client(Peer::new(datanode_id, addr), client)
+                .await;
+        }
+
+        let MockInfo {
+            server_addr,
+            channel_manager,
+        } = meta_srv.clone();
+        let mut meta_client = MetaClientBuilder::new(1000, 0)
+            .enable_router()
+            .enable_store()
+            .channel_manager(channel_manager)
+            .build();
+        meta_client.start(&[&server_addr]).await.unwrap();
+        let meta_client = Arc::new(meta_client);
+
+        let table_name = TableName::new("greptime", "public", "dist_numbers");
+
+        let meta_backend = Arc::new(MetaKvBackend {
+            client: meta_client.clone(),
+        });
+        let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
+        let catalog_manager = Arc::new(FrontendCatalogManager::new(
+            meta_backend,
+            table_routes.clone(),
+            datanode_clients.clone(),
+        ));
+        let dist_instance = DistInstance::new(
+            meta_client.clone(),
+            catalog_manager,
+            datanode_clients.clone(),
         );
 
-        let table1 = new_memtable(schema.clone(), (0..5).collect::<Vec<i32>>());
-        let table2 = new_memtable(schema.clone(), (10..15).collect::<Vec<i32>>());
-        let table3 = new_memtable(schema.clone(), (30..35).collect::<Vec<i32>>());
-        let table4 = new_memtable(schema.clone(), (100..105).collect::<Vec<i32>>());
+        let sql = "
+            CREATE TABLE greptime.public.dist_numbers (
+                ts BIGINT,
+                a INT,
+                row_id INT,
+                TIME INDEX (ts),
+            )
+            PARTITION BY RANGE COLUMNS (a) (
+                PARTITION r0 VALUES LESS THAN (10),
+                PARTITION r1 VALUES LESS THAN (20),
+                PARTITION r2 VALUES LESS THAN (50),
+                PARTITION r3 VALUES LESS THAN (MAXVALUE),
+            )
+            ENGINE=mito";
+        let create_table = match ParserContext::create_with_dialect(sql, &GenericDialect {})
+            .unwrap()
+            .pop()
+            .unwrap()
+        {
+            Statement::CreateTable(c) => c,
+            _ => unreachable!(),
+        };
 
-        let instance1 = create_datanode_instance(1, table1).await;
-        let instance2 = create_datanode_instance(2, table2).await;
-        let instance3 = create_datanode_instance(3, table3).await;
-        let instance4 = create_datanode_instance(4, table4).await;
+        wait_datanodes_alive(kv_store).await;
 
-        let datanode_instances = HashMap::from([
-            (instance1.datanode_id, instance1),
-            (instance2.datanode_id, instance2),
-            (instance3.datanode_id, instance3),
-            (instance4.datanode_id, instance4),
-        ]);
+        let factory = DefaultCreateExprFactory {};
+        let mut expr = factory.create_expr_by_stmt(&create_table).await.unwrap();
+        let _result = dist_instance
+            .create_table(&mut expr, create_table.partitions)
+            .await
+            .unwrap();
+
+        let table_route = table_routes.get_route(&table_name).await.unwrap();
+        println!("{}", serde_json::to_string_pretty(&table_route).unwrap());
+
+        let mut region_to_datanode_mapping = HashMap::new();
+        for region_route in table_route.region_routes.iter() {
+            let region_id = region_route.region.id as u32;
+            let datanode_id = region_route.leader_peer.as_ref().unwrap().id;
+            region_to_datanode_mapping.insert(region_id, datanode_id);
+        }
+
+        let mut global_start_ts = 1;
+        let regional_numbers = vec![
+            (0, (0..5).collect::<Vec<i32>>()),
+            (1, (10..15).collect::<Vec<i32>>()),
+            (2, (30..35).collect::<Vec<i32>>()),
+            (3, (100..105).collect::<Vec<i32>>()),
+        ];
+        for (region_id, numbers) in regional_numbers {
+            let datanode_id = *region_to_datanode_mapping.get(&region_id).unwrap();
+            let instance = datanode_instances.get(&datanode_id).unwrap().clone();
+
+            let start_ts = global_start_ts;
+            global_start_ts += numbers.len() as i64;
+
+            insert_testing_data(&table_name, instance.clone(), numbers, start_ts).await;
+        }
 
         DistTable {
-            table_name: "dist_numbers".to_string(),
+            table_name,
             schema,
-            partition_rule: Arc::new(partition_rule),
-            region_dist_map: HashMap::from([(1_u64, 1), (2_u64, 2), (3_u64, 3), (4_u64, 4)]),
-            datanode_instances,
+            table_routes,
+            datanode_clients,
         }
     }
 
-    fn new_memtable(schema: SchemaRef, data: Vec<i32>) -> MemTable {
-        let rows = data.len() as u32;
-        let columns: Vec<VectorRef> = vec![
-            // column "a"
-            Arc::new(Int32Vector::from_slice(data)),
-            // column "row_id"
-            Arc::new(UInt32Vector::from_slice((1..=rows).collect::<Vec<u32>>())),
-        ];
-        let recordbatch = RecordBatch::new(schema, columns).unwrap();
-        MemTable::new("dist_numbers", recordbatch)
+    async fn wait_datanodes_alive(kv_store: KvStoreRef) {
+        let wait = 10;
+        for _ in 0..wait {
+            let datanodes = meta_srv::lease::alive_datanodes(1000, &kv_store, |_, _| true)
+                .await
+                .unwrap();
+            if datanodes.len() >= 4 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await
+        }
+        panic!()
     }
 
-    async fn create_datanode_instance(
-        datanode_id: DatanodeId,
-        table: MemTable,
-    ) -> DatanodeInstance {
-        let wal_tmp_dir = TempDir::new_in("/tmp", "gt_wal_dist_table_test").unwrap();
-        let data_tmp_dir = TempDir::new_in("/tmp", "gt_data_dist_table_test").unwrap();
+    async fn insert_testing_data(
+        table_name: &TableName,
+        dn_instance: Arc<Instance>,
+        data: Vec<i32>,
+        start_ts: i64,
+    ) {
+        let rows = data.len() as u32;
+        let values = vec![InsertBatch {
+            columns: vec![
+                Column {
+                    column_name: "ts".to_string(),
+                    values: Some(column::Values {
+                        i64_values: (start_ts..start_ts + rows as i64).collect::<Vec<i64>>(),
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::Int64 as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "a".to_string(),
+                    values: Some(column::Values {
+                        i32_values: data,
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::Int32 as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "row_id".to_string(),
+                    values: Some(column::Values {
+                        i32_values: (1..=rows as i32).collect::<Vec<i32>>(),
+                        ..Default::default()
+                    }),
+                    datatype: ColumnDataType::Int32 as i32,
+                    ..Default::default()
+                },
+            ],
+            row_count: rows,
+        }
+        .into()];
+        let values = insert_expr::Values { values };
+        dn_instance
+            .execute_grpc_insert(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+                values,
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn create_datanode_instance(datanode_id: u64, meta_srv: MockInfo) -> Arc<Instance> {
+        let current = common_time::util::current_time_millis();
+        let wal_tmp_dir =
+            TempDir::new_in("/tmp", &format!("dist_table_test-wal-{}", current)).unwrap();
+        let data_tmp_dir =
+            TempDir::new_in("/tmp", &format!("dist_table_test-data-{}", current)).unwrap();
         let opts = DatanodeOptions {
+            node_id: datanode_id,
             wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             storage: ObjectStoreConfig::File {
                 data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
@@ -489,35 +935,45 @@ mod test {
             ..Default::default()
         };
 
-        let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+        let instance = Arc::new(
+            Instance::with_mock_meta_server(&opts, meta_srv)
+                .await
+                .unwrap(),
+        );
         instance.start().await.unwrap();
-
-        let catalog_manager = instance.catalog_manager().clone();
-        catalog_manager
-            .register_table(RegisterTableRequest {
-                catalog: "greptime".to_string(),
-                schema: "public".to_string(),
-                table_name: table.table_name().to_string(),
-                table_id: 1234,
-                table: Arc::new(table),
-            })
-            .await
-            .unwrap();
-
-        let client = crate::tests::create_datanode_client(instance).await;
-        DatanodeInstance::new(
-            datanode_id,
-            catalog_manager,
-            Database::new("greptime", client),
-        )
+        instance
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_find_regions() {
-        let table = new_dist_table().await;
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            true,
+        )]));
+        let table = DistTable {
+            table_name: TableName::new("greptime", "public", "foo"),
+            schema,
+            table_routes: Arc::new(TableRoutes::new(Arc::new(MetaClient::default()))),
+            datanode_clients: Arc::new(DatanodeClients::new()),
+        };
 
-        let test = |filters: Vec<Expr>, expect_regions: Vec<u64>| {
-            let mut regions = table.find_regions(filters.as_slice()).unwrap();
+        // PARTITION BY RANGE (a) (
+        //   PARTITION r1 VALUES LESS THAN (10),
+        //   PARTITION r2 VALUES LESS THAN (20),
+        //   PARTITION r3 VALUES LESS THAN (50),
+        //   PARTITION r4 VALUES LESS THAN (MAXVALUE),
+        // )
+        let partition_rule: PartitionRuleRef<Error> = Arc::new(RangePartitionRule::new(
+            "a",
+            vec![10_i32.into(), 20_i32.into(), 50_i32.into()],
+            vec![0_u32, 1, 2, 3],
+        )) as _;
+
+        let test = |filters: Vec<Expr>, expect_regions: Vec<RegionNumber>| {
+            let mut regions = table
+                .find_regions(partition_rule.clone(), filters.as_slice())
+                .unwrap();
             regions.sort();
 
             assert_eq!(regions, expect_regions);
@@ -526,31 +982,31 @@ mod test {
         // test simple filter
         test(
             vec![binary_expr(col("a"), Operator::Lt, lit(10)).into()], // a < 10
-            vec![1],
+            vec![0],
         );
         test(
             vec![binary_expr(col("a"), Operator::LtEq, lit(10)).into()], // a <= 10
-            vec![1, 2],
+            vec![0, 1],
         );
         test(
             vec![binary_expr(lit(20), Operator::Gt, col("a")).into()], // 20 > a
-            vec![1, 2],
+            vec![0, 1],
         );
         test(
             vec![binary_expr(lit(20), Operator::GtEq, col("a")).into()], // 20 >= a
-            vec![1, 2, 3],
+            vec![0, 1, 2],
         );
         test(
             vec![binary_expr(lit(45), Operator::Eq, col("a")).into()], // 45 == a
-            vec![3],
+            vec![2],
         );
         test(
             vec![binary_expr(col("a"), Operator::NotEq, lit(45)).into()], // a != 45
-            vec![1, 2, 3, 4],
+            vec![0, 1, 2, 3],
         );
         test(
             vec![binary_expr(col("a"), Operator::Gt, lit(50)).into()], // a > 50
-            vec![4],
+            vec![3],
         );
 
         // test multiple filters
@@ -559,21 +1015,21 @@ mod test {
                 binary_expr(col("a"), Operator::Gt, lit(10)).into(),
                 binary_expr(col("a"), Operator::Gt, lit(50)).into(),
             ], // [a > 10, a > 50]
-            vec![4],
+            vec![3],
         );
 
         // test finding all regions when provided with not supported filters or not partition column
         test(
             vec![binary_expr(col("row_id"), Operator::LtEq, lit(123)).into()], // row_id <= 123
-            vec![1, 2, 3, 4],
+            vec![0, 1, 2, 3],
         );
         test(
             vec![binary_expr(col("b"), Operator::Like, lit("foo%")).into()], // b LIKE 'foo%'
-            vec![1, 2, 3, 4],
+            vec![0, 1, 2, 3],
         );
         test(
             vec![binary_expr(col("c"), Operator::Gt, lit(123)).into()], // c > 789
-            vec![1, 2, 3, 4],
+            vec![0, 1, 2, 3],
         );
 
         // test complex "AND" or "OR" filters
@@ -586,7 +1042,7 @@ mod test {
                 ),
             )
             .into()], // row_id < 1 OR (row_id < 1 AND a > 1)
-            vec![1, 2, 3, 4],
+            vec![0, 1, 2, 3],
         );
         test(
             vec![or(
@@ -594,7 +1050,7 @@ mod test {
                 binary_expr(col("a"), Operator::GtEq, lit(20)),
             )
             .into()], // a < 20 OR a >= 20
-            vec![1, 2, 3, 4],
+            vec![0, 1, 2, 3],
         );
         test(
             vec![and(
@@ -602,11 +1058,12 @@ mod test {
                 binary_expr(col("a"), Operator::Lt, lit(50)),
             )
             .into()], // a < 20 AND a < 50
-            vec![1, 2],
+            vec![0, 1],
         );
 
         // test failed to find regions by contradictory filters
         let regions = table.find_regions(
+            partition_rule,
             vec![and(
                 binary_expr(col("a"), Operator::Lt, lit(20)),
                 binary_expr(col("a"), Operator::GtEq, lit(20)),

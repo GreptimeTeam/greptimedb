@@ -11,11 +11,14 @@ use api::v1::{
     codec::SelectResult, column, column::SemanticType, insert_expr, Column, ColumnDataType,
     InsertExpr,
 };
+use common_grpc::writer::Precision::MILLISECOND;
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
+use table::requests::InsertRequest;
 
 use crate::error::{self, Result};
+use crate::line_writer::LineWriter;
 
 const TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
 const VALUE_COLUMN_NAME: &str = "greptime_value";
@@ -28,7 +31,7 @@ pub struct Metrics {
 
 /// Generate a sql from a remote request query
 /// TODO(dennis): maybe use logical plan in future to prevent sql injection
-pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
+pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
     let start_timestamp_ms = q.start_timestamp_ms;
     let end_timestamp_ms = q.end_timestamp_ms;
 
@@ -89,8 +92,8 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
     Ok((
         table_name.to_string(),
         format!(
-            "select * from {} where {} order by {}",
-            table_name, conditions, TIMESTAMP_COLUMN_NAME,
+            "select * from {}.{} where {} order by {}",
+            db, table_name, conditions, TIMESTAMP_COLUMN_NAME,
         ),
     ))
 }
@@ -275,17 +278,75 @@ pub fn select_result_to_timeseries(
     Ok(timeseries_map.into_values().collect())
 }
 
-/// Cast a remote write request into gRPC's InsertExpr.
-pub fn write_request_to_insert_exprs(mut request: WriteRequest) -> Result<Vec<InsertExpr>> {
+/// Cast a remote write request into InsertRequest
+pub fn write_request_to_insert_reqs(
+    db: &str,
+    mut request: WriteRequest,
+) -> Result<Vec<InsertRequest>> {
     let timeseries = std::mem::take(&mut request.timeseries);
 
     timeseries
         .into_iter()
-        .map(timeseries_to_insert_expr)
+        .map(|timeseries| timeseries_to_insert_request(db, timeseries))
         .collect()
 }
 
-fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
+fn timeseries_to_insert_request(db: &str, mut timeseries: TimeSeries) -> Result<InsertRequest> {
+    // TODO(dennis): save exemplars into a column
+    let labels = std::mem::take(&mut timeseries.labels);
+    let samples = std::mem::take(&mut timeseries.samples);
+
+    let mut table_name = None;
+    for label in &labels {
+        // The metric name is a special label
+        if label.name == METRIC_NAME_LABEL {
+            table_name = Some(&label.value);
+        }
+    }
+    let table_name = table_name.context(error::InvalidPromRemoteRequestSnafu {
+        msg: "missing '__name__' label in timeseries",
+    })?;
+
+    let row_count = samples.len();
+    let mut line_writer = LineWriter::with_lines(db, table_name, row_count);
+
+    for sample in samples {
+        let ts_millis = sample.timestamp;
+        let val = sample.value;
+
+        line_writer.write_ts(TIMESTAMP_COLUMN_NAME, (ts_millis, MILLISECOND));
+        line_writer.write_f64(VALUE_COLUMN_NAME, val);
+
+        labels
+            .iter()
+            .filter(|label| label.name != METRIC_NAME_LABEL)
+            .for_each(|label| {
+                line_writer.write_tag(&label.name, &label.value);
+            });
+
+        line_writer.commit();
+    }
+    Ok(line_writer.finish())
+}
+
+// TODO(fys): it will remove in the future.
+/// Cast a remote write request into gRPC's InsertExpr.
+pub fn write_request_to_insert_exprs(
+    database: &str,
+    mut request: WriteRequest,
+) -> Result<Vec<InsertExpr>> {
+    let timeseries = std::mem::take(&mut request.timeseries);
+
+    timeseries
+        .into_iter()
+        .map(|timeseries| timeseries_to_insert_expr(database, timeseries))
+        .collect()
+}
+
+// TODO(fys): it will remove in the future.
+fn timeseries_to_insert_expr(database: &str, mut timeseries: TimeSeries) -> Result<InsertExpr> {
+    let schema_name = database.to_string();
+
     // TODO(dennis): save exemplars into a column
     let labels = std::mem::take(&mut timeseries.labels);
     let samples = std::mem::take(&mut timeseries.samples);
@@ -346,6 +407,7 @@ fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
         row_count: row_count as u32,
     };
     Ok(InsertExpr {
+        schema_name,
         table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
         })?,
@@ -354,6 +416,7 @@ fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
             values: vec![batch.into()],
         })),
         options: HashMap::default(),
+        region_number: 0,
     })
 }
 
@@ -439,7 +502,12 @@ pub fn mock_timeseries() -> Vec<TimeSeries> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::prometheus::remote::LabelMatcher;
+    use common_time::timestamp::TimeUnit;
+    use common_time::Timestamp;
+    use datatypes::{value::Value, vectors::Vector};
 
     use super::*;
 
@@ -455,7 +523,7 @@ mod tests {
             matchers: vec![],
             ..Default::default()
         };
-        let err = query_to_sql(&q).unwrap_err();
+        let err = query_to_sql("public", &q).unwrap_err();
         assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
 
         let q = Query {
@@ -468,9 +536,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (table, sql) = query_to_sql(&q).unwrap();
+        let (table, sql) = query_to_sql("public", &q).unwrap();
         assert_eq!("test", table);
-        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 order by greptime_timestamp", sql);
+        assert_eq!("select * from public.test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 order by greptime_timestamp", sql);
 
         let q = Query {
             start_timestamp_ms: 1000,
@@ -494,9 +562,97 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (table, sql) = query_to_sql(&q).unwrap();
+        let (table, sql) = query_to_sql("public", &q).unwrap();
         assert_eq!("test", table);
-        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 AND job~'*prom*' AND instance!='localhost' order by greptime_timestamp", sql);
+        assert_eq!("select * from public.test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 AND job~'*prom*' AND instance!='localhost' order by greptime_timestamp", sql);
+    }
+
+    #[test]
+    fn test_write_request_to_insert_reqs() {
+        let write_request = WriteRequest {
+            timeseries: mock_timeseries(),
+            ..Default::default()
+        };
+
+        let reqs = write_request_to_insert_reqs("public", write_request).unwrap();
+
+        assert_eq!(3, reqs.len());
+
+        let req1 = reqs.get(0).unwrap();
+        assert_eq!("public", req1.schema_name);
+        assert_eq!("metric1", req1.table_name);
+
+        let columns = &req1.columns_values;
+        let job = columns.get("job").unwrap();
+        let expected: Vec<Value> = vec!["spark".into(), "spark".into()];
+        assert_vector(&expected, job);
+
+        let ts = columns.get(TIMESTAMP_COLUMN_NAME).unwrap();
+        let expected: Vec<Value> = vec![
+            datatypes::prelude::Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)),
+            datatypes::prelude::Value::Timestamp(Timestamp::new(2000, TimeUnit::Millisecond)),
+        ];
+        assert_vector(&expected, ts);
+
+        let val = columns.get(VALUE_COLUMN_NAME).unwrap();
+        let expected: Vec<Value> = vec![1.0_f64.into(), 2.0_f64.into()];
+        assert_vector(&expected, val);
+
+        let req2 = reqs.get(1).unwrap();
+        assert_eq!("public", req2.schema_name);
+        assert_eq!("metric2", req2.table_name);
+
+        let columns = &req2.columns_values;
+        let instance = columns.get("instance").unwrap();
+        let expected: Vec<Value> = vec!["test_host1".into(), "test_host1".into()];
+        assert_vector(&expected, instance);
+
+        let idc = columns.get("idc").unwrap();
+        let expected: Vec<Value> = vec!["z001".into(), "z001".into()];
+        assert_vector(&expected, idc);
+
+        let ts = columns.get(TIMESTAMP_COLUMN_NAME).unwrap();
+        let expected: Vec<Value> = vec![
+            datatypes::prelude::Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)),
+            datatypes::prelude::Value::Timestamp(Timestamp::new(2000, TimeUnit::Millisecond)),
+        ];
+        assert_vector(&expected, ts);
+
+        let val = columns.get(VALUE_COLUMN_NAME).unwrap();
+        let expected: Vec<Value> = vec![3.0_f64.into(), 4.0_f64.into()];
+        assert_vector(&expected, val);
+
+        let req3 = reqs.get(2).unwrap();
+        assert_eq!("public", req3.schema_name);
+        assert_eq!("metric3", req3.table_name);
+
+        let columns = &req3.columns_values;
+        let idc = columns.get("idc").unwrap();
+        let expected: Vec<Value> = vec!["z002".into(), "z002".into(), "z002".into()];
+        assert_vector(&expected, idc);
+
+        let app = columns.get("app").unwrap();
+        let expected: Vec<Value> = vec!["biz".into(), "biz".into(), "biz".into()];
+        assert_vector(&expected, app);
+
+        let ts = columns.get(TIMESTAMP_COLUMN_NAME).unwrap();
+        let expected: Vec<Value> = vec![
+            datatypes::prelude::Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)),
+            datatypes::prelude::Value::Timestamp(Timestamp::new(2000, TimeUnit::Millisecond)),
+            datatypes::prelude::Value::Timestamp(Timestamp::new(3000, TimeUnit::Millisecond)),
+        ];
+        assert_vector(&expected, ts);
+
+        let val = columns.get(VALUE_COLUMN_NAME).unwrap();
+        let expected: Vec<Value> = vec![5.0_f64.into(), 6.0_f64.into(), 7.0_f64.into()];
+        assert_vector(&expected, val);
+    }
+
+    fn assert_vector(expected: &[Value], vector: &Arc<dyn Vector>) {
+        for (idx, expected) in expected.iter().enumerate() {
+            let val = vector.get(idx);
+            assert_eq!(*expected, val);
+        }
     }
 
     #[test]
@@ -506,8 +662,11 @@ mod tests {
             ..Default::default()
         };
 
-        let exprs = write_request_to_insert_exprs(write_request).unwrap();
+        let exprs = write_request_to_insert_exprs("prometheus", write_request).unwrap();
         assert_eq!(3, exprs.len());
+        assert_eq!("prometheus", exprs[0].schema_name);
+        assert_eq!("prometheus", exprs[1].schema_name);
+        assert_eq!("prometheus", exprs[2].schema_name);
         assert_eq!("metric1", exprs[0].table_name);
         assert_eq!("metric2", exprs[1].table_name);
         assert_eq!("metric3", exprs[2].table_name);

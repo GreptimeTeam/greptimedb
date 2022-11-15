@@ -24,8 +24,8 @@ use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::SimpleTableScan;
 use table::{Table, TableRef};
 
-use crate::error::{Error, InsertTableRecordSnafu};
-use crate::system::{build_table_insert_request, SystemCatalogTable};
+use crate::error::{Error, InsertCatalogRecordSnafu};
+use crate::system::{build_schema_insert_request, build_table_insert_request, SystemCatalogTable};
 use crate::{
     format_full_table_name, CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef,
 };
@@ -254,7 +254,20 @@ impl SystemCatalog {
             .system
             .insert(request)
             .await
-            .context(InsertTableRecordSnafu)
+            .context(InsertCatalogRecordSnafu)
+    }
+
+    pub async fn register_schema(
+        &self,
+        catalog: String,
+        schema: String,
+    ) -> crate::error::Result<usize> {
+        let request = build_schema_insert_request(catalog, schema);
+        self.information_schema
+            .system
+            .insert(request)
+            .await
+            .context(InsertCatalogRecordSnafu)
     }
 }
 
@@ -312,6 +325,7 @@ fn build_schema_for_tables() -> Schema {
 
 #[cfg(test)]
 mod tests {
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::physical_plan::RuntimeEnv;
     use datatypes::arrow::array::Utf8Array;
     use datatypes::arrow::datatypes::DataType;
@@ -319,32 +333,30 @@ mod tests {
     use table::table::numbers::NumbersTable;
 
     use super::*;
-    use crate::local::memory::{
-        new_memory_catalog_list, MemoryCatalogProvider, MemorySchemaProvider,
-    };
+    use crate::local::memory::new_memory_catalog_list;
     use crate::CatalogList;
 
     #[tokio::test]
     async fn test_tables() {
         let catalog_list = new_memory_catalog_list().unwrap();
-        let catalog_provider = Arc::new(MemoryCatalogProvider::default());
-        let schema = Arc::new(MemorySchemaProvider::new());
+        let schema = catalog_list
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .unwrap()
+            .schema(DEFAULT_SCHEMA_NAME)
+            .unwrap()
+            .unwrap();
         schema
             .register_table("test_table".to_string(), Arc::new(NumbersTable::default()))
             .unwrap();
-        catalog_provider
-            .register_schema("test_schema".to_string(), schema)
-            .unwrap();
-        catalog_list
-            .register_catalog("test_catalog".to_string(), catalog_provider)
-            .unwrap();
-        let tables = Tables::new(catalog_list, "test_engine".to_string());
 
+        let tables = Tables::new(catalog_list, "test_engine".to_string());
         let tables_stream = tables.scan(&None, &[], None).await.unwrap();
         let mut tables_stream = tables_stream
             .execute(0, Arc::new(RuntimeEnv::default()))
             .await
             .unwrap();
+
         if let Some(t) = tables_stream.next().await {
             let batch = t.unwrap().df_recordbatch;
             assert_eq!(1, batch.num_rows());
@@ -354,7 +366,7 @@ mod tests {
             assert_eq!(&DataType::Utf8, batch.column(2).data_type());
             assert_eq!(&DataType::Utf8, batch.column(3).data_type());
             assert_eq!(
-                "test_catalog",
+                "greptime",
                 batch
                     .column(0)
                     .as_any()
@@ -364,7 +376,7 @@ mod tests {
             );
 
             assert_eq!(
-                "test_schema",
+                "public",
                 batch
                     .column(1)
                     .as_any()

@@ -1,5 +1,7 @@
 use std::str::FromStr;
 
+use api::v1::meta::TableName;
+use common_catalog::TableGlobalKey;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Deserialize;
@@ -12,6 +14,8 @@ use crate::error;
 use crate::error::Result;
 
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
+pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
+pub(crate) const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
 lazy_static! {
     static ref DATANODE_KEY_PATTERN: Regex =
@@ -105,6 +109,44 @@ impl TryFrom<LeaseValue> for Vec<u8> {
                 input: format!("{:?}", dn_value),
             })?
             .into_bytes())
+    }
+}
+
+pub struct TableRouteKey<'a> {
+    pub table_id: u64,
+    pub catalog_name: &'a str,
+    pub schema_name: &'a str,
+    pub table_name: &'a str,
+}
+
+impl<'a> TableRouteKey<'a> {
+    pub fn with_table_name(table_id: u64, t: &'a TableName) -> Self {
+        Self {
+            table_id,
+            catalog_name: &t.catalog_name,
+            schema_name: &t.schema_name,
+            table_name: &t.table_name,
+        }
+    }
+
+    pub fn with_table_global_key(table_id: u64, t: &'a TableGlobalKey) -> Self {
+        Self {
+            table_id,
+            catalog_name: &t.catalog_name,
+            schema_name: &t.schema_name,
+            table_name: &t.table_name,
+        }
+    }
+
+    pub fn prefix(&self) -> String {
+        format!(
+            "{}-{}-{}-{}",
+            TABLE_ROUTE_PREFIX, self.catalog_name, self.schema_name, self.table_name
+        )
+    }
+
+    pub fn key(&self) -> String {
+        format!("{}-{}", self.prefix(), self.table_id)
     }
 }
 

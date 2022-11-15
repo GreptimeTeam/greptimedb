@@ -7,7 +7,7 @@ use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{self, Error, Result};
-use crate::memtable::{IterContext, MemtableRef, MemtableSet};
+use crate::memtable::{IterContext, MemtableRef};
 use crate::read::{BoxedBatchReader, DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions, Visitor};
@@ -100,11 +100,8 @@ impl ChunkReaderBuilder {
         self
     }
 
-    pub fn pick_memtables(mut self, memtables: &MemtableSet) -> Self {
-        for (_range, mem) in memtables.iter() {
-            self.memtables.push(mem.clone());
-        }
-
+    pub fn pick_memtables(mut self, memtables: MemtableRef) -> Self {
+        self.memtables.push(memtables);
         self
     }
 

@@ -1,6 +1,8 @@
-mod router;
+pub mod router;
 mod store;
 pub mod util;
+
+use std::fmt::{Display, Formatter};
 
 use api::v1::meta::KeyValue as PbKeyValue;
 use api::v1::meta::Peer as PbPeer;
@@ -13,6 +15,7 @@ pub use router::RouteRequest;
 pub use router::RouteResponse;
 pub use router::Table;
 pub use router::TableRoute;
+use serde::{Deserialize, Serialize};
 pub use store::BatchPutRequest;
 pub use store::BatchPutResponse;
 pub use store::CompareAndPutRequest;
@@ -90,11 +93,21 @@ impl KeyValue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct TableName {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+}
+
+impl Display for TableName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}",
+            self.catalog_name, self.schema_name, self.table_name
+        )
+    }
 }
 
 impl TableName {
@@ -131,7 +144,7 @@ impl From<PbTableName> for TableName {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Peer {
     pub id: u64,
     pub addr: String,

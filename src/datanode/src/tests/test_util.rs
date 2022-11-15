@@ -4,6 +4,7 @@ use std::sync::Arc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use frontend::frontend::Mode;
 use snafu::ResultExt;
 use table::engine::EngineContext;
 use table::engine::TableEngineRef;
@@ -32,6 +33,7 @@ pub fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGua
         storage: ObjectStoreConfig::File {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
         },
+        mode: Mode::Standalone,
         ..Default::default()
     };
     (
@@ -48,7 +50,7 @@ pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("ts", ts_type, true),
+        ColumnSchema::new("ts", ts_type, true).with_time_index(true),
     ];
 
     let table_name = "demo";
@@ -65,7 +67,6 @@ pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -
                 schema: Arc::new(
                     SchemaBuilder::try_from(column_schemas)
                         .unwrap()
-                        .timestamp_index(Some(3))
                         .build()
                         .expect("ts is expected to be timestamp column"),
                 ),

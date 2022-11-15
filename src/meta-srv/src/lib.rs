@@ -1,5 +1,6 @@
 #![feature(btree_drain_filter)]
 pub mod bootstrap;
+mod election;
 pub mod error;
 pub mod handler;
 mod keys;
@@ -8,6 +9,7 @@ pub mod metasrv;
 #[cfg(feature = "mock")]
 pub mod mocks;
 pub mod selector;
+mod sequence;
 pub mod service;
 mod util;
 

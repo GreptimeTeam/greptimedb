@@ -2,8 +2,12 @@ use std::collections::HashMap;
 
 use api::v1::codec::InsertBatch;
 use api::v1::{column, column::SemanticType, insert_expr, Column, ColumnDataType, InsertExpr};
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_grpc::writer::Precision;
+use table::requests::InsertRequest;
 
 use crate::error::{self, Result};
+use crate::line_writer::LineWriter;
 
 pub const OPENTSDB_TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
 pub const OPENTSDB_VALUE_COLUMN_NAME: &str = "greptime_value";
@@ -112,7 +116,25 @@ impl DataPoint {
         self.value
     }
 
+    pub fn as_insert_request(&self) -> InsertRequest {
+        let mut line_writer = LineWriter::with_lines(DEFAULT_SCHEMA_NAME, self.metric.clone(), 1);
+        line_writer.write_ts(
+            OPENTSDB_TIMESTAMP_COLUMN_NAME,
+            (self.ts_millis(), Precision::MILLISECOND),
+        );
+
+        line_writer.write_f64(OPENTSDB_VALUE_COLUMN_NAME, self.value);
+
+        for (tagk, tagv) in self.tags.iter() {
+            line_writer.write_tag(tagk, tagv);
+        }
+        line_writer.commit();
+        line_writer.finish()
+    }
+
+    // TODO(fys): will remove in the future.
     pub fn as_grpc_insert(&self) -> InsertExpr {
+        let schema_name = DEFAULT_SCHEMA_NAME.to_string();
         let mut columns = Vec::with_capacity(2 + self.tags.len());
 
         let ts_column = Column {
@@ -157,11 +179,13 @@ impl DataPoint {
             row_count: 1,
         };
         InsertExpr {
+            schema_name,
             table_name: self.metric.clone(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values {
                 values: vec![batch.into()],
             })),
             options: HashMap::default(),
+            region_number: 0,
         }
     }
 
@@ -180,6 +204,12 @@ impl DataPoint {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
+    use common_time::{timestamp::TimeUnit, Timestamp};
+    use datatypes::value::Value;
+    use datatypes::vectors::Vector;
+
     use super::*;
 
     #[test]
@@ -239,6 +269,43 @@ mod test {
         );
     }
 
+    #[test]
+    fn test_as_insert_request() {
+        let data_point = DataPoint {
+            metric: "my_metric_1".to_string(),
+            ts_millis: 1000,
+            value: 1.0,
+            tags: vec![
+                ("tagk1".to_string(), "tagv1".to_string()),
+                ("tagk2".to_string(), "tagv2".to_string()),
+            ],
+        };
+        let insert_request = data_point.as_insert_request();
+        assert_eq!("my_metric_1", insert_request.table_name);
+        let columns = insert_request.columns_values;
+        assert_eq!(4, columns.len());
+        let ts = columns.get(OPENTSDB_TIMESTAMP_COLUMN_NAME).unwrap();
+        let expected = vec![datatypes::prelude::Value::Timestamp(Timestamp::new(
+            1000,
+            TimeUnit::Millisecond,
+        ))];
+        assert_vector(&expected, ts);
+        let val = columns.get(OPENTSDB_VALUE_COLUMN_NAME).unwrap();
+        assert_vector(&[1.0.into()], val);
+        let tagk1 = columns.get("tagk1").unwrap();
+        assert_vector(&["tagv1".into()], tagk1);
+        let tagk2 = columns.get("tagk2").unwrap();
+        assert_vector(&["tagv2".into()], tagk2);
+    }
+
+    fn assert_vector(expected: &[Value], vector: &Arc<dyn Vector>) {
+        for (idx, expected) in expected.iter().enumerate() {
+            let val = vector.get(idx);
+            assert_eq!(*expected, val);
+        }
+    }
+
+    // TODO(fys): will remove in the future.
     #[test]
     fn test_as_grpc_insert() {
         let data_point = DataPoint {

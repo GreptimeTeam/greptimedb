@@ -302,7 +302,7 @@ mod tests {
     #[tokio::test]
     async fn test_parquet_writer() {
         let schema = memtable_tests::schema_for_test();
-        let memtable = DefaultMemtableBuilder {}.build(1, schema);
+        let memtable = DefaultMemtableBuilder::default().build(schema);
 
         memtable_tests::write_kvs(
             &*memtable,

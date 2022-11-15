@@ -1,3 +1,4 @@
+mod context;
 pub mod handler;
 pub mod influxdb;
 pub mod opentsdb;
@@ -11,6 +12,7 @@ use aide::axum::routing as apirouting;
 use aide::axum::{ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
+use axum::middleware::{self};
 use axum::response::Html;
 use axum::Extension;
 use axum::{error_handling::HandleErrorLayer, response::Json, routing, BoxError, Router};
@@ -22,7 +24,7 @@ use common_telemetry::logging::info;
 use datatypes::data_type::DataType;
 use futures::FutureExt;
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ensure;
 use snafu::ResultExt;
@@ -49,18 +51,32 @@ pub struct HttpServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub struct ColumnSchema {
     name: String,
     data_type: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+impl ColumnSchema {
+    pub fn new(name: String, data_type: String) -> ColumnSchema {
+        ColumnSchema { name, data_type }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub struct Schema {
     column_schemas: Vec<ColumnSchema>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+impl Schema {
+    pub fn new(columns: Vec<ColumnSchema>) -> Schema {
+        Schema {
+            column_schemas: columns,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 pub struct HttpRecordsOutput {
     schema: Option<Schema>,
     rows: Vec<Vec<Value>>,
@@ -76,6 +92,14 @@ impl HttpRecordsOutput {
             .as_ref()
             .map(|x| x.column_schemas.len())
             .unwrap_or(0)
+    }
+
+    pub fn schema(&self) -> Option<&Schema> {
+        self.schema.as_ref()
+    }
+
+    pub fn rows(&self) -> &Vec<Vec<Value>> {
+        &self.rows
     }
 }
 
@@ -129,20 +153,22 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
     }
 }
 
-#[derive(Serialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum JsonOutput {
     AffectedRows(usize),
     Records(HttpRecordsOutput),
 }
 
-#[derive(Serialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct JsonResponse {
     code: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<JsonOutput>,
+    output: Option<Vec<JsonOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_time_ms: Option<u128>,
 }
 
 impl JsonResponse {
@@ -151,33 +177,40 @@ impl JsonResponse {
             error: Some(error),
             code: error_code as u32,
             output: None,
+            execution_time_ms: None,
         }
     }
 
-    fn with_output(output: Option<JsonOutput>) -> Self {
+    fn with_output(output: Option<Vec<JsonOutput>>) -> Self {
         JsonResponse {
             error: None,
             code: StatusCode::Success as u32,
             output,
+            execution_time_ms: None,
         }
+    }
+
+    fn with_execution_time(mut self, execution_time: u128) -> Self {
+        self.execution_time_ms = Some(execution_time);
+        self
     }
 
     /// Create a json response from query result
     async fn from_output(output: Result<Output>) -> Self {
         match output {
             Ok(Output::AffectedRows(rows)) => {
-                Self::with_output(Some(JsonOutput::AffectedRows(rows)))
+                Self::with_output(Some(vec![JsonOutput::AffectedRows(rows)]))
             }
             Ok(Output::Stream(stream)) => match util::collect(stream).await {
                 Ok(rows) => match HttpRecordsOutput::try_from(rows) {
-                    Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
+                    Ok(rows) => Self::with_output(Some(vec![JsonOutput::Records(rows)])),
                     Err(err) => Self::with_error(err, StatusCode::Internal),
                 },
                 Err(e) => Self::with_error(format!("Recordbatch error: {}", e), e.status_code()),
             },
             Ok(Output::RecordBatches(recordbatches)) => {
                 match HttpRecordsOutput::try_from(recordbatches.take()) {
-                    Ok(rows) => Self::with_output(Some(JsonOutput::Records(rows))),
+                    Ok(rows) => Self::with_output(Some(vec![JsonOutput::Records(rows)])),
                     Err(err) => Self::with_error(err, StatusCode::Internal),
                 }
             }
@@ -185,6 +218,10 @@ impl JsonResponse {
                 Self::with_error(format!("Query engine output error: {}", e), e.status_code())
             }
         }
+    }
+
+    pub fn code(&self) -> u32 {
+        self.code
     }
 
     pub fn success(&self) -> bool {
@@ -195,8 +232,12 @@ impl JsonResponse {
         self.error.as_ref()
     }
 
-    pub fn output(&self) -> Option<&JsonOutput> {
-        self.output.as_ref()
+    pub fn output(&self) -> Option<&[JsonOutput]> {
+        self.output.as_deref()
+    }
+
+    pub fn execution_time_ms(&self) -> Option<u128> {
+        self.execution_time_ms
     }
 }
 
@@ -288,7 +329,6 @@ impl HttpServer {
             router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
         }
 
-        // TODO(fys): Creating influxdb's database when we can create greptime schema.
         if let Some(influxdb_handler) = self.influxdb_handler.clone() {
             let influxdb_router =
                 Router::with_state(influxdb_handler).route("/write", routing::post(influxdb_write));
@@ -313,7 +353,9 @@ impl HttpServer {
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
                     // TODO(LFC): make timeout configurable
-                    .layer(TimeoutLayer::new(Duration::from_secs(30))),
+                    .layer(TimeoutLayer::new(Duration::from_secs(30)))
+                    // custom layer
+                    .layer(middleware::from_fn(context::build_ctx)),
             )
     }
 }
@@ -398,11 +440,11 @@ mod test {
 
         let json_resp = JsonResponse::from_output(Ok(Output::RecordBatches(recordbatches))).await;
 
-        let json_output = json_resp.output.unwrap();
+        let json_output = &json_resp.output.unwrap()[0];
         if let JsonOutput::Records(r) = json_output {
             assert_eq!(r.num_rows(), 4);
             assert_eq!(r.num_cols(), 2);
-            let schema = r.schema.unwrap();
+            let schema = r.schema.as_ref().unwrap();
             assert_eq!(schema.column_schemas[0].name, "numbers");
             assert_eq!(schema.column_schemas[0].data_type, "UInt32");
             assert_eq!(r.rows[0][0], serde_json::Value::from(1));

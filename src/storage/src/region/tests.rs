@@ -20,6 +20,7 @@ use tempdir::TempDir;
 use super::*;
 use crate::manifest::action::{RegionChange, RegionMetaActionList};
 use crate::manifest::test_utils::*;
+use crate::memtable::DefaultMemtableBuilder;
 use crate::test_util::{
     self, config_util, descriptor_util::RegionDescBuilder, schema_util, write_batch_util,
 };
@@ -76,6 +77,10 @@ impl<S: LogStore> TesterBase<S> {
             .write_inner(&self.write_ctx, batch)
             .await
             .unwrap()
+    }
+
+    pub async fn replay_inner(&self, recovered_metadata: RecoveredMetadataMap) {
+        self.region.replay_inner(recovered_metadata).await.unwrap()
     }
 
     /// Scan all data.
@@ -166,7 +171,7 @@ async fn test_new_region() {
         .push_key_column(("k1", LogicalTypeId::Int32, false))
         .push_value_column(("v0", LogicalTypeId::Float32, true))
         .build();
-    let metadata = desc.try_into().unwrap();
+    let metadata: RegionMetadata = desc.try_into().unwrap();
 
     let store_dir = TempDir::new("test_new_region")
         .unwrap()
@@ -175,8 +180,14 @@ async fn test_new_region() {
         .to_string();
 
     let store_config = config_util::new_store_config(region_name, &store_dir).await;
+    let placeholder_memtable = store_config
+        .memtable_builder
+        .build(metadata.schema().clone());
 
-    let region = RegionImpl::new(Version::new(Arc::new(metadata)), store_config);
+    let region = RegionImpl::new(
+        Version::new(Arc::new(metadata), placeholder_memtable),
+        store_config,
+    );
 
     let expect_schema = schema_util::new_schema_ref(
         &[
@@ -195,6 +206,7 @@ async fn test_new_region() {
 #[tokio::test]
 async fn test_recover_region_manifets() {
     let tmp_dir = TempDir::new("test_new_region").unwrap();
+    let memtable_builder = Arc::new(DefaultMemtableBuilder::default()) as _;
 
     let object_store = ObjectStore::new(
         fs::Builder::default()
@@ -207,11 +219,13 @@ async fn test_recover_region_manifets() {
     let region_meta = Arc::new(build_region_meta());
 
     // Recover from empty
-    assert!(RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest)
-        .await
-        .unwrap()
-        .0
-        .is_none());
+    assert!(
+        RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest, &memtable_builder)
+            .await
+            .unwrap()
+            .0
+            .is_none()
+    );
 
     {
         // save some actions into region_meta
@@ -246,7 +260,7 @@ async fn test_recover_region_manifets() {
 
     // try to recover
     let (version, recovered_metadata) =
-        RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest)
+        RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest, &memtable_builder)
             .await
             .unwrap();
 
@@ -261,7 +275,6 @@ async fn test_recover_region_manifets() {
     for (i, file) in files.iter().enumerate() {
         assert_eq!(format!("f{}", i + 1), file.file_name());
     }
-    assert!(version.mutable_memtables().is_empty());
 
     // check manifest state
     assert_eq!(3, manifest.last_version());

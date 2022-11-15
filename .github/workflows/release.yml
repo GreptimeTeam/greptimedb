@@ -2,6 +2,7 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
 
 name: Release
 
@@ -13,20 +14,20 @@ jobs:
     name: Build binary
     strategy:
       matrix:
-        # The file format is greptime-<tag>.<os>-<arch>
+        # The file format is greptime-<os>-<arch>
         include:
           - arch: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            file: greptime-${{ github.ref_name }}.linux-amd64
+            os: ubuntu-latest-16-cores
+            file: greptime-linux-amd64
           - arch: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            file: greptime-${{ github.ref_name }}.linux-arm64
+            os: ubuntu-latest-16-cores
+            file: greptime-linux-arm64
           - arch: aarch64-apple-darwin
             os: macos-latest
-            file: greptime-${{ github.ref_name }}.darwin-arm64
+            file: greptime-darwin-arm64
           - arch: x86_64-apple-darwin
             os: macos-latest
-            file: greptime-${{ github.ref_name }}.darwin-amd64
+            file: greptime-darwin-amd64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout sources
@@ -63,35 +64,31 @@ jobs:
           sudo apt-get -y update
           sudo apt-get -y install libssl-dev pkg-config g++-aarch64-linux-gnu gcc-aarch64-linux-gnu
 
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          profile: minimal
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          override: true
-          target: ${{ matrix.arch }}
+          targets: ${{ matrix.arch }}
 
       - name: Output package versions
         run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
 
       - name: Run cargo build
-        uses: actions-rs/cargo@v1
-        with:
-          command: build
-          args: ${{ matrix.opts }} --release --locked --target ${{ matrix.arch }}
+        run: cargo build ${{ matrix.opts }} --release --locked --target ${{ matrix.arch }}
 
       - name: Calculate checksum and rename binary
         shell: bash
         run: |
           cd target/${{ matrix.arch }}/release
-          cp greptime ${{ matrix.file }}
-          echo $(shasum -a 256 greptime | cut -f1 -d' ') > ${{ matrix.file }}.sha256sum
+          chmod +x greptime
+          tar -zcvf ${{ matrix.file }}.tgz greptime
+          echo $(shasum -a 256 ${{ matrix.file }}.tgz | cut -f1 -d' ') > ${{ matrix.file }}.sha256sum
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v3
         with:
           name: ${{ matrix.file }}
-          path: target/${{ matrix.arch }}/release/${{ matrix.file }}
+          path: target/${{ matrix.arch }}/release/${{ matrix.file }}.tgz
 
       - name: Upload checksum of artifacts
         uses: actions/upload-artifact@v3
@@ -114,7 +111,7 @@ jobs:
         with:
           name: "Release ${{ github.ref_name }}"
           files: |
-            **/greptime-${{ github.ref_name }}.*
+            **/greptime-*
 
   docker:
     name: Build docker image
@@ -122,32 +119,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Download amd64 binary
         uses: actions/download-artifact@v3
         with:
-          name: greptime-${{ github.ref_name }}.linux-amd64
+          name: greptime-linux-amd64
           path: amd64
 
-      - name: Rename amd64 binary
+      - name: Unzip the amd64 artifacts
         run: |
-          mv amd64/greptime-${{ github.ref_name }}.linux-amd64 amd64/greptime
+          cd amd64
+          tar xvf greptime-linux-amd64.tgz
+          rm greptime-linux-amd64.tgz
 
       - name: Download arm64 binary
         uses: actions/download-artifact@v3
         with:
-          name: greptime-${{ github.ref_name }}.linux-arm64
+          name: greptime-linux-arm64
           path: arm64
 
-      - name: Rename arm64 binary
+      - name: Unzip the arm64 artifacts
         run: |
-          mv arm64/greptime-${{ github.ref_name }}.linux-arm64 arm64/greptime
-
-      - name: Set file permissions
-        shell: bash
-        run: |
-          chmod +x amd64/greptime arm64/greptime
+          cd arm64
+          tar xvf greptime-linux-arm64.tgz
+          rm greptime-linux-arm64.tgz
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v2
@@ -161,6 +157,12 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
+        shell: bash
+        run: |
+          VERSION=${{ github.ref_name }}
+          echo "VERSION=${VERSION:1}" >> $GITHUB_ENV
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
@@ -176,5 +178,6 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/greptimeteam/greptimedb:${{ github.ref_name }}
-            greptime/greptimedb:${{ github.ref_name }}
+            greptime/greptimedb:latest
+            greptime/greptimedb:${{ env.VERSION }}
+            ghcr.io/greptimeteam/greptimedb:${{ env.VERSION }}
