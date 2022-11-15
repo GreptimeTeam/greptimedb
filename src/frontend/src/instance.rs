@@ -650,7 +650,12 @@ fn get_schema_name(expr: &AdminExpr) -> &str {
 
 #[async_trait]
 impl GrpcAdminHandler for Instance {
-    async fn exec_admin_request(&self, expr: AdminExpr) -> server_error::Result<AdminResult> {
+    async fn exec_admin_request(&self, mut expr: AdminExpr) -> server_error::Result<AdminResult> {
+        // Force the default to be `None` rather than `Some(0)` comes from gRPC decode.
+        // Related issue: #480
+        if let Some(api::v1::admin_expr::Expr::Create(create)) = &mut expr.expr {
+            create.table_id = None;
+        }
         self.admin(get_schema_name(&expr))
             .do_request(expr.clone())
             .await
