@@ -416,7 +416,7 @@ impl CatalogManager for RemoteCatalogManager {
 
     fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
         self.catalog(catalog)?
-            .with_context(|| CatalogNotFoundSnafu {
+            .context(CatalogNotFoundSnafu {
                 catalog_name: catalog,
             })?
             .schema(schema)
