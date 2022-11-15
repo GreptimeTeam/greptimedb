@@ -266,7 +266,7 @@ mod tests {
             fe_opts.grpc_options.unwrap().addr
         );
         assert_eq!("0.0.0.0:4002", fe_opts.mysql_options.as_ref().unwrap().addr);
-        assert_eq!(4, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
+        assert_eq!(2, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
         assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
     }
 }

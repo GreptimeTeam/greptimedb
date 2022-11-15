@@ -87,6 +87,5 @@ where
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Standalone,
-    // with meta server's addr
     Distributed,
 }

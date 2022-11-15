@@ -9,20 +9,20 @@ wal_dir = "/tmp/greptimedb/wal/"
 type = 'File'
 data_dir = '/tmp/greptimedb/data/'
 
-
 [grpc_options]
 addr = '0.0.0.0:4001'
-runtime_size = 4
+runtime_size = 8
 
 [mysql_options]
 addr = '0.0.0.0:4002'
-runtime_size = 4
+runtime_size = 2
 
 [influxdb_options]
 enable = true
 
 [opentsdb_options]
 addr = "0.0.0.0:4242"
+enable = true
 runtime_size = 2
 
 [prometheus_options]
@@ -30,5 +30,5 @@ enable = true
 
 [postgres_options]
 addr = '0.0.0.0:4003'
-runtime_size = 4
+runtime_size = 2
 check_pwd = false
