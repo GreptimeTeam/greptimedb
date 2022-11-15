@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! promethues protcol supportings
+//! prometheus protocol supportings
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -77,7 +77,7 @@ pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
         let value = &m.value;
         let m_type =
             MatcherType::from_i32(m.r#type).context(error::InvalidPromRemoteRequestSnafu {
-                msg: format!("invaid LabelMatcher type: {}", m.r#type),
+                msg: format!("invalid LabelMatcher type: {}", m.r#type),
             })?;
 
         match m_type {
@@ -87,11 +87,11 @@ pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
             MatcherType::Neq => {
                 conditions.push(format!("{}!='{}'", name, value));
             }
-            // Case senstive regexp match
+            // Case sensitive regexp match
             MatcherType::Re => {
                 conditions.push(format!("{}~'{}'", name, value));
             }
-            // Case senstive regexp not match
+            // Case sensitive regexp not match
             MatcherType::Nre => {
                 conditions.push(format!("{}!~'{}'", name, value));
             }

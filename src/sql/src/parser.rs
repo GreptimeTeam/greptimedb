@@ -158,7 +158,7 @@ impl<'a> ParserContext<'a> {
                 }));
             }
 
-            // SHOW TABLES [in | FROM] [DATABSE]
+            // SHOW TABLES [in | FROM] [DATABASE]
             Token::Word(w) => match w.keyword {
                 Keyword::IN | Keyword::FROM => {
                     self.parser.next_token();
