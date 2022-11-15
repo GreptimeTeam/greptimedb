@@ -69,6 +69,21 @@ pub enum Error {
         source: tonic::transport::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to collect RecordBatches, source: {}", source))]
+    CollectRecordBatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to convert Arrow type: {}", from))]
+    Conversion { from: String, backtrace: Backtrace },
+
+    #[snafu(display("Column datatype error, source: {}", source))]
+    ColumnDataType {
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -83,7 +98,10 @@ impl ErrorExt for Error {
             }
             Error::NewProjection { .. }
             | Error::DecodePhysicalPlanNode { .. }
-            | Error::CreateChannel { .. } => StatusCode::Internal,
+            | Error::CreateChannel { .. }
+            | Error::Conversion { .. } => StatusCode::Internal,
+            Error::CollectRecordBatches { source } => source.status_code(),
+            Error::ColumnDataType { source } => source.status_code(),
         }
     }
 

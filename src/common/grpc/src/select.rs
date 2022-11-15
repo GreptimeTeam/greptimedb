@@ -21,6 +21,7 @@ use api::v1::column::{SemanticType, Values};
 use api::v1::{Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::BitVec;
+use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatches, SendableRecordBatchStream};
@@ -30,7 +31,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, ConversionSnafu, Result};
 
-pub async fn to_object_result(output: Result<Output>) -> ObjectResult {
+pub async fn to_object_result(output: std::result::Result<Output, impl ErrorExt>) -> ObjectResult {
     let result = match output {
         Ok(Output::AffectedRows(rows)) => Ok(ObjectResultBuilder::new()
             .status_code(StatusCode::Success as u32)
@@ -208,7 +209,7 @@ mod tests {
     use datatypes::schema::Schema;
     use datatypes::vectors::{UInt32Vector, VectorRef};
 
-    use crate::server::grpc::select::{null_mask, try_convert, values};
+    use crate::select::{null_mask, try_convert, values};
 
     #[test]
     fn test_convert_record_batches_to_select_result() {

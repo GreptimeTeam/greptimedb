@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_grpc::select::to_object_result;
 use common_insert::insertion_expr_to_request;
 use common_query::Output;
 use query::plan::LogicalPlan;
@@ -36,7 +37,6 @@ use crate::error::{
 };
 use crate::instance::Instance;
 use crate::server::grpc::plan::PhysicalPlanner;
-use crate::server::grpc::select::to_object_result;
 
 impl Instance {
     pub async fn execute_grpc_insert(

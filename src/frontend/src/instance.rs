@@ -26,8 +26,8 @@ use api::v1::alter_expr::Kind;
 use api::v1::codec::InsertBatch;
 use api::v1::object_expr::Expr;
 use api::v1::{
-    admin_expr, insert_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr,
-    CreateExpr, InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
+    admin_expr, insert_expr, select_expr, AddColumns, AdminExpr, AdminResult, AlterExpr,
+    CreateDatabaseExpr, CreateExpr, InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
@@ -37,6 +37,7 @@ use client::{Client, Database, Select};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{BoxedError, StatusCode};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_grpc::select::to_object_result;
 use common_query::Output;
 use common_telemetry::{debug, error, info};
 use distributed::DistInstance;
@@ -531,21 +532,26 @@ impl Instance {
     }
 }
 
+fn parse_stmt(sql: &str) -> Result<Statement> {
+    let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        .context(error::ParseSqlSnafu)?;
+    // TODO(LFC): Support executing multiple SQL queries,
+    // which seems to be a major change to our whole server framework?
+    ensure!(
+        stmt.len() == 1,
+        error::InvalidSqlSnafu {
+            err_msg: "Currently executing multiple SQL queries are not supported."
+        }
+    );
+    Ok(stmt.remove(0))
+}
+
 #[async_trait]
 impl SqlQueryHandler for Instance {
     async fn do_query(&self, query: &str) -> server_error::Result<Output> {
-        let mut stmt = ParserContext::create_with_dialect(query, &GenericDialect {})
+        let stmt = parse_stmt(query)
             .map_err(BoxedError::new)
             .context(server_error::ExecuteQuerySnafu { query })?;
-        if stmt.len() != 1 {
-            // TODO(LFC): Support executing multiple SQLs,
-            // which seems to be a major change to our whole server framework?
-            return server_error::NotSupportedSnafu {
-                feat: "Only one SQL is allowed to be executed at one time.",
-            }
-            .fail();
-        }
-        let stmt = stmt.remove(0);
 
         match stmt {
             Statement::Query(_) => self
@@ -680,16 +686,39 @@ impl GrpcQueryHandler for Instance {
                             query: format!("{:?}", query),
                         })
                 }
-
-                // FIXME(hl): refactor
-                _ => self
-                    .database(DEFAULT_SCHEMA_NAME)
-                    .object(query.clone())
-                    .await
-                    .map_err(BoxedError::new)
-                    .with_context(|_| server_error::ExecuteQuerySnafu {
-                        query: format!("{:?}", query),
-                    }),
+                Expr::Select(select) => {
+                    let select = select
+                        .expr
+                        .as_ref()
+                        .context(server_error::InvalidQuerySnafu {
+                            reason: "empty query",
+                        })?;
+                    match select {
+                        select_expr::Expr::Sql(sql) => {
+                            let output = SqlQueryHandler::do_query(self, sql).await;
+                            Ok(to_object_result(output).await)
+                        }
+                        _ => {
+                            if self.dist_instance.is_some() {
+                                return server_error::NotSupportedSnafu {
+                                    feat: "Executing plan directly in Frontend.",
+                                }
+                                .fail();
+                            }
+                            self.database(DEFAULT_SCHEMA_NAME)
+                                .object(query.clone())
+                                .await
+                                .map_err(BoxedError::new)
+                                .with_context(|_| server_error::ExecuteQuerySnafu {
+                                    query: format!("{:?}", query),
+                                })
+                        }
+                    }
+                }
+                _ => server_error::NotSupportedSnafu {
+                    feat: "Currently only insert and select is supported in GRPC service.",
+                }
+                .fail(),
             }
         } else {
             server_error::InvalidQuerySnafu {

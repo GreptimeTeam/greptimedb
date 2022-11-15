@@ -15,9 +15,11 @@
 use api::prometheus::remote::read_request::ResponseType;
 use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
 use async_trait::async_trait;
-use client::{Database, ObjectResult, Select};
+use client::{ObjectResult, Select};
 use common_error::prelude::BoxedError;
+use common_grpc::select::to_object_result;
 use common_telemetry::logging;
+use futures_util::TryFutureExt;
 use prost::Message;
 use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
@@ -25,7 +27,7 @@ use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use snafu::{OptionExt, ResultExt};
 
 use crate::frontend::Mode;
-use crate::instance::Instance;
+use crate::instance::{parse_stmt, Instance};
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
 
@@ -73,31 +75,37 @@ fn object_result_to_query_result(
     })
 }
 
-async fn handle_remote_queries(
-    db: &Database,
-    queries: &[Query],
-) -> ServerResult<Vec<(String, ObjectResult)>> {
-    let mut results = Vec::with_capacity(queries.len());
+impl Instance {
+    async fn handle_remote_queries(
+        &self,
+        db: &str,
+        queries: &[Query],
+    ) -> ServerResult<Vec<(String, ObjectResult)>> {
+        let mut results = Vec::with_capacity(queries.len());
 
-    for q in queries {
-        let (table_name, sql) = prometheus::query_to_sql(db.name(), q)?;
+        for query in queries {
+            let (table_name, sql) = prometheus::query_to_sql(db, query)?;
+            logging::debug!(
+                "prometheus remote read, table: {}, sql: {}",
+                table_name,
+                sql
+            );
 
-        logging::debug!(
-            "prometheus remote read, table: {}, sql: {}",
-            table_name,
-            sql
-        );
-
-        let object_result = db
-            .select(Select::Sql(sql.clone()))
-            .await
+            let object_result = if let Some(dist_instance) = &self.dist_instance {
+                let output = futures::future::ready(parse_stmt(&sql))
+                    .and_then(|stmt| dist_instance.handle_sql(&sql, stmt))
+                    .await;
+                to_object_result(output).await.try_into()
+            } else {
+                self.database(db).select(Select::Sql(sql.clone())).await
+            }
             .map_err(BoxedError::new)
             .context(error::ExecuteQuerySnafu { query: sql })?;
 
-        results.push((table_name, object_result));
+            results.push((table_name, object_result));
+        }
+        Ok(results)
     }
-
-    Ok(results)
 }
 
 #[async_trait]
@@ -138,7 +146,9 @@ impl PrometheusProtocolHandler for Instance {
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
-        let results = handle_remote_queries(&self.database(database), &request.queries).await?;
+        let results = self
+            .handle_remote_queries(database, &request.queries)
+            .await?;
 
         match response_type {
             ResponseType::Samples => {
