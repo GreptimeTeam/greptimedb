@@ -4887,6 +4887,10 @@ dependencies = [
 name = "rustpython-pylib"
 version = "0.1.0"
 source = "git+https://github.com/RustPython/RustPython?rev=02a1d1d#02a1d1d7db57afbb78049599c2585cc7cd59e6d3"
+dependencies = [
+ "rustpython-bytecode",
+ "rustpython-derive",
+]
 
 [[package]]
 name = "rustpython-vm"
