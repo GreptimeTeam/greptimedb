@@ -81,7 +81,7 @@ now `pre-commit` will run automatically on `git commit`.
 ### Title
 
 The titles of pull requests should be prefixed with category names listed in [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0) 
-like `feat`/`fix`/`doc`, with a concise summary of code change following. DO NOT use last commit message as pull request title.
+like `feat`/`fix`/`docs`, with a concise summary of code change following. DO NOT use last commit message as pull request title.
 
 ### Description
 
@@ -98,7 +98,7 @@ All commit messages SHOULD adhere to the [Conventional Commits specification](ht
 There are many ways to get help when you're stuck. It is recommended to ask for help by opening an issue, with a detailed description
 of what you were trying to do and what went wrong. You can also reach for help in our [Slack channel](https://greptime.com/slack).
 
-# Community
+## Community
 
 The core team will be thrilled if you participate in any way you like. When you are stuck, try ask for help by filing an issue, with a detailed description of what you were trying to do and what went wrong. If you have any questions or if you would like to get involved in our community, please check out:
 - [GreptimeDB Community Slack](https://greptime.com/slack)
