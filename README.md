@@ -79,7 +79,7 @@ docker run -p 4002:4002 -v "$(pwd):/tmp/greptimedb" greptime/greptimedb standalo
 ```
 
 For more startup options, greptimedb's **distributed mode** and information
-about Kubernetes deployment, check our [docs](https://greptime.com/docs).
+about Kubernetes deployment, check our [docs](https://docs.greptime.com/).
 
 ### Connect
 
