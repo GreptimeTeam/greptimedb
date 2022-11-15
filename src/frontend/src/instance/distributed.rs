@@ -5,7 +5,6 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::CreateExpr;
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
-use client::Select;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{TableGlobalKey, TableGlobalValue};
 use common_query::Output;
@@ -17,10 +16,12 @@ use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, RouteResponse, TableName,
     TableRoute,
 };
+use query::sql::{show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
+use sql::statements::statement::Statement;
 use sqlparser::ast::Value as SqlValue;
 use table::metadata::RawTableMeta;
 
@@ -103,16 +104,24 @@ impl DistInstance {
         Ok(Output::AffectedRows(region_routes.len()))
     }
 
-    pub(crate) async fn handle_select(&self, select: Select) -> Result<Output> {
-        let Select::Sql(sql) = select;
-        let plan = self
-            .query_engine
-            .sql_to_plan(&sql)
-            .with_context(|_| error::ExecuteSqlSnafu { sql: sql.clone() })?;
-        self.query_engine
-            .execute(&plan)
-            .await
-            .context(error::ExecuteSqlSnafu { sql })
+    pub(crate) async fn handle_sql(&self, sql: &str, stmt: Statement) -> Result<Output> {
+        match stmt {
+            Statement::Query(_) => {
+                let plan = self
+                    .query_engine
+                    .statement_to_plan(stmt)
+                    .context(error::ExecuteSqlSnafu { sql })?;
+                self.query_engine
+                    .execute(&plan)
+                    .await
+                    .context(error::ExecuteSqlSnafu { sql })
+            }
+            Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone())
+                .context(error::ExecuteSqlSnafu { sql }),
+            Statement::ShowTables(stmt) => show_tables(stmt, self.catalog_manager.clone())
+                .context(error::ExecuteSqlSnafu { sql }),
+            _ => unreachable!(),
+        }
     }
 
     async fn create_table_in_meta(

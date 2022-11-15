@@ -1,23 +1,19 @@
 //! sql handler
 
-use catalog::{schema::SchemaProviderRef, CatalogManagerRef, CatalogProviderRef};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::CatalogManagerRef;
 use common_query::Output;
+use query::sql::{show_databases, show_tables};
 use snafu::{OptionExt, ResultExt};
 use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
-use crate::error::{
-    CatalogNotFoundSnafu, CatalogSnafu, GetTableSnafu, Result, SchemaNotFoundSnafu,
-    TableNotFoundSnafu,
-};
+use crate::error::{self, GetTableSnafu, Result, TableNotFoundSnafu};
 
 mod alter;
 mod create;
 mod insert;
-mod show;
 
 #[derive(Debug)]
 pub enum SqlRequest {
@@ -49,8 +45,12 @@ impl SqlHandler {
             SqlRequest::CreateTable(req) => self.create_table(req).await,
             SqlRequest::CreateDatabase(req) => self.create_database(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
-            SqlRequest::ShowDatabases(stmt) => self.show_databases(stmt).await,
-            SqlRequest::ShowTables(stmt) => self.show_tables(stmt).await,
+            SqlRequest::ShowDatabases(stmt) => {
+                show_databases(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+            }
+            SqlRequest::ShowTables(stmt) => {
+                show_tables(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+            }
         }
     }
 
@@ -62,29 +62,6 @@ impl SqlHandler {
             })?
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_ref.to_string(),
-            })
-    }
-
-    pub(crate) fn get_default_catalog(&self) -> Result<CatalogProviderRef> {
-        self.catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                name: DEFAULT_CATALOG_NAME,
-            })
-    }
-
-    pub(crate) fn get_default_schema(&self) -> Result<SchemaProviderRef> {
-        self.catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                name: DEFAULT_CATALOG_NAME,
-            })?
-            .schema(DEFAULT_SCHEMA_NAME)
-            .context(CatalogSnafu)?
-            .context(SchemaNotFoundSnafu {
-                name: DEFAULT_SCHEMA_NAME,
             })
     }
 

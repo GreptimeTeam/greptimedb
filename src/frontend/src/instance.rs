@@ -188,11 +188,13 @@ impl Instance {
         self.script_handler = Some(handler);
     }
 
-    pub async fn handle_select(&self, expr: Select) -> Result<Output> {
+    pub async fn handle_select(&self, expr: Select, stmt: Statement) -> Result<Output> {
         if let Some(dist_instance) = &self.dist_instance {
-            dist_instance.handle_select(expr).await
+            let Select::Sql(sql) = expr;
+            dist_instance.handle_sql(&sql, stmt).await
         } else {
-            // TODO(LFC): Find a better way to execute query between Frontend and Datanode in standalone mode.
+            // TODO(LFC): Refactor consideration: Datanode should directly execute statement in standalone mode to avoid parse SQL again.
+            // Find a better way to execute query between Frontend and Datanode in standalone mode.
             // Otherwise we have to parse SQL first to get schema name. Maybe not GRPC.
             self.database(DEFAULT_SCHEMA_NAME)
                 .select(expr)
@@ -520,7 +522,7 @@ impl SqlQueryHandler for Instance {
 
         match stmt {
             Statement::Query(_) => self
-                .handle_select(Select::Sql(query.to_string()))
+                .handle_select(Select::Sql(query.to_string()), stmt)
                 .await
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
@@ -572,7 +574,7 @@ impl SqlQueryHandler for Instance {
             }
 
             Statement::ShowDatabases(_) | Statement::ShowTables(_) => self
-                .handle_select(Select::Sql(query.to_string()))
+                .handle_select(Select::Sql(query.to_string()), stmt)
                 .await
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
