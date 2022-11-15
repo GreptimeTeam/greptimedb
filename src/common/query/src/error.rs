@@ -1,6 +1,7 @@
 use std::any::Any;
 
 use arrow::datatypes::DataType as ArrowDatatype;
+use arrow::error::ArrowError;
 use common_error::prelude::*;
 use datafusion_common::DataFusionError;
 use datatypes::error::Error as DataTypeError;
@@ -12,6 +13,11 @@ common_error::define_opaque_error!(Error);
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum InnerError {
+    #[snafu(display("Fail to cast array to {:?}, source: {}", typ, source))]
+    TypeCast {
+        source: ArrowError,
+        typ: arrow::datatypes::DataType,
+    },
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
@@ -33,6 +39,12 @@ pub enum InnerError {
 
     #[snafu(display("Fail to cast scalar value into vector: {}", source))]
     FromScalarValue {
+        #[snafu(backtrace)]
+        source: DataTypeError,
+    },
+
+    #[snafu(display("Fail to cast arrow array into vector: {}", source))]
+    FromArrowArray {
         #[snafu(backtrace)]
         source: DataTypeError,
     },
@@ -118,13 +130,16 @@ impl ErrorExt for InnerError {
             InnerError::InvalidInputs { source, .. }
             | InnerError::IntoVector { source, .. }
             | InnerError::FromScalarValue { source }
-            | InnerError::ConvertArrowSchema { source } => source.status_code(),
+            | InnerError::ConvertArrowSchema { source }
+            | InnerError::FromArrowArray { source } => source.status_code(),
 
             InnerError::ExecuteRepeatedly { .. }
             | InnerError::GeneralDataFusion { .. }
             | InnerError::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
 
-            InnerError::UnsupportedInputDataType { .. } => StatusCode::InvalidArguments,
+            InnerError::UnsupportedInputDataType { .. } | InnerError::TypeCast { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             InnerError::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
         }
