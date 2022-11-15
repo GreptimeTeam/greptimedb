@@ -1,5 +1,5 @@
-mode = "distributed"
 node_id = 42
+mode = "distributed"
 rpc_addr = '0.0.0.0:3001'
 wal_dir = '/tmp/greptimedb/wal'
 rpc_runtime_size = 8
