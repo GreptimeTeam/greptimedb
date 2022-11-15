@@ -1,13 +1,19 @@
+use std::collections::HashMap;
+
+use api::v1::codec::InsertBatch;
+use api::v1::insert_expr::Expr;
 use api::v1::InsertExpr;
 use async_trait::async_trait;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
+use common_insert::column_to_vector;
 use servers::influxdb::InfluxdbRequest;
 use servers::{error as server_error, query_handler::InfluxdbLineProtocolHandler};
 use snafu::{OptionExt, ResultExt};
 use table::requests::InsertRequest;
 
 use crate::error;
-use crate::error::Result;
+use crate::error::{DeserializeInsertBatchSnafu, InsertBatchToRequestSnafu, Result};
 use crate::frontend::Mode;
 use crate::instance::Instance;
 
@@ -39,33 +45,55 @@ impl InfluxdbLineProtocolHandler for Instance {
 }
 
 impl Instance {
-    pub(crate) async fn dist_insert(&self, inserts: Vec<InsertRequest>) -> Result<usize> {
+    pub(crate) async fn dist_insert(&self, inserts: Vec<InsertExpr>) -> Result<usize> {
         let mut joins = Vec::with_capacity(inserts.len());
+        let catalog_name = DEFAULT_CATALOG_NAME.to_string();
 
         for insert in inserts {
             let self_clone = self.clone();
-            let insert_batch = crate::table::insert::insert_request_to_insert_batch(&insert)?;
+            let insert_batches = match &insert.expr.unwrap() {
+                Expr::Values(values) => common_insert::insert_batches(&values.values)
+                    .context(DeserializeInsertBatchSnafu)?,
+                Expr::Sql(_) => unreachable!(),
+            };
+
             self.create_or_alter_table_on_demand(
-                &insert.catalog_name,
+                DEFAULT_CATALOG_NAME,
                 &insert.schema_name,
                 &insert.table_name,
-                &[insert_batch],
+                &insert_batches,
             )
             .await?;
-            // TODO(fys): need a separate runtime here
-            let join = tokio::spawn(async move {
-                let catalog = self_clone.get_catalog(&insert.catalog_name)?;
-                let schema = Self::get_schema(catalog, &insert.schema_name)?;
-                let table = schema
-                    .table(&insert.table_name)
-                    .context(error::CatalogSnafu)?
-                    .context(error::TableNotFoundSnafu {
-                        table_name: &insert.table_name,
-                    })?;
 
-                table.insert(insert).await.context(error::TableSnafu)
-            });
-            joins.push(join);
+            let schema_name = insert.schema_name.clone();
+            let table_name = insert.table_name.clone();
+
+            for insert_batch in &insert_batches {
+                let catalog_name = catalog_name.clone();
+                let schema_name = schema_name.clone();
+                let table_name = table_name.clone();
+                let request = Self::insert_batch_to_request(
+                    DEFAULT_CATALOG_NAME,
+                    &schema_name,
+                    &table_name,
+                    insert_batch,
+                )?;
+                // TODO(fys): need a separate runtime here
+                let self_clone = self_clone.clone();
+                let join = tokio::spawn(async move {
+                    let catalog = self_clone.get_catalog(&catalog_name)?;
+                    let schema = Self::get_schema(catalog, &schema_name)?;
+                    let table = schema
+                        .table(&table_name)
+                        .context(error::CatalogSnafu)?
+                        .context(error::TableNotFoundSnafu {
+                            table_name: &table_name,
+                        })?;
+
+                    table.insert(request).await.context(error::TableSnafu)
+                });
+                joins.push(join);
+            }
         }
 
         let mut affected = 0;
@@ -75,5 +103,25 @@ impl Instance {
         }
 
         Ok(affected)
+    }
+
+    fn insert_batch_to_request(
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        batches: &InsertBatch,
+    ) -> Result<InsertRequest> {
+        let mut vectors = HashMap::with_capacity(batches.columns.len());
+        for col in &batches.columns {
+            let vector =
+                column_to_vector(col, batches.row_count).context(InsertBatchToRequestSnafu)?;
+            vectors.insert(col.column_name.clone(), vector);
+        }
+        Ok(InsertRequest {
+            catalog_name: catalog_name.to_string(),
+            schema_name: schema_name.to_string(),
+            table_name: table_name.to_string(),
+            columns_values: vectors,
+        })
     }
 }

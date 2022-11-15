@@ -260,6 +260,12 @@ pub enum Error {
         source: common_insert::error::Error,
     },
 
+    #[snafu(display("Failed to deserialize insert batching: {}", source))]
+    InsertBatchToRequest {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
@@ -427,6 +433,7 @@ impl ErrorExt for Error {
             Error::DeserializeInsertBatch { source, .. } => source.status_code(),
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
+            Error::InsertBatchToRequest { source, .. } => source.status_code(),
         }
     }
 

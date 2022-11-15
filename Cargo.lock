@@ -1026,6 +1026,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-grpc",
+ "common-insert",
  "common-query",
  "common-recordbatch",
  "common-time",
