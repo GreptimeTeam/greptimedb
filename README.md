@@ -24,13 +24,13 @@
 
 GreptimeDB is an open-source time-series database with a special focus on
 scalability, analytical capabilities and efficiency. It's designed to work on
-infrastructure of the cloud era, and urers benefit from its elasticity and commodity
+infrastructure of the cloud era, and users benefit from its elasticity and commodity
 storage.
 
 Our core developers have been building time-series data platform
 for years. Based on their best-practices, GreptimeDB is born to give you:
 
-- A standalone binary that scales to highly-available distributed cluster, with transparent experience from users' perspective/provide users with transparency/provide a transparent experience for users/transparent to users from all perspectives 
+- A standalone binary that scales to highly-available distributed cluster, providing a transparent experience for cluster users
 - Optimized columnar layout for handling time-series data; compacted, compressed, stored on various storage backends
 - Flexible index options, tackling high cardinality issues down
 - Distributed, parallel query execution, leveraging elastic computing resource
