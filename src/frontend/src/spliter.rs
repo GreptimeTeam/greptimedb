@@ -1,18 +1,14 @@
 use std::collections::HashMap;
 
 use datatypes::value::Value;
-use datatypes::vectors::VectorBuilder;
-use datatypes::vectors::VectorRef;
-use snafu::ensure;
-use snafu::OptionExt;
+use datatypes::vectors::{VectorBuilder, VectorRef};
+use snafu::{ensure, OptionExt};
 use store_api::storage::RegionNumber;
 use table::requests::InsertRequest;
 
-use crate::error::Error;
-use crate::error::FindPartitionColumnSnafu;
-use crate::error::FindRegionSnafu;
-use crate::error::InvalidInsertRequestSnafu;
-use crate::error::Result;
+use crate::error::{
+    Error, FindPartitionColumnSnafu, FindRegionSnafu, InvalidInsertRequestSnafu, Result,
+};
 use crate::partitioning::PartitionRuleRef;
 
 pub type DistInsertRequest = HashMap<RegionNumber, InsertRequest>;
@@ -159,15 +155,15 @@ fn partition_insert_request(
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-    use std::{collections::HashMap, result::Result, sync::Arc};
+    use std::collections::HashMap;
+    use std::result::Result;
+    use std::sync::Arc;
 
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datatypes::{
-        data_type::ConcreteDataType,
-        types::{BooleanType, StringType},
-        value::Value,
-        vectors::VectorBuilder,
-    };
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::types::{BooleanType, StringType};
+    use datatypes::value::Value;
+    use datatypes::vectors::VectorBuilder;
     use serde::{Deserialize, Serialize};
     use store_api::storage::RegionNumber;
     use table::requests::InsertRequest;
@@ -176,10 +172,8 @@ mod tests {
         check_req, find_partitioning_values, partition_insert_request, partition_values,
         WriteSpliter,
     };
-    use crate::{
-        error::Error,
-        partitioning::{PartitionExpr, PartitionRule, PartitionRuleRef},
-    };
+    use crate::error::Error;
+    use crate::partitioning::{PartitionExpr, PartitionRule, PartitionRuleRef};
 
     #[test]
     fn test_insert_req_check() {

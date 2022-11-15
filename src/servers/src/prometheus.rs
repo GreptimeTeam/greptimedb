@@ -3,14 +3,11 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 
-use api::prometheus::remote::{
-    label_matcher::Type as MatcherType, Label, Query, Sample, TimeSeries, WriteRequest,
-};
-use api::v1::codec::InsertBatch;
-use api::v1::{
-    codec::SelectResult, column, column::SemanticType, insert_expr, Column, ColumnDataType,
-    InsertExpr,
-};
+use api::prometheus::remote::label_matcher::Type as MatcherType;
+use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
+use api::v1::codec::{InsertBatch, SelectResult};
+use api::v1::column::SemanticType;
+use api::v1::{column, insert_expr, Column, ColumnDataType, InsertExpr};
 use common_grpc::writer::Precision::MILLISECOND;
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt};
@@ -507,7 +504,8 @@ mod tests {
     use api::prometheus::remote::LabelMatcher;
     use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
-    use datatypes::{value::Value, vectors::Vector};
+    use datatypes::value::Value;
+    use datatypes::vectors::Vector;
 
     use super::*;
 

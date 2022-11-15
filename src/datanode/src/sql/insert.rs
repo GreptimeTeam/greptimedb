@@ -1,12 +1,10 @@
 use catalog::SchemaProviderRef;
 use common_query::Output;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::prelude::VectorBuilder;
-use snafu::ensure;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use datatypes::prelude::{ConcreteDataType, VectorBuilder};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
-use sql::statements::{self, insert::Insert};
+use sql::statements::insert::Insert;
+use sql::statements::{self};
 use table::engine::TableReference;
 use table::requests::*;
 

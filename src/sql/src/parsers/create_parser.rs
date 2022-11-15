@@ -2,8 +2,7 @@ use std::cmp::Ordering;
 
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-use snafu::ResultExt;
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::Value;
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::parser::IsOptional::Mandatory;

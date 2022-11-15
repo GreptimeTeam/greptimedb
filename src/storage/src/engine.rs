@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use common_telemetry::logging::info;
 use object_store::{util, ObjectStore};
 use snafu::ResultExt;
-use store_api::{
-    logstore::LogStore,
-    storage::{CreateOptions, EngineContext, OpenOptions, RegionDescriptor, StorageEngine},
+use store_api::logstore::LogStore;
+use store_api::storage::{
+    CreateOptions, EngineContext, OpenOptions, RegionDescriptor, StorageEngine,
 };
 
 use crate::background::JobPoolImpl;

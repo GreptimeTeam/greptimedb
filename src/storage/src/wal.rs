@@ -5,24 +5,18 @@ use common_error::prelude::BoxedError;
 use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
-use store_api::storage::RegionId;
-use store_api::{
-    logstore::{entry::Entry, AppendResponse, LogStore},
-    storage::SequenceNumber,
-};
+use store_api::logstore::entry::Entry;
+use store_api::logstore::{AppendResponse, LogStore};
+use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::{
-    codec::{Decoder, Encoder},
-    error::{self, Error, Result},
-    proto::wal::{self, PayloadType, WalHeader},
-    write_batch::{
-        codec::{
-            WriteBatchArrowDecoder, WriteBatchArrowEncoder, WriteBatchProtobufDecoder,
-            WriteBatchProtobufEncoder,
-        },
-        WriteBatch,
-    },
+use crate::codec::{Decoder, Encoder};
+use crate::error::{self, Error, Result};
+use crate::proto::wal::{self, PayloadType, WalHeader};
+use crate::write_batch::codec::{
+    WriteBatchArrowDecoder, WriteBatchArrowEncoder, WriteBatchProtobufDecoder,
+    WriteBatchProtobufEncoder,
 };
+use crate::write_batch::WriteBatch;
 
 #[derive(Debug)]
 pub struct Wal<S: LogStore> {

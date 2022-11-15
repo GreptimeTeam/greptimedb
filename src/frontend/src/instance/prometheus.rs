@@ -1,9 +1,7 @@
-use api::prometheus::remote::{
-    read_request::ResponseType, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
-};
+use api::prometheus::remote::read_request::ResponseType;
+use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
 use async_trait::async_trait;
-use client::ObjectResult;
-use client::{Database, Select};
+use client::{Database, ObjectResult, Select};
 use common_error::prelude::BoxedError;
 use common_telemetry::logging;
 use prost::Message;
@@ -162,9 +160,8 @@ impl PrometheusProtocolHandler for Instance {
 
 #[cfg(test)]
 mod tests {
-    use api::prometheus::remote::{
-        label_matcher::Type as MatcherType, Label, LabelMatcher, Sample,
-    };
+    use api::prometheus::remote::label_matcher::Type as MatcherType;
+    use api::prometheus::remote::{Label, LabelMatcher, Sample};
     use api::v1::CreateDatabaseExpr;
 
     use super::*;

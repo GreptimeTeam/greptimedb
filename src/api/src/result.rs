@@ -1,8 +1,9 @@
 use common_error::prelude::ErrorExt;
 
+use crate::v1::codec::SelectResult;
 use crate::v1::{
-    admin_result, codec::SelectResult, object_result, AdminResult, MutateResult, ObjectResult,
-    ResultHeader, SelectResult as SelectResultRaw,
+    admin_result, object_result, AdminResult, MutateResult, ObjectResult, ResultHeader,
+    SelectResult as SelectResultRaw,
 };
 
 pub const PROTOCOL_VERSION: u32 = 1;

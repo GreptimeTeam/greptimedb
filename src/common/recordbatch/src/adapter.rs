@@ -5,14 +5,14 @@ use std::task::{Context, Poll};
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::physical_plan::RecordBatchStream as DfRecordBatchStream;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-use datatypes::arrow::error::ArrowError;
-use datatypes::arrow::error::Result as ArrowResult;
+use datatypes::arrow::error::{ArrowError, Result as ArrowResult};
 use datatypes::schema::{Schema, SchemaRef};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
-use crate::DfSendableRecordBatchStream;
-use crate::{RecordBatch, RecordBatchStream, SendableRecordBatchStream, Stream};
+use crate::{
+    DfSendableRecordBatchStream, RecordBatch, RecordBatchStream, SendableRecordBatchStream, Stream,
+};
 
 /// Greptime SendableRecordBatchStream -> DataFusion RecordBatchStream
 pub struct DfRecordBatchStreamAdapter {

@@ -4,16 +4,13 @@ use datafusion::arrow::array::{ArrayRef, BooleanArray, NullArray, PrimitiveArray
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue as DFColValue;
 use datatypes::arrow::datatypes::DataType;
-use rustpython_vm::builtins::{PyBool, PyFloat, PyInt, PyList, PyStr};
-use rustpython_vm::{builtins::PyBaseExceptionRef, PyObjectRef, PyPayload, PyRef, VirtualMachine};
-use snafu::OptionExt;
-use snafu::ResultExt;
-use snafu::{Backtrace, GenerateImplicitData};
+use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
+use rustpython_vm::{PyObjectRef, PyPayload, PyRef, VirtualMachine};
+use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
 
 use crate::python::builtins::try_into_columnar_value;
-use crate::python::error;
 use crate::python::error::ret_other_error_with;
-use crate::python::PyVector;
+use crate::python::{error, PyVector};
 
 pub(crate) type PyVectorRef = PyRef<PyVector>;
 

@@ -1,18 +1,13 @@
 use std::collections::HashSet;
 
 use datatypes::arrow::datatypes::DataType;
-use rustpython_parser::{
-    ast,
-    ast::{Arguments, Location},
-    parser,
-};
+use rustpython_parser::ast::{Arguments, Location};
+use rustpython_parser::{ast, parser};
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
 
-use crate::python::coprocessor::compile;
-use crate::python::coprocessor::AnnotationInfo;
-use crate::python::coprocessor::Coprocessor;
+use crate::python::coprocessor::{compile, AnnotationInfo, Coprocessor};
 use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
 
 #[cfg_attr(test, derive(Deserialize))]

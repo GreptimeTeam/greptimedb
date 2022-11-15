@@ -5,8 +5,9 @@ use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{BadAccumulatorImplSnafu, CreateAccumulatorSnafu, Result};
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
+use datatypes::prelude::*;
 use datatypes::vectors::ConstantVector;
-use datatypes::{prelude::*, with_match_primitive_type_id};
+use datatypes::with_match_primitive_type_id;
 use snafu::ensure;
 
 // https://numpy.org/doc/stable/reference/generated/numpy.argmax.html

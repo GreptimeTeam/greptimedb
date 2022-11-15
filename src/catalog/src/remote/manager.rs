@@ -22,10 +22,9 @@ use table::TableRef;
 use tokio::sync::Mutex;
 
 use crate::error::{
-    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu,
-    SchemaNotFoundSnafu, TableExistsSnafu,
+    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu,
+    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu,
 };
-use crate::error::{InvalidTableSchemaSnafu, Result};
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,

@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
 use common_insert::column_to_vector;
+use servers::error as server_error;
 use servers::influxdb::InfluxdbRequest;
-use servers::{error as server_error, query_handler::InfluxdbLineProtocolHandler};
+use servers::query_handler::InfluxdbLineProtocolHandler;
 use snafu::{OptionExt, ResultExt};
 use table::requests::InsertRequest;
 

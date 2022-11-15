@@ -264,7 +264,8 @@ impl ManifestLogStorage for ManifestObjectStore {
 
 #[cfg(test)]
 mod tests {
-    use object_store::{backend::fs, ObjectStore};
+    use object_store::backend::fs;
+    use object_store::ObjectStore;
     use tempdir::TempDir;
 
     use super::*;

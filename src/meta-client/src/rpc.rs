@@ -4,28 +4,18 @@ pub mod util;
 
 use std::fmt::{Display, Formatter};
 
-use api::v1::meta::KeyValue as PbKeyValue;
-use api::v1::meta::Peer as PbPeer;
-use api::v1::meta::ResponseHeader as PbResponseHeader;
-use api::v1::meta::TableName as PbTableName;
-pub use router::CreateRequest;
-pub use router::Partition;
-pub use router::Region;
-pub use router::RouteRequest;
-pub use router::RouteResponse;
-pub use router::Table;
-pub use router::TableRoute;
+use api::v1::meta::{
+    KeyValue as PbKeyValue, Peer as PbPeer, ResponseHeader as PbResponseHeader,
+    TableName as PbTableName,
+};
+pub use router::{
+    CreateRequest, Partition, Region, RouteRequest, RouteResponse, Table, TableRoute,
+};
 use serde::{Deserialize, Serialize};
-pub use store::BatchPutRequest;
-pub use store::BatchPutResponse;
-pub use store::CompareAndPutRequest;
-pub use store::CompareAndPutResponse;
-pub use store::DeleteRangeRequest;
-pub use store::DeleteRangeResponse;
-pub use store::PutRequest;
-pub use store::PutResponse;
-pub use store::RangeRequest;
-pub use store::RangeResponse;
+pub use store::{
+    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
+    DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+};
 
 #[derive(Debug, Clone)]
 pub struct ResponseHeader(PbResponseHeader);

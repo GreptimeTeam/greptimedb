@@ -1,7 +1,9 @@
-use std::{result::Result, sync::Arc};
+use std::result::Result;
+use std::sync::Arc;
 
 use api::v1::codec;
-use datafusion::physical_plan::{expressions::Column as DfColumn, PhysicalExpr as DfPhysicalExpr};
+use datafusion::physical_plan::expressions::Column as DfColumn;
+use datafusion::physical_plan::PhysicalExpr as DfPhysicalExpr;
 use snafu::OptionExt;
 
 use crate::error::{EmptyPhysicalExprSnafu, Error, UnsupportedDfExprSnafu};
@@ -52,8 +54,10 @@ pub(crate) fn parse_df_physical_expr(
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::codec::{physical_expr_node::ExprType::Column, PhysicalColumn, PhysicalExprNode};
-    use datafusion::physical_plan::{expressions::Column as DfColumn, PhysicalExpr};
+    use api::v1::codec::physical_expr_node::ExprType::Column;
+    use api::v1::codec::{PhysicalColumn, PhysicalExprNode};
+    use datafusion::physical_plan::expressions::Column as DfColumn;
+    use datafusion::physical_plan::PhysicalExpr;
 
     use crate::physical::expr::{parse_df_physical_expr, parse_grpc_physical_expr};
 

@@ -3,14 +3,10 @@ mod health;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::task::Context;
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use tonic::body::BoxBody;
-use tonic::codegen::empty_body;
-use tonic::codegen::http;
-use tonic::codegen::BoxFuture;
-use tonic::codegen::Service;
+use tonic::codegen::{empty_body, http, BoxFuture, Service};
 use tonic::transport::NamedService;
 
 use crate::metasrv::MetaSrv;

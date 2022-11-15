@@ -4,7 +4,8 @@ use store_api::storage::{
     RegionDescriptor, RowKeyDescriptorBuilder,
 };
 
-use super::{schema_util::ColumnDef, TIMESTAMP_NAME};
+use super::schema_util::ColumnDef;
+use super::TIMESTAMP_NAME;
 
 pub struct RegionDescBuilder {
     name: String,

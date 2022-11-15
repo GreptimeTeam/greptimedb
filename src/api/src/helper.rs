@@ -7,8 +7,7 @@ use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::v1::column::Values;
-use crate::v1::Column;
-use crate::v1::ColumnDataType;
+use crate::v1::{Column, ColumnDataType};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ColumnDataTypeWrapper(ColumnDataType);

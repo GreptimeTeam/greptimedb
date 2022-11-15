@@ -1,6 +1,7 @@
 use futures::TryStreamExt;
 
-use crate::{error::Result, RecordBatch, SendableRecordBatchStream};
+use crate::error::Result;
+use crate::{RecordBatch, SendableRecordBatchStream};
 
 pub async fn collect(stream: SendableRecordBatchStream) -> Result<Vec<RecordBatch>> {
     stream.try_collect::<Vec<_>>().await
@@ -16,8 +17,7 @@ mod tests {
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datatypes::arrow::array::UInt32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-    use datatypes::schema::Schema;
-    use datatypes::schema::SchemaRef;
+    use datatypes::schema::{Schema, SchemaRef};
     use futures::task::{Context, Poll};
     use futures::Stream;
 

@@ -2,12 +2,10 @@ use api::v1::meta::Peer;
 use common_time::util as time_util;
 
 use crate::error::Result;
-use crate::keys::LeaseKey;
-use crate::keys::LeaseValue;
+use crate::keys::{LeaseKey, LeaseValue};
 use crate::lease;
 use crate::metasrv::Context;
-use crate::selector::Namespace;
-use crate::selector::Selector;
+use crate::selector::{Namespace, Selector};
 
 pub struct LeaseBasedSelector;
 

@@ -1,8 +1,11 @@
+use store_api::logstore::entry::Id;
 use store_api::logstore::namespace::Id as NamespaceId;
-use store_api::logstore::{entry::Id, LogStore};
+use store_api::logstore::LogStore;
 
 use crate::error::{Error, Result};
-use crate::fs::{entry::EntryImpl, namespace::LocalNamespace, AppendResponseImpl};
+use crate::fs::entry::EntryImpl;
+use crate::fs::namespace::LocalNamespace;
+use crate::fs::AppendResponseImpl;
 
 /// A noop log store which only for test
 // TODO: Add a test feature

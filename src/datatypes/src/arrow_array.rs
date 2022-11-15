@@ -85,9 +85,9 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
 
 #[cfg(test)]
 mod test {
-    use arrow::array::Int64Array as ArrowI64Array;
-    use arrow::array::*;
-    use arrow::array::{MutableListArray, MutablePrimitiveArray, TryExtend};
+    use arrow::array::{
+        Int64Array as ArrowI64Array, MutableListArray, MutablePrimitiveArray, TryExtend, *,
+    };
     use arrow::buffer::Buffer;
     use arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
     use common_time::timestamp::{TimeUnit, Timestamp};

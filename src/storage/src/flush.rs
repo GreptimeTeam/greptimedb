@@ -12,8 +12,7 @@ use crate::error::{CancelledSnafu, Result};
 use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{IterContext, MemtableId, MemtableRef};
-use crate::region::RegionWriterRef;
-use crate::region::SharedDataRef;
+use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::sst::{AccessLayerRef, FileMeta, WriteOptions};
 use crate::wal::Wal;
 

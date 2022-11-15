@@ -83,7 +83,8 @@ mod tests {
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
     use log_store::fs::noop::NoopLogStore;
-    use object_store::{services::fs::Builder, ObjectStore};
+    use object_store::services::fs::Builder;
+    use object_store::ObjectStore;
     use query::QueryEngineFactory;
     use sql::statements::statement::Statement;
     use storage::config::EngineConfig as StorageEngineConfig;

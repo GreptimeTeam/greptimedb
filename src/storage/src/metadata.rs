@@ -8,8 +8,8 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Metadata};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
+use store_api::storage::consts::{self, ReservedColumnId};
 use store_api::storage::{
-    consts::{self, ReservedColumnId},
     AddColumn, AlterOperation, AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder,
     ColumnDescriptorBuilderError, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder,
     ColumnFamilyId, ColumnId, RegionDescriptor, RegionDescriptorBuilder, RegionId, RegionMeta,

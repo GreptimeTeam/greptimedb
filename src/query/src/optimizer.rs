@@ -13,8 +13,7 @@ use datafusion::logical_plan::{
 };
 use datafusion::optimizer::optimizer::OptimizerRule;
 use datafusion::optimizer::utils;
-use datafusion_common::Result;
-use datafusion_common::{DFSchemaRef, DataFusionError, ScalarValue};
+use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
 
 /// TypeConversionRule converts some literal values in logical plan to other types according
 /// to data type of corresponding columns.

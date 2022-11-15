@@ -310,16 +310,13 @@ impl ReadAdapter {
 #[cfg(test)]
 mod tests {
     use datatypes::data_type::ConcreteDataType;
-    use store_api::storage::consts;
-    use store_api::storage::ColumnDescriptorBuilder;
+    use store_api::storage::{consts, ColumnDescriptorBuilder};
 
     use super::*;
     use crate::error::Error;
     use crate::metadata::RegionMetadata;
-    use crate::schema::tests;
-    use crate::schema::{ProjectedSchema, RegionSchema};
-    use crate::test_util::descriptor_util;
-    use crate::test_util::schema_util;
+    use crate::schema::{tests, ProjectedSchema, RegionSchema};
+    use crate::test_util::{descriptor_util, schema_util};
 
     fn check_fields(fields: &[Field], names: &[&str]) {
         for (field, name) in fields.iter().zip(names) {

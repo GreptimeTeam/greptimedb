@@ -1,7 +1,6 @@
 use std::collections::LinkedList;
 
-use common_base::buffer::Buffer;
-use common_base::buffer::UnderflowSnafu;
+use common_base::buffer::{Buffer, UnderflowSnafu};
 use snafu::ensure;
 
 pub const DEFAULT_CHUNK_SIZE: usize = 4096;

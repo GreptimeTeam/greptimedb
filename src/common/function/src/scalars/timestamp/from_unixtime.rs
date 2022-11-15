@@ -9,8 +9,7 @@ use arrow::scalar::PrimitiveScalar;
 use common_query::error::{IntoVectorSnafu, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::{Signature, Volatility};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::TimestampVector;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{TimestampVector, VectorRef};
 use snafu::ResultExt;
 
 use crate::error::Result;

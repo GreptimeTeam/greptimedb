@@ -7,8 +7,9 @@ use common_query::error::{
 };
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
+use datatypes::prelude::*;
 use datatypes::vectors::{ConstantVector, Float64Vector, UInt64Vector};
-use datatypes::{prelude::*, with_match_primitive_type_id};
+use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use snafu::{ensure, OptionExt};
 

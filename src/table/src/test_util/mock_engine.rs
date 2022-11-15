@@ -4,12 +4,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use crate::engine::{EngineContext, TableEngine, TableReference};
+use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::test_util::EmptyTable;
-use crate::{
-    engine::{EngineContext, TableEngine, TableReference},
-    requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest},
-    Result, TableRef,
-};
+use crate::{Result, TableRef};
 
 #[derive(Default)]
 pub struct MockTableEngine {

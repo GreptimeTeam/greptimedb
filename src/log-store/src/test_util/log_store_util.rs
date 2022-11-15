@@ -1,6 +1,7 @@
 use tempdir::TempDir;
 
-use crate::fs::{config::LogConfig, log::LocalFileLogStore};
+use crate::fs::config::LogConfig;
+use crate::fs::log::LocalFileLogStore;
 
 /// Create a tmp directory for write log, used for test.
 // TODO: Add a test feature

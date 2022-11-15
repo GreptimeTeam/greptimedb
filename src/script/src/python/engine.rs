@@ -7,10 +7,8 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use common_recordbatch::{
-    error::ExternalSnafu, error::Result as RecordBatchResult, RecordBatch, RecordBatchStream,
-    SendableRecordBatchStream,
-};
+use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
+use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures::Stream;
 use query::QueryEngineRef;
@@ -18,11 +16,8 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::coprocessor::{exec_parsed, parse};
-use crate::python::{
-    coprocessor::CoprocessorRef,
-    error::{self, Result},
-};
+use crate::python::coprocessor::{exec_parsed, parse, CoprocessorRef};
+use crate::python::error::{self, Result};
 
 const PY_ENGINE: &str = "python";
 
@@ -137,10 +132,8 @@ mod tests {
     use catalog::{CatalogList, CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_recordbatch::util;
-    use datafusion_common::field_util::FieldExt;
-    use datafusion_common::field_util::SchemaExt;
-    use datatypes::arrow::array::Float64Array;
-    use datatypes::arrow::array::Int64Array;
+    use datafusion_common::field_util::{FieldExt, SchemaExt};
+    use datatypes::arrow::array::{Float64Array, Int64Array};
     use query::QueryEngineFactory;
     use table::table::numbers::NumbersTable;
 

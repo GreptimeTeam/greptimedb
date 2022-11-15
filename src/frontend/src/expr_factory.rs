@@ -10,11 +10,9 @@ use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use sqlparser::ast::{ColumnDef, TableConstraint};
 
-use crate::error::InvalidSqlSnafu;
-use crate::error::Result;
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
-    ParseSqlSnafu,
+    InvalidSqlSnafu, ParseSqlSnafu, Result,
 };
 
 pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;

@@ -3,8 +3,7 @@ use std::os::unix::fs::FileExt;
 
 use snafu::ResultExt;
 
-use crate::error::Error;
-use crate::error::IoSnafu;
+use crate::error::{Error, IoSnafu};
 
 pub fn pread_exact(file: &File, buf: &mut [u8], offset: u64) -> Result<(), Error> {
     file.read_exact_at(buf, offset as u64).context(IoSnafu)

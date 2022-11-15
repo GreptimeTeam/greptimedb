@@ -134,7 +134,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::service::store::{kv::KvStore, memory::MemStore};
+    use crate::service::store::kv::KvStore;
+    use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_sequence() {

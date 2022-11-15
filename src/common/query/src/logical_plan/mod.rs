@@ -60,12 +60,12 @@ mod tests {
 
     use arrow::array::BooleanArray;
     use arrow::datatypes::DataType;
-    use datafusion_expr::ColumnarValue as DfColumnarValue;
-    use datafusion_expr::ScalarUDF as DfScalarUDF;
-    use datafusion_expr::TypeSignature as DfTypeSignature;
+    use datafusion_expr::{
+        ColumnarValue as DfColumnarValue, ScalarUDF as DfScalarUDF,
+        TypeSignature as DfTypeSignature,
+    };
     use datatypes::prelude::*;
-    use datatypes::vectors::BooleanVector;
-    use datatypes::vectors::VectorRef;
+    use datatypes::vectors::{BooleanVector, VectorRef};
 
     use super::*;
     use crate::error::Result;

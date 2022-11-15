@@ -1,7 +1,8 @@
 mod expr;
 pub mod plan;
 
-use std::{result::Result, sync::Arc};
+use std::result::Result;
+use std::sync::Arc;
 
 use datafusion::physical_plan::ExecutionPlan;
 

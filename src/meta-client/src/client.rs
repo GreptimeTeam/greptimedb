@@ -3,31 +3,21 @@ mod load_balance;
 mod router;
 mod store;
 
-use common_grpc::channel_manager::ChannelConfig;
-use common_grpc::channel_manager::ChannelManager;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
 use router::Client as RouterClient;
 use snafu::OptionExt;
 use store::Client as StoreClient;
 
-pub use self::heartbeat::HeartbeatSender;
-pub use self::heartbeat::HeartbeatStream;
+pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::error;
 use crate::error::Result;
-use crate::rpc::BatchPutRequest;
-use crate::rpc::BatchPutResponse;
-use crate::rpc::CompareAndPutRequest;
-use crate::rpc::CompareAndPutResponse;
-use crate::rpc::CreateRequest;
-use crate::rpc::DeleteRangeRequest;
-use crate::rpc::DeleteRangeResponse;
-use crate::rpc::PutRequest;
-use crate::rpc::PutResponse;
-use crate::rpc::RangeRequest;
-use crate::rpc::RangeResponse;
-use crate::rpc::RouteRequest;
-use crate::rpc::RouteResponse;
+use crate::rpc::{
+    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, CreateRequest,
+    DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    RouteRequest, RouteResponse,
+};
 
 pub type Id = (u64, u64);
 
@@ -273,17 +263,14 @@ impl MetaClient {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::meta::HeartbeatRequest;
-    use api::v1::meta::Peer;
+    use api::v1::meta::{HeartbeatRequest, Peer};
     use meta_srv::metasrv::Context;
-    use meta_srv::selector::Namespace;
-    use meta_srv::selector::Selector;
+    use meta_srv::selector::{Namespace, Selector};
     use meta_srv::Result as MetaResult;
 
     use super::*;
     use crate::mocks;
-    use crate::rpc::Partition;
-    use crate::rpc::TableName;
+    use crate::rpc::{Partition, TableName};
 
     #[tokio::test]
     async fn test_meta_client_builder() {

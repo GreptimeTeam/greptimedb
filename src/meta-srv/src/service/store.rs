@@ -2,19 +2,11 @@ pub mod etcd;
 pub mod kv;
 pub mod memory;
 
-use api::v1::meta::store_server;
-use api::v1::meta::BatchPutRequest;
-use api::v1::meta::BatchPutResponse;
-use api::v1::meta::CompareAndPutRequest;
-use api::v1::meta::CompareAndPutResponse;
-use api::v1::meta::DeleteRangeRequest;
-use api::v1::meta::DeleteRangeResponse;
-use api::v1::meta::PutRequest;
-use api::v1::meta::PutResponse;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::RangeResponse;
-use tonic::Request;
-use tonic::Response;
+use api::v1::meta::{
+    store_server, BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
+    DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+};
+use tonic::{Request, Response};
 
 use crate::metasrv::MetaSrv;
 use crate::service::GrpcResult;

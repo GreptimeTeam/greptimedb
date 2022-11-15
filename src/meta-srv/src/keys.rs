@@ -4,11 +4,8 @@ use api::v1::meta::TableName;
 use common_catalog::TableGlobalKey;
 use lazy_static::lazy_static;
 use regex::Regex;
-use serde::Deserialize;
-use serde::Serialize;
-use snafu::ensure;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use serde::{Deserialize, Serialize};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::Result;

@@ -1,12 +1,9 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use api::v1::meta::Peer;
-use common_telemetry::info;
-use common_telemetry::warn;
-use serde::Deserialize;
-use serde::Serialize;
+use common_telemetry::{info, warn};
+use serde::{Deserialize, Serialize};
 
 use crate::election::Election;
 use crate::handler::check_leader::CheckLeaderHandler;
@@ -15,8 +12,7 @@ use crate::handler::response_header::ResponseHeaderHandler;
 use crate::handler::HeartbeatHandlerGroup;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::Selector;
-use crate::sequence::Sequence;
-use crate::sequence::SequenceRef;
+use crate::sequence::{Sequence, SequenceRef};
 use crate::service::store::kv::KvStoreRef;
 
 pub const TABLE_ID_SEQ: &str = "table_id";

@@ -1,8 +1,7 @@
 tonic::include_proto!("greptime.v1.meta");
 
 use std::collections::HashMap;
-use std::hash::Hash;
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 
 pub const PROTOCOL_VERSION: u64 = 1;
 

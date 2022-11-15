@@ -5,7 +5,8 @@ use store_api::storage::{
     RegionDescriptor, RegionId, RowKeyDescriptorBuilder,
 };
 
-use crate::test_util::{self, schema_util::ColumnDef};
+use crate::test_util::schema_util::ColumnDef;
+use crate::test_util::{self};
 
 /// A RegionDescriptor builder for test.
 pub struct RegionDescBuilder {

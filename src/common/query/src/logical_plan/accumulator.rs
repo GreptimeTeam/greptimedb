@@ -9,8 +9,7 @@ use datafusion_common::Result as DfResult;
 use datafusion_expr::Accumulator as DfAccumulator;
 use datatypes::prelude::*;
 use datatypes::value::ListValue;
-use datatypes::vectors::Helper as VectorHelper;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{Helper as VectorHelper, VectorRef};
 use snafu::ResultExt;
 
 use crate::error::{self, Error, FromScalarValueSnafu, IntoVectorSnafu, Result};

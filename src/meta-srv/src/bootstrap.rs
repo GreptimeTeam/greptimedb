@@ -7,8 +7,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 
 use crate::election::etcd::EtcdElection;
 use crate::error;
-use crate::metasrv::MetaSrv;
-use crate::metasrv::MetaSrvOptions;
+use crate::metasrv::{MetaSrv, MetaSrvOptions};
 use crate::service::admin;
 use crate::service::store::etcd::EtcdStore;
 
