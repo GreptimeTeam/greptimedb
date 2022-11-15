@@ -110,13 +110,14 @@ impl TryFrom<StartCommand> for FrontendOptions {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
         if let Some(metasrv_addr) = cmd.metasrv_addr {
-            opts.mode = Mode::Distributed(
+            opts.metasrv_addr = Some(
                 metasrv_addr
                     .split(',')
                     .into_iter()
                     .map(|x| x.trim().to_string())
                     .collect::<Vec<String>>(),
             );
+            opts.mode = Mode::Distributed;
         }
         Ok(opts)
     }

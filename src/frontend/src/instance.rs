@@ -113,7 +113,11 @@ impl Instance {
 
         instance.dist_instance = match &opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed(metasrv_addr) => {
+            Mode::Distributed => {
+                let metasrv_addr = opts
+                    .metasrv_addr
+                    .clone()
+                    .expect("Forgot to set metasrv_addr");
                 info!(
                     "Creating Frontend instance in distributed mode with Meta server addr {:?}",
                     metasrv_addr
@@ -557,7 +561,7 @@ impl SqlQueryHandler for Instance {
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteQuerySnafu { query })
                 }
-                Mode::Distributed(_) => {
+                Mode::Distributed => {
                     let affected = self
                         .sql_dist_insert(insert)
                         .await
