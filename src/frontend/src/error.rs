@@ -212,6 +212,13 @@ pub enum Error {
         source: client::Error,
     },
 
+    #[snafu(display("Failed to create database: {}, source: {}", name, source))]
+    CreateDatabase {
+        name: String,
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
     #[snafu(display("Failed to alter table, source: {}", source))]
     AlterTable {
         #[snafu(backtrace)]
@@ -363,12 +370,6 @@ pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to create a RecordBatch, source: {}", source))]
-    NewRecordBatch {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
-    },
-
     #[snafu(display("Failed to do vector computation, source: {}", source))]
     VectorComputation {
         #[snafu(backtrace)]
@@ -451,7 +452,7 @@ impl ErrorExt for Error {
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
             Error::InsertBatchToRequest { source, .. } => source.status_code(),
-            Error::NewRecordBatch { source } => source.status_code(),
+            Error::CreateDatabase { source, .. } => source.status_code(),
         }
     }
 

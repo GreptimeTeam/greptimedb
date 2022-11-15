@@ -209,6 +209,7 @@ mod tests {
         let catalog = Arc::new(RemoteCatalogProvider::new(
             catalog_name.clone(),
             backend.clone(),
+            node_id,
         ));
 
         // register catalog to catalog manager

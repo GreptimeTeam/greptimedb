@@ -84,6 +84,7 @@ impl Instance {
                 .mutate_result(rows as u32, 0)
                 .build(),
             Err(err) => {
+                common_telemetry::error!(err; "Failed to handle insert, catalog name: {}, schema name: {}, table name: {}", catalog_name, schema_name, table_name);
                 // TODO(fys): failure count
                 build_err_result(&err)
             }

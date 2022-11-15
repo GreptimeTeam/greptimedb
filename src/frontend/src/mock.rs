@@ -42,7 +42,7 @@ impl DatanodeInstance {
 
     pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> RecordBatches {
         let logical_plan = self.build_logical_plan(&plan);
-
+        common_telemetry::info!("logical_plan: {:?}", logical_plan);
         // TODO(LFC): Directly pass in logical plan to GRPC interface when our substrait codec supports filter.
         let sql = to_sql(logical_plan);
         let result = self.db.select(Select::Sql(sql)).await.unwrap();
@@ -62,7 +62,7 @@ impl DatanodeInstance {
         let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
 
         let mut builder = LogicalPlanBuilder::scan_with_filters(
-            &table_scan.table_name.table_name,
+            &table_scan.table_name.to_string(),
             table_provider,
             table_scan.projection.clone(),
             table_scan

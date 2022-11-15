@@ -29,7 +29,7 @@ lazy_static! {
 
 lazy_static! {
     static ref TABLE_GLOBAL_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)$",
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z0-9_]+)$",
         TABLE_GLOBAL_KEY_PREFIX
     ))
     .unwrap();
@@ -37,7 +37,7 @@ lazy_static! {
 
 lazy_static! {
     static ref TABLE_REGIONAL_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)$",
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z0-9_]+)-([0-9]+)$",
         TABLE_REGIONAL_KEY_PREFIX
     ))
     .unwrap();

@@ -2,19 +2,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::CreateExpr;
+use api::v1::{CreateDatabaseExpr, CreateExpr};
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::{TableGlobalKey, TableGlobalValue};
+use common_catalog::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use common_query::Output;
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
 use meta_client::client::MetaClient;
 use meta_client::rpc::{
-    CreateRequest as MetaCreateRequest, Partition as MetaPartition, RouteResponse, TableName,
-    TableRoute,
+    CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
+    TableName, TableRoute,
 };
 use query::sql::{show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
@@ -28,7 +28,8 @@ use table::metadata::RawTableMeta;
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu, PrimaryKeyNotFoundSnafu, Result,
+    self, CatalogEntrySerdeSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
+    PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result, StartMetaClientSnafu,
 };
 use crate::partitioning::{PartitionBound, PartitionDef};
 
@@ -69,7 +70,13 @@ impl DistInstance {
             }
         );
         let table_route = table_routes.first().unwrap();
-
+        info!(
+            "Create table {:?}.{:?}.{}, table routes: {:?}",
+            create_table.catalog_name,
+            create_table.schema_name,
+            create_table.table_name,
+            table_route
+        );
         let region_routes = &table_route.region_routes;
         ensure!(
             !region_routes.is_empty(),
@@ -122,6 +129,25 @@ impl DistInstance {
                 .context(error::ExecuteSqlSnafu { sql }),
             _ => unreachable!(),
         }
+    }
+
+    /// Handles distributed database creation
+    pub(crate) async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
+        let key = SchemaKey {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: expr.database_name,
+        };
+        let value = SchemaValue {};
+        let client = self
+            .meta_client
+            .store_client()
+            .context(StartMetaClientSnafu)?;
+
+        let request = PutRequest::default()
+            .with_key(key.to_string())
+            .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
+        client.put(request.into()).await.context(RequestMetaSnafu)?;
+        Ok(Output::AffectedRows(1))
     }
 
     async fn create_table_in_meta(

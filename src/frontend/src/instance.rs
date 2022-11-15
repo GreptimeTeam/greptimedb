@@ -43,8 +43,8 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterTableOnInsertionSnafu, AlterTableSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    CreateTableSnafu, DeserializeInsertBatchSnafu, FindNewColumnsOnInsertionSnafu, InsertSnafu,
-    Result, SchemaNotFoundSnafu, SelectSnafu,
+    CreateDatabaseSnafu, CreateTableSnafu, DeserializeInsertBatchSnafu,
+    FindNewColumnsOnInsertionSnafu, InsertSnafu, Result, SchemaNotFoundSnafu, SelectSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::{FrontendOptions, Mode};
@@ -229,11 +229,19 @@ impl Instance {
 
     /// Handle create database expr.
     pub async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
-        self.admin(DEFAULT_SCHEMA_NAME)
-            .create_database(expr)
-            .await
-            .and_then(admin_result_to_output)
-            .context(CreateTableSnafu)
+        let database_name = expr.database_name.clone();
+        if let Some(dist_instance) = &self.dist_instance {
+            dist_instance.handle_create_database(expr).await
+        } else {
+            // FIXME(hl): In order to get admin client to create schema, we need to use the default schema admin
+            self.admin(DEFAULT_SCHEMA_NAME)
+                .create_database(expr)
+                .await
+                .and_then(admin_result_to_output)
+                .context(CreateDatabaseSnafu {
+                    name: database_name,
+                })
+        }
     }
 
     /// Handle alter expr
