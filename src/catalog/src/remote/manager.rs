@@ -327,7 +327,7 @@ impl RemoteCatalogManager {
             }
             None => {
                 info!(
-                    "try create table: {}.{}.{}",
+                    "Try create table: {}.{}.{}",
                     catalog_name, schema_name, table_name
                 );
 
