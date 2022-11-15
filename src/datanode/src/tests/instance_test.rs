@@ -173,9 +173,13 @@ async fn test_execute_insert() {
     let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
-    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
-        .await
-        .unwrap();
+    test_util::create_test_table(
+        instance.catalog_manager(),
+        instance.sql_handler(),
+        ConcreteDataType::timestamp_millis_datatype(),
+    )
+    .await
+    .unwrap();
 
     let output = instance
         .execute_sql(
@@ -197,9 +201,13 @@ async fn test_execute_insert_query_with_i64_timestamp() {
     let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
-    test_util::create_test_table(&instance, ConcreteDataType::int64_datatype())
-        .await
-        .unwrap();
+    test_util::create_test_table(
+        instance.catalog_manager(),
+        instance.sql_handler(),
+        ConcreteDataType::int64_datatype(),
+    )
+    .await
+    .unwrap();
 
     let output = instance
         .execute_sql(
@@ -329,9 +337,13 @@ async fn test_execute_show_databases_tables() {
     }
 
     // creat a table
-    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
-        .await
-        .unwrap();
+    test_util::create_test_table(
+        instance.catalog_manager(),
+        instance.sql_handler(),
+        ConcreteDataType::timestamp_millis_datatype(),
+    )
+    .await
+    .unwrap();
 
     let output = instance.execute_sql("show tables").await.unwrap();
     match output {
@@ -440,9 +452,13 @@ async fn test_alter_table() {
     let instance = Instance::new_mock().await.unwrap();
     instance.start().await.unwrap();
 
-    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
-        .await
-        .unwrap();
+    test_util::create_test_table(
+        instance.catalog_manager(),
+        instance.sql_handler(),
+        ConcreteDataType::timestamp_millis_datatype(),
+    )
+    .await
+    .unwrap();
     // make sure table insertion is ok before altering table
     instance
         .execute_sql("insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000)")

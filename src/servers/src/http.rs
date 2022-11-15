@@ -3,6 +3,7 @@ pub mod handler;
 pub mod influxdb;
 pub mod opentsdb;
 pub mod prometheus;
+pub mod script;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::query_handler::{
     InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef, PrometheusProtocolHandlerRef,
+    ScriptHandlerRef,
 };
 use crate::server::Server;
 
@@ -48,6 +50,7 @@ pub struct HttpServer {
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
     prom_handler: Option<PrometheusProtocolHandlerRef>,
+    script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
 }
 
@@ -249,6 +252,12 @@ async fn serve_docs() -> Html<String> {
     Html(include_str!("http/redoc.html").to_owned())
 }
 
+#[derive(Clone)]
+pub struct ApiState {
+    pub sql_handler: SqlQueryHandlerRef,
+    pub script_handler: Option<ScriptHandlerRef>,
+}
+
 impl HttpServer {
     pub fn new(sql_handler: SqlQueryHandlerRef) -> Self {
         Self {
@@ -256,6 +265,7 @@ impl HttpServer {
             opentsdb_handler: None,
             influxdb_handler: None,
             prom_handler: None,
+            script_handler: None,
             shutdown_tx: Mutex::new(None),
         }
     }
@@ -266,6 +276,14 @@ impl HttpServer {
             "OpenTSDB handler can be set only once!"
         );
         self.opentsdb_handler.get_or_insert(handler);
+    }
+
+    pub fn set_script_handler(&mut self, handler: ScriptHandlerRef) {
+        debug_assert!(
+            self.script_handler.is_none(),
+            "Script handler can be set only once!"
+        );
+        self.script_handler.get_or_insert(handler);
     }
 
     pub fn set_influxdb_handler(&mut self, handler: InfluxdbLineProtocolHandlerRef) {
@@ -307,18 +325,21 @@ impl HttpServer {
         // handlers amongst router methods. That requires us to pack all query handlers in a shared
         // state, and check-then-get the desired query handler in different router methods, which
         // is a lot of tedious work.
-        let sql_router = ApiRouter::with_state(self.sql_handler.clone())
-            .api_route(
-                "/sql",
-                apirouting::get_with(handler::sql, handler::sql_docs)
-                    .post_with(handler::sql, handler::sql_docs),
-            )
-            .api_route("/scripts", apirouting::post(handler::scripts))
-            .api_route("/run-script", apirouting::post(handler::run_script))
-            .route("/private/api.json", apirouting::get(serve_api))
-            .route("/private/docs", apirouting::get(serve_docs))
-            .finish_api(&mut api)
-            .layer(Extension(Arc::new(api)));
+        let sql_router = ApiRouter::with_state(ApiState {
+            sql_handler: self.sql_handler.clone(),
+            script_handler: self.script_handler.clone(),
+        })
+        .api_route(
+            "/sql",
+            apirouting::get_with(handler::sql, handler::sql_docs)
+                .post_with(handler::sql, handler::sql_docs),
+        )
+        .api_route("/scripts", apirouting::post(script::scripts))
+        .api_route("/run-script", apirouting::post(script::run_script))
+        .route("/private/api.json", apirouting::get(serve_api))
+        .route("/private/docs", apirouting::get(serve_docs))
+        .finish_api(&mut api)
+        .layer(Extension(Arc::new(api)));
 
         let mut router = Router::new().nest(&format!("/{}", HTTP_API_VERSION), sql_router);
 

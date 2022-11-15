@@ -122,6 +122,7 @@ impl Services {
             ) {
                 http_server.set_prom_handler(instance.clone());
             }
+            http_server.set_script_handler(instance.clone());
 
             Some((Box::new(http_server) as _, http_addr))
         } else {

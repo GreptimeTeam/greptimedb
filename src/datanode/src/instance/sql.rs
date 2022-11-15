@@ -122,12 +122,4 @@ impl SqlQueryHandler for Instance {
             })
             .context(servers::error::ExecuteQuerySnafu { query })
     }
-
-    async fn insert_script(&self, name: &str, script: &str) -> servers::error::Result<()> {
-        self.script_executor.insert_script(name, script).await
-    }
-
-    async fn execute_script(&self, name: &str) -> servers::error::Result<Output> {
-        self.script_executor.execute_script(name).await
-    }
 }

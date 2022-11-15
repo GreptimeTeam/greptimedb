@@ -1,27 +1,59 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
 use datatypes::prelude::ConcreteDataType;
+use frontend::frontend::FrontendOptions;
+use frontend::instance::FrontendInstance;
+use frontend::instance::Instance as FeInstance;
 use serde_json::json;
 use servers::http::{ColumnSchema, HttpServer, JsonOutput, JsonResponse, Schema};
-use servers::server::Server;
 use test_util::TestGuard;
 
-use crate::instance::Instance;
+use crate::instance::{Instance, InstanceRef};
 use crate::tests::test_util;
+
+async fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
+    let fe_opts = FrontendOptions::default();
+    let mut frontend_instance = FeInstance::try_new(&fe_opts).await.unwrap();
+    frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
+    frontend_instance.set_script_handler(datanode_instance);
+    frontend_instance
+}
 
 async fn make_test_app(name: &str) -> (Router, TestGuard) {
     let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
     instance.start().await.unwrap();
-    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
-        .await
-        .unwrap();
+    test_util::create_test_table(
+        instance.catalog_manager(),
+        instance.sql_handler(),
+        ConcreteDataType::timestamp_millis_datatype(),
+    )
+    .await
+    .unwrap();
     let http_server = HttpServer::new(instance);
     (http_server.make_app(), guard)
+}
+
+async fn make_test_app_with_frontend(name: &str) -> (Router, TestGuard) {
+    let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
+    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let mut frontend = build_frontend_instance(instance.clone()).await;
+    instance.start().await.unwrap();
+    test_util::create_test_table(
+        frontend.catalog_manager().as_ref().unwrap(),
+        instance.sql_handler(),
+        ConcreteDataType::timestamp_millis_datatype(),
+    )
+    .await
+    .unwrap();
+    frontend.start().await.unwrap();
+    let mut http_server = HttpServer::new(Arc::new(frontend));
+    http_server.set_script_handler(instance.clone());
+    let app = http_server.make_app();
+    (app, guard)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -192,8 +224,9 @@ async fn test_metrics_api() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_scripts_api() {
     common_telemetry::init_default_ut_logging();
-    let (app, _guard) = make_test_app("scripts_api").await;
+    let (app, _guard) = make_test_app_with_frontend("script_api").await;
     let client = TestClient::new(app);
+
     let res = client
         .post("/v1/scripts?name=test")
         .body(
@@ -237,25 +270,4 @@ def test(n):
     } else {
         unreachable!()
     }
-}
-
-async fn start_test_app(addr: &str) -> (SocketAddr, TestGuard) {
-    let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts("py_side_scripts_api");
-    let instance = Arc::new(Instance::new(&opts).await.unwrap());
-    instance.start().await.unwrap();
-    let http_server = HttpServer::new(instance);
-    (
-        http_server.start(addr.parse().unwrap()).await.unwrap(),
-        guard,
-    )
-}
-
-#[allow(unused)]
-#[tokio::test]
-async fn test_py_side_scripts_api() {
-    // TODO(discord9): make a working test case, it will require python3 with numpy installed, complex environment setup expected....
-    common_telemetry::init_default_ut_logging();
-    let server = start_test_app("127.0.0.1:21830");
-    // let (app, _guard) = server.await;
-    // dbg!(app);
 }

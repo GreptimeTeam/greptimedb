@@ -26,6 +26,7 @@ use crate::server::grpc::plan::PhysicalPlanner;
 use crate::sql::SqlHandler;
 
 mod grpc;
+mod script;
 mod sql;
 
 pub(crate) type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
