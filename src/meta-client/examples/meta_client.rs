@@ -80,7 +80,7 @@ async fn run() {
         .add_partition(p1)
         .add_partition(p2);
 
-    let res = meta_client.create_route(create_req).await.unwrap();
+    let res = meta_client.create_route(create_req).await;
     event!(Level::INFO, "create_route result: {:#?}", res);
 
     // put
