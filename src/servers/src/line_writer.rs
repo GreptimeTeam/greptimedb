@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_grpc::writer::{to_ms_ts, Precision};
 use common_time::{timestamp::TimeUnit::Millisecond, Timestamp};
 use datatypes::{
@@ -15,6 +15,7 @@ type ColumnLen = usize;
 type ColumnName = String;
 
 pub struct LineWriter {
+    db: String,
     table_name: String,
     expected_rows: usize,
     current_rows: usize,
@@ -22,8 +23,9 @@ pub struct LineWriter {
 }
 
 impl LineWriter {
-    pub fn with_lines(table_name: impl Into<String>, lines: usize) -> Self {
+    pub fn with_lines(db: impl Into<String>, table_name: impl Into<String>, lines: usize) -> Self {
         Self {
+            db: db.into(),
             table_name: table_name.into(),
             expected_rows: lines,
             current_rows: 0,
@@ -122,8 +124,7 @@ impl LineWriter {
             .collect();
         InsertRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            // TODO(dennis): supports database
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            schema_name: self.db,
             table_name: self.table_name,
             columns_values,
         }
@@ -134,6 +135,7 @@ impl LineWriter {
 mod tests {
     use std::sync::Arc;
 
+    use common_catalog::consts::DEFAULT_SCHEMA_NAME;
     use common_time::Timestamp;
     use datatypes::{value::Value, vectors::Vector};
 
@@ -141,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_writer() {
-        let mut writer = LineWriter::with_lines("demo".to_string(), 4);
+        let mut writer = LineWriter::with_lines(DEFAULT_SCHEMA_NAME, "demo".to_string(), 4);
         writer.write_ts("ts", (1665893727685, Precision::MILLISECOND));
         writer.write_tag("host", "host-1");
         writer.write_i64("memory", 10_i64);
@@ -162,6 +164,7 @@ mod tests {
         let insert_request = writer.finish();
 
         assert_eq!("demo", insert_request.table_name);
+        assert_eq!(DEFAULT_SCHEMA_NAME, insert_request.schema_name);
 
         let columns = insert_request.columns_values;
         assert_eq!(5, columns.len());

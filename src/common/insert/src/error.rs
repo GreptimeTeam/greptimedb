@@ -45,6 +45,17 @@ pub enum Error {
 
     #[snafu(display("Missing timestamp column in request"))]
     MissingTimestampColumn { backtrace: Backtrace },
+
+    #[snafu(display("Invalid column proto: {}", err_msg))]
+    InvalidColumnProto {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+    #[snafu(display("Failed to create vector, source: {}", source))]
+    CreateVector {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -60,6 +71,8 @@ impl ErrorExt for Error {
             Error::CreateSchema { .. }
             | Error::DuplicatedTimestampColumn { .. }
             | Error::MissingTimestampColumn { .. } => StatusCode::InvalidArguments,
+            Error::InvalidColumnProto { .. } => StatusCode::InvalidArguments,
+            Error::CreateVector { .. } => StatusCode::InvalidArguments,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

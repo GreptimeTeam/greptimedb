@@ -10,11 +10,11 @@ use api::v1::meta::PutResponse as PbPutResponse;
 use api::v1::meta::RangeRequest as PbRangeRequest;
 use api::v1::meta::RangeResponse as PbRangeResponse;
 
-use super::util;
-use super::KeyValue;
-use super::ResponseHeader;
 use crate::error;
 use crate::error::Result;
+use crate::rpc::util;
+use crate::rpc::KeyValue;
+use crate::rpc::ResponseHeader;
 
 #[derive(Debug, Clone, Default)]
 pub struct RangeRequest {

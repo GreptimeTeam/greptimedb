@@ -48,22 +48,10 @@ pub enum Error {
     #[snafu(display("Mutate result has failure {}", failure))]
     MutateFailure { failure: u32, backtrace: Backtrace },
 
-    #[snafu(display("Invalid column proto: {}", err_msg))]
-    InvalidColumnProto {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
         #[snafu(backtrace)]
         source: api::error::Error,
-    },
-
-    #[snafu(display("Failed to create vector, source: {}", source))]
-    CreateVector {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to create RecordBatches, source: {}", source))]
@@ -97,6 +85,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc::error::Error,
     },
+
+    #[snafu(display("Failed to convert column to vector, source: {}", source))]
+    ColumnToVector {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -112,15 +106,13 @@ impl ErrorExt for Error {
             | Error::Datanode { .. }
             | Error::EncodePhysical { .. }
             | Error::MutateFailure { .. }
-            | Error::InvalidColumnProto { .. }
             | Error::ColumnDataType { .. }
             | Error::MissingField { .. } => StatusCode::Internal,
-            Error::ConvertSchema { source } | Error::CreateVector { source } => {
-                source.status_code()
-            }
+            Error::ConvertSchema { source } => source.status_code(),
             Error::CreateRecordBatches { source } => source.status_code(),
             Error::CreateChannel { source, .. } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
+            Error::ColumnToVector { source, .. } => source.status_code(),
         }
     }
 

@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 
 use crate::test_util::EmptyTable;
 use crate::{
-    engine::{EngineContext, TableEngine},
+    engine::{EngineContext, TableEngine, TableReference},
     requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest},
     Result, TableRef,
 };
@@ -73,11 +73,15 @@ impl TableEngine for MockTableEngine {
         unimplemented!()
     }
 
-    fn get_table(&self, _ctx: &EngineContext, _name: &str) -> Result<Option<TableRef>> {
+    fn get_table<'a>(
+        &self,
+        _ctx: &EngineContext,
+        _ref: &'a TableReference,
+    ) -> Result<Option<TableRef>> {
         unimplemented!()
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, _name: &str) -> bool {
+    fn table_exists<'a>(&self, _ctx: &EngineContext, _name: &'a TableReference) -> bool {
         unimplemented!()
     }
 

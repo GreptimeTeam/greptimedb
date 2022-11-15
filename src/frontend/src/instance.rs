@@ -12,14 +12,15 @@ use api::v1::alter_expr::Kind;
 use api::v1::codec::InsertBatch;
 use api::v1::object_expr::Expr;
 use api::v1::{
-    insert_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr, CreateExpr,
-    InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
+    admin_expr, insert_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr,
+    CreateExpr, InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManagerRef, CatalogProviderRef, SchemaProviderRef};
 use client::admin::{admin_result_to_output, Admin};
 use client::{Client, Database, Select};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{BoxedError, StatusCode};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
@@ -155,14 +156,12 @@ impl Instance {
         Ok(instance)
     }
 
-    // TODO(fys): temporarily hard code
-    pub fn database(&self) -> Database {
-        Database::new("greptime", self.client.clone())
+    pub fn database(&self, database: &str) -> Database {
+        Database::new(database, self.client.clone())
     }
 
-    // TODO(fys): temporarily hard code
-    pub fn admin(&self) -> Admin {
-        Admin::new("greptime", self.client.clone())
+    pub fn admin(&self, database: &str) -> Admin {
+        Admin::new(database, self.client.clone())
     }
 
     pub fn set_catalog_manager(&mut self, catalog_manager: CatalogManagerRef) {
@@ -173,7 +172,9 @@ impl Instance {
         if let Some(dist_instance) = &self.dist_instance {
             dist_instance.handle_select(expr).await
         } else {
-            self.database()
+            // TODO(LFC): Find a better way to execute query between Frontend and Datanode in standalone mode.
+            // Otherwise we have to parse SQL first to get schema name. Maybe not GRPC.
+            self.database(DEFAULT_SCHEMA_NAME)
                 .select(expr)
                 .await
                 .and_then(Output::try_from)
@@ -191,7 +192,10 @@ impl Instance {
             v.create_table(&mut expr, partitions).await
         } else {
             // Currently standalone mode does not support multi partitions/regions.
-            let result = self.admin().create(expr.clone()).await;
+            let result = self
+                .admin(expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME))
+                .create(expr.clone())
+                .await;
             if let Err(e) = &result {
                 error!(e; "Failed to create table by expr: {:?}", expr);
             }
@@ -203,7 +207,7 @@ impl Instance {
 
     /// Handle create database expr.
     pub async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
-        self.admin()
+        self.admin(DEFAULT_SCHEMA_NAME)
             .create_database(expr)
             .await
             .and_then(admin_result_to_output)
@@ -212,7 +216,7 @@ impl Instance {
 
     /// Handle alter expr
     pub async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
-        self.admin()
+        self.admin(expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME))
             .alter(expr)
             .await
             .and_then(admin_result_to_output)
@@ -234,8 +238,8 @@ impl Instance {
     /// Handle insert. for 'values' insertion, create/alter the destination table on demand.
     pub async fn handle_insert(&self, insert_expr: &InsertExpr) -> Result<Output> {
         let table_name = &insert_expr.table_name;
-        let catalog_name = "greptime";
-        let schema_name = "public";
+        let catalog_name = DEFAULT_CATALOG_NAME;
+        let schema_name = &insert_expr.schema_name;
 
         if let Some(expr) = &insert_expr.expr {
             match expr {
@@ -253,7 +257,7 @@ impl Instance {
                 }
                 api::v1::insert_expr::Expr::Sql(_) => {
                     // Frontend does not comprehend insert request that is raw SQL string
-                    self.database()
+                    self.database(schema_name)
                         .insert(insert_expr.clone())
                         .await
                         .and_then(Output::try_from)
@@ -286,7 +290,7 @@ impl Instance {
             &insert_batches,
         )
         .await?;
-        self.database()
+        self.database(schema_name)
             .insert(InsertExpr {
                 schema_name: schema_name.to_string(),
                 table_name: table_name.to_string(),
@@ -350,8 +354,13 @@ impl Instance {
                         "Find new columns {:?} on insertion, try to alter table: {}.{}.{}",
                         add_columns, catalog_name, schema_name, table_name
                     );
-                    self.add_new_columns_to_table(table_name, add_columns)
-                        .await?;
+                    self.add_new_columns_to_table(
+                        catalog_name,
+                        schema_name,
+                        table_name,
+                        add_columns,
+                    )
+                    .await?;
                     info!(
                         "Successfully altered table on insertion: {}.{}.{}",
                         catalog_name, schema_name, table_name
@@ -386,6 +395,8 @@ impl Instance {
 
     async fn add_new_columns_to_table(
         &self,
+        catalog_name: &str,
+        schema_name: &str,
         table_name: &str,
         add_columns: AddColumns,
     ) -> Result<Output> {
@@ -395,11 +406,11 @@ impl Instance {
         );
         let expr = AlterExpr {
             table_name: table_name.to_string(),
-            schema_name: None,
-            catalog_name: None,
+            schema_name: Some(schema_name.to_string()),
+            catalog_name: Some(catalog_name.to_string()),
             kind: Some(Kind::AddColumns(add_columns)),
         };
-        self.admin()
+        self.admin(schema_name)
             .alter(expr)
             .await
             .and_then(admin_result_to_output)
@@ -608,8 +619,10 @@ impl GrpcQueryHandler for Instance {
                             query: format!("{:?}", query),
                         })
                 }
+
+                // FIXME(hl): refactor
                 _ => self
-                    .database()
+                    .database(DEFAULT_SCHEMA_NAME)
                     .object(query.clone())
                     .await
                     .map_err(BoxedError::new)
@@ -618,16 +631,21 @@ impl GrpcQueryHandler for Instance {
                     }),
             }
         } else {
-            // why?
-            self.database()
-                .object(query.clone())
-                .await
-                .map_err(BoxedError::new)
-                .with_context(|_| server_error::ExecuteQuerySnafu {
-                    query: format!("{:?}", query),
-                })
+            server_error::InvalidQuerySnafu {
+                reason: "empty query",
+            }
+            .fail()
         }
     }
+}
+
+fn get_schema_name(expr: &AdminExpr) -> &str {
+    let schema_name = match &expr.expr {
+        Some(admin_expr::Expr::Create(expr)) => expr.schema_name.as_deref(),
+        Some(admin_expr::Expr::Alter(expr)) => expr.schema_name.as_deref(),
+        Some(admin_expr::Expr::CreateDatabase(_)) | None => Some(DEFAULT_SCHEMA_NAME),
+    };
+    schema_name.unwrap_or(DEFAULT_SCHEMA_NAME)
 }
 
 #[async_trait]
@@ -638,7 +656,7 @@ impl GrpcAdminHandler for Instance {
         if let Some(api::v1::admin_expr::Expr::Create(create)) = &mut expr.expr {
             create.table_id = None;
         }
-        self.admin()
+        self.admin(get_schema_name(&expr))
             .do_request(expr.clone())
             .await
             .map_err(BoxedError::new)

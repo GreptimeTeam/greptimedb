@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use tonic::codegen::http;
 
-use super::HttpHandler;
 use crate::error::Result;
+use crate::service::admin::HttpHandler;
 
 const HTTP_OK: &str = "OK\n";
 

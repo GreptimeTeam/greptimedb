@@ -17,8 +17,8 @@ use api::v1::meta::RangeResponse;
 use api::v1::meta::ResponseHeader;
 use parking_lot::RwLock;
 
-use super::kv::KvStore;
 use crate::error::Result;
+use crate::service::store::kv::KvStore;
 
 /// Only for mock test
 #[derive(Clone)]
