@@ -18,6 +18,12 @@ pub enum InnerError {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Catalog not found: {}", catalog))]
+    CatalogNotFound {
+        catalog: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to find schema, schema: {}", schema))]
     SchemaNotFound {
         schema: String,
@@ -42,7 +48,9 @@ impl ErrorExt for InnerError {
         use InnerError::*;
 
         match self {
-            UnsupportedExpr { .. } | SchemaNotFound { .. } => StatusCode::InvalidArguments,
+            UnsupportedExpr { .. } | CatalogNotFound { .. } | SchemaNotFound { .. } => {
+                StatusCode::InvalidArguments
+            }
             Catalog { source } => source.status_code(),
             VectorComputation { source } => source.status_code(),
             CreateRecordBatch { source } => source.status_code(),

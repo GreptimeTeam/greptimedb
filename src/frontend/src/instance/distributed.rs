@@ -16,7 +16,7 @@ use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, RouteResponse, TableName,
     TableRoute,
 };
-use query::sql::show_tables;
+use query::sql::{show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
@@ -116,6 +116,8 @@ impl DistInstance {
                     .await
                     .context(error::ExecuteSqlSnafu { sql })
             }
+            Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone())
+                .context(error::ExecuteSqlSnafu { sql }),
             Statement::ShowTables(stmt) => show_tables(stmt, self.catalog_manager.clone())
                 .context(error::ExecuteSqlSnafu { sql }),
             _ => unreachable!(),
