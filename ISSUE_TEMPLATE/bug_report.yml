@@ -33,9 +33,10 @@ body:
       description: You can pick multiple subsystems.
       multiple: true
       options:
+        - Standalone mode
         - Frontend
         - Datanode
-        - Metaserver
+        - Meta
         - Other
     validations:
       required: true
