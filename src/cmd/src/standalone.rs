@@ -1,7 +1,6 @@
 use clap::Parser;
 use common_telemetry::info;
-use datanode::datanode::ObjectStoreConfig;
-use datanode::datanode::{Datanode, DatanodeOptions};
+use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::{Frontend, FrontendOptions, Mode};
 use frontend::grpc::GrpcOptions;
