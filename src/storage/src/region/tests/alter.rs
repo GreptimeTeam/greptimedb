@@ -5,19 +5,15 @@ use common_time::Timestamp;
 use datatypes::prelude::*;
 use datatypes::vectors::{Int64Vector, TimestampVector};
 use log_store::fs::log::LocalFileLogStore;
-use store_api::storage::PutOperation;
-use store_api::storage::WriteRequest;
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
-    ColumnDescriptorBuilder, ColumnId, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot,
-    WriteResponse,
+    ColumnDescriptorBuilder, ColumnId, PutOperation, Region, RegionMeta, ScanRequest, SchemaRef,
+    Snapshot, WriteRequest, WriteResponse,
 };
 use tempdir::TempDir;
 
 use crate::region::tests::{self, FileTesterBase};
-use crate::region::OpenOptions;
-use crate::region::RegionImpl;
-use crate::region::{RawRegionMetadata, RegionMetadata};
+use crate::region::{OpenOptions, RawRegionMetadata, RegionImpl, RegionMetadata};
 use crate::test_util;
 use crate::test_util::config_util;
 use crate::test_util::descriptor_util::RegionDescBuilder;

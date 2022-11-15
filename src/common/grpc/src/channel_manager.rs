@@ -1,14 +1,11 @@
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use snafu::ResultExt;
-use tonic::transport::Channel as InnerChannel;
-use tonic::transport::Endpoint;
-use tonic::transport::Uri;
+use tonic::transport::{Channel as InnerChannel, Endpoint, Uri};
 use tower::make::MakeConnection;
 
 use crate::error;

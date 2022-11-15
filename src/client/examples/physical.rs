@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use client::{Client, Database};
 use common_grpc::MockExecution;
-use datafusion::physical_plan::{
-    expressions::Column, projection::ProjectionExec, ExecutionPlan, PhysicalExpr,
-};
+use datafusion::physical_plan::expressions::Column;
+use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
 use tracing::{event, Level};
 
 fn main() {

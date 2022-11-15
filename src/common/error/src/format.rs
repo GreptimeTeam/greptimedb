@@ -32,7 +32,8 @@ impl<'a, E: ErrorExt + ?Sized> fmt::Debug for DebugFormat<'a, E> {
 mod tests {
     use std::any::Any;
 
-    use snafu::{prelude::*, Backtrace, GenerateImplicitData};
+    use snafu::prelude::*;
+    use snafu::{Backtrace, GenerateImplicitData};
 
     use super::*;
 

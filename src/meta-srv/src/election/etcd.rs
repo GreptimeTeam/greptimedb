@@ -1,22 +1,15 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_telemetry::info;
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use etcd_client::Client;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::election::Election;
-use crate::election::ELECTION_KEY;
-use crate::election::LEASE_SECS;
-use crate::election::PROCLAIM_PERIOD_SECS;
+use crate::election::{Election, ELECTION_KEY, LEASE_SECS, PROCLAIM_PERIOD_SECS};
 use crate::error;
 use crate::error::Result;
-use crate::metasrv::ElectionRef;
-use crate::metasrv::LeaderValue;
+use crate::metasrv::{ElectionRef, LeaderValue};
 
 pub struct EtcdElection {
     leader_value: String,

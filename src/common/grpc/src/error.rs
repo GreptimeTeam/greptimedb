@@ -84,8 +84,7 @@ impl ErrorExt for Error {
 
 #[cfg(test)]
 mod tests {
-    use snafu::OptionExt;
-    use snafu::ResultExt;
+    use snafu::{OptionExt, ResultExt};
 
     use super::*;
 

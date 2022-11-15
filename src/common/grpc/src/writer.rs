@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 
-use api::v1::{
-    codec::InsertBatch,
-    column::{SemanticType, Values},
-    Column, ColumnDataType,
-};
+use api::v1::codec::InsertBatch;
+use api::v1::column::{SemanticType, Values};
+use api::v1::{Column, ColumnDataType};
 use common_base::BitVec;
 use snafu::ensure;
 
@@ -232,7 +230,8 @@ pub enum Precision {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{column::SemanticType, ColumnDataType};
+    use api::v1::column::SemanticType;
+    use api::v1::ColumnDataType;
     use common_base::BitVec;
 
     use super::LinesWriter;

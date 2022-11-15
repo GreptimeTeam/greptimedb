@@ -2,8 +2,7 @@ use meta_srv::metasrv::SelectorRef;
 use meta_srv::mocks as server_mock;
 use meta_srv::mocks::MockInfo;
 
-use crate::client::MetaClient;
-use crate::client::MetaClientBuilder;
+use crate::client::{MetaClient, MetaClientBuilder};
 
 pub async fn mock_client_with_memstore() -> MetaClient {
     let mock_info = server_mock::mock_with_memstore().await;

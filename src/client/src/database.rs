@@ -7,8 +7,7 @@ use api::v1::{
     SelectExpr,
 };
 use common_error::status_code::StatusCode;
-use common_grpc::AsExcutionPlan;
-use common_grpc::DefaultAsPlanImpl;
+use common_grpc::{AsExcutionPlan, DefaultAsPlanImpl};
 use common_insert::column_to_vector;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
@@ -17,12 +16,10 @@ use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error;
-use crate::error::ColumnToVectorSnafu;
-use crate::{
-    error::{ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu},
-    Client, Result,
+use crate::error::{
+    ColumnToVectorSnafu, ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu,
 };
+use crate::{error, Client, Result};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 

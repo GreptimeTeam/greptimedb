@@ -102,8 +102,7 @@ pub fn to_df_return_type(func: ReturnTypeFunction) -> DfReturnTypeFunction {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::prelude::ScalarVector;
-    use datatypes::prelude::Vector;
+    use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::vectors::BooleanVector;
 
     use super::*;

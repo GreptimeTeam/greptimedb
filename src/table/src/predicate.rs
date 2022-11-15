@@ -58,9 +58,7 @@ mod tests {
 
     pub use datafusion::parquet::schema::types::{BasicTypeInfo, PhysicalType};
     use datafusion_common::Column;
-    use datafusion_expr::Expr;
-    use datafusion_expr::Literal;
-    use datafusion_expr::Operator;
+    use datafusion_expr::{Expr, Literal, Operator};
     use datatypes::arrow::array::{Int32Array, Utf8Array};
     use datatypes::arrow::chunk::Chunk;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
@@ -68,8 +66,7 @@ mod tests {
     use datatypes::arrow::io::parquet::write::{
         Compression, Encoding, FileSink, Version, WriteOptions,
     };
-    use futures::AsyncWriteExt;
-    use futures::SinkExt;
+    use futures::{AsyncWriteExt, SinkExt};
     use tempdir::TempDir;
     use tokio_util::compat::TokioAsyncWriteCompatExt;
 

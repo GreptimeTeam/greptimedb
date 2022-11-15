@@ -4,10 +4,10 @@ mod storage;
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
-use crate::manifest::action::ProtocolAction;
-use crate::manifest::action::ProtocolVersion;
+use crate::manifest::action::{ProtocolAction, ProtocolVersion};
 pub use crate::manifest::storage::*;
 
 pub type ManifestVersion = u64;

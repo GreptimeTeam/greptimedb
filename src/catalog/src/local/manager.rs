@@ -20,10 +20,10 @@ use table::table::TableIdProvider;
 use table::TableRef;
 
 use crate::error::{
-    CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, SchemaNotFoundSnafu,
-    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, Result,
+    SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu,
+    TableExistsSnafu, TableNotFoundSnafu,
 };
-use crate::error::{ReadSystemCatalogSnafu, Result, SchemaExistsSnafu};
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
     decode_system_catalog, Entry, SystemCatalogTable, TableEntry, ENTRY_TYPE_INDEX, KEY_INDEX,

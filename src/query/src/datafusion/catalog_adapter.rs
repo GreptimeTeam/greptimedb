@@ -7,17 +7,15 @@ use catalog::error::Error;
 use catalog::{
     CatalogListRef, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
 };
-use datafusion::catalog::{
-    catalog::{CatalogList as DfCatalogList, CatalogProvider as DfCatalogProvider},
-    schema::SchemaProvider as DfSchemaProvider,
+use datafusion::catalog::catalog::{
+    CatalogList as DfCatalogList, CatalogProvider as DfCatalogProvider,
 };
+use datafusion::catalog::schema::SchemaProvider as DfSchemaProvider;
 use datafusion::datasource::TableProvider as DfTableProvider;
 use datafusion::error::Result as DataFusionResult;
 use snafu::ResultExt;
-use table::{
-    table::adapter::{DfTableProviderAdapter, TableAdapter},
-    TableRef,
-};
+use table::table::adapter::{DfTableProviderAdapter, TableAdapter};
+use table::TableRef;
 
 use crate::datafusion::error;
 

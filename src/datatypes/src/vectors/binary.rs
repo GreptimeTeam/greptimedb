@@ -1,8 +1,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef};
-use arrow::array::{BinaryValueIter, MutableArray};
+use arrow::array::{Array, ArrayRef, BinaryValueIter, MutableArray};
 use arrow::bitmap::utils::ZipValidity;
 use snafu::{OptionExt, ResultExt};
 

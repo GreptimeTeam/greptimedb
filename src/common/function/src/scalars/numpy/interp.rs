@@ -3,16 +3,12 @@ use std::sync::Arc;
 use arrow::array::PrimitiveArray;
 use arrow::compute::cast::primitive_to_primitive;
 use arrow::datatypes::DataType::Float64;
-use datatypes::arrow;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::value::Value;
-use datatypes::vectors::Float64Vector;
-use datatypes::vectors::PrimitiveVector;
-use datatypes::vectors::Vector;
-use datatypes::vectors::VectorRef;
-use datatypes::with_match_primitive_type_id;
+use datatypes::vectors::{Float64Vector, PrimitiveVector, Vector, VectorRef};
+use datatypes::{arrow, with_match_primitive_type_id};
 use snafu::{ensure, Snafu};
 
 #[derive(Debug, Snafu)]
@@ -247,10 +243,8 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::{
-        prelude::ScalarVectorBuilder,
-        vectors::{Int32Vector, Int64Vector, PrimitiveVectorBuilder},
-    };
+    use datatypes::prelude::ScalarVectorBuilder;
+    use datatypes::vectors::{Int32Vector, Int64Vector, PrimitiveVectorBuilder};
 
     use super::*;
     #[test]

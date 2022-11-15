@@ -1,8 +1,7 @@
 use std::pin::Pin;
 
 use futures::Stream;
-use tonic::Response;
-use tonic::Status;
+use tonic::{Response, Status};
 
 pub mod admin;
 mod heartbeat;

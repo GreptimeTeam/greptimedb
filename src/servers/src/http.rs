@@ -9,14 +9,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aide::axum::routing as apirouting;
-use aide::axum::{ApiRouter, IntoApiResponse};
+use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
+use axum::error_handling::HandleErrorLayer;
 use axum::middleware::{self};
-use axum::response::Html;
-use axum::Extension;
-use axum::{error_handling::HandleErrorLayer, response::Json, routing, BoxError, Router};
+use axum::response::{Html, Json};
+use axum::{routing, BoxError, Extension, Router};
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -27,19 +26,18 @@ use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::ensure;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
-use tower::{timeout::TimeoutLayer, ServiceBuilder};
+use tower::timeout::TimeoutLayer;
+use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
 use self::influxdb::influxdb_write;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
-use crate::query_handler::SqlQueryHandlerRef;
 use crate::query_handler::{
     InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef, PrometheusProtocolHandlerRef,
-    ScriptHandlerRef,
+    ScriptHandlerRef, SqlQueryHandlerRef,
 };
 use crate::server::Server;
 

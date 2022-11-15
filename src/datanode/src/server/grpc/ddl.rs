@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::result::AdminResultBuilder;
-use api::v1::{alter_expr::Kind, AdminResult, AlterExpr, ColumnDef, CreateExpr};
+use api::v1::alter_expr::Kind;
+use api::v1::{AdminResult, AlterExpr, ColumnDef, CreateExpr};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
 use common_telemetry::{error, info};
-use datatypes::schema::ColumnDefaultConstraint;
-use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use snafu::prelude::*;
 use table::metadata::TableId;

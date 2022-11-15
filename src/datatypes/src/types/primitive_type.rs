@@ -9,8 +9,7 @@ use snafu::OptionExt;
 
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
-use crate::scalars::ScalarVectorBuilder;
-use crate::scalars::{Scalar, ScalarRef};
+use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
 use crate::type_id::LogicalTypeId;
 use crate::types::primitive_traits::Primitive;
 use crate::value::{Value, ValueRef};

@@ -2,19 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::codec;
 use api::v1::codec::InsertBatch;
 use api::v1::column::SemanticType;
-use api::v1::insert_expr;
 use api::v1::insert_expr::Expr;
-use api::v1::Column;
-use api::v1::InsertExpr;
-use api::v1::MutateResult;
+use api::v1::{codec, insert_expr, Column, InsertExpr, MutateResult};
 use client::{Database, ObjectResult};
 use datatypes::prelude::ConcreteDataType;
-use snafu::ensure;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::requests::InsertRequest;
 
@@ -144,9 +138,13 @@ fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<
 mod tests {
     use std::collections::HashMap;
 
-    use api::v1::{codec::InsertBatch, insert_expr::Expr, ColumnDataType, InsertExpr};
+    use api::v1::codec::InsertBatch;
+    use api::v1::insert_expr::Expr;
+    use api::v1::{ColumnDataType, InsertExpr};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datatypes::{prelude::ConcreteDataType, types::StringType, vectors::VectorBuilder};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::types::StringType;
+    use datatypes::vectors::VectorBuilder;
     use table::requests::InsertRequest;
 
     use super::to_insert_expr;

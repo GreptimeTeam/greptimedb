@@ -4,14 +4,11 @@ use api::v1::greptime_client::GreptimeClient;
 use api::v1::*;
 use common_grpc::channel_manager::ChannelManager;
 use parking_lot::RwLock;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tonic::transport::Channel;
 
-use crate::error;
-use crate::load_balance::LoadBalance;
-use crate::load_balance::Loadbalancer;
-use crate::Result;
+use crate::load_balance::{LoadBalance, Loadbalancer};
+use crate::{error, Result};
 
 #[derive(Clone, Debug, Default)]
 pub struct Client {

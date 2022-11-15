@@ -296,8 +296,9 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
-    use crate::memtable::tests as memtable_tests;
-    use crate::memtable::{DefaultMemtableBuilder, IterContext, MemtableBuilder};
+    use crate::memtable::{
+        tests as memtable_tests, DefaultMemtableBuilder, IterContext, MemtableBuilder,
+    };
 
     #[tokio::test]
     async fn test_parquet_writer() {

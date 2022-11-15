@@ -5,8 +5,7 @@ use axum::http::StatusCode;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision;
 
-use crate::error::Result;
-use crate::error::TimePrecisionSnafu;
+use crate::error::{Result, TimePrecisionSnafu};
 use crate::influxdb::InfluxdbRequest;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 

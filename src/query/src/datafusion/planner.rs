@@ -11,8 +11,11 @@ use snafu::ResultExt;
 use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 
+use crate::datafusion::error;
+use crate::error::Result;
+use crate::plan::LogicalPlan;
+use crate::planner::Planner;
 use crate::query_engine::QueryEngineState;
-use crate::{datafusion::error, error::Result, plan::LogicalPlan, planner::Planner};
 
 pub struct DfPlanner<'a, S: ContextProvider> {
     sql_to_rel: SqlToRel<'a, S>,

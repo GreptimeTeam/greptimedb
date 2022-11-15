@@ -5,9 +5,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
-use common_query::physical_plan::Partitioning;
-use common_query::physical_plan::RuntimeEnv;
-use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
+use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef, RuntimeEnv};
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use snafu::OptionExt;
@@ -70,8 +68,7 @@ impl PhysicalPlan for SimpleTableScan {
 
 #[cfg(test)]
 mod test {
-    use common_recordbatch::util;
-    use common_recordbatch::{RecordBatch, RecordBatches};
+    use common_recordbatch::{util, RecordBatch, RecordBatches};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;

@@ -24,13 +24,12 @@ use store_api::storage::{
     RegionMeta, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
-use table::metadata::{FilterPushDownType, TableInfoRef};
+use table::metadata::{
+    FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType,
+};
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
 use table::table::scan::SimpleTableScan;
-use table::{
-    metadata::{RawTableInfo, TableInfo, TableMeta, TableType},
-    table::Table,
-};
+use table::table::Table;
 use tokio::sync::Mutex;
 
 use crate::error::{

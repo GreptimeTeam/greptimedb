@@ -3,17 +3,15 @@ pub mod bench_memtable_read_write_ratio;
 pub mod bench_memtable_write;
 pub mod util;
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use common_time::Timestamp;
-use datatypes::{
-    prelude::ScalarVectorBuilder,
-    vectors::{StringVectorBuilder, TimestampVectorBuilder, UInt64VectorBuilder},
-};
-use rand::{distributions::Alphanumeric, prelude::ThreadRng, Rng};
+use datatypes::prelude::ScalarVectorBuilder;
+use datatypes::vectors::{StringVectorBuilder, TimestampVectorBuilder, UInt64VectorBuilder};
+use rand::distributions::Alphanumeric;
+use rand::prelude::ThreadRng;
+use rand::Rng;
 use storage::memtable::KeyValues;
 use store_api::storage::{OpType, SequenceNumber};
 

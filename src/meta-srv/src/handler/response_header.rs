@@ -1,10 +1,7 @@
-use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::ResponseHeader;
-use api::v1::meta::PROTOCOL_VERSION;
+use api::v1::meta::{HeartbeatRequest, ResponseHeader, PROTOCOL_VERSION};
 
 use crate::error::Result;
-use crate::handler::HeartbeatAccumulator;
-use crate::handler::HeartbeatHandler;
+use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
 pub struct ResponseHeaderHandler;

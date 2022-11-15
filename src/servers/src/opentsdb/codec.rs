@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use api::v1::codec::InsertBatch;
-use api::v1::{column, column::SemanticType, insert_expr, Column, ColumnDataType, InsertExpr};
+use api::v1::column::SemanticType;
+use api::v1::{column, insert_expr, Column, ColumnDataType, InsertExpr};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision;
 use table::requests::InsertRequest;
@@ -206,7 +207,8 @@ impl DataPoint {
 mod test {
     use std::sync::Arc;
 
-    use common_time::{timestamp::TimeUnit, Timestamp};
+    use common_time::timestamp::TimeUnit;
+    use common_time::Timestamp;
     use datatypes::value::Value;
     use datatypes::vectors::Vector;
 

@@ -2,25 +2,16 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::store_client::StoreClient;
-use api::v1::meta::BatchPutRequest;
-use api::v1::meta::BatchPutResponse;
-use api::v1::meta::CompareAndPutRequest;
-use api::v1::meta::CompareAndPutResponse;
-use api::v1::meta::DeleteRangeRequest;
-use api::v1::meta::DeleteRangeResponse;
-use api::v1::meta::PutRequest;
-use api::v1::meta::PutResponse;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::RangeResponse;
+use api::v1::meta::{
+    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
+    DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+};
 use common_grpc::channel_manager::ChannelManager;
-use snafu::ensure;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
-use crate::client::load_balance as lb;
-use crate::client::Id;
+use crate::client::{load_balance as lb, Id};
 use crate::error;
 use crate::error::Result;
 

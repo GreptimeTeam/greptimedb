@@ -1,12 +1,11 @@
 use api::v1::{ColumnDataType, ColumnDef, CreateExpr};
-use client::{admin::Admin, Client, Database};
+use client::admin::Admin;
+use client::{Client, Database};
 use prost_09::Message;
-use substrait_proto::protobuf::{
-    plan_rel::RelType as PlanRelType,
-    read_rel::{NamedTable, ReadType},
-    rel::RelType,
-    PlanRel, ReadRel, Rel,
-};
+use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
+use substrait_proto::protobuf::read_rel::{NamedTable, ReadType};
+use substrait_proto::protobuf::rel::RelType;
+use substrait_proto::protobuf::{PlanRel, ReadRel, Rel};
 use tracing::{event, Level};
 
 fn main() {

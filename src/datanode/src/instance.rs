@@ -1,19 +1,23 @@
+use std::sync::Arc;
 use std::time::Duration;
-use std::{fs, path, sync::Arc};
+use std::{fs, path};
 
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
 use frontend::frontend::Mode;
-use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
+use log_store::fs::config::LogConfig;
+use log_store::fs::log::LocalFileLogStore;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use object_store::layers::LoggingLayer;
-use object_store::{services::fs::Builder, util, ObjectStore};
+use object_store::services::fs::Builder;
+use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use snafu::prelude::*;
-use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
+use storage::config::EngineConfig as StorageEngineConfig;
+use storage::EngineImpl;
 use table::table::TableIdProviderRef;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;

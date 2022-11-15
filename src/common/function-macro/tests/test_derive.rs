@@ -1,5 +1,4 @@
-use common_function_macro::as_aggr_func_creator;
-use common_function_macro::AggrFuncTypeStore;
+use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use static_assertions::{assert_fields, assert_impl_all};
 
 #[as_aggr_func_creator]

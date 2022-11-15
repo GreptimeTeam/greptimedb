@@ -1,24 +1,18 @@
 //! logging stuffs, inspired by databend
 use std::env;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
 pub use tracing::{event, span, Level};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_appender::rolling::RollingFileAppender;
-use tracing_appender::rolling::Rotation;
-use tracing_bunyan_formatter::BunyanFormattingLayer;
-use tracing_bunyan_formatter::JsonStorageLayer;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
 use tracing_log::LogTracer;
-use tracing_subscriber::filter;
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::Registry;
+use tracing_subscriber::{filter, EnvFilter, Registry};
 
 pub use crate::{debug, error, info, log, trace, warn};
 

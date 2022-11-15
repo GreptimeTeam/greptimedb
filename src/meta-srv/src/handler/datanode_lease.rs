@@ -1,13 +1,10 @@
-use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::PutRequest;
+use api::v1::meta::{HeartbeatRequest, PutRequest};
 use common_telemetry::info;
 use common_time::util as time_util;
 
 use crate::error::Result;
-use crate::handler::HeartbeatAccumulator;
-use crate::handler::HeartbeatHandler;
-use crate::keys::LeaseKey;
-use crate::keys::LeaseValue;
+use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::keys::{LeaseKey, LeaseValue};
 use crate::metasrv::Context;
 
 pub struct DatanodeLeaseHandler;
@@ -57,9 +54,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
-    use api::v1::meta::Peer;
-    use api::v1::meta::RangeRequest;
-    use api::v1::meta::RequestHeader;
+    use api::v1::meta::{Peer, RangeRequest, RequestHeader};
 
     use super::*;
     use crate::service::store::memory::MemStore;

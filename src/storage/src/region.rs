@@ -16,18 +16,19 @@ use store_api::storage::{
 
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
-use crate::manifest::{
-    action::{RawRegionMetadata, RegionChange, RegionMetaAction, RegionMetaActionList},
-    region::RegionManifest,
+use crate::manifest::action::{
+    RawRegionMetadata, RegionChange, RegionMetaAction, RegionMetaActionList,
 };
+use crate::manifest::region::RegionManifest;
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
 pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
-use crate::version::VersionEdit;
-use crate::version::{Version, VersionControl, VersionControlRef, INIT_COMMITTED_SEQUENCE};
+use crate::version::{
+    Version, VersionControl, VersionControlRef, VersionEdit, INIT_COMMITTED_SEQUENCE,
+};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 

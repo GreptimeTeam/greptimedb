@@ -1,6 +1,7 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::thread;
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 
 use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
@@ -165,7 +166,9 @@ fn on_thread_unpark(thread_name: String) -> impl Fn() + 'static {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, thread, time::Duration};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
 
     use common_telemetry::metric;
     use tokio::sync::oneshot;

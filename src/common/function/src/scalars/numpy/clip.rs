@@ -2,8 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::prelude::{Signature, Volatility};
-use datatypes::data_type::ConcreteDataType;
-use datatypes::data_type::DataType;
+use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{Scalar, VectorRef};
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;

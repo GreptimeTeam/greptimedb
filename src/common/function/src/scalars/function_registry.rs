@@ -1,7 +1,6 @@
 //! functions registry
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use once_cell::sync::Lazy;
 

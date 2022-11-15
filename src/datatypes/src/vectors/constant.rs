@@ -9,8 +9,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{Result, SerializeSnafu};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
-use crate::vectors::Helper;
-use crate::vectors::{BooleanVector, Validity, Vector, VectorRef};
+use crate::vectors::{BooleanVector, Helper, Validity, Vector, VectorRef};
 
 #[derive(Clone)]
 pub struct ConstantVector {

@@ -8,8 +8,7 @@ use datatypes::prelude::ConcreteDataType;
 use substrait_proto::protobuf::r#type::{self as s_type, Kind, Nullability};
 use substrait_proto::protobuf::Type as SType;
 
-use crate::error::Result;
-use crate::error::{UnsupportedConcreteTypeSnafu, UnsupportedSubstraitTypeSnafu};
+use crate::error::{Result, UnsupportedConcreteTypeSnafu, UnsupportedSubstraitTypeSnafu};
 
 macro_rules! substrait_kind {
     ($desc:ident, $concrete_ty:ident) => {{

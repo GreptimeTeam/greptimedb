@@ -5,9 +5,7 @@ pub(crate) mod response_header;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::HeartbeatResponse;
-use api::v1::meta::ResponseHeader;
+use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, ResponseHeader};
 use common_telemetry::info;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;

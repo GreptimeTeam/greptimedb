@@ -16,8 +16,7 @@ use store_api::storage::{SchemaRef, SequenceNumber};
 use crate::memtable::{MemtableId, MemtableRef, MemtableVersion};
 use crate::metadata::RegionMetadataRef;
 use crate::schema::RegionSchemaRef;
-use crate::sst::LevelMetas;
-use crate::sst::{FileHandle, FileMeta};
+use crate::sst::{FileHandle, FileMeta, LevelMetas};
 use crate::sync::CowCell;
 
 pub const INIT_COMMITTED_SEQUENCE: u64 = 0;

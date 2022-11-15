@@ -8,10 +8,11 @@ use common_query::error::{
 };
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
+use datatypes::prelude::*;
 use datatypes::types::PrimitiveType;
 use datatypes::value::ListValue;
 use datatypes::vectors::{ConstantVector, Int64Vector, ListVector};
-use datatypes::{prelude::*, with_match_primitive_type_id};
+use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use snafu::{ensure, OptionExt, ResultExt};
 

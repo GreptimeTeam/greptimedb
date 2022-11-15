@@ -34,10 +34,11 @@ use servers::query_handler::{
     PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
 };
 use snafu::prelude::*;
+use sql::dialect::GenericDialect;
+use sql::parser::ParserContext;
 use sql::statements::create::Partitions;
 use sql::statements::insert::Insert;
 use sql::statements::statement::Statement;
-use sql::{dialect::GenericDialect, parser::ParserContext};
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
@@ -713,10 +714,10 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::codec::{InsertBatch, SelectResult};
+    use api::v1::column::SemanticType;
     use api::v1::{
-        admin_expr, admin_result, column, column::SemanticType, object_expr, object_result,
-        select_expr, Column, ColumnDataType, ColumnDef as GrpcColumnDef, ExprHeader, MutateResult,
-        SelectExpr,
+        admin_expr, admin_result, column, object_expr, object_result, select_expr, Column,
+        ColumnDataType, ColumnDef as GrpcColumnDef, ExprHeader, MutateResult, SelectExpr,
     };
     use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;

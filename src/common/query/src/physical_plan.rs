@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
-use common_recordbatch::DfSendableRecordBatchStream;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 pub use datafusion::execution::runtime_env::RuntimeEnv;

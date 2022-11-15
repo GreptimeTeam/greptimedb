@@ -3,11 +3,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_telemetry::error;
-use opensrv_mysql::AsyncMysqlShim;
-use opensrv_mysql::ErrorKind;
-use opensrv_mysql::ParamParser;
-use opensrv_mysql::QueryResultWriter;
-use opensrv_mysql::StatementMetaWriter;
+use opensrv_mysql::{
+    AsyncMysqlShim, ErrorKind, ParamParser, QueryResultWriter, StatementMetaWriter,
+};
 use rand::RngCore;
 use tokio::sync::RwLock;
 

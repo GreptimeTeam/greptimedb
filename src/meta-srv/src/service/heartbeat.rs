@@ -1,30 +1,20 @@
 use std::io::ErrorKind;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use api::v1::meta::heartbeat_server;
-use api::v1::meta::AskLeaderRequest;
-use api::v1::meta::AskLeaderResponse;
-use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::HeartbeatResponse;
-use api::v1::meta::Peer;
-use api::v1::meta::ResponseHeader;
-use common_telemetry::error;
-use common_telemetry::info;
-use common_telemetry::warn;
+use api::v1::meta::{
+    heartbeat_server, AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse,
+    Peer, ResponseHeader,
+};
+use common_telemetry::{error, info, warn};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::Request;
-use tonic::Response;
-use tonic::Streaming;
+use tonic::{Request, Response, Streaming};
 
 use crate::error;
 use crate::error::Result;
-use crate::metasrv::Context;
-use crate::metasrv::MetaSrv;
-use crate::service::GrpcResult;
-use crate::service::GrpcStream;
+use crate::metasrv::{Context, MetaSrv};
+use crate::service::{GrpcResult, GrpcStream};
 
 static PUSHER_ID: AtomicU64 = AtomicU64::new(0);
 

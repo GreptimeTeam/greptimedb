@@ -5,19 +5,16 @@ use std::sync::Arc;
 
 use common_base::BitVec;
 use common_error::prelude::*;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::{ScalarVector, ScalarVectorBuilder};
 use datatypes::schema;
-use datatypes::{
-    data_type::ConcreteDataType,
-    prelude::{ScalarVector, ScalarVectorBuilder},
-    vectors::{
-        BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, Float32Vector,
-        Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder,
-        Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector,
-        Int8VectorBuilder, StringVector, StringVectorBuilder, TimestampVector,
-        TimestampVectorBuilder, UInt16Vector, UInt16VectorBuilder, UInt32Vector,
-        UInt32VectorBuilder, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
-        Vector, VectorRef,
-    },
+use datatypes::vectors::{
+    BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, Float32Vector,
+    Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder,
+    Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector,
+    Int8VectorBuilder, StringVector, StringVectorBuilder, TimestampVector, TimestampVectorBuilder,
+    UInt16Vector, UInt16VectorBuilder, UInt32Vector, UInt32VectorBuilder, UInt64Vector,
+    UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder, Vector, VectorRef,
 };
 use paste::paste;
 use snafu::OptionExt;

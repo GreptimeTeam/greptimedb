@@ -1,7 +1,6 @@
 use datafusion_expr::ColumnarValue as DfColumnarValue;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::Helper;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{Helper, VectorRef};
 use snafu::ResultExt;
 
 use crate::error::{self, IntoVectorSnafu, Result};

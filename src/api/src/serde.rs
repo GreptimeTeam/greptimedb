@@ -1,10 +1,7 @@
 pub use prost::DecodeError;
 use prost::Message;
 
-use crate::v1::codec::InsertBatch;
-use crate::v1::codec::PhysicalPlanNode;
-use crate::v1::codec::RegionNumber;
-use crate::v1::codec::SelectResult;
+use crate::v1::codec::{InsertBatch, PhysicalPlanNode, RegionNumber, SelectResult};
 use crate::v1::meta::TableRouteValue;
 
 macro_rules! impl_convert_with_bytes {
@@ -36,8 +33,7 @@ mod tests {
     use std::ops::Deref;
 
     use crate::v1::codec::*;
-    use crate::v1::column;
-    use crate::v1::Column;
+    use crate::v1::{column, Column};
 
     const SEMANTIC_TAG: i32 = 0;
 

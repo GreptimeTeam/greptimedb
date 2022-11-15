@@ -1,31 +1,16 @@
-use api::v1::meta::router_server;
-use api::v1::meta::CreateRequest;
-use api::v1::meta::Error;
-use api::v1::meta::PeerDict;
-use api::v1::meta::PutRequest;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::Region;
-use api::v1::meta::RegionRoute;
-use api::v1::meta::ResponseHeader;
-use api::v1::meta::RouteRequest;
-use api::v1::meta::RouteResponse;
-use api::v1::meta::Table;
-use api::v1::meta::TableRoute;
-use api::v1::meta::TableRouteValue;
-use common_catalog::TableGlobalKey;
-use common_catalog::TableGlobalValue;
+use api::v1::meta::{
+    router_server, CreateRequest, Error, PeerDict, PutRequest, RangeRequest, Region, RegionRoute,
+    ResponseHeader, RouteRequest, RouteResponse, Table, TableRoute, TableRouteValue,
+};
+use common_catalog::{TableGlobalKey, TableGlobalValue};
 use common_telemetry::warn;
-use snafu::OptionExt;
-use snafu::ResultExt;
-use tonic::Request;
-use tonic::Response;
+use snafu::{OptionExt, ResultExt};
+use tonic::{Request, Response};
 
 use crate::error;
 use crate::error::Result;
 use crate::keys::TableRouteKey;
-use crate::metasrv::Context;
-use crate::metasrv::MetaSrv;
-use crate::metasrv::SelectorRef;
+use crate::metasrv::{Context, MetaSrv, SelectorRef};
 use crate::sequence::SequenceRef;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::GrpcResult;

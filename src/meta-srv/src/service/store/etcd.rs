@@ -1,32 +1,18 @@
 use std::sync::Arc;
 
-use api::v1::meta::BatchPutRequest;
-use api::v1::meta::BatchPutResponse;
-use api::v1::meta::CompareAndPutRequest;
-use api::v1::meta::CompareAndPutResponse;
-use api::v1::meta::DeleteRangeRequest;
-use api::v1::meta::DeleteRangeResponse;
-use api::v1::meta::KeyValue;
-use api::v1::meta::PutRequest;
-use api::v1::meta::PutResponse;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::RangeResponse;
-use api::v1::meta::ResponseHeader;
+use api::v1::meta::{
+    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
+    DeleteRangeRequest, DeleteRangeResponse, KeyValue, PutRequest, PutResponse, RangeRequest,
+    RangeResponse, ResponseHeader,
+};
 use common_error::prelude::*;
-use etcd_client::Client;
-use etcd_client::Compare;
-use etcd_client::CompareOp;
-use etcd_client::DeleteOptions;
-use etcd_client::GetOptions;
-use etcd_client::PutOptions;
-use etcd_client::Txn;
-use etcd_client::TxnOp;
-use etcd_client::TxnOpResponse;
+use etcd_client::{
+    Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
+};
 
 use crate::error;
 use crate::error::Result;
-use crate::service::store::kv::KvStore;
-use crate::service::store::kv::KvStoreRef;
+use crate::service::store::kv::{KvStore, KvStoreRef};
 
 #[derive(Clone)]
 pub struct EtcdStore {

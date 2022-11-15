@@ -11,8 +11,7 @@ use prost::Message;
 use servers::error::Result;
 use servers::http::HttpServer;
 use servers::prometheus;
-use servers::prometheus::snappy_compress;
-use servers::prometheus::Metrics;
+use servers::prometheus::{snappy_compress, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse, SqlQueryHandler};
 use tokio::sync::mpsc;
 

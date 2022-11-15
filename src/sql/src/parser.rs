@@ -1,8 +1,7 @@
 use snafu::{ensure, ResultExt};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
-use sqlparser::parser::Parser;
-use sqlparser::parser::ParserError;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::error::{

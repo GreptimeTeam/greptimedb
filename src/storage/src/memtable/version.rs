@@ -109,8 +109,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::memtable::DefaultMemtableBuilder;
-    use crate::memtable::MemtableBuilder;
+    use crate::memtable::{DefaultMemtableBuilder, MemtableBuilder};
     use crate::test_util::schema_util;
 
     #[test]

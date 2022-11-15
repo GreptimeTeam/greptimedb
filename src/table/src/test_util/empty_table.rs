@@ -4,16 +4,10 @@ use async_trait::async_trait;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::EmptyRecordBatchStream;
 
-use crate::metadata::TableInfoBuilder;
-use crate::metadata::TableInfoRef;
-use crate::requests::InsertRequest;
+use crate::metadata::{TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
+use crate::requests::{CreateTableRequest, InsertRequest};
 use crate::table::scan::SimpleTableScan;
-use crate::Result;
-use crate::{
-    metadata::{TableMetaBuilder, TableType},
-    requests::CreateTableRequest,
-    Table,
-};
+use crate::{Result, Table};
 
 pub struct EmptyTable {
     info: TableInfoRef,

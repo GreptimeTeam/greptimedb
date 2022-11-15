@@ -15,11 +15,10 @@ use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
 
 use super::error::{get_error_reason_loc, visualize_loc};
-use crate::python::coprocessor::AnnotationInfo;
-use crate::python::error::pretty_print_error_in_src;
-use crate::python::{
-    coprocessor, coprocessor::parse::parse_and_compile_copr, coprocessor::Coprocessor, error::Error,
-};
+use crate::python::coprocessor;
+use crate::python::coprocessor::parse::parse_and_compile_copr;
+use crate::python::coprocessor::{AnnotationInfo, Coprocessor};
+use crate::python::error::{pretty_print_error_in_src, Error};
 
 #[derive(Deserialize, Debug)]
 struct TestCase {

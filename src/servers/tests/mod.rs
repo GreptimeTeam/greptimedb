@@ -8,16 +8,15 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::Result;
-use servers::query_handler::ScriptHandlerRef;
-use servers::query_handler::{ScriptHandler, SqlQueryHandler, SqlQueryHandlerRef};
+use servers::query_handler::{
+    ScriptHandler, ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
+};
 use table::test_util::MemTable;
 
 mod http;
 mod mysql;
-use script::{
-    engine::{CompileContext, EvalContext, Script, ScriptEngine},
-    python::{PyEngine, PyScript},
-};
+use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
+use script::python::{PyEngine, PyScript};
 mod opentsdb;
 mod postgres;
 

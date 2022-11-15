@@ -1,7 +1,6 @@
 use api::prometheus::remote::{ReadRequest, WriteRequest};
 use axum::extract::{Query, RawBody, State};
-use axum::http::header;
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use hyper::Body;

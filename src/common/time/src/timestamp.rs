@@ -3,7 +3,8 @@ use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
-use chrono::{offset::Local, DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
+use chrono::offset::Local;
+use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, ParseTimestampSnafu};

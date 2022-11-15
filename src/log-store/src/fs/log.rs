@@ -5,8 +5,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_stream::stream;
 use common_telemetry::{error, info, warn};
-use futures::pin_mut;
-use futures::StreamExt;
+use futures::{pin_mut, StreamExt};
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{Encode, Entry, Id};
 use store_api::logstore::entry_stream::SendableEntryStream;
@@ -272,7 +271,8 @@ impl LogStore for LocalFileLogStore {
 #[cfg(test)]
 mod tests {
     use futures_util::StreamExt;
-    use rand::{distributions::Alphanumeric, Rng};
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
     use store_api::logstore::entry::Entry;
     use tempdir::TempDir;
 

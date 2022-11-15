@@ -2,16 +2,14 @@ pub mod write_batch_util;
 
 use std::sync::Arc;
 
-use datatypes::{
-    prelude::ScalarVector,
-    type_id::LogicalTypeId,
-    vectors::{BooleanVector, Float64Vector, StringVector, TimestampVector, UInt64Vector},
+use datatypes::prelude::ScalarVector;
+use datatypes::type_id::LogicalTypeId;
+use datatypes::vectors::{
+    BooleanVector, Float64Vector, StringVector, TimestampVector, UInt64Vector,
 };
 use rand::Rng;
-use storage::{
-    proto,
-    write_batch::{PutData, WriteBatch},
-};
+use storage::proto;
+use storage::write_batch::{PutData, WriteBatch};
 use store_api::storage::{consts, PutOperation, WriteRequest};
 
 pub fn new_test_batch() -> WriteBatch {
