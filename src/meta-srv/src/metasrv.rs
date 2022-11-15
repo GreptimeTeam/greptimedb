@@ -83,7 +83,7 @@ impl MetaSrv {
         election: Option<ElectionRef>,
     ) -> Self {
         let started = Arc::new(AtomicBool::new(false));
-        let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 10, kv_store.clone()));
+        let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector {}));
         let handler_group = HeartbeatHandlerGroup::default();
         handler_group.add_handler(ResponseHeaderHandler).await;
