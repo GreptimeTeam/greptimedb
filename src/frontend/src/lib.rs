@@ -3,6 +3,7 @@
 mod catalog;
 mod datanode;
 pub mod error;
+mod expr_factory;
 pub mod frontend;
 pub mod grpc;
 pub mod influxdb;

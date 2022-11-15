@@ -54,15 +54,13 @@ impl PostgresServer {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
-                        io_runtime.spawn(async move {
-                            process_socket(
-                                io_stream,
-                                auth_handler.clone(),
-                                query_handler.clone(),
-                                query_handler.clone(),
-                            )
-                            .await;
-                        });
+                        io_runtime.spawn(process_socket(
+                            io_stream,
+                            None,
+                            auth_handler.clone(),
+                            query_handler.clone(),
+                            query_handler.clone(),
+                        ));
                     }
                 };
             }

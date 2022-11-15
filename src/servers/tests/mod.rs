@@ -8,7 +8,8 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::Result;
-use servers::query_handler::{SqlQueryHandler, SqlQueryHandlerRef};
+use servers::query_handler::ScriptHandlerRef;
+use servers::query_handler::{ScriptHandler, SqlQueryHandler, SqlQueryHandlerRef};
 use table::test_util::MemTable;
 
 mod http;
@@ -42,7 +43,10 @@ impl SqlQueryHandler for DummyInstance {
         let plan = self.query_engine.sql_to_plan(query).unwrap();
         Ok(self.query_engine.execute(&plan).await.unwrap())
     }
+}
 
+#[async_trait]
+impl ScriptHandler for DummyInstance {
     async fn insert_script(&self, name: &str, script: &str) -> Result<()> {
         let script = self
             .py_engine
@@ -64,7 +68,7 @@ impl SqlQueryHandler for DummyInstance {
     }
 }
 
-fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
+fn create_testing_instance(table: MemTable) -> DummyInstance {
     let table_name = table.table_name().to_string();
     let table = Arc::new(table);
 
@@ -81,5 +85,13 @@ fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
 
     let factory = QueryEngineFactory::new(catalog_list);
     let query_engine = factory.query_engine();
-    Arc::new(DummyInstance::new(query_engine))
+    DummyInstance::new(query_engine)
+}
+
+fn create_testing_script_handler(table: MemTable) -> ScriptHandlerRef {
+    Arc::new(create_testing_instance(table)) as _
+}
+
+fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
+    Arc::new(create_testing_instance(table)) as _
 }

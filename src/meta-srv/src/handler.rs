@@ -1,3 +1,4 @@
+pub(crate) mod check_leader;
 pub(crate) mod datanode_lease;
 pub(crate) mod response_header;
 
@@ -12,7 +13,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
 
 use crate::error::Result;
-use crate::service::store::kv::KvStoreRef;
+use crate::metasrv::Context;
 
 #[async_trait::async_trait]
 pub trait HeartbeatHandler: Send + Sync {
@@ -22,24 +23,6 @@ pub trait HeartbeatHandler: Send + Sync {
         ctx: &Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()>;
-}
-
-#[derive(Clone)]
-pub struct Context {
-    pub server_addr: String, // also server_id
-    pub kv_store: KvStoreRef,
-}
-
-impl Context {
-    #[inline]
-    pub fn server_addr(&self) -> &str {
-        &self.server_addr
-    }
-
-    #[inline]
-    pub fn kv_store(&self) -> KvStoreRef {
-        self.kv_store.clone()
-    }
 }
 
 #[derive(Debug, Default)]

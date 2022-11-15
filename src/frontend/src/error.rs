@@ -260,6 +260,12 @@ pub enum Error {
         source: common_insert::error::Error,
     },
 
+    #[snafu(display("Failed to deserialize insert batching: {}", source))]
+    InsertBatchToRequest {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
+
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
@@ -344,11 +350,29 @@ pub enum Error {
         source: client::Error,
     },
 
+    #[snafu(display("Cannot find primary key column by name: {}", msg))]
+    PrimaryKeyNotFound { msg: String, backtrace: Backtrace },
+
     #[snafu(display("Failed to execute sql: {}, source: {}", sql, source))]
     ExecuteSql {
         sql: String,
         #[snafu(backtrace)]
         source: query::error::Error,
+    },
+
+    #[snafu(display("Unsupported expr type: {}", name))]
+    UnsupportedExpr { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to create a RecordBatch, source: {}", source))]
+    NewRecordBatch {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to do vector computation, source: {}", source))]
+    VectorComputation {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
     },
 }
 
@@ -378,7 +402,8 @@ impl ErrorExt for Error {
             Error::Table { source } => source.status_code(),
 
             Error::ConvertColumnDefaultConstraint { source, .. }
-            | Error::ConvertScalarValue { source, .. } => source.status_code(),
+            | Error::ConvertScalarValue { source, .. }
+            | Error::VectorComputation { source } => source.status_code(),
 
             Error::ConnectDatanode { source, .. }
             | Error::RequestDatanode { source }
@@ -393,7 +418,8 @@ impl ErrorExt for Error {
             | Error::FindRegionRoutes { .. }
             | Error::FindLeaderPeer { .. }
             | Error::FindRegionPartition { .. }
-            | Error::IllegalTableRoutesData { .. } => StatusCode::Internal,
+            | Error::IllegalTableRoutesData { .. }
+            | Error::UnsupportedExpr { .. } => StatusCode::Internal,
 
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
                 StatusCode::Unexpected
@@ -422,8 +448,10 @@ impl ErrorExt for Error {
             Error::Select { source, .. } => source.status_code(),
             Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
             Error::DeserializeInsertBatch { source, .. } => source.status_code(),
-
+            Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
+            Error::InsertBatchToRequest { source, .. } => source.status_code(),
+            Error::NewRecordBatch { source } => source.status_code(),
         }
     }
 

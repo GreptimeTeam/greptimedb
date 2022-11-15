@@ -6,14 +6,16 @@ use api::v1::meta::Region as PbRegion;
 use api::v1::meta::RouteRequest as PbRouteRequest;
 use api::v1::meta::RouteResponse as PbRouteResponse;
 use api::v1::meta::Table as PbTable;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::Deserialize;
+use serde::Serialize;
+use serde::Serializer;
 use snafu::OptionExt;
 
-use super::util;
-use super::Peer;
-use super::TableName;
 use crate::error;
 use crate::error::Result;
+use crate::rpc::util;
+use crate::rpc::Peer;
+use crate::rpc::TableName;
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteRequest {

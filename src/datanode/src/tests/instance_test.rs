@@ -1,4 +1,4 @@
-use arrow::array::{Int64Array, UInt64Array};
+use arrow::array::{Int64Array, UInt64Array, Utf8Array};
 use common_query::Output;
 use common_recordbatch::util;
 use datafusion::arrow_print;
@@ -64,6 +64,106 @@ async fn test_create_database_and_insert_query() {
         _ => unreachable!(),
     }
 }
+#[tokio::test(flavor = "multi_thread")]
+async fn test_issue477_same_table_name_in_different_databases() {
+    common_telemetry::init_default_ut_logging();
+
+    let (opts, _guard) =
+        test_util::create_tmp_dir_and_datanode_opts("create_database_and_insert_query");
+    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
+    instance.start().await.unwrap();
+
+    // Create database a and b
+    let output = instance.execute_sql("create database a").await.unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+    let output = instance.execute_sql("create database b").await.unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    // Create table a.demo and b.demo
+    let output = instance
+        .execute_sql(
+            r#"create table a.demo(
+             host STRING,
+             ts bigint,
+             TIME INDEX(ts)
+)"#,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    let output = instance
+        .execute_sql(
+            r#"create table b.demo(
+             host STRING,
+             ts bigint,
+             TIME INDEX(ts)
+)"#,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    // Insert different data into a.demo and b.demo
+    let output = instance
+        .execute_sql(
+            r#"insert into a.demo(host, ts) values
+                           ('host1', 1655276557000)
+                           "#,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+    let output = instance
+        .execute_sql(
+            r#"insert into b.demo(host, ts) values
+                           ('host2',1655276558000)
+                           "#,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    // Query data and assert
+    assert_query_result(
+        &instance,
+        "select host,ts from a.demo order by ts",
+        1655276557000,
+        "host1",
+    )
+    .await;
+
+    assert_query_result(
+        &instance,
+        "select host,ts from b.demo order by ts",
+        1655276558000,
+        "host2",
+    )
+    .await;
+}
+
+async fn assert_query_result(instance: &Instance, sql: &str, ts: i64, host: &str) {
+    let query_output = instance.execute_sql(sql).await.unwrap();
+    match query_output {
+        Output::Stream(s) => {
+            let batches = util::collect(s).await.unwrap();
+            let columns = batches[0].df_recordbatch.columns();
+            assert_eq!(2, columns.len());
+            assert_eq!(
+                &Utf8Array::<i32>::from_slice(&[host]),
+                columns[0]
+                    .as_any()
+                    .downcast_ref::<Utf8Array<i32>>()
+                    .unwrap()
+            );
+            assert_eq!(
+                &Int64Array::from_slice(&[ts]),
+                columns[1].as_any().downcast_ref::<Int64Array>().unwrap()
+            );
+        }
+        _ => unreachable!(),
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_execute_insert() {
@@ -73,9 +173,13 @@ async fn test_execute_insert() {
     let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
-    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
-        .await
-        .unwrap();
+    test_util::create_test_table(
+        instance.catalog_manager(),
+        instance.sql_handler(),
+        ConcreteDataType::timestamp_millis_datatype(),
+    )
+    .await
+    .unwrap();
 
     let output = instance
         .execute_sql(
@@ -97,9 +201,13 @@ async fn test_execute_insert_query_with_i64_timestamp() {
     let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
-    test_util::create_test_table(&instance, ConcreteDataType::int64_datatype())
-        .await
-        .unwrap();
+    test_util::create_test_table(
+        instance.catalog_manager(),
+        instance.sql_handler(),
+        ConcreteDataType::int64_datatype(),
+    )
+    .await
+    .unwrap();
 
     let output = instance
         .execute_sql(
@@ -229,9 +337,13 @@ async fn test_execute_show_databases_tables() {
     }
 
     // creat a table
-    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
-        .await
-        .unwrap();
+    test_util::create_test_table(
+        instance.catalog_manager(),
+        instance.sql_handler(),
+        ConcreteDataType::timestamp_millis_datatype(),
+    )
+    .await
+    .unwrap();
 
     let output = instance.execute_sql("show tables").await.unwrap();
     match output {
@@ -340,9 +452,13 @@ async fn test_alter_table() {
     let instance = Instance::new_mock().await.unwrap();
     instance.start().await.unwrap();
 
-    test_util::create_test_table(&instance, ConcreteDataType::timestamp_millis_datatype())
-        .await
-        .unwrap();
+    test_util::create_test_table(
+        instance.catalog_manager(),
+        instance.sql_handler(),
+        ConcreteDataType::timestamp_millis_datatype(),
+    )
+    .await
+    .unwrap();
     // make sure table insertion is ok before altering table
     instance
         .execute_sql("insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000)")

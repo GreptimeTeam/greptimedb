@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
@@ -15,7 +16,6 @@ use tempdir::TempDir;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{CreateTableSnafu, Result};
-use crate::instance::Instance;
 use crate::sql::SqlHandler;
 
 /// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
@@ -45,7 +45,11 @@ pub fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGua
     )
 }
 
-pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -> Result<()> {
+pub async fn create_test_table(
+    catalog_manager: &CatalogManagerRef,
+    sql_handler: &SqlHandler,
+    ts_type: ConcreteDataType,
+) -> Result<()> {
     let column_schemas = vec![
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
@@ -54,7 +58,7 @@ pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = instance.sql_handler().table_engine();
+    let table_engine: TableEngineRef = sql_handler.table_engine();
     let table = table_engine
         .create_table(
             &EngineContext::default(),
@@ -79,8 +83,7 @@ pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -
         .await
         .context(CreateTableSnafu { table_name })?;
 
-    let schema_provider = instance
-        .catalog_manager()
+    let schema_provider = catalog_manager
         .catalog(DEFAULT_CATALOG_NAME)
         .unwrap()
         .unwrap()

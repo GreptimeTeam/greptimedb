@@ -97,6 +97,7 @@ pub struct StoreConfig<S> {
     pub flush_strategy: FlushStrategyRef,
 }
 
+pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
 pub type RecoveredMetadataMap = BTreeMap<SequenceNumber, (ManifestVersion, RawRegionMetadata)>;
 
 impl<S: LogStore> RegionImpl<S> {
@@ -345,6 +346,10 @@ impl<S: LogStore> RegionImpl<S> {
         self.inner.version_control().committed_sequence()
     }
 
+    fn current_manifest_version(&self) -> ManifestVersion {
+        self.inner.version_control().current_manifest_version()
+    }
+
     async fn wait_flush_done(&self) -> Result<()> {
         self.inner.writer.wait_flush_done().await
     }
@@ -352,6 +357,22 @@ impl<S: LogStore> RegionImpl<S> {
     /// Write to inner, also the `RegionWriter` directly.
     async fn write_inner(&self, ctx: &WriteContext, request: WriteBatch) -> Result<WriteResponse> {
         self.inner.write(ctx, request).await
+    }
+
+    // Replay metadata to inner.
+    async fn replay_inner(&self, recovered_metadata: RecoveredMetadataMap) -> Result<()> {
+        let inner = &self.inner;
+        let writer_ctx = WriterContext {
+            shared: &inner.shared,
+            flush_strategy: &inner.flush_strategy,
+            flush_scheduler: &inner.flush_scheduler,
+            sst_layer: &inner.sst_layer,
+            wal: &inner.wal,
+            writer: &inner.writer,
+            manifest: &inner.manifest,
+        };
+
+        inner.writer.replay(recovered_metadata, writer_ctx).await
     }
 }
 

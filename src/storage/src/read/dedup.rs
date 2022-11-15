@@ -39,7 +39,7 @@ impl<R> DedupReader<R> {
         // but we couldn't zero all bits in the mutable array easily.
         let mut selected = MutableBitmap::from_len_zeroed(batch.num_rows());
         self.schema
-            .dedup(&batch, &mut selected, self.prev_batch.as_ref());
+            .find_unique(&batch, &mut selected, self.prev_batch.as_ref());
 
         // Store current batch to `prev_batch` so we could compare the next batch
         // with this batch. We store batch before filtering it mainly for correctness, as

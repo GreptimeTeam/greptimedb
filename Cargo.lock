@@ -1026,6 +1026,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-grpc",
+ "common-insert",
  "common-query",
  "common-recordbatch",
  "common-time",
@@ -3869,9 +3870,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e30e99a0b8acf60a6815aa8178e9ffb08178ef3ca1366673bb0d6c7ababe4c2"
+checksum = "5dacbf864d6cb6a0e676c9a1162ab7b315b5c8e6c87fa9b6e0ba9ba0a569adb1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3884,6 +3885,7 @@ dependencies = [
  "thiserror",
  "time 0.3.14",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
 ]
 

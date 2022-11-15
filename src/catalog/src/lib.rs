@@ -80,6 +80,8 @@ pub trait CatalogManager: CatalogList {
     async fn register_system_table(&self, request: RegisterSystemTableRequest)
         -> error::Result<()>;
 
+    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>>;
+
     /// Returns the table by catalog, schema and table name.
     fn table(&self, catalog: &str, schema: &str, table_name: &str) -> Result<Option<TableRef>>;
 }

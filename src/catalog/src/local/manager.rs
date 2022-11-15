@@ -33,7 +33,7 @@ use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
     CatalogProvider, CatalogProviderRef, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, SchemaProvider,
+    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -377,6 +377,15 @@ impl CatalogManager for LocalCatalogManager {
         sys_table_requests.push(request);
 
         Ok(())
+    }
+
+    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+        self.catalogs
+            .catalog(catalog)?
+            .context(CatalogNotFoundSnafu {
+                catalog_name: catalog,
+            })?
+            .schema(schema)
     }
 
     fn table(

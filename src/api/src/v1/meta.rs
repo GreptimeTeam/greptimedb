@@ -71,11 +71,22 @@ impl ResponseHeader {
             error: Some(error),
         }
     }
+
+    #[inline]
+    pub fn is_not_leader(&self) -> bool {
+        if let Some(error) = &self.error {
+            if error.code == ErrorCode::NotLeader as i32 {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     NoActiveDatanodes = 1,
+    NotLeader = 2,
 }
 
 impl Error {
@@ -85,6 +96,24 @@ impl Error {
             code: ErrorCode::NoActiveDatanodes as i32,
             err_msg: "No active datanodes".to_string(),
         }
+    }
+
+    #[inline]
+    pub fn is_not_leader() -> Self {
+        Self {
+            code: ErrorCode::NotLeader as i32,
+            err_msg: "Current server is not leader".to_string(),
+        }
+    }
+}
+
+impl HeartbeatResponse {
+    #[inline]
+    pub fn is_not_leader(&self) -> bool {
+        if let Some(header) = &self.header {
+            return header.is_not_leader();
+        }
+        false
     }
 }
 

@@ -11,7 +11,7 @@
     &nbsp;
     <a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml"><img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="CI"></img></a>
     &nbsp;
-    <a href="https://github.com/greptimeTeam/greptimedb/blob/master/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
+    <a href="https://github.com/greptimeTeam/greptimedb/blob/develop/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
 </p>
 
 <p align="center">
@@ -38,87 +38,63 @@ for years. Based on their best-practices, GreptimeDB is born to give you:
 - Widely adopted database protocols and APIs
 - Extensible table engine architecture for extensive workloads
 
-## Getting Started
+## Quick Start
 
-### Prerequisite
+### Build
 
-To compile GreptimeDB from the source, you'll need the following:
-- Rust
-- Protobuf
+#### Build from Source
 
-#### Rust
+To compile GreptimeDB from source, you'll need:
 
-The easiest way to install Rust is to use [`rustup`](https://rustup.rs/), which checks our `rust-toolchain` file and installs the correct version of Rust for you.
+- C/C++ Toolchain: provides basic tools for compiling and linking. This is
+  available as `build-essential` on ubuntu and similar name on other platforms.
+- Rust: the easiest way to install Rust is to use
+  [`rustup`](https://rustup.rs/), which will check our `rust-toolchain` file and
+  install correct Rust version for you.
+- Protobuf: `protoc` is required for compiling `.proto` files. `protobuf` is
+  available from major package manager on macos and linux distributions. You can
+  find an installation instructions
+  [here](https://grpc.io/docs/protoc-installation/).
 
-#### Protobuf
+#### Build with Docker
 
-`protoc` is required for compiling `.proto` files. `protobuf` is available from
-major package manager on macos and linux distributions. You can find the
-installation instructions [here](https://grpc.io/docs/protoc-installation/).
-
-### Build the Docker Image
+A docker image with necessary dependencies is provided:
 
 ```
 docker build --network host -f docker/Dockerfile -t greptimedb .
 ```
 
-## Usage
+### Run
 
-### Start in standalone mode
-
-```
-// Start datanode and frontend with default options.
-cargo run  -- --log-level=debug standalone start
-
-OR
-
-// Start with `http-addr` option.
-cargo run  -- --log-level=debug standalone start --http-addr=0.0.0.0:9999
-
-OR
-
-// Start with `mysql-addr` option.
-cargo run  -- --log-level=debug standalone start --mysql-addr=0.0.0.0:9999
-
-OR
-// Start datanode with `log-dir` and `log-level` options.
-cargo run  -- --log-dir=logs --log-level=debug standalone start --mysql-addr=0.0.0.0:4102
+Start GreptimeDB from source code, in standalone mode:
 
 ```
-
-Start with config file:
-
-```
-cargo run -- --log-dir=logs --log-level=debug standalone start -c ./config/standalone.example.toml
+cargo run -- standalone start
 ```
 
-Start datanode by running docker container:
+Or if you built from docker:
 
 ```
-docker run -p 3000:3000 \
--p 3001:3001 \
--p 3306:3306 \
-greptimedb
+docker run -p 4002:4002 -v "$(pwd):/tmp/greptimedb" greptime/greptimedb standalone start
 ```
 
-### SQL Operations
+For more startup options, greptimedb's **distributed mode** and information
+about Kubernetes deployment, check our [docs](https://greptime.com/docs).
 
-1. Connect to DB through [mysql client](https://dev.mysql.com/downloads/mysql/):
+### Connect
+
+1. Connect to GreptimeDB via standard [MySQL
+   client](https://dev.mysql.com/downloads/mysql/):
 
    ```
    # The standalone instance listen on port 4002 by default.
    mysql -h 127.0.0.1 -P 4002
    ```
 
-2. Create a database;
-```SQL
-CREATE DATABASE hello_greptime;
-```
-
-2. Create a table:
+2. Create table:
 
    ```SQL
-   CREATE TABLE hello_greptime.monitor (
+   CREATE TABLE monitor (
      host STRING,
      ts TIMESTAMP,
      cpu DOUBLE DEFAULT 0,
@@ -130,15 +106,15 @@ CREATE DATABASE hello_greptime;
 3. Insert some data:
 
    ```SQL
-   INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
-   INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host2', 77.7, 2048, 1660897956000);
-   INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host2', 77.7, 2048, 1660897956000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
    ```
 
 4. Query the data:
 
    ```SQL
-   mysql> SELECT * FROM hello_greptime.monitor;
+   mysql> SELECT * FROM monitor;
    +-------+---------------------+------+--------+
    | host  | ts                  | cpu  | memory |
    +-------+---------------------+------+--------+
@@ -148,9 +124,28 @@ CREATE DATABASE hello_greptime;
    +-------+---------------------+------+--------+
    3 rows in set (0.01 sec)
    ```
-   You can delete your data by removing `/tmp/greptimedb`.
 
-# Community
+You can always cleanup test database by removing `/tmp/greptimedb`.
+
+## Resources
+
+- [Pre-built Binaries](https://github.com/GreptimeTeam/greptimedb/releases):
+  downloadable pre-built binaries for Linux and MacOS
+- [Docker Images](https://hub.docker.com/r/greptime/greptimedb): pre-built
+  Docker images
+- [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
+  Kubernetes deployment
+- [GreptimeDB Java
+  Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+
+## Project Status
+
+This project is in its early stage and under heavy development. We move fast and
+break things. Benchmark on development branch may not represent its potential
+performance. We release pre-built binaries constantly for functional
+evaluation. Do not use it in production at the moment.
+
+## Community
 
 Our core team is thrilled too see you participate in any ways you like. When you are stuck, try to
 ask for help by filling an issue with a detailed description of what you were trying to do

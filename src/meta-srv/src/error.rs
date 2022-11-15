@@ -1,5 +1,6 @@
 use common_error::prelude::*;
-use tonic::{Code, Status};
+use tonic::Code;
+use tonic::Status;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -106,6 +107,9 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("MetaSrv has no leader at this moment"))]
+    NoLeader { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -134,6 +138,7 @@ impl ErrorExt for Error {
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
             | Error::DecodeTableRoute { .. }
+            | Error::NoLeader { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }

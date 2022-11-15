@@ -12,7 +12,7 @@ use servers::query_handler::{InfluxdbLineProtocolHandler, SqlQueryHandler};
 use tokio::sync::mpsc;
 
 struct DummyInstance {
-    tx: mpsc::Sender<String>,
+    tx: mpsc::Sender<(String, String)>,
 }
 
 #[async_trait]
@@ -21,7 +21,7 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
         let exprs: Vec<InsertExpr> = request.try_into()?;
 
         for expr in exprs {
-            let _ = self.tx.send(expr.table_name).await;
+            let _ = self.tx.send((expr.schema_name, expr.table_name)).await;
         }
 
         Ok(())
@@ -33,17 +33,9 @@ impl SqlQueryHandler for DummyInstance {
     async fn do_query(&self, _query: &str) -> Result<Output> {
         unimplemented!()
     }
-
-    async fn insert_script(&self, _name: &str, _script: &str) -> Result<()> {
-        unimplemented!()
-    }
-
-    async fn execute_script(&self, _name: &str) -> Result<Output> {
-        unimplemented!()
-    }
 }
 
-fn make_test_app(tx: mpsc::Sender<String>) -> Router {
+fn make_test_app(tx: mpsc::Sender<(String, String)>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
     let mut server = HttpServer::new(instance.clone());
     server.set_influxdb_handler(instance);
@@ -66,6 +58,14 @@ async fn test_influxdb_write() {
     assert_eq!(result.status(), 204);
     assert!(result.text().await.is_empty());
 
+    let result = client
+        .post("/v1/influxdb/write?db=influxdb")
+        .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+
     // bad request
     let result = client
         .post("/v1/influxdb/write")
@@ -79,5 +79,11 @@ async fn test_influxdb_write() {
     while let Ok(s) = rx.try_recv() {
         metrics.push(s);
     }
-    assert_eq!(metrics, vec!["monitor".to_string()]);
+    assert_eq!(
+        metrics,
+        vec![
+            ("public".to_string(), "monitor".to_string()),
+            ("influxdb".to_string(), "monitor".to_string())
+        ]
+    );
 }

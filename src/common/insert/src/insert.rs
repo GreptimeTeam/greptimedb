@@ -5,14 +5,18 @@ use std::{
     sync::Arc,
 };
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
     codec::InsertBatch,
     column::{SemanticType, Values},
-    AddColumns, Column,
+    AddColumns, Column, ColumnDataType,
 };
 use api::v1::{AddColumn, ColumnDef, CreateExpr};
 use common_base::BitVec;
 use common_time::timestamp::Timestamp;
+use common_time::Date;
+use common_time::DateTime;
+use datatypes::prelude::{ValueRef, VectorRef};
 use datatypes::schema::SchemaRef;
 use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -23,10 +27,10 @@ use table::{
 };
 
 use crate::error::{
-    ColumnNotFoundSnafu, DecodeInsertSnafu, DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu,
+    ColumnDataTypeSnafu, ColumnNotFoundSnafu, CreateVectorSnafu, DecodeInsertSnafu,
+    DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu, InvalidColumnProtoSnafu,
     MissingTimestampColumnSnafu, Result,
 };
-
 const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
 const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
 
@@ -92,6 +96,94 @@ pub fn build_alter_table_request(
         schema_name: None,
         table_name: table_name.to_string(),
         alter_kind: AlterKind::AddColumns { columns },
+    }
+}
+
+pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
+    let wrapper = ColumnDataTypeWrapper::try_new(column.datatype).context(ColumnDataTypeSnafu)?;
+    let column_datatype = wrapper.datatype();
+
+    let rows = rows as usize;
+    let mut vector = VectorBuilder::with_capacity(wrapper.into(), rows);
+
+    if let Some(values) = &column.values {
+        let values = collect_column_values(column_datatype, values);
+        let mut values_iter = values.into_iter();
+
+        let null_mask = BitVec::from_slice(&column.null_mask);
+        let mut nulls_iter = null_mask.iter().by_vals().fuse();
+
+        for i in 0..rows {
+            if let Some(true) = nulls_iter.next() {
+                vector.push_null();
+            } else {
+                let value_ref = values_iter.next().context(InvalidColumnProtoSnafu {
+                    err_msg: format!(
+                        "value not found at position {} of column {}",
+                        i, &column.column_name
+                    ),
+                })?;
+                vector.try_push_ref(value_ref).context(CreateVectorSnafu)?;
+            }
+        }
+    } else {
+        (0..rows).for_each(|_| vector.push_null());
+    }
+    Ok(vector.finish())
+}
+
+fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Vec<ValueRef> {
+    macro_rules! collect_values {
+        ($value: expr, $mapper: expr) => {
+            $value.iter().map($mapper).collect::<Vec<ValueRef>>()
+        };
+    }
+
+    match column_datatype {
+        ColumnDataType::Boolean => collect_values!(values.bool_values, |v| ValueRef::from(*v)),
+        ColumnDataType::Int8 => collect_values!(values.i8_values, |v| ValueRef::from(*v as i8)),
+        ColumnDataType::Int16 => {
+            collect_values!(values.i16_values, |v| ValueRef::from(*v as i16))
+        }
+        ColumnDataType::Int32 => {
+            collect_values!(values.i32_values, |v| ValueRef::from(*v))
+        }
+        ColumnDataType::Int64 => {
+            collect_values!(values.i64_values, |v| ValueRef::from(*v as i64))
+        }
+        ColumnDataType::Uint8 => {
+            collect_values!(values.u8_values, |v| ValueRef::from(*v as u8))
+        }
+        ColumnDataType::Uint16 => {
+            collect_values!(values.u16_values, |v| ValueRef::from(*v as u16))
+        }
+        ColumnDataType::Uint32 => {
+            collect_values!(values.u32_values, |v| ValueRef::from(*v))
+        }
+        ColumnDataType::Uint64 => {
+            collect_values!(values.u64_values, |v| ValueRef::from(*v as u64))
+        }
+        ColumnDataType::Float32 => collect_values!(values.f32_values, |v| ValueRef::from(*v)),
+        ColumnDataType::Float64 => collect_values!(values.f64_values, |v| ValueRef::from(*v)),
+        ColumnDataType::Binary => {
+            collect_values!(values.binary_values, |v| ValueRef::from(v.as_slice()))
+        }
+        ColumnDataType::String => {
+            collect_values!(values.string_values, |v| ValueRef::from(v.as_str()))
+        }
+        ColumnDataType::Date => {
+            collect_values!(values.date_values, |v| ValueRef::Date(Date::new(*v)))
+        }
+        ColumnDataType::Datetime => {
+            collect_values!(values.datetime_values, |v| ValueRef::DateTime(
+                DateTime::new(*v)
+            ))
+        }
+        ColumnDataType::Timestamp => {
+            collect_values!(values.ts_millis_values, |v| ValueRef::Timestamp(
+                Timestamp::from_millis(*v)
+            ))
+        }
     }
 }
 

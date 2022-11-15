@@ -26,10 +26,15 @@ pub type GrpcAdminHandlerRef = Arc<dyn GrpcAdminHandler + Send + Sync>;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PrometheusProtocolHandlerRef = Arc<dyn PrometheusProtocolHandler + Send + Sync>;
+pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 
 #[async_trait]
 pub trait SqlQueryHandler {
     async fn do_query(&self, query: &str) -> Result<Output>;
+}
+
+#[async_trait]
+pub trait ScriptHandler {
     async fn insert_script(&self, name: &str, script: &str) -> Result<()>;
     async fn execute_script(&self, name: &str) -> Result<Output>;
 }
@@ -67,9 +72,9 @@ pub struct PrometheusResponse {
 #[async_trait]
 pub trait PrometheusProtocolHandler {
     /// Handling prometheus remote write requests
-    async fn write(&self, request: WriteRequest) -> Result<()>;
+    async fn write(&self, database: &str, request: WriteRequest) -> Result<()>;
     /// Handling prometheus remote read requests
-    async fn read(&self, request: ReadRequest) -> Result<PrometheusResponse>;
+    async fn read(&self, database: &str, request: ReadRequest) -> Result<PrometheusResponse>;
     /// Handling push gateway requests
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }

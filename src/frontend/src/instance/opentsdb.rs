@@ -24,7 +24,7 @@ impl OpentsdbProtocolHandler for Instance {
                     })?;
             }
             Mode::Distributed(_) => {
-                self.dist_insert(vec![data_point.as_insert_request()])
+                self.dist_insert(vec![data_point.as_grpc_insert()])
                     .await
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteInsertSnafu {

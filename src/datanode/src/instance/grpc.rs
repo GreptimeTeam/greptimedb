@@ -4,7 +4,7 @@ use api::v1::{
     ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_insert::insertion_expr_to_request;
@@ -152,9 +152,8 @@ impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> servers::error::Result<ObjectResult> {
         let object_resp = match query.expr {
             Some(object_expr::Expr::Insert(insert_expr)) => {
-                // TODO(dennis): retrieve schema name from DatabaseRequest
                 let catalog_name = DEFAULT_CATALOG_NAME;
-                let schema_name = DEFAULT_SCHEMA_NAME;
+                let schema_name = &insert_expr.schema_name;
                 let table_name = &insert_expr.table_name;
                 let expr = insert_expr
                     .expr
