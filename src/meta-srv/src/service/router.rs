@@ -20,8 +20,6 @@ use snafu::ResultExt;
 use tonic::Request;
 use tonic::Response;
 
-use super::store::kv::KvStoreRef;
-use super::GrpcResult;
 use crate::error;
 use crate::error::Result;
 use crate::keys::TableRouteKey;
@@ -29,6 +27,8 @@ use crate::metasrv::Context;
 use crate::metasrv::MetaSrv;
 use crate::metasrv::SelectorRef;
 use crate::sequence::SequenceRef;
+use crate::service::store::kv::KvStoreRef;
+use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
 impl router_server::Router for MetaSrv {
@@ -71,7 +71,7 @@ async fn handle_route(req: RouteRequest, ctx: Context) -> Result<RouteResponse> 
             peers,
             mut table_route,
         } = tr;
-        if let Some(ref mut table_route) = table_route {
+        if let Some(table_route) = &mut table_route {
             for rr in &mut table_route.region_routes {
                 if let Some(peer) = peers.get(rr.leader_peer_index as usize) {
                     rr.leader_peer_index = peer_dict.get_or_insert(peer.clone()) as u64;
@@ -83,7 +83,7 @@ async fn handle_route(req: RouteRequest, ctx: Context) -> Result<RouteResponse> 
                 }
             }
 
-            if let Some(ref mut table) = table_route.table {
+            if let Some(table) = &mut table_route.table {
                 table.table_schema = tg.as_bytes().context(error::InvalidCatalogValueSnafu)?;
             }
         }

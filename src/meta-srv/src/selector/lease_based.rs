@@ -1,13 +1,13 @@
 use api::v1::meta::Peer;
 use common_time::util as time_util;
 
-use super::Namespace;
-use super::Selector;
 use crate::error::Result;
 use crate::keys::LeaseKey;
 use crate::keys::LeaseValue;
 use crate::lease;
 use crate::metasrv::Context;
+use crate::selector::Namespace;
+use crate::selector::Selector;
 
 pub struct LeaseBasedSelector;
 
