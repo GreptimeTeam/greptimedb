@@ -1,9 +1,9 @@
 node_id = 0
 mode = 'standalone'
 http_addr = '0.0.0.0:4000'
-datanode_mysql_addr = "0.0.0.0:3306"
+datanode_mysql_addr = '0.0.0.0:3306'
 datanode_mysql_runtime_size = 4
-wal_dir = "/tmp/greptimedb/wal/"
+wal_dir = '/tmp/greptimedb/wal/'
 
 [storage]
 type = 'File'
@@ -21,7 +21,7 @@ runtime_size = 2
 enable = true
 
 [opentsdb_options]
-addr = "0.0.0.0:4242"
+addr = '0.0.0.0:4242'
 enable = true
 runtime_size = 2
 

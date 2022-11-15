@@ -1,5 +1,5 @@
 node_id = 42
-mode = "distributed"
+mode = 'distributed'
 rpc_addr = '0.0.0.0:3001'
 wal_dir = '/tmp/greptimedb/wal'
 rpc_runtime_size = 8
@@ -11,7 +11,7 @@ type = 'File'
 data_dir = '/tmp/greptimedb/data/'
 
 [meta_client_opts]
-metasrv_addr = "1.1.1.1:3002"
+metasrv_addr = '1.1.1.1:3002'
 timeout_millis = 3000
 connect_timeout_millis = 5000
 tcp_nodelay = false
