@@ -1,6 +1,12 @@
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
   push:
     branches:
       - develop
@@ -8,11 +14,10 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'config/**'
-      - '.github/**'
       - '**.md'
-      - '**.yml'
       - '.dockerignore'
       - 'docker/**'
+      - '.gitignore'
   workflow_dispatch:
 
 name: CI
