@@ -191,7 +191,7 @@ impl Instance {
     pub async fn handle_select(&self, expr: Select, stmt: Statement) -> Result<Output> {
         if let Some(dist_instance) = &self.dist_instance {
             let Select::Sql(sql) = expr;
-            dist_instance.handle_select(&sql, stmt).await
+            dist_instance.handle_sql(&sql, stmt).await
         } else {
             // TODO(LFC): Refactor consideration: Datanode should directly execute statement in standalone mode to avoid parse SQL again.
             // Find a better way to execute query between Frontend and Datanode in standalone mode.

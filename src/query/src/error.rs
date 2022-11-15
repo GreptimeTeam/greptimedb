@@ -24,7 +24,7 @@ pub enum InnerError {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to find schema, schema: {}", schema))]
+    #[snafu(display("Schema not found: {}", schema))]
     SchemaNotFound {
         schema: String,
         backtrace: Backtrace,

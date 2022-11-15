@@ -104,7 +104,7 @@ impl DistInstance {
         Ok(Output::AffectedRows(region_routes.len()))
     }
 
-    pub(crate) async fn handle_select(&self, sql: &str, stmt: Statement) -> Result<Output> {
+    pub(crate) async fn handle_sql(&self, sql: &str, stmt: Statement) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {
                 let plan = self
