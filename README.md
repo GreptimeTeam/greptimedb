@@ -11,7 +11,7 @@
     &nbsp;
     <a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml"><img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="CI"></img></a>
     &nbsp;
-    <a href="https://github.com/greptimeTeam/greptimedb/blob/master/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
+    <a href="https://github.com/greptimeTeam/greptimedb/blob/develop/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
 </p>
 
 <p align="center">
@@ -91,15 +91,10 @@ about Kubernetes deployment, check our [docs](https://greptime.com/docs).
    mysql -h 127.0.0.1 -P 4002
    ```
 
-2. Create a database;
-   ```SQL
-   CREATE DATABASE hello_greptime;
-   ```
-
-3. Create table:
+2. Create table:
 
    ```SQL
-   CREATE TABLE hello_greptime.monitor (
+   CREATE TABLE monitor (
      host STRING,
      ts TIMESTAMP,
      cpu DOUBLE DEFAULT 0,
@@ -108,18 +103,18 @@ about Kubernetes deployment, check our [docs](https://greptime.com/docs).
      PRIMARY KEY(host)) ENGINE=mito WITH(regions=1);
    ```
 
-4. Insert data:
+3. Insert data:
 
    ```SQL
-   INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
-   INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host2', 77.7, 2048, 1660897956000);
-   INSERT INTO hello_greptime.monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host2', 77.7, 2048, 1660897956000);
+   INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
    ```
 
-5. Query data:
+4. Query data:
 
    ```SQL
-   mysql> SELECT * FROM hello_greptime.monitor;
+   mysql> SELECT * FROM monitor;
    +-------+---------------------+------+--------+
    | host  | ts                  | cpu  | memory |
    +-------+---------------------+------+--------+
@@ -140,7 +135,15 @@ You can always cleanup test database by removing `/tmp/greptimedb`.
   Docker images
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
   Kubernetes deployment
-- [GreptimeDB Java Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+- [GreptimeDB Java
+  Client](https://github.com/GreptimeTeam/greptimedb-client-java)
+
+## Project Status
+
+This project is in its early stage and under heavy development. We move fast and
+break things. Benchmark on development branch may not represent its potential
+performance. We release pre-built binaries constantly for functional
+evaluation. Do not use it in production at the moment.
 
 ## Community
 
