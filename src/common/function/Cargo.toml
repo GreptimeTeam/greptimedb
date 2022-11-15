@@ -2,6 +2,7 @@
 edition = "2021"
 name = "common-function"
 version = "0.1.0"
+license = "Apache-2.0"
 
 [dependencies]
 arc-swap = "1.0"
@@ -21,7 +22,16 @@ snafu = { version = "0.7", features = ["backtraces"] }
 statrs = "0.15"
 
 [dependencies.arrow]
-features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+features = [
+    "io_csv",
+    "io_json",
+    "io_parquet",
+    "io_parquet_compression",
+    "io_ipc",
+    "ahash",
+    "compute",
+    "serde_types",
+]
 package = "arrow2"
 version = "0.10"
 

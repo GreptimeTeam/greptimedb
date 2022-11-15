@@ -3,6 +3,7 @@ name = "cmd"
 version = "0.1.0"
 edition = "2021"
 default-run = "greptime"
+license = "Apache-2.0"
 
 [[bin]]
 name = "greptime"

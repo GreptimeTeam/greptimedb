@@ -2,6 +2,7 @@
 name = "frontend"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [dependencies]
 api = { path = "../api" }
@@ -20,7 +21,9 @@ common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 common-insert = { path = "../common/insert" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
+    "simd",
+] }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 
@@ -46,7 +49,16 @@ tokio = { version = "1.18", features = ["full"] }
 [dependencies.arrow]
 package = "arrow2"
 version = "0.10"
-features = ["io_csv", "io_json", "io_parquet", "io_parquet_compression", "io_ipc", "ahash", "compute", "serde_types"]
+features = [
+    "io_csv",
+    "io_json",
+    "io_parquet",
+    "io_parquet_compression",
+    "io_ipc",
+    "ahash",
+    "compute",
+    "serde_types",
+]
 
 [dev-dependencies]
 datanode = { path = "../datanode" }
