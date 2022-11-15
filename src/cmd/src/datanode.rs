@@ -86,7 +86,8 @@ impl TryFrom<StartCommand> for DatanodeOptions {
                 // commandline options
                 opts.meta_client_opts.metasrv_addr = meta_addr.clone();
                 opts.node_id = node_id;
-                opts.mode = Mode::Distributed(vec![meta_addr]);
+                opts.metasrv_addr = Some(vec![meta_addr]);
+                opts.mode = Mode::Distributed;
             }
             (None, None) => {
                 opts.mode = Mode::Standalone;
@@ -140,7 +141,7 @@ mod tests {
         );
         assert_eq!(5000, options.meta_client_opts.connect_timeout_millis);
         assert_eq!(3000, options.meta_client_opts.timeout_millis);
-        assert!(options.meta_client_opts.tcp_nodelay);
+        assert!(!options.meta_client_opts.tcp_nodelay);
 
         match options.storage {
             ObjectStoreConfig::File { data_dir } => {
@@ -173,7 +174,7 @@ mod tests {
         })
         .unwrap()
         .mode;
-        assert_matches!(mode, Mode::Distributed(_));
+        assert_matches!(mode, Mode::Distributed);
 
         assert!(DatanodeOptions::try_from(StartCommand {
             node_id: None,

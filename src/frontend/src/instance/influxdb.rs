@@ -31,7 +31,7 @@ impl InfluxdbLineProtocolHandler for Instance {
                         query: &request.lines,
                     })?;
             }
-            Mode::Distributed(_) => {
+            Mode::Distributed => {
                 self.dist_insert(request.try_into()?)
                     .await
                     .map_err(BoxedError::new)

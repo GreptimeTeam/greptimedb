@@ -1,8 +1,8 @@
+mode = "distributed"
 node_id = 42
 rpc_addr = '0.0.0.0:3001'
 wal_dir = '/tmp/greptimedb/wal'
 rpc_runtime_size = 8
-mode = "standalone"
 mysql_addr = '0.0.0.0:3306'
 mysql_runtime_size = 4
 
@@ -14,4 +14,4 @@ data_dir = '/tmp/greptimedb/data/'
 metasrv_addr = "1.1.1.1:3002"
 timeout_millis = 3000
 connect_timeout_millis = 5000
-tcp_nodelay = true
+tcp_nodelay = false

@@ -57,7 +57,7 @@ impl Instance {
 
         let meta_client = match opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed(_) => {
+            Mode::Distributed => {
                 let meta_client = new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?;
                 Some(Arc::new(meta_client))
             }
@@ -89,7 +89,7 @@ impl Instance {
                 )
             }
 
-            Mode::Distributed(_) => {
+            Mode::Distributed => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
                     table_engine.clone(),
                     opts.node_id,
@@ -108,7 +108,7 @@ impl Instance {
 
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed(_) => Some(HeartbeatTask::new(
+            Mode::Distributed => Some(HeartbeatTask::new(
                 opts.node_id, /*node id not set*/
                 opts.rpc_addr.clone(),
                 meta_client.as_ref().unwrap().clone(),

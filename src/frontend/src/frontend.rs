@@ -24,6 +24,7 @@ pub struct FrontendOptions {
     pub prometheus_options: Option<PrometheusOptions>,
     pub mode: Mode,
     pub datanode_rpc_addr: String,
+    pub metasrv_addr: Option<Vec<String>>,
 }
 
 impl Default for FrontendOptions {
@@ -38,6 +39,7 @@ impl Default for FrontendOptions {
             prometheus_options: Some(PrometheusOptions::default()),
             mode: Mode::Standalone,
             datanode_rpc_addr: "127.0.0.1:3001".to_string(),
+            metasrv_addr: None,
         }
     }
 }
@@ -86,5 +88,5 @@ where
 pub enum Mode {
     Standalone,
     // with meta server's addr
-    Distributed(Vec<String>),
+    Distributed,
 }
