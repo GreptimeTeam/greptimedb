@@ -14,7 +14,6 @@
 
 //! manifest storage
 pub(crate) mod action;
-pub(crate) mod checkpoint;
 pub mod helper;
 mod impl_;
 pub mod region;
