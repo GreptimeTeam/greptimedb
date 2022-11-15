@@ -1,21 +1,13 @@
 use std::time::Duration;
 
-use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::Peer;
-use common_grpc::channel_manager::ChannelConfig;
-use common_grpc::channel_manager::ChannelManager;
+use api::v1::meta::{HeartbeatRequest, Peer};
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use meta_client::client::MetaClientBuilder;
-use meta_client::rpc::BatchPutRequest;
-use meta_client::rpc::CompareAndPutRequest;
-use meta_client::rpc::CreateRequest;
-use meta_client::rpc::DeleteRangeRequest;
-use meta_client::rpc::Partition;
-use meta_client::rpc::PutRequest;
-use meta_client::rpc::RangeRequest;
-use meta_client::rpc::TableName;
-use tracing::event;
-use tracing::subscriber;
-use tracing::Level;
+use meta_client::rpc::{
+    BatchPutRequest, CompareAndPutRequest, CreateRequest, DeleteRangeRequest, Partition,
+    PutRequest, RangeRequest, TableName,
+};
+use tracing::{event, subscriber, Level};
 use tracing_subscriber::FmtSubscriber;
 
 fn main() {
@@ -80,7 +72,7 @@ async fn run() {
         .add_partition(p1)
         .add_partition(p2);
 
-    let res = meta_client.create_route(create_req).await.unwrap();
+    let res = meta_client.create_route(create_req).await;
     event!(Level::INFO, "create_route result: {:#?}", res);
 
     // put

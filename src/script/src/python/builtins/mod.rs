@@ -12,12 +12,8 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::vectors::Helper as HelperVec;
-use rustpython_vm::builtins::PyList;
-use rustpython_vm::pymodule;
-use rustpython_vm::{
-    builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyStr},
-    AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
-};
+use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
+use rustpython_vm::{pymodule, AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
 use crate::python::utils::is_instance;
 use crate::python::PyVector;
@@ -274,45 +270,31 @@ pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
-    use common_function::scalars::{
-        function::FunctionContext, math::PowFunction, Function, FunctionRef, FUNCTION_REGISTRY,
-    };
-    use datafusion::{
-        arrow::{
-            compute::comparison::{gt_eq_scalar, lt_eq_scalar},
-            datatypes::DataType,
-            error::ArrowError,
-            scalar::{PrimitiveScalar, Scalar},
-        },
-        physical_plan::expressions,
-    };
+    use common_function::scalars::function::FunctionContext;
+    use common_function::scalars::math::PowFunction;
+    use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
+    use datafusion::arrow::compute::comparison::{gt_eq_scalar, lt_eq_scalar};
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::arrow::error::ArrowError;
+    use datafusion::arrow::scalar::{PrimitiveScalar, Scalar};
+    use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
-    use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector};
-    use datatypes::{
-        arrow::{
-            self,
-            array::{ArrayRef, NullArray},
-            compute,
-        },
-        vectors::VectorRef,
-    };
+    use datatypes::arrow::array::{ArrayRef, NullArray};
+    use datatypes::arrow::{self, compute};
+    use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector, VectorRef};
     use paste::paste;
-    use rustpython_vm::{
-        builtins::{PyFloat, PyFunction, PyInt, PyStr},
-        function::{FuncArgs, KwArgs, OptionalArg},
-        AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
-    };
+    use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
+    use rustpython_vm::function::{FuncArgs, KwArgs, OptionalArg};
+    use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
 
     use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
-    use crate::python::{
-        utils::{is_instance, py_vec_obj_to_array, PyVectorRef},
-        vector::val_to_pyobj,
-        PyVector,
-    };
+    use crate::python::utils::{is_instance, py_vec_obj_to_array, PyVectorRef};
+    use crate::python::vector::val_to_pyobj;
+    use crate::python::PyVector;
 
     #[pyfunction]
     fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {

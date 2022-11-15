@@ -1,8 +1,6 @@
 use std::marker::PhantomData;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -13,8 +11,7 @@ use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
 
 use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result};
-use crate::manifest::storage::ManifestObjectStore;
-use crate::manifest::storage::ObjectStoreLogIterator;
+use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
 #[derive(Clone, Debug)]
 pub struct ManifestImpl<M: MetaAction<Error = Error>> {

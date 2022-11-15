@@ -18,6 +18,7 @@ datanode = { path = "../datanode" }
 frontend = { path = "../frontend" }
 futures = "0.3"
 meta-srv = { path = "../meta-srv" }
+serde = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.18", features = ["full"] }
 toml = "0.5"

@@ -3,11 +3,9 @@ pub mod regiondesc_util;
 pub mod schema_util;
 
 use datatypes::type_id::LogicalTypeId;
-use storage::{
-    memtable::{DefaultMemtableBuilder, MemtableBuilder, MemtableRef},
-    metadata::RegionMetadata,
-    schema::RegionSchemaRef,
-};
+use storage::memtable::{DefaultMemtableBuilder, MemtableBuilder, MemtableRef};
+use storage::metadata::RegionMetadata;
+use storage::schema::RegionSchemaRef;
 
 use crate::memtable::util::regiondesc_util::RegionDescBuilder;
 

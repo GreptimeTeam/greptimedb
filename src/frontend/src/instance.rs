@@ -34,10 +34,11 @@ use servers::query_handler::{
     PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
 };
 use snafu::prelude::*;
+use sql::dialect::GenericDialect;
+use sql::parser::ParserContext;
 use sql::statements::create::Partitions;
 use sql::statements::insert::Insert;
 use sql::statements::statement::Statement;
-use sql::{dialect::GenericDialect, parser::ParserContext};
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
@@ -112,7 +113,11 @@ impl Instance {
 
         instance.dist_instance = match &opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed(metasrv_addr) => {
+            Mode::Distributed => {
+                let metasrv_addr = opts
+                    .metasrv_addr
+                    .clone()
+                    .expect("Forgot to set metasrv_addr");
                 info!(
                     "Creating Frontend instance in distributed mode with Meta server addr {:?}",
                     metasrv_addr
@@ -556,7 +561,7 @@ impl SqlQueryHandler for Instance {
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteQuerySnafu { query })
                 }
-                Mode::Distributed(_) => {
+                Mode::Distributed => {
                     let affected = self
                         .sql_dist_insert(insert)
                         .await
@@ -713,10 +718,10 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use api::v1::codec::{InsertBatch, SelectResult};
+    use api::v1::column::SemanticType;
     use api::v1::{
-        admin_expr, admin_result, column, column::SemanticType, object_expr, object_result,
-        select_expr, Column, ColumnDataType, ColumnDef as GrpcColumnDef, ExprHeader, MutateResult,
-        SelectExpr,
+        admin_expr, admin_result, column, object_expr, object_result, select_expr, Column,
+        ColumnDataType, ColumnDef as GrpcColumnDef, ExprHeader, MutateResult, SelectExpr,
     };
     use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;

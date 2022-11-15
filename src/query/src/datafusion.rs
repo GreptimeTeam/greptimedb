@@ -10,32 +10,30 @@ use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
-use common_query::physical_plan::PhysicalPlanAdapter;
-use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan};
-use common_query::{prelude::ScalarUdf, Output};
+use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
+use common_query::prelude::ScalarUdf;
+use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use snafu::{OptionExt, ResultExt};
+use sql::dialect::GenericDialect;
+use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
-use sql::{dialect::GenericDialect, parser::ParserContext};
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
-use crate::metric;
+use crate::datafusion::planner::{DfContextProviderAdapter, DfPlanner};
+use crate::error::Result;
+use crate::executor::QueryExecutor;
+use crate::logical_optimizer::LogicalOptimizer;
+use crate::physical_optimizer::PhysicalOptimizer;
+use crate::physical_planner::PhysicalPlanner;
+use crate::plan::LogicalPlan;
+use crate::planner::Planner;
 use crate::query_engine::{QueryContext, QueryEngineState};
-use crate::{
-    datafusion::planner::{DfContextProviderAdapter, DfPlanner},
-    error::Result,
-    executor::QueryExecutor,
-    logical_optimizer::LogicalOptimizer,
-    physical_optimizer::PhysicalOptimizer,
-    physical_planner::PhysicalPlanner,
-    plan::LogicalPlan,
-    planner::Planner,
-    QueryEngine,
-};
+use crate::{metric, QueryEngine};
 
 pub(crate) struct DatafusionQueryEngine {
     state: QueryEngineState,
@@ -238,8 +236,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
-    use datafusion::field_util::FieldExt;
-    use datafusion::field_util::SchemaExt;
+    use datafusion::field_util::{FieldExt, SchemaExt};
     use table::table::numbers::NumbersTable;
 
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};

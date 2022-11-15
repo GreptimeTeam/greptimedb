@@ -34,6 +34,7 @@ pub struct DatanodeOptions {
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
     pub mode: Mode,
+    pub metasrv_addr: Option<Vec<String>>,
 }
 
 impl Default for DatanodeOptions {
@@ -48,6 +49,7 @@ impl Default for DatanodeOptions {
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
             mode: Mode::Standalone,
+            metasrv_addr: None,
         }
     }
 }

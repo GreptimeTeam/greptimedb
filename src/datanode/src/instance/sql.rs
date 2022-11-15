@@ -1,10 +1,8 @@
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use common_telemetry::{
-    logging::{error, info},
-    timer,
-};
+use common_telemetry::logging::{error, info};
+use common_telemetry::timer;
 use servers::query_handler::SqlQueryHandler;
 use snafu::prelude::*;
 use sql::statements::statement::Statement;

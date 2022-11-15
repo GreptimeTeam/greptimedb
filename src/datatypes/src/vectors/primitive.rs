@@ -9,10 +9,8 @@ use serde_json::Value as JsonValue;
 use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error::ConversionSnafu;
-use crate::error::{Result, SerializeSnafu};
-use crate::scalars::{Scalar, ScalarRef};
-use crate::scalars::{ScalarVector, ScalarVectorBuilder};
+use crate::error::{ConversionSnafu, Result, SerializeSnafu};
+use crate::scalars::{Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{Primitive, PrimitiveElement};
 use crate::value::{Value, ValueRef};

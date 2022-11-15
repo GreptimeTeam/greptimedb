@@ -2,10 +2,8 @@ use std::any::Any;
 use std::net::SocketAddr;
 
 use axum::http::StatusCode as HttpStatusCode;
-use axum::{
-    response::{IntoResponse, Response},
-    Json,
-};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use common_error::prelude::*;
 use serde_json::json;
 

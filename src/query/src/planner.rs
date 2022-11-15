@@ -1,6 +1,7 @@
 use sql::statements::statement::Statement;
 
-use crate::{error::Result, plan::LogicalPlan};
+use crate::error::Result;
+use crate::plan::LogicalPlan;
 
 /// SQL logical planner.
 pub trait Planner: Send + Sync {

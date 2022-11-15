@@ -7,22 +7,19 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::VectorRef;
 use log_store::fs::noop::NoopLogStore;
-use object_store::{services::fs::Builder, ObjectStore};
+use object_store::services::fs::Builder;
+use object_store::ObjectStore;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
-use table::engine::EngineContext;
-use table::engine::TableEngine;
+use table::engine::{EngineContext, TableEngine};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
-use table::requests::CreateTableRequest;
-use table::requests::InsertRequest;
+use table::requests::{CreateTableRequest, InsertRequest};
 use table::TableRef;
 use tempdir::TempDir;
 
 use crate::config::EngineConfig;
-use crate::engine::MitoEngine;
-use crate::engine::MITO_ENGINE;
-pub use crate::table::test_util::mock_engine::MockEngine;
-pub use crate::table::test_util::mock_engine::MockRegion;
+use crate::engine::{MitoEngine, MITO_ENGINE};
+pub use crate::table::test_util::mock_engine::{MockEngine, MockRegion};
 
 pub const TABLE_NAME: &str = "demo";
 

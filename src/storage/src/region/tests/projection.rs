@@ -12,8 +12,7 @@ use store_api::storage::{
 };
 use tempdir::TempDir;
 
-use crate::region::RegionImpl;
-use crate::region::RegionMetadata;
+use crate::region::{RegionImpl, RegionMetadata};
 use crate::test_util::{self, config_util, descriptor_util, write_batch_util};
 use crate::write_batch::{PutData, WriteBatch};
 

@@ -7,21 +7,17 @@ use datafusion::datasource::TableProvider;
 use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
 use datafusion::physical_plan::project_schema;
 use prost::Message;
-use snafu::ensure;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use substrait_proto::protobuf::expression::mask_expression::{StructItem, StructSelect};
 use substrait_proto::protobuf::expression::MaskExpression;
 use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
 use substrait_proto::protobuf::read_rel::{NamedTable, ReadType};
 use substrait_proto::protobuf::rel::RelType;
-use substrait_proto::protobuf::PlanRel;
-use substrait_proto::protobuf::ReadRel;
-use substrait_proto::protobuf::Rel;
+use substrait_proto::protobuf::{PlanRel, ReadRel, Rel};
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::error::Error;
 use crate::error::{
-    DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, InternalSnafu,
+    DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, Error, InternalSnafu,
     InvalidParametersSnafu, MissingFieldSnafu, SchemaNotMatchSnafu, TableNotFoundSnafu,
     UnknownPlanSnafu, UnsupportedExprSnafu, UnsupportedPlanSnafu,
 };
@@ -334,15 +330,13 @@ impl DFLogicalSubstraitConvertor {
 
 #[cfg(test)]
 mod test {
-    use catalog::local::LocalCatalogManager;
-    use catalog::{
-        local::{MemoryCatalogProvider, MemorySchemaProvider},
-        CatalogList, CatalogProvider, RegisterTableRequest,
-    };
+    use catalog::local::{LocalCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
+    use catalog::{CatalogList, CatalogProvider, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datafusion::logical_plan::DFSchema;
     use datatypes::schema::Schema;
-    use table::{requests::CreateTableRequest, test_util::EmptyTable, test_util::MockTableEngine};
+    use table::requests::CreateTableRequest;
+    use table::test_util::{EmptyTable, MockTableEngine};
 
     use super::*;
     use crate::schema::test::supported_types;

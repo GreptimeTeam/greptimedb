@@ -2,18 +2,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::router_client::RouterClient;
-use api::v1::meta::CreateRequest;
-use api::v1::meta::RouteRequest;
-use api::v1::meta::RouteResponse;
+use api::v1::meta::{CreateRequest, RouteRequest, RouteResponse};
 use common_grpc::channel_manager::ChannelManager;
-use snafu::ensure;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
-use crate::client::load_balance as lb;
-use crate::client::Id;
+use crate::client::{load_balance as lb, Id};
 use crate::error;
 use crate::error::Result;
 

@@ -2,11 +2,8 @@
 
 use rustpython_bytecode::CodeObject;
 use rustpython_compiler_core::compile as python_compile;
-use rustpython_parser::{
-    ast,
-    ast::{Located, Location},
-    parser,
-};
+use rustpython_parser::ast::{Located, Location};
+use rustpython_parser::{ast, parser};
 use snafu::ResultExt;
 
 use crate::fail_parse_error;

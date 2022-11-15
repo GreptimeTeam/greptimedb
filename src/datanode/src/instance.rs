@@ -1,19 +1,23 @@
+use std::sync::Arc;
 use std::time::Duration;
-use std::{fs, path, sync::Arc};
+use std::{fs, path};
 
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
 use frontend::frontend::Mode;
-use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
+use log_store::fs::config::LogConfig;
+use log_store::fs::log::LocalFileLogStore;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use object_store::layers::LoggingLayer;
-use object_store::{services::fs::Builder, util, ObjectStore};
+use object_store::services::fs::Builder;
+use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use snafu::prelude::*;
-use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
+use storage::config::EngineConfig as StorageEngineConfig;
+use storage::EngineImpl;
 use table::table::TableIdProviderRef;
 use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
@@ -53,7 +57,7 @@ impl Instance {
 
         let meta_client = match opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed(_) => {
+            Mode::Distributed => {
                 let meta_client = new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?;
                 Some(Arc::new(meta_client))
             }
@@ -85,7 +89,7 @@ impl Instance {
                 )
             }
 
-            Mode::Distributed(_) => {
+            Mode::Distributed => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
                     table_engine.clone(),
                     opts.node_id,
@@ -104,7 +108,7 @@ impl Instance {
 
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed(_) => Some(HeartbeatTask::new(
+            Mode::Distributed => Some(HeartbeatTask::new(
                 opts.node_id, /*node id not set*/
                 opts.rpc_addr.clone(),
                 meta_client.as_ref().unwrap().clone(),

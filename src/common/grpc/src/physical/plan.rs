@@ -1,22 +1,20 @@
-use std::{ops::Deref, result::Result, sync::Arc};
+use std::ops::Deref;
+use std::result::Result;
+use std::sync::Arc;
 
-use api::v1::codec::{
-    physical_plan_node::PhysicalPlanType, MockInputExecNode, PhysicalPlanNode, ProjectionExecNode,
-};
-use arrow::{
-    array::{PrimitiveArray, Utf8Array},
-    datatypes::{DataType, Field, Schema},
-};
+use api::v1::codec::physical_plan_node::PhysicalPlanType;
+use api::v1::codec::{MockInputExecNode, PhysicalPlanNode, ProjectionExecNode};
+use arrow::array::{PrimitiveArray, Utf8Array};
+use arrow::datatypes::{DataType, Field, Schema};
 use async_trait::async_trait;
-use datafusion::{
-    execution::runtime_env::RuntimeEnv,
-    field_util::SchemaExt,
-    physical_plan::{
-        memory::MemoryStream, projection::ProjectionExec, ExecutionPlan, PhysicalExpr,
-        SendableRecordBatchStream, Statistics,
-    },
-    record_batch::RecordBatch,
+use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::field_util::SchemaExt;
+use datafusion::physical_plan::memory::MemoryStream;
+use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::physical_plan::{
+    ExecutionPlan, PhysicalExpr, SendableRecordBatchStream, Statistics,
 };
+use datafusion::record_batch::RecordBatch;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
@@ -211,12 +209,11 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::codec::PhysicalPlanNode;
-    use datafusion::physical_plan::{expressions::Column, projection::ProjectionExec};
+    use datafusion::physical_plan::expressions::Column;
+    use datafusion::physical_plan::projection::ProjectionExec;
 
-    use crate::physical::{
-        plan::{DefaultAsPlanImpl, MockExecution},
-        {AsExcutionPlan, ExecutionPlanRef},
-    };
+    use crate::physical::plan::{DefaultAsPlanImpl, MockExecution};
+    use crate::physical::{AsExcutionPlan, ExecutionPlanRef};
 
     #[test]
     fn test_convert_df_projection_with_bytes() {

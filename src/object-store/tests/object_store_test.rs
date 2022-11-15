@@ -2,10 +2,8 @@ use std::env;
 
 use anyhow::Result;
 use common_telemetry::logging;
-use object_store::{
-    backend::{fs, s3},
-    util, DirStreamer, Object, ObjectMode, ObjectStore,
-};
+use object_store::backend::{fs, s3};
+use object_store::{util, DirStreamer, Object, ObjectMode, ObjectStore};
 use tempdir::TempDir;
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {

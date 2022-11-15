@@ -1,6 +1,7 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 
-use crate::memtable::{generate_kvs, util::bench_context::BenchContext};
+use crate::memtable::generate_kvs;
+use crate::memtable::util::bench_context::BenchContext;
 
 fn bench_memtable_read(c: &mut Criterion) {
     // the length of string in value is 20

@@ -1,11 +1,7 @@
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
-    },
-    thread,
-    time::Instant,
-};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Instant;
 
 use atomic_float::AtomicF64;
 use criterion::{
@@ -13,7 +9,8 @@ use criterion::{
 };
 use rand::Rng;
 
-use crate::memtable::{generate_kvs, util::bench_context::BenchContext};
+use crate::memtable::generate_kvs;
+use crate::memtable::util::bench_context::BenchContext;
 
 static READ_NUM: AtomicUsize = AtomicUsize::new(0);
 static WRITE_NUM: AtomicUsize = AtomicUsize::new(0);

@@ -1,9 +1,7 @@
 use api::v1::meta::RangeRequest;
 
 use crate::error::Result;
-use crate::keys::LeaseKey;
-use crate::keys::LeaseValue;
-use crate::keys::DN_LEASE_PREFIX;
+use crate::keys::{LeaseKey, LeaseValue, DN_LEASE_PREFIX};
 use crate::service::store::kv::KvStoreRef;
 use crate::util;
 

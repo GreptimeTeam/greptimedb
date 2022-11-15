@@ -4,32 +4,24 @@
 #![feature(once_cell)]
 #![allow(clippy::print_stdout)]
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Instant,
-};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
-use arrow::{
-    array::{ArrayRef, PrimitiveArray, StringArray, TimestampNanosecondArray},
-    datatypes::{DataType, Float64Type, Int64Type},
-    record_batch::RecordBatch,
-};
+use arrow::array::{ArrayRef, PrimitiveArray, StringArray, TimestampNanosecondArray};
+use arrow::datatypes::{DataType, Float64Type, Int64Type};
+use arrow::record_batch::RecordBatch;
 use clap::Parser;
-use client::{
-    admin::Admin,
-    api::v1::{
-        codec::InsertBatch, column::Values, insert_expr, Column, ColumnDataType, ColumnDef,
-        CreateExpr, InsertExpr,
-    },
-    Client, Database, Select,
-};
+use client::admin::Admin;
+use client::api::v1::codec::InsertBatch;
+use client::api::v1::column::Values;
+use client::api::v1::{insert_expr, Column, ColumnDataType, ColumnDef, CreateExpr, InsertExpr};
+use client::{Client, Database, Select};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use parquet::{
-    arrow::{ArrowReader, ParquetFileArrowReader},
-    file::{reader::FileReader, serialized_reader::SerializedFileReader},
-};
+use parquet::arrow::{ArrowReader, ParquetFileArrowReader};
+use parquet::file::reader::FileReader;
+use parquet::file::serialized_reader::SerializedFileReader;
 use tokio::task::JoinSet;
 
 const DATABASE_NAME: &str = "greptime";

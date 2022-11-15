@@ -4,10 +4,8 @@ use meta_srv::bootstrap;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
-use crate::error;
-use crate::error::Error;
-use crate::error::Result;
-use crate::toml_loader;
+use crate::error::{Error, Result};
+use crate::{error, toml_loader};
 
 #[derive(Parser)]
 pub struct Command {

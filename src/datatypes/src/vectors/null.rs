@@ -2,8 +2,7 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
-use arrow::array::{Array, NullArray};
+use arrow::array::{Array, ArrayRef, NullArray};
 use arrow::datatypes::DataType as ArrowDataType;
 use snafu::{ensure, OptionExt};
 

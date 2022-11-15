@@ -1,8 +1,7 @@
 //! Udf module contains foundational types that are used to represent UDFs.
 //! It's modifed from datafusion.
 use std::fmt;
-use std::fmt::Debug;
-use std::fmt::Formatter;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use datafusion_expr::{

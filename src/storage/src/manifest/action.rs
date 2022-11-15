@@ -4,10 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json as json;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion, VersionHeader};
-use store_api::manifest::ManifestVersion;
-use store_api::manifest::MetaAction;
-use store_api::storage::RegionId;
-use store_api::storage::SequenceNumber;
+use store_api::manifest::{ManifestVersion, MetaAction};
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::{
     self, DecodeJsonSnafu, DecodeMetaActionListSnafu, ManifestProtocolForbidReadSnafu,

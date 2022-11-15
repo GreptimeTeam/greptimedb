@@ -2,8 +2,7 @@ use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use snafu::OptionExt;

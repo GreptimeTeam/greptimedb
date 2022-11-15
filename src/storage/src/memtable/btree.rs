@@ -1,10 +1,8 @@
 use std::cmp::Ordering;
 use std::collections::{btree_map, BTreeMap};
 use std::ops::Bound;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering as AtomicOrdering},
-    Arc, RwLock,
-};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, RwLock};
 
 use datatypes::prelude::*;
 use datatypes::value::Value;

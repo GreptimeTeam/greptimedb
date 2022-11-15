@@ -1,21 +1,15 @@
 use std::collections::HashMap;
 
-use api::v1::meta::CreateRequest as PbCreateRequest;
-use api::v1::meta::Partition as PbPartition;
-use api::v1::meta::Region as PbRegion;
-use api::v1::meta::RouteRequest as PbRouteRequest;
-use api::v1::meta::RouteResponse as PbRouteResponse;
-use api::v1::meta::Table as PbTable;
-use serde::Deserialize;
-use serde::Serialize;
-use serde::Serializer;
+use api::v1::meta::{
+    CreateRequest as PbCreateRequest, Partition as PbPartition, Region as PbRegion,
+    RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
+};
+use serde::{Deserialize, Serialize, Serializer};
 use snafu::OptionExt;
 
 use crate::error;
 use crate::error::Result;
-use crate::rpc::util;
-use crate::rpc::Peer;
-use crate::rpc::TableName;
+use crate::rpc::{util, Peer, TableName};
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteRequest {
@@ -266,15 +260,11 @@ impl From<PbPartition> for Partition {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::Partition as PbPartition;
-    use api::v1::meta::Peer as PbPeer;
-    use api::v1::meta::Region as PbRegion;
-    use api::v1::meta::RegionRoute as PbRegionRoute;
-    use api::v1::meta::RouteRequest as PbRouteRequest;
-    use api::v1::meta::RouteResponse as PbRouteResponse;
-    use api::v1::meta::Table as PbTable;
-    use api::v1::meta::TableName as PbTableName;
-    use api::v1::meta::TableRoute as PbTableRoute;
+    use api::v1::meta::{
+        Partition as PbPartition, Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
+        RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
+        TableName as PbTableName, TableRoute as PbTableRoute,
+    };
 
     use super::*;
 

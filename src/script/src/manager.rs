@@ -88,8 +88,10 @@ mod tests {
 
     use super::*;
     type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
-    use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
-    use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
+    use log_store::fs::config::LogConfig;
+    use log_store::fs::log::LocalFileLogStore;
+    use storage::config::EngineConfig as StorageEngineConfig;
+    use storage::EngineImpl;
     use table_engine::engine::MitoEngine;
     use tempdir::TempDir;
 

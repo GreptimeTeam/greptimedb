@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::result::{build_err_result, ObjectResultBuilder};
-use api::v1::{codec::SelectResult, column::SemanticType, column::Values, Column, ObjectResult};
+use api::v1::codec::SelectResult;
+use api::v1::column::{SemanticType, Values};
+use api::v1::{Column, ObjectResult};
 use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::BitVec;
 use common_error::status_code::StatusCode;
@@ -183,18 +185,14 @@ pub fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::{
-        array::{Array, BooleanArray, PrimitiveArray},
-        datatypes::{DataType, Field},
-    };
+    use arrow::array::{Array, BooleanArray, PrimitiveArray};
+    use arrow::datatypes::{DataType, Field};
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datafusion::field_util::SchemaExt;
     use datatypes::arrow::datatypes::Schema as ArrowSchema;
-    use datatypes::{
-        arrow_array::StringArray,
-        schema::Schema,
-        vectors::{UInt32Vector, VectorRef},
-    };
+    use datatypes::arrow_array::StringArray;
+    use datatypes::schema::Schema;
+    use datatypes::vectors::{UInt32Vector, VectorRef};
 
     use crate::server::grpc::select::{null_mask, try_convert, values};
 

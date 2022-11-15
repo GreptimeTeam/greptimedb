@@ -4,9 +4,7 @@ use common_query::Output;
 use snafu::prelude::*;
 
 use crate::database::PROTOCOL_VERSION;
-use crate::error;
-use crate::Client;
-use crate::Result;
+use crate::{error, Client, Result};
 
 #[derive(Clone, Debug)]
 pub struct Admin {

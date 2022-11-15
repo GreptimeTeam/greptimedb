@@ -5,9 +5,11 @@ use datatypes::arrow::error::ArrowError;
 use datatypes::error::Error as DataTypeError;
 use query::error::Error as QueryError;
 use rustpython_compiler_core::error::CompileError as CoreCompileError;
-use rustpython_parser::{ast::Location, error::ParseError};
+use rustpython_parser::ast::Location;
+use rustpython_parser::error::ParseError;
 pub use snafu::ensure;
-use snafu::{prelude::Snafu, Backtrace};
+use snafu::prelude::Snafu;
+use snafu::Backtrace;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub(crate) fn ret_other_error_with(reason: String) -> OtherSnafu<String> {

@@ -3,13 +3,10 @@ use std::sync::Arc;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
-use common_grpc::channel_manager::ChannelConfig;
-use common_grpc::channel_manager::ChannelManager;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use tower::service_fn;
 
-use crate::metasrv::MetaSrv;
-use crate::metasrv::MetaSrvOptions;
-use crate::metasrv::SelectorRef;
+use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
 use crate::service::store::etcd::EtcdStore;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::store::memory::MemStore;

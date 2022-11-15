@@ -4,12 +4,10 @@ use std::fmt::Formatter;
 use std::sync::Arc;
 
 use api::v1::InsertExpr;
-use client::ObjectResult;
-use client::{Database, Select};
+use client::{Database, ObjectResult, Select};
 use common_query::prelude::Expr;
 use common_query::Output;
-use common_recordbatch::util;
-use common_recordbatch::RecordBatches;
+use common_recordbatch::{util, RecordBatches};
 use datafusion::logical_plan::{LogicalPlan as DfLogicPlan, LogicalPlanBuilder};
 use datafusion_expr::Expr as DfExpr;
 use datatypes::prelude::Value;

@@ -5,8 +5,7 @@ use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
-use store_api::storage::SequenceNumber;
-use store_api::storage::{AlterRequest, WriteContext, WriteResponse};
+use store_api::storage::{AlterRequest, SequenceNumber, WriteContext, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
@@ -21,8 +20,7 @@ use crate::proto::wal::WalHeader;
 use crate::region::{RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef};
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
-use crate::version::VersionControl;
-use crate::version::{VersionControlRef, VersionEdit};
+use crate::version::{VersionControl, VersionControlRef, VersionEdit};
 use crate::wal::{Payload, Wal};
 use crate::write_batch::WriteBatch;
 

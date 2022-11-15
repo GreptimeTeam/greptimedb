@@ -8,8 +8,7 @@ use datatypes::vectors::{
     UInt8Vector,
 };
 use mysql_async::prelude::FromRow;
-use mysql_async::FromRowError;
-use mysql_async::Value as MysqlValue;
+use mysql_async::{FromRowError, Value as MysqlValue};
 use opensrv_mysql::ColumnType;
 
 mod mysql_server_test;

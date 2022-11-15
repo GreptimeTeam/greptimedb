@@ -8,7 +8,8 @@ pub type RegionManifest = ManifestImpl<RegionMetaActionList>;
 mod tests {
     use std::sync::Arc;
 
-    use object_store::{backend::fs, ObjectStore};
+    use object_store::backend::fs;
+    use object_store::ObjectStore;
     use store_api::manifest::action::ProtocolAction;
     use store_api::manifest::{Manifest, MetaActionIterator, MAX_VERSION};
     use tempdir::TempDir;

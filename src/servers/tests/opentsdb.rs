@@ -14,8 +14,7 @@ use servers::opentsdb::OpentsdbServer;
 use servers::query_handler::OpentsdbProtocolHandler;
 use servers::server::Server;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 
 struct DummyOpentsdbInstance {
     tx: mpsc::Sender<i32>,

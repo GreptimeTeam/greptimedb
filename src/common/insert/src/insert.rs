@@ -1,30 +1,24 @@
-use std::collections::HashSet;
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    ops::Deref,
-    sync::Arc,
-};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
+use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{
-    codec::InsertBatch,
-    column::{SemanticType, Values},
-    AddColumns, Column, ColumnDataType,
-};
-use api::v1::{AddColumn, ColumnDef, CreateExpr};
+use api::v1::codec::InsertBatch;
+use api::v1::column::{SemanticType, Values};
+use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateExpr};
 use common_base::BitVec;
 use common_time::timestamp::Timestamp;
-use common_time::Date;
-use common_time::DateTime;
+use common_time::{Date, DateTime};
+use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::{ValueRef, VectorRef};
 use datatypes::schema::SchemaRef;
-use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
+use datatypes::value::Value;
+use datatypes::vectors::VectorBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
-use table::{
-    requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest},
-    Table,
-};
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
+use table::Table;
 
 use crate::error::{
     ColumnDataTypeSnafu, ColumnNotFoundSnafu, CreateVectorSnafu, DecodeInsertSnafu,
@@ -455,20 +449,16 @@ mod tests {
     use std::sync::Arc;
 
     use api::helper::ColumnDataTypeWrapper;
-    use api::v1::{
-        codec::InsertBatch,
-        column::{self, SemanticType, Values},
-        insert_expr, Column, ColumnDataType,
-    };
+    use api::v1::codec::InsertBatch;
+    use api::v1::column::{self, SemanticType, Values};
+    use api::v1::{insert_expr, Column, ColumnDataType};
     use common_base::BitVec;
     use common_query::physical_plan::PhysicalPlanRef;
     use common_query::prelude::Expr;
     use common_time::timestamp::Timestamp;
-    use datatypes::{
-        data_type::ConcreteDataType,
-        schema::{ColumnSchema, SchemaBuilder, SchemaRef},
-        value::Value,
-    };
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+    use datatypes::value::Value;
     use snafu::ResultExt;
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;

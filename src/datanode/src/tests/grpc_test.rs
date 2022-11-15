@@ -4,11 +4,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::alter_expr::Kind;
+use api::v1::codec::InsertBatch;
+use api::v1::column::SemanticType;
 use api::v1::{
-    admin_result, alter_expr::Kind, codec::InsertBatch, column, column::SemanticType, insert_expr,
-    AddColumn, AlterExpr, Column, ColumnDef, CreateExpr, InsertExpr, MutateResult,
+    admin_result, column, insert_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType,
+    ColumnDef, CreateExpr, InsertExpr, MutateResult,
 };
-use api::v1::{AddColumns, ColumnDataType};
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
 use common_catalog::consts::MIN_USER_TABLE_ID;

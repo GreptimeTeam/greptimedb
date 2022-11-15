@@ -443,8 +443,7 @@ mod test {
     use common_recordbatch::util;
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-    use datafusion_expr::expr_fn::col;
-    use datafusion_expr::expr_fn::{and, binary_expr, or};
+    use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::lit;
     use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
     use datanode::instance::Instance;

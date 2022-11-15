@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -15,13 +14,10 @@ use store_api::storage::{
     RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine, TableReference};
+use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
-use table::Result as TableResult;
-use table::{
-    metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion},
-    table::TableRef,
-    Table,
-};
+use table::table::TableRef;
+use table::{Result as TableResult, Table};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
@@ -470,11 +466,9 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 mod tests {
     use common_query::physical_plan::RuntimeEnv;
     use common_recordbatch::util;
-    use datafusion_common::field_util::FieldExt;
-    use datafusion_common::field_util::SchemaExt;
+    use datafusion_common::field_util::{FieldExt, SchemaExt};
     use datatypes::prelude::{ConcreteDataType, ScalarVector};
-    use datatypes::schema::ColumnSchema;
-    use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder};
     use datatypes::value::Value;
     use datatypes::vectors::*;
     use log_store::fs::noop::NoopLogStore;

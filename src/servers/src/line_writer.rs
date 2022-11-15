@@ -2,13 +2,12 @@ use std::collections::HashMap;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_grpc::writer::{to_ms_ts, Precision};
-use common_time::{timestamp::TimeUnit::Millisecond, Timestamp};
-use datatypes::{
-    prelude::ConcreteDataType,
-    types::TimestampType,
-    value::Value,
-    vectors::{VectorBuilder, VectorRef},
-};
+use common_time::timestamp::TimeUnit::Millisecond;
+use common_time::Timestamp;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::types::TimestampType;
+use datatypes::value::Value;
+use datatypes::vectors::{VectorBuilder, VectorRef};
 use table::requests::InsertRequest;
 
 type ColumnLen = usize;
@@ -137,7 +136,8 @@ mod tests {
 
     use common_catalog::consts::DEFAULT_SCHEMA_NAME;
     use common_time::Timestamp;
-    use datatypes::{value::Value, vectors::Vector};
+    use datatypes::value::Value;
+    use datatypes::vectors::Vector;
 
     use crate::line_writer::{LineWriter, Precision};
 

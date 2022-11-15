@@ -9,8 +9,7 @@ use storage::error::{
 };
 use storage::manifest::helper;
 use store_api::manifest::action::{ProtocolAction, ProtocolVersion, VersionHeader};
-use store_api::manifest::ManifestVersion;
-use store_api::manifest::MetaAction;
+use store_api::manifest::{ManifestVersion, MetaAction};
 use table::metadata::{RawTableInfo, TableIdent};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

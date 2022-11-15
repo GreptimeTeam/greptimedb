@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 
-use api::v1::{
-    insert_expr::{self, Expr},
-    InsertExpr,
-};
+use api::v1::insert_expr::{self, Expr};
+use api::v1::InsertExpr;
 use common_grpc::writer::{LinesWriter, Precision};
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
@@ -168,17 +166,18 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
 
 #[cfg(test)]
 mod tests {
-    use std::{ops::Deref, sync::Arc};
+    use std::ops::Deref;
+    use std::sync::Arc;
 
-    use api::v1::{
-        codec::InsertBatch,
-        column::{SemanticType, Values},
-        insert_expr::Expr,
-        Column, ColumnDataType, InsertExpr,
-    };
+    use api::v1::codec::InsertBatch;
+    use api::v1::column::{SemanticType, Values};
+    use api::v1::insert_expr::Expr;
+    use api::v1::{Column, ColumnDataType, InsertExpr};
     use common_base::BitVec;
-    use common_time::{timestamp::TimeUnit, Timestamp};
-    use datatypes::{value::Value, vectors::Vector};
+    use common_time::timestamp::TimeUnit;
+    use common_time::Timestamp;
+    use datatypes::value::Value;
+    use datatypes::vectors::Vector;
     use table::requests::InsertRequest;
 
     use crate::influxdb::InfluxdbRequest;

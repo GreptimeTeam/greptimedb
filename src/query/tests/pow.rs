@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use common_query::error::Result;
-use datatypes::prelude::ScalarVector;
-use datatypes::prelude::Vector;
+use datatypes::prelude::{ScalarVector, Vector};
 use datatypes::vectors::{UInt32Vector, VectorRef};
 
 pub fn pow(args: &[VectorRef]) -> Result<VectorRef> {

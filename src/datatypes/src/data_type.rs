@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
-    BinaryType, BooleanType, DateType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
-    Int8Type, ListType, NullType, StringType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    BinaryType, BooleanType, DateTimeType, DateType, Float32Type, Float64Type, Int16Type,
+    Int32Type, Int64Type, Int8Type, ListType, NullType, StringType, TimestampType, UInt16Type,
+    UInt32Type, UInt64Type, UInt8Type,
 };
-use crate::types::{DateTimeType, TimestampType};
 use crate::value::Value;
 use crate::vectors::MutableVector;
 

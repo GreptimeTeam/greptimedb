@@ -164,8 +164,9 @@ In addition, you may:
 
 ## Documentation
 
-- GreptimeDB [User Guide](https://greptime.com/docs/user-guide)
-- GreptimeDB [Developer Guide](https://greptime.com/docs/developer-guide)
+- GreptimeDB [User Guide](https://docs.greptime.com/user-guide/concepts.html)
+- GreptimeDB [Developer
+  Guide](https://docs.greptime.com/developer-guide/overview.html)
 
 ## License
 
