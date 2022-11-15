@@ -20,13 +20,11 @@ impl HeartbeatHandler for CheckLeaderHandler {
             if election.is_leader() {
                 return Ok(());
             }
+            if let Some(header) = &mut acc.header {
+                header.error = Some(Error::is_not_leader());
+                ctx.set_skip_all();
+            }
         }
-
-        if let Some(header) = &mut acc.header {
-            header.error = Some(Error::is_not_leader());
-            ctx.set_skip_all();
-        }
-
         Ok(())
     }
 }
