@@ -1,10 +1,10 @@
 # Welcome!
 
-Thanks a lot for considering contributing to GreptimeDB. We believe people like you would make GreptimeDB a great product. We intend to build a community where individuals can have open talks, show respect for one another, and speak with true ❤️. Meanwhile, we are to keep transparency and make your effort count here.  
+Thanks a lot for considering contributing to GreptimeDB. We believe people like you would make GreptimeDB a great product. We intend to build a community where individuals can have open talks, show respect for one another, and speak with true ❤️. Meanwhile, we are to keep transparency and make your effort count here.
 
-Read the guidelines, and they can help you get started. Communicate with respect to developers maintaining and developing the project. In return, they should reciprocate that respect by addressing your issue, reviewing changes, as well as helping finalize and merge your pull requests. 
+Read the guidelines, and they can help you get started. Communicate with respect to developers maintaining and developing the project. In return, they should reciprocate that respect by addressing your issue, reviewing changes, as well as helping finalize and merge your pull requests.
 
-Follow our [README](https://github.com/GreptimeTeam/greptimedb#readme) to get the whole picture of the project. To learn about the design of GreptimeDB, please refer to the [design docs](https://github.com/GrepTimeTeam/docs). 
+Follow our [README](https://github.com/GreptimeTeam/greptimedb#readme) to get the whole picture of the project. To learn about the design of GreptimeDB, please refer to the [design docs](https://github.com/GrepTimeTeam/docs).
 
 ## Your First Contribution
 
@@ -13,12 +13,12 @@ It can feel intimidating to contribute to a complex project, but it can also be 
 - Follow the [Code of Conduct](https://github.com/GreptimeTeam/greptimedb/blob/develop/CODE_OF_CONDUCT.md)
 - Small changes make huge differences. We will happily accept a PR making a single character change if it helps move forward. Don't wait to have everything working.
 - Check the closed issues before opening your issue.
-- Try to follow the existing style of the code. 
+- Try to follow the existing style of the code.
 - More importantly, when in doubt, ask away.
 
 Pull requests are great, but we accept all kinds of other help if you like. Such as
 
-- Write tutorials or blog posts. Blog, speak about, or create tutorials about one of GreptimeDB's many features. Mention [@greptime](https://twitter.com/greptime) on Twitter and email info@greptime.com so we can give pointers and tips and help you spread the word by promoting your content on Greptime communication channels. 
+- Write tutorials or blog posts. Blog, speak about, or create tutorials about one of GreptimeDB's many features. Mention [@greptime](https://twitter.com/greptime) on Twitter and email info@greptime.com so we can give pointers and tips and help you spread the word by promoting your content on Greptime communication channels.
 - Improve the documentation. [Submit documentation](http://github.com/greptimeTeam/docs/) updates, enhancements, designs, or bug fixes, and fixing any spelling or grammar errors will be very much appreciated.
 - Present at meetups and conferences about your GreptimeDB projects. Your unique challenges and successes in building things with GreptimeDB can provide great speaking material. We'd love to review your talk abstract, so get in touch with us if you'd like some help!
 - Submit bug reports. To report a bug or a security issue, you can [open a new GitHub issue](https://github.com/GrepTimeTeam/greptimedb/issues/new).
@@ -36,19 +36,20 @@ GreptimeDB uses the [Apache 2.0 license](https://github.com/GreptimeTeam/greptim
 
 ### Submitting Issues
 
-- Check if an issue already exists. Before filing an issue report, see whether it's already covered. Use the search bar and check out existing issues. 
-- File an issue: 
+- Check if an issue already exists. Before filing an issue report, see whether it's already covered. Use the search bar and check out existing issues.
+- File an issue:
   - To report a bug, a security issue, or anything that you think is a problem and that isn't under the radar, go ahead and [open a new GitHub issue](https://github.com/GrepTimeTeam/greptimedb/issues/new).
   - In the given templates, look for the one that suits you.
   - If you bump into anything, reach out to our [Slack](https://greptime.com/slack) for a wider audience and ask for help.
-- What happens after: 
+- What happens after:
   - Once we spot a new issue, we identify and categorize it as soon as possible.
-  - Usually, it gets assigned to other developers. Follow up and see what folks are talking about and how they take care of it. 
+  - Usually, it gets assigned to other developers. Follow up and see what folks are talking about and how they take care of it.
   - Please be patient and offer as much information as you can to help reach a solution or a consensus. You are not alone and embrace team power.
 
 ### Before PR
 
-- To ensure that community is free and confident in its ability to use your contributions, please sign the Contributor License Agreement (CLA) which will be incorporated in the pull request process. 
+- To ensure that community is free and confident in its ability to use your contributions, please sign the Contributor License Agreement (CLA) which will be incorporated in the pull request process.
+- Make sure all your codes are formatted and follow the [coding style](https://pingcap.github.io/style-guide/rust/).
 - Make sure all unit tests are passed.
 - Make sure all clippy warnings are fixed (you can check it locally by running `cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr`).
 
@@ -80,7 +81,7 @@ now `pre-commit` will run automatically on `git commit`.
 
 ### Title
 
-The titles of pull requests should be prefixed with category names listed in [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0) 
+The titles of pull requests should be prefixed with category names listed in [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0)
 like `feat`/`fix`/`docs`, with a concise summary of code change following. DO NOT use last commit message as pull request title.
 
 ### Description
