@@ -15,6 +15,7 @@ common-error = { path = "../common/error" }
 common-telemetry = { path = "../common/telemetry", features = [
     "deadlock_detection",
 ] }
+meta-client = { path = "../meta-client" }
 datanode = { path = "../datanode" }
 frontend = { path = "../frontend" }
 futures = "0.3"

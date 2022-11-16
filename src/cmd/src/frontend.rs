@@ -20,6 +20,7 @@ use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
+use meta_client::MetaClientOpts;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -124,13 +125,13 @@ impl TryFrom<StartCommand> for FrontendOptions {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
         if let Some(metasrv_addr) = cmd.metasrv_addr {
-            opts.metasrv_addr = Some(
-                metasrv_addr
-                    .split(',')
-                    .into_iter()
-                    .map(|x| x.trim().to_string())
-                    .collect::<Vec<String>>(),
-            );
+            opts.meta_client_opts
+                .get_or_insert_with(|| MetaClientOpts::default())
+                .metasrv_addr = metasrv_addr
+                .split(",")
+                .map(&str::trim)
+                .map(&str::to_string)
+                .collect::<Vec<_>>();
             opts.mode = Mode::Distributed;
         }
         Ok(opts)

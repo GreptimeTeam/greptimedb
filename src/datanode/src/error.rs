@@ -283,6 +283,9 @@ pub enum Error {
 
     #[snafu(display("Missing node id option in distributed mode"))]
     MissingNodeId { backtrace: Backtrace },
+
+    #[snafu(display("Missing node id option in distributed mode"))]
+    MissingMetasrvOpts { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -348,6 +351,7 @@ impl ErrorExt for Error {
             Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::MissingNodeId { .. } => StatusCode::InvalidArguments,
+            Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
         }
     }
 

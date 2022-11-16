@@ -16,6 +16,7 @@ use clap::Parser;
 use common_telemetry::logging;
 use datanode::datanode::{Datanode, DatanodeOptions};
 use frontend::frontend::Mode;
+use meta_client::MetaClientOpts;
 use snafu::ResultExt;
 
 use crate::error::{Error, MissingConfigSnafu, Result, StartDatanodeSnafu};
@@ -98,7 +99,13 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         }
 
         if let Some(meta_addr) = cmd.metasrv_addr {
-            opts.meta_client_opts.metasrv_addr = meta_addr;
+            opts.meta_client_opts
+                .get_or_insert_with(|| MetaClientOpts::default())
+                .metasrv_addr = meta_addr
+                .split(",")
+                .map(&str::trim)
+                .map(&str::to_string)
+                .collect::<_>();
             opts.mode = Mode::Distributed;
         }
 
@@ -138,13 +145,17 @@ mod tests {
         assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal_dir);
         assert_eq!("127.0.0.1:3306".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
-        assert_eq!(
-            "1.1.1.1:3002".to_string(),
-            options.meta_client_opts.metasrv_addr
-        );
-        assert_eq!(5000, options.meta_client_opts.connect_timeout_millis);
-        assert_eq!(3000, options.meta_client_opts.timeout_millis);
-        assert!(!options.meta_client_opts.tcp_nodelay);
+        let MetaClientOpts {
+            metasrv_addr,
+            timeout_millis,
+            connect_timeout_millis,
+            tcp_nodelay,
+        } = options.meta_client_opts.unwrap();
+
+        assert_eq!(vec!["1.1.1.1:3002".to_string()], metasrv_addr);
+        assert_eq!(5000, connect_timeout_millis);
+        assert_eq!(3000, timeout_millis);
+        assert!(!tcp_nodelay);
 
         match options.storage {
             ObjectStoreConfig::File { data_dir } => {
@@ -213,6 +224,15 @@ mod tests {
         })
         .unwrap();
         assert_eq!(Some(42), dn_opts.node_id);
-        assert_eq!("1.1.1.1:3002", dn_opts.meta_client_opts.metasrv_addr);
+        let MetaClientOpts {
+            metasrv_addr,
+            timeout_millis,
+            connect_timeout_millis,
+            tcp_nodelay,
+        } = dn_opts.meta_client_opts.unwrap();
+        assert_eq!(vec!["1.1.1.1:3002".to_string()], metasrv_addr);
+        assert_eq!(3000, timeout_millis);
+        assert_eq!(5000, connect_timeout_millis);
+        assert!(!tcp_nodelay);
     }
 }

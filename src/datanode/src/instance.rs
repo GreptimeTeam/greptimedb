@@ -38,7 +38,8 @@ use table::table::TableIdProviderRef;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
-    self, CatalogSnafu, MetaClientInitSnafu, MissingNodeIdSnafu, NewCatalogSnafu, Result,
+    self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
+    NewCatalogSnafu, Result,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
@@ -76,7 +77,9 @@ impl Instance {
             Mode::Distributed => {
                 let meta_client = new_metasrv_client(
                     opts.node_id.context(MissingNodeIdSnafu)?,
-                    &opts.meta_client_opts,
+                    opts.meta_client_opts
+                        .as_ref()
+                        .context(MissingMetasrvOptsSnafu)?,
                 )
                 .await?;
                 Some(Arc::new(meta_client))
@@ -204,7 +207,7 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Resul
         .channel_manager(channel_manager)
         .build();
     meta_client
-        .start(&[&meta_config.metasrv_addr])
+        .start(&meta_config.metasrv_addr)
         .await
         .context(MetaClientInitSnafu)?;
 
