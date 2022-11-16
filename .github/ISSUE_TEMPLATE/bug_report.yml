@@ -1,8 +1,7 @@
 ---
 name: Bug report
 description: Is something not working? Help us fix it!
-title: "[Bug]: <Title>"
-labels: ["bug", "triage"]
+labels: [ "bug" ]
 body:
   - type: markdown
     attributes:

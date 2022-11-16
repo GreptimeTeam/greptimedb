@@ -1,7 +1,6 @@
 ---
 name: Feature request
 description: Suggest a new feature for GreptimeDB
-title: "[Feature]: <Feature name>"
 labels: [ "feature-request" ]
 body:
   - type: markdown
