@@ -93,31 +93,20 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             opts.mysql_addr = addr;
         }
 
-        match (cmd.metasrv_addr, cmd.node_id) {
-            (Some(meta_addr), Some(node_id)) => {
-                // Running mode is only set to Distributed when
-                // both metasrv addr and node id are set in
-                // commandline options
-                opts.meta_client_opts.metasrv_addr = meta_addr.clone();
-                opts.node_id = node_id;
-                opts.metasrv_addr = Some(vec![meta_addr]);
-                opts.mode = Mode::Distributed;
+        if let Some(node_id) = cmd.node_id {
+            opts.node_id = Some(node_id);
+        }
+
+        if let Some(meta_addr) = cmd.metasrv_addr {
+            opts.meta_client_opts.metasrv_addr = meta_addr;
+            opts.mode = Mode::Distributed;
+        }
+
+        if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {
+            return MissingConfigSnafu {
+                msg: "Missing node id option",
             }
-            (None, None) => {
-                opts.mode = Mode::Standalone;
-            }
-            (None, Some(_)) => {
-                return MissingConfigSnafu {
-                    msg: "Missing metasrv address option",
-                }
                 .fail();
-            }
-            (Some(_), None) => {
-                return MissingConfigSnafu {
-                    msg: "Missing node id option",
-                }
-                .fail();
-            }
         }
         Ok(opts)
     }
@@ -198,13 +187,31 @@ mod tests {
             config_file: None,
         })
         .is_err());
-        assert!(DatanodeOptions::try_from(StartCommand {
+
+        // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
+        DatanodeOptions::try_from(StartCommand {
             node_id: Some(42),
             rpc_addr: None,
             mysql_addr: None,
             metasrv_addr: None,
             config_file: None,
         })
-        .is_err());
+            .unwrap();
+    }
+
+    #[test]
+    fn test_merge_config() {
+        let dn_opts = DatanodeOptions::try_from(StartCommand {
+            node_id: None,
+            rpc_addr: None,
+            mysql_addr: None,
+            metasrv_addr: None,
+            config_file: Some(format!(
+                "{}/../../config/datanode.example.toml",
+                std::env::current_dir().unwrap().as_path().to_str().unwrap()
+            )),
+        }).unwrap();
+        assert_eq!(Some(42), dn_opts.node_id);
+        assert_eq!("1.1.1.1:3002", dn_opts.meta_client_opts.metasrv_addr);
     }
 }
