@@ -17,6 +17,7 @@ use sqlparser::parser::ParserError;
 
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
+use crate::statements::explain::Explain;
 use crate::statements::describe::DescribeTable;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
@@ -43,6 +44,8 @@ pub enum Statement {
     ShowCreateTable(ShowCreateTable),
     // DESCRIBE TABLE
     DescribeTable(DescribeTable),
+    // EXPLAIN [[ DESCRIBE| DESC ]] select_statement
+    Explain(Explain),
 }
 
 /// Converts Statement to sqlparser statement
@@ -68,6 +71,7 @@ impl TryFrom<Statement> for SpStatement {
             Statement::CreateDatabase(_) | Statement::CreateTable(_) | Statement::Alter(_) => {
                 unimplemented!()
             }
+            Statement::Explain(e) => Ok(e.inner),
         }
     }
 }

@@ -14,6 +14,7 @@
 
 pub mod alter;
 pub mod create;
+pub mod explain;
 pub mod describe;
 pub mod insert;
 pub mod query;

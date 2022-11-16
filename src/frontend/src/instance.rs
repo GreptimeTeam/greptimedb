@@ -275,6 +275,11 @@ impl Instance {
             .context(AlterTableSnafu)
     }
 
+    /// Handle explain expr
+    pub async fn handle_explain(&self) -> Result<Output> {
+        todo!()
+    }
+
     /// Handle batch inserts
     pub async fn handle_inserts(&self, insert_expr: &[InsertExpr]) -> Result<Output> {
         let mut success = 0;
@@ -634,6 +639,10 @@ impl SqlQueryHandler for Instance {
                 .await
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
+            Statement::Explain(_explain) => {
+                // self.handle_explain()
+                unimplemented!()
+            }
             Statement::ShowCreateTable(_) => {
                 return server_error::NotSupportedSnafu { feat: query }.fail()
             }

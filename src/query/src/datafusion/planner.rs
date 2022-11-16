@@ -70,6 +70,7 @@ where
             | Statement::CreateTable(_)
             | Statement::CreateDatabase(_)
             | Statement::Alter(_)
+            | Statement::Explain(_)
             | Statement::Insert(_) => unreachable!(),
         }
     }
