@@ -91,7 +91,7 @@ impl Instance {
     pub async fn with_mock_meta_server(opts: &DatanodeOptions, meta_srv: MockInfo) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
-        let meta_client = Arc::new(mock_meta_client(meta_srv, opts.node_id).await);
+        let meta_client = Arc::new(mock_meta_client(meta_srv, opts.node_id.unwrap_or(42)).await);
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
@@ -105,7 +105,7 @@ impl Instance {
         // create remote catalog manager
         let catalog_manager = Arc::new(catalog::remote::RemoteCatalogManager::new(
             table_engine.clone(),
-            opts.node_id,
+            opts.node_id.unwrap_or(42),
             Arc::new(MetaKvBackend {
                 client: meta_client.clone(),
             }),
@@ -116,8 +116,11 @@ impl Instance {
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
-        let heartbeat_task =
-            HeartbeatTask::new(opts.node_id, opts.rpc_addr.clone(), meta_client.clone());
+        let heartbeat_task = HeartbeatTask::new(
+            opts.node_id.unwrap_or(42),
+            opts.rpc_addr.clone(),
+            meta_client.clone(),
+        );
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),

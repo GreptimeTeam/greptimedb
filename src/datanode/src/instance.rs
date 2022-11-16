@@ -37,7 +37,9 @@ use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
-use crate::error::{self, CatalogSnafu, MetaClientInitSnafu, NewCatalogSnafu, Result};
+use crate::error::{
+    self, CatalogSnafu, MetaClientInitSnafu, MissingNodeIdSnafu, NewCatalogSnafu, Result,
+};
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
 use crate::server::grpc::plan::PhysicalPlanner;
@@ -72,7 +74,11 @@ impl Instance {
         let meta_client = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => {
-                let meta_client = new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?;
+                let meta_client = new_metasrv_client(
+                    opts.node_id.context(MissingNodeIdSnafu)?,
+                    &opts.meta_client_opts,
+                )
+                .await?;
                 Some(Arc::new(meta_client))
             }
         };
@@ -106,7 +112,7 @@ impl Instance {
             Mode::Distributed => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
                     table_engine.clone(),
-                    opts.node_id,
+                    opts.node_id.context(MissingNodeIdSnafu)?,
                     Arc::new(MetaKvBackend {
                         client: meta_client.as_ref().unwrap().clone(),
                     }),
@@ -123,7 +129,7 @@ impl Instance {
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => Some(HeartbeatTask::new(
-                opts.node_id, /*node id not set*/
+                opts.node_id.context(MissingNodeIdSnafu)?,
                 opts.rpc_addr.clone(),
                 meta_client.as_ref().unwrap().clone(),
             )),

@@ -944,7 +944,7 @@ mod test {
         let data_tmp_dir =
             TempDir::new_in("/tmp", &format!("dist_table_test-data-{}", current)).unwrap();
         let opts = DatanodeOptions {
-            node_id: datanode_id,
+            node_id: Some(datanode_id),
             wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             storage: ObjectStoreConfig::File {
                 data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),

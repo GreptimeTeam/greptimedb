@@ -39,7 +39,7 @@ impl Default for ObjectStoreConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DatanodeOptions {
-    pub node_id: u64,
+    pub node_id: Option<u64>,
     pub rpc_addr: String,
     pub rpc_runtime_size: usize,
     pub mysql_addr: String,
@@ -48,13 +48,12 @@ pub struct DatanodeOptions {
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
     pub mode: Mode,
-    pub metasrv_addr: Option<Vec<String>>,
 }
 
 impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
-            node_id: 0,
+            node_id: None,
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_runtime_size: 8,
             mysql_addr: "127.0.0.1:3306".to_string(),
@@ -63,7 +62,6 @@ impl Default for DatanodeOptions {
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
             mode: Mode::Standalone,
-            metasrv_addr: None,
         }
     }
 }
