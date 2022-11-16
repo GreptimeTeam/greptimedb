@@ -104,18 +104,20 @@ async fn test_fs_backend() -> Result<()> {
 #[tokio::test]
 async fn test_s3_backend() -> Result<()> {
     logging::init_default_ut_logging();
-    if env::var("GT_S3_BUCKET").is_ok() {
-        logging::info!("Running s3 test.");
+    if let Ok(bucket) = env::var("GT_S3_BUCKET") {
+        if !bucket.is_empty() {
+            logging::info!("Running s3 test.");
 
-        let accessor = s3::Builder::default()
-            .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
-            .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
-            .bucket(&env::var("GT_S3_BUCKET")?)
-            .build()?;
+            let accessor = s3::Builder::default()
+                .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
+                .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
+                .bucket(&bucket)
+                .build()?;
 
-        let store = ObjectStore::new(accessor);
-        test_object_crud(&store).await?;
-        test_object_list(&store).await?;
+            let store = ObjectStore::new(accessor);
+            test_object_crud(&store).await?;
+            test_object_list(&store).await?;
+        }
     }
 
     Ok(())
