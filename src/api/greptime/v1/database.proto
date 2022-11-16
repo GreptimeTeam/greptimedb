@@ -42,11 +42,11 @@ message InsertExpr {
   string table_name = 2;
 
   message Values {
-    repeated bytes values = 3;
+    repeated bytes values = 1;
   }
 
   oneof expr {
-    Values values = 4;
+    Values values = 3;
 
     // TODO(LFC): Remove field "sql" in InsertExpr.
     // When Frontend instance received an insertion SQL (`insert into ...`), it's anticipated to parse the SQL and
@@ -55,12 +55,12 @@ message InsertExpr {
     // Then why the "sql" field exists here? It's because the Frontend needs table schema to create the values to insert,
     // which is currently not able to find anywhere. (Maybe the table schema is suppose to be fetched from Meta?)
     // The "sql" field is meant to be removed in the future.
-    string sql = 5;
+    string sql = 4;
   }
 
   /// The region number of current insert request.
-  uint32 region_number = 6;
-  map<string, bytes> options = 7;
+  uint32 region_number = 5;
+  map<string, bytes> options = 6;
 }
 
 // TODO(jiachun)
