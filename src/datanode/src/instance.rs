@@ -207,7 +207,7 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Resul
         .channel_manager(channel_manager)
         .build();
     meta_client
-        .start(&meta_config.metasrv_addr)
+        .start(&meta_config.metasrv_addrs)
         .await
         .context(MetaClientInitSnafu)?;
 

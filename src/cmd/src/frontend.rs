@@ -127,7 +127,7 @@ impl TryFrom<StartCommand> for FrontendOptions {
         if let Some(metasrv_addr) = cmd.metasrv_addr {
             opts.meta_client_opts
                 .get_or_insert_with(|| MetaClientOpts::default())
-                .metasrv_addr = metasrv_addr
+                .metasrv_addrs = metasrv_addr
                 .split(",")
                 .map(&str::trim)
                 .map(&str::to_string)

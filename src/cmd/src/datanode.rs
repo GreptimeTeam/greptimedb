@@ -101,7 +101,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         if let Some(meta_addr) = cmd.metasrv_addr {
             opts.meta_client_opts
                 .get_or_insert_with(|| MetaClientOpts::default())
-                .metasrv_addr = meta_addr
+                .metasrv_addrs = meta_addr
                 .split(",")
                 .map(&str::trim)
                 .map(&str::to_string)
@@ -146,7 +146,7 @@ mod tests {
         assert_eq!("127.0.0.1:3306".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
         let MetaClientOpts {
-            metasrv_addr,
+            metasrv_addrs: metasrv_addr,
             timeout_millis,
             connect_timeout_millis,
             tcp_nodelay,
@@ -225,7 +225,7 @@ mod tests {
         .unwrap();
         assert_eq!(Some(42), dn_opts.node_id);
         let MetaClientOpts {
-            metasrv_addr,
+            metasrv_addrs: metasrv_addr,
             timeout_millis,
             connect_timeout_millis,
             tcp_nodelay,

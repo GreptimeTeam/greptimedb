@@ -134,7 +134,7 @@ impl Instance {
                     .meta_client_opts
                     .as_ref()
                     .context(MissingMetasrvOptsSnafu)?
-                    .metasrv_addr;
+                    .metasrv_addrs;
                 info!(
                     "Creating Frontend instance in distributed mode with Meta server addr {:?}",
                     metasrv_addr

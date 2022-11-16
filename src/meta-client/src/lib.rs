@@ -23,7 +23,7 @@ pub mod rpc;
 // Options for meta client in datanode instance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetaClientOpts {
-    pub metasrv_addr: Vec<String>,
+    pub metasrv_addrs: Vec<String>,
     pub timeout_millis: u64,
     pub connect_timeout_millis: u64,
     pub tcp_nodelay: bool,
@@ -32,7 +32,7 @@ pub struct MetaClientOpts {
 impl Default for MetaClientOpts {
     fn default() -> Self {
         Self {
-            metasrv_addr: vec!["127.0.0.1:3002".to_string()],
+            metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
             timeout_millis: 3_000u64,
             connect_timeout_millis: 5_000u64,
             tcp_nodelay: true,
