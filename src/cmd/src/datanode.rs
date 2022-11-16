@@ -106,7 +106,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             return MissingConfigSnafu {
                 msg: "Missing node id option",
             }
-                .fail();
+            .fail();
         }
         Ok(opts)
     }
@@ -196,7 +196,7 @@ mod tests {
             metasrv_addr: None,
             config_file: None,
         })
-            .unwrap();
+        .unwrap();
     }
 
     #[test]
@@ -210,7 +210,8 @@ mod tests {
                 "{}/../../config/datanode.example.toml",
                 std::env::current_dir().unwrap().as_path().to_str().unwrap()
             )),
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(Some(42), dn_opts.node_id);
         assert_eq!("1.1.1.1:3002", dn_opts.meta_client_opts.metasrv_addr);
     }

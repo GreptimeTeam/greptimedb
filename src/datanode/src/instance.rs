@@ -37,7 +37,9 @@ use table_engine::config::EngineConfig as TableEngineConfig;
 use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
-use crate::error::{self, CatalogSnafu, MetaClientInitSnafu, MissingNodeIdSnafu, NewCatalogSnafu, Result};
+use crate::error::{
+    self, CatalogSnafu, MetaClientInitSnafu, MissingNodeIdSnafu, NewCatalogSnafu, Result,
+};
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
 use crate::server::grpc::plan::PhysicalPlanner;
@@ -72,7 +74,11 @@ impl Instance {
         let meta_client = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => {
-                let meta_client = new_metasrv_client(opts.node_id.context(MissingNodeIdSnafu)?, &opts.meta_client_opts).await?;
+                let meta_client = new_metasrv_client(
+                    opts.node_id.context(MissingNodeIdSnafu)?,
+                    &opts.meta_client_opts,
+                )
+                .await?;
                 Some(Arc::new(meta_client))
             }
         };

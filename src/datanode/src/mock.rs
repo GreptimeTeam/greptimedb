@@ -116,8 +116,7 @@ impl Instance {
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
-        let heartbeat_task =
-            HeartbeatTask::new(42, opts.rpc_addr.clone(), meta_client.clone());
+        let heartbeat_task = HeartbeatTask::new(42, opts.rpc_addr.clone(), meta_client.clone());
         Ok(Self {
             query_engine: query_engine.clone(),
             sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),

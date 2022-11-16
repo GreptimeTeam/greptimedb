@@ -282,9 +282,7 @@ pub enum Error {
     },
 
     #[snafu(display("Missing node id option in distributed mode"))]
-    MissingNodeId {
-        backtrace: Backtrace,
-    }
+    MissingNodeId { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
