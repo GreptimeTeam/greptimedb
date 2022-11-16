@@ -100,9 +100,9 @@ impl TryFrom<StartCommand> for DatanodeOptions {
 
         if let Some(meta_addr) = cmd.metasrv_addr {
             opts.meta_client_opts
-                .get_or_insert_with(|| MetaClientOpts::default())
+                .get_or_insert_with(MetaClientOpts::default)
                 .metasrv_addrs = meta_addr
-                .split(",")
+                .split(',')
                 .map(&str::trim)
                 .map(&str::to_string)
                 .collect::<_>();
