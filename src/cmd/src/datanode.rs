@@ -145,9 +145,9 @@ mod tests {
             )),
         };
         let options: DatanodeOptions = cmd.try_into().unwrap();
-        assert_eq!("127.0.0.01:3001".to_string(), options.rpc_addr);
+        assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal_dir);
-        assert_eq!("127.0.0.01:3306".to_string(), options.mysql_addr);
+        assert_eq!("127.0.0.1:3306".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
         assert_eq!(
             "1.1.1.1:3002".to_string(),

@@ -1,9 +1,9 @@
 node_id = 42
 mode = 'distributed'
-rpc_addr = '127.0.0.01:3001'
+rpc_addr = '127.0.0.1:3001'
 wal_dir = '/tmp/greptimedb/wal'
 rpc_runtime_size = 8
-mysql_addr = '127.0.0.01:3306'
+mysql_addr = '127.0.0.1:3306'
 mysql_runtime_size = 4
 
 [storage]

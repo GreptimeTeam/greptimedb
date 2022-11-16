@@ -182,7 +182,7 @@ mod tests {
     fn test_datanode_lease_value() {
         let value = LeaseValue {
             timestamp_millis: 111,
-            node_addr: "127.0.0.01:3002".to_string(),
+            node_addr: "127.0.0.1:3002".to_string(),
         };
 
         let value_bytes: Vec<u8> = value.clone().try_into().unwrap();
