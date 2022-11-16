@@ -34,7 +34,7 @@ impl<'a, E: ErrorExt + ?Sized> fmt::Debug for DebugFormat<'a, E> {
             write!(f, " Caused by: {:?}", source)?;
         }
         if let Some(backtrace) = self.0.backtrace_opt() {
-            // Add a newline to seperate causes and backtrace.
+            // Add a newline to separate causes and backtrace.
             write!(f, "\nBacktrace:\n{}", backtrace)?;
         }
 
