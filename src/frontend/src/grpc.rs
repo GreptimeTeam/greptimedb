@@ -23,7 +23,7 @@ pub struct GrpcOptions {
 impl Default for GrpcOptions {
     fn default() -> Self {
         Self {
-            addr: "0.0.0.0:4001".to_string(),
+            addr: "127.0.0.1:4001".to_string(),
             runtime_size: 8,
         }
     }

@@ -389,6 +389,30 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Failed to build DataFusion logical plan, source: {}", source))]
+    BuildDfLogicalPlan {
+        source: datafusion_common::DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to convert Arrow schema, source: {}", source))]
+    ConvertArrowSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to collect Recordbatch stream, source: {}", source))]
+    CollectRecordbatchStream {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to create Recordbatches, source: {}", source))]
+    CreateRecordbatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -418,7 +442,8 @@ impl ErrorExt for Error {
 
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::ConvertScalarValue { source, .. }
-            | Error::VectorComputation { source } => source.status_code(),
+            | Error::VectorComputation { source }
+            | Error::ConvertArrowSchema { source } => source.status_code(),
 
             Error::ConnectDatanode { source, .. }
             | Error::RequestDatanode { source }
@@ -434,7 +459,8 @@ impl ErrorExt for Error {
             | Error::FindLeaderPeer { .. }
             | Error::FindRegionPartition { .. }
             | Error::IllegalTableRoutesData { .. }
-            | Error::UnsupportedExpr { .. } => StatusCode::Internal,
+            | Error::UnsupportedExpr { .. }
+            | Error::BuildDfLogicalPlan { .. } => StatusCode::Internal,
 
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
                 StatusCode::Unexpected
@@ -467,6 +493,9 @@ impl ErrorExt for Error {
             Error::ExecuteSql { source, .. } => source.status_code(),
             Error::InsertBatchToRequest { source, .. } => source.status_code(),
             Error::CreateDatabase { source, .. } => source.status_code(),
+            Error::CollectRecordbatchStream { source } | Error::CreateRecordbatches { source } => {
+                source.status_code()
+            }
         }
     }
 

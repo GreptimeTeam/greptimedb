@@ -70,7 +70,7 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Boolean(_))
     }
 
-    pub fn is_string(&self) -> bool {
+    pub fn stringifiable(&self) -> bool {
         matches!(
             self,
             ConcreteDataType::String(_)

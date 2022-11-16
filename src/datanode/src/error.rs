@@ -145,9 +145,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to convert datafusion type: {}", from))]
-    Conversion { from: String },
-
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String },
 
@@ -227,12 +224,6 @@ pub enum Error {
     StartScriptManager {
         #[snafu(backtrace)]
         source: script::error::Error,
-    },
-
-    #[snafu(display("Failed to collect RecordBatches, source: {}", source))]
-    CollectRecordBatches {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
     },
 
     #[snafu(display(
@@ -338,7 +329,6 @@ impl ErrorExt for Error {
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
             | Error::RegisterSchema { .. }
-            | Error::Conversion { .. }
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }
             | Error::ColumnDataType { .. }
@@ -349,8 +339,6 @@ impl ErrorExt for Error {
             Error::StartScriptManager { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
-            Error::CollectRecordBatches { source } => source.status_code(),
-
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::InsertData { source, .. } => source.status_code(),
             Error::EmptyInsertBatch => StatusCode::InvalidArguments,

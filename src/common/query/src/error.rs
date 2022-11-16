@@ -114,6 +114,12 @@ pub enum InnerError {
         #[snafu(backtrace)]
         source: DataTypeError,
     },
+
+    #[snafu(display("Failed to execute physical plan, source: {}", source))]
+    ExecutePhysicalPlan {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -141,6 +147,7 @@ impl ErrorExt for InnerError {
             InnerError::UnsupportedInputDataType { .. } => StatusCode::InvalidArguments,
 
             InnerError::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
+            InnerError::ExecutePhysicalPlan { source } => source.status_code(),
         }
     }
 
@@ -162,6 +169,12 @@ impl From<InnerError> for Error {
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
+    }
+}
+
+impl From<BoxedError> for Error {
+    fn from(source: BoxedError) -> Self {
+        InnerError::ExecutePhysicalPlan { source }.into()
     }
 }
 

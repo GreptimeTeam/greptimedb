@@ -23,7 +23,7 @@ pub struct MysqlOptions {
 impl Default for MysqlOptions {
     fn default() -> Self {
         Self {
-            addr: "0.0.0.0:4002".to_string(),
+            addr: "127.0.0.1:4002".to_string(),
             runtime_size: 2,
         }
     }

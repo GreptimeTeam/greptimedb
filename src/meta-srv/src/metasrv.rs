@@ -42,9 +42,9 @@ pub struct MetaSrvOptions {
 impl Default for MetaSrvOptions {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:3002".to_string(),
-            server_addr: "0.0.0.0:3002".to_string(),
-            store_addr: "0.0.0.0:2379".to_string(),
+            bind_addr: "127.0.0.1:3002".to_string(),
+            server_addr: "127.0.0.1:3002".to_string(),
+            store_addr: "127.0.0.1:2379".to_string(),
             datanode_lease_secs: 15,
         }
     }

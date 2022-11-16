@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::codec::SelectResult as GrpcSelectResult;
+use api::v1::column::SemanticType;
 use api::v1::{
     object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr,
     MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, PhysicalPlan,
@@ -219,7 +220,12 @@ impl TryFrom<ObjectResult> for Output {
                     .map(|(column, vector)| {
                         let datatype = vector.data_type();
                         // nullable or not, does not affect the output
-                        ColumnSchema::new(&column.column_name, datatype, true)
+                        let mut column_schema =
+                            ColumnSchema::new(&column.column_name, datatype, true);
+                        if column.semantic_type == SemanticType::Timestamp as i32 {
+                            column_schema = column_schema.with_time_index(true);
+                        }
+                        column_schema
                     })
                     .collect::<Vec<ColumnSchema>>();
 
@@ -251,7 +257,7 @@ impl TryFrom<ObjectResult> for Output {
 mod tests {
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::Column;
-    use datanode::server::grpc::select::{null_mask, values};
+    use common_grpc::select::{null_mask, values};
     use datatypes::vectors::{
         BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
         Int16Vector, Int32Vector, Int64Vector, Int8Vector, StringVector, UInt16Vector,

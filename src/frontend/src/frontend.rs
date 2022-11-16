@@ -44,7 +44,7 @@ pub struct FrontendOptions {
 impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
-            http_addr: Some("0.0.0.0:4000".to_string()),
+            http_addr: Some("127.0.0.1:4000".to_string()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
             postgres_options: Some(PostgresOptions::default()),

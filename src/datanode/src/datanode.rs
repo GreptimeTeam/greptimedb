@@ -55,9 +55,9 @@ impl Default for DatanodeOptions {
     fn default() -> Self {
         Self {
             node_id: 0,
-            rpc_addr: "0.0.0.0:3001".to_string(),
+            rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_runtime_size: 8,
-            mysql_addr: "0.0.0.0:3306".to_string(),
+            mysql_addr: "127.0.0.1:3306".to_string(),
             mysql_runtime_size: 2,
             meta_client_opts: MetaClientOpts::default(),
             wal_dir: "/tmp/greptimedb/wal".to_string(),

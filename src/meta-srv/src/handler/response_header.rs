@@ -55,7 +55,7 @@ mod tests {
         let kv_store = Arc::new(MemStore::new());
         let ctx = Context {
             datanode_lease_secs: 30,
-            server_addr: "0.0.0.0:0000".to_string(),
+            server_addr: "127.0.0.1:0000".to_string(),
             kv_store,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),

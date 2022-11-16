@@ -77,7 +77,7 @@ pub struct StandaloneOptions {
 impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
-            http_addr: Some("0.0.0.0:4000".to_string()),
+            http_addr: Some("127.0.0.1:4000".to_string()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
             postgres_options: Some(PostgresOptions::default()),
@@ -87,7 +87,7 @@ impl Default for StandaloneOptions {
             mode: Mode::Standalone,
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
-            datanode_mysql_addr: "0.0.0.0:3306".to_string(),
+            datanode_mysql_addr: "127.0.0.1:3306".to_string(),
             datanode_mysql_runtime_size: 4,
         }
     }
@@ -274,12 +274,15 @@ mod tests {
         let fe_opts = FrontendOptions::try_from(cmd).unwrap();
         assert_eq!(Mode::Standalone, fe_opts.mode);
         assert_eq!("127.0.0.1:3001".to_string(), fe_opts.datanode_rpc_addr);
-        assert_eq!(Some("0.0.0.0:4000".to_string()), fe_opts.http_addr);
+        assert_eq!(Some("127.0.0.1:4000".to_string()), fe_opts.http_addr);
         assert_eq!(
-            "0.0.0.0:4001".to_string(),
+            "127.0.0.1:4001".to_string(),
             fe_opts.grpc_options.unwrap().addr
         );
-        assert_eq!("0.0.0.0:4002", fe_opts.mysql_options.as_ref().unwrap().addr);
+        assert_eq!(
+            "127.0.0.1:4002",
+            fe_opts.mysql_options.as_ref().unwrap().addr
+        );
         assert_eq!(2, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
         assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
     }
