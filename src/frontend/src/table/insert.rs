@@ -29,7 +29,7 @@ use table::requests::InsertRequest;
 use super::DistTable;
 use crate::error;
 use crate::error::Result;
-use crate::mock::DatanodeInstance;
+use crate::table::scan::DatanodeInstance;
 
 impl DistTable {
     pub async fn dist_insert(

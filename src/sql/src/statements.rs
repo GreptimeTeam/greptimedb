@@ -74,7 +74,7 @@ fn parse_string_to_value(
     data_type: &ConcreteDataType,
 ) -> Result<Value> {
     ensure!(
-        data_type.is_string(),
+        data_type.stringifiable(),
         ColumnTypeMismatchSnafu {
             column_name,
             expect: data_type.clone(),

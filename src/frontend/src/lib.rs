@@ -22,7 +22,6 @@ pub mod frontend;
 pub mod grpc;
 pub mod influxdb;
 pub mod instance;
-pub(crate) mod mock;
 pub mod mysql;
 pub mod opentsdb;
 pub mod partitioning;

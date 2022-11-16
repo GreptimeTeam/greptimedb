@@ -126,9 +126,9 @@ mod tests {
             )),
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
-        assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
+        assert_eq!("0.0.0.0:3002".to_string(), options.bind_addr);
         assert_eq!("0.0.0.0:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
-        assert_eq!(30, options.datanode_lease_secs);
+        assert_eq!(15, options.datanode_lease_secs);
     }
 }

@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use client::Database;
+use common_error::prelude::BoxedError;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
@@ -40,7 +41,6 @@ use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
 use crate::error::{self, Error, Result};
-use crate::mock::{DatanodeInstance, TableScanPlan};
 use crate::partitioning::columns::RangeColumnsPartitionRule;
 use crate::partitioning::range::RangePartitionRule;
 use crate::partitioning::{
@@ -48,7 +48,10 @@ use crate::partitioning::{
 };
 use crate::spliter::WriteSpliter;
 use crate::table::route::TableRoutes;
+use crate::table::scan::{DatanodeInstance, TableScanPlan};
+
 pub mod insert;
+pub(crate) mod scan;
 
 #[derive(Clone)]
 pub struct DistTable {
@@ -399,7 +402,7 @@ impl PhysicalPlan for DistTableScan {
         _runtime: Arc<RuntimeEnv>,
     ) -> QueryResult<SendableRecordBatchStream> {
         let exec = &self.partition_execs[partition];
-        exec.maybe_init().await;
+        exec.maybe_init().await.map_err(BoxedError::new)?;
         Ok(exec.as_stream().await)
     }
 }
@@ -415,14 +418,14 @@ struct PartitionExec {
 }
 
 impl PartitionExec {
-    async fn maybe_init(&self) {
+    async fn maybe_init(&self) -> Result<()> {
         if self.batches.read().await.is_some() {
-            return;
+            return Ok(());
         }
 
         let mut batches = self.batches.write().await;
         if batches.is_some() {
-            return;
+            return Ok(());
         }
 
         let plan = TableScanPlan {
@@ -431,8 +434,9 @@ impl PartitionExec {
             filters: self.filters.clone(),
             limit: self.limit,
         };
-        let result = self.datanode_instance.grpc_table_scan(plan).await;
+        let result = self.datanode_instance.grpc_table_scan(plan).await?;
         let _ = batches.insert(result);
+        Ok(())
     }
 
     async fn as_stream(&self) -> SendableRecordBatchStream {

@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// FIXME(LFC): no mock
-
 use std::fmt::Formatter;
 use std::sync::Arc;
 
@@ -28,8 +26,11 @@ use datatypes::prelude::*;
 use datatypes::schema::SchemaRef;
 use meta_client::rpc::TableName;
 use query::plan::LogicalPlan;
+use snafu::ResultExt;
 use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
+
+use crate::error::{self, Result};
 
 #[derive(Clone)]
 pub struct DatanodeInstance {
@@ -52,25 +53,33 @@ impl DatanodeInstance {
         self.db.insert(request).await
     }
 
-    pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> RecordBatches {
-        let logical_plan = self.build_logical_plan(&plan);
-        common_telemetry::info!("logical_plan: {:?}", logical_plan);
+    pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> Result<RecordBatches> {
+        let logical_plan = self.build_logical_plan(&plan)?;
+
         // TODO(LFC): Directly pass in logical plan to GRPC interface when our substrait codec supports filter.
-        let sql = to_sql(logical_plan);
-        let result = self.db.select(Select::Sql(sql)).await.unwrap();
+        let sql = to_sql(logical_plan)?;
 
-        let output: Output = result.try_into().unwrap();
-        let recordbatches = match output {
-            Output::Stream(stream) => util::collect(stream).await.unwrap(),
-            Output::RecordBatches(x) => x.take(),
+        let output = self
+            .db
+            .select(Select::Sql(sql))
+            .await
+            .and_then(Output::try_from)
+            .context(error::SelectSnafu)?;
+
+        Ok(match output {
+            Output::Stream(stream) => {
+                let schema = stream.schema();
+                let batches = util::collect(stream)
+                    .await
+                    .context(error::CollectRecordbatchStreamSnafu)?;
+                RecordBatches::try_new(schema, batches).context(error::CreateRecordbatchesSnafu)?
+            }
+            Output::RecordBatches(x) => x,
             _ => unreachable!(),
-        };
-
-        let schema = recordbatches.first().unwrap().schema.clone();
-        RecordBatches::try_new(schema, recordbatches).unwrap()
+        })
     }
 
-    fn build_logical_plan(&self, table_scan: &TableScanPlan) -> LogicalPlan {
+    fn build_logical_plan(&self, table_scan: &TableScanPlan) -> Result<LogicalPlan> {
         let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
 
         let mut builder = LogicalPlanBuilder::scan_with_filters(
@@ -83,13 +92,16 @@ impl DatanodeInstance {
                 .map(|x| x.df_expr().clone())
                 .collect::<Vec<_>>(),
         )
-        .unwrap();
+        .context(error::BuildDfLogicalPlanSnafu)?;
+
         if let Some(limit) = table_scan.limit {
-            builder = builder.limit(limit).unwrap();
+            builder = builder
+                .limit(limit)
+                .context(error::BuildDfLogicalPlanSnafu)?;
         }
 
-        let plan = builder.build().unwrap();
-        LogicalPlan::DfPlan(plan)
+        let plan = builder.build().context(error::BuildDfLogicalPlanSnafu)?;
+        Ok(LogicalPlan::DfPlan(plan))
     }
 }
 
@@ -101,14 +113,20 @@ pub(crate) struct TableScanPlan {
     pub limit: Option<usize>,
 }
 
-fn to_sql(plan: LogicalPlan) -> String {
+fn to_sql(plan: LogicalPlan) -> Result<String> {
     let LogicalPlan::DfPlan(plan) = plan;
     let table_scan = match plan {
         DfLogicPlan::TableScan(table_scan) => table_scan,
         _ => unreachable!("unknown plan: {:?}", plan),
     };
 
-    let schema: SchemaRef = Arc::new(table_scan.source.schema().try_into().unwrap());
+    let schema: SchemaRef = Arc::new(
+        table_scan
+            .source
+            .schema()
+            .try_into()
+            .context(error::ConvertArrowSchemaSnafu)?,
+    );
     let projection = table_scan
         .projection
         .map(|x| {
@@ -131,7 +149,7 @@ fn to_sql(plan: LogicalPlan) -> String {
         .filters
         .iter()
         .map(expr_to_sql)
-        .collect::<Vec<String>>()
+        .collect::<Result<Vec<String>>>()?
         .join(" AND ");
     if !filters.is_empty() {
         sql.push_str(" where ");
@@ -142,24 +160,25 @@ fn to_sql(plan: LogicalPlan) -> String {
         sql.push_str(" limit ");
         sql.push_str(&limit.to_string());
     }
-    sql
+    Ok(sql)
 }
 
-fn expr_to_sql(expr: &DfExpr) -> String {
-    match expr {
+fn expr_to_sql(expr: &DfExpr) -> Result<String> {
+    Ok(match expr {
         DfExpr::BinaryExpr {
             ref left,
             ref right,
             ref op,
         } => format!(
             "{} {} {}",
-            expr_to_sql(left.as_ref()),
+            expr_to_sql(left.as_ref())?,
             op,
-            expr_to_sql(right.as_ref())
+            expr_to_sql(right.as_ref())?
         ),
         DfExpr::Column(c) => c.name.clone(),
         DfExpr::Literal(sv) => {
-            let v: Value = Value::try_from(sv.clone()).unwrap();
+            let v: Value = Value::try_from(sv.clone())
+                .with_context(|_| error::ConvertScalarValueSnafu { value: sv.clone() })?;
             if matches!(v.data_type(), ConcreteDataType::String(_)) {
                 format!("'{}'", sv)
             } else {
@@ -167,5 +186,5 @@ fn expr_to_sql(expr: &DfExpr) -> String {
             }
         }
         _ => unimplemented!("not implemented for {:?}", expr),
-    }
+    })
 }
