@@ -1,7 +1,7 @@
 node_id = 0
 mode = 'standalone'
-http_addr = '0.0.0.0:4000'
-datanode_mysql_addr = '0.0.0.0:3306'
+http_addr = '127.0.0.01:4000'
+datanode_mysql_addr = '127.0.0.01:3306'
 datanode_mysql_runtime_size = 4
 wal_dir = '/tmp/greptimedb/wal/'
 
@@ -10,18 +10,18 @@ type = 'File'
 data_dir = '/tmp/greptimedb/data/'
 
 [grpc_options]
-addr = '0.0.0.0:4001'
+addr = '127.0.0.01:4001'
 runtime_size = 8
 
 [mysql_options]
-addr = '0.0.0.0:4002'
+addr = '127.0.0.01:4002'
 runtime_size = 2
 
 [influxdb_options]
 enable = true
 
 [opentsdb_options]
-addr = '0.0.0.0:4242'
+addr = '127.0.0.01:4242'
 enable = true
 runtime_size = 2
 
@@ -29,6 +29,6 @@ runtime_size = 2
 enable = true
 
 [postgres_options]
-addr = '0.0.0.0:4003'
+addr = '127.0.0.01:4003'
 runtime_size = 2
 check_pwd = false

@@ -24,7 +24,7 @@ pub struct PostgresOptions {
 impl Default for PostgresOptions {
     fn default() -> Self {
         Self {
-            addr: "0.0.0.0:4003".to_string(),
+            addr: "127.0.0.01:4003".to_string(),
             runtime_size: 2,
             check_pwd: false,
         }

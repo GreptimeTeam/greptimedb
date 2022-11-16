@@ -23,7 +23,7 @@ pub struct OpentsdbOptions {
 impl Default for OpentsdbOptions {
     fn default() -> Self {
         Self {
-            addr: "0.0.0.0:4242".to_string(),
+            addr: "127.0.0.01:4242".to_string(),
             runtime_size: 2,
         }
     }

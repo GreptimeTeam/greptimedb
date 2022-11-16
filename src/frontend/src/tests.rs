@@ -69,8 +69,8 @@ pub(crate) async fn create_datanode_client(
     // Move client to an option so we can _move_ the inner value
     // on the first attempt to connect. All other attempts will fail.
     let mut client = Some(client);
-    // "0.0.0.0:3001" is just a placeholder, does not actually connect to it.
-    let addr = "0.0.0.0:3001";
+    // "127.0.0.01:3001" is just a placeholder, does not actually connect to it.
+    let addr = "127.0.0.01:3001";
     let channel_manager = ChannelManager::new();
     channel_manager
         .reset_with_connector(
