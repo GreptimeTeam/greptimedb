@@ -24,7 +24,7 @@ use common_query::Output;
 use common_recordbatch::{util, RecordBatches};
 use datafusion::logical_plan::{LogicalPlan as DfLogicPlan, LogicalPlanBuilder};
 use datafusion_expr::Expr as DfExpr;
-use datatypes::prelude::Value;
+use datatypes::prelude::*;
 use datatypes::schema::SchemaRef;
 use meta_client::rpc::TableName;
 use query::plan::LogicalPlan;
@@ -160,7 +160,7 @@ fn expr_to_sql(expr: &DfExpr) -> String {
         DfExpr::Column(c) => c.name.clone(),
         DfExpr::Literal(sv) => {
             let v: Value = Value::try_from(sv.clone()).unwrap();
-            if v.data_type().is_string() {
+            if matches!(v.data_type(), ConcreteDataType::String(_)) {
                 format!("'{}'", sv)
             } else {
                 format!("{}", sv)
