@@ -1,7 +1,6 @@
 ---
 name: Enhancement
 description: Suggest an enhancement to existing functionality
-title: "[Enhancement]: <Title>"
 labels: [ "enhancement" ]
 body:
   - type: dropdown
