@@ -377,8 +377,8 @@ mod tests {
     use storage::EngineImpl;
     use table::metadata::TableType;
     use table::metadata::TableType::Base;
-    use table_engine::config::EngineConfig;
-    use table_engine::engine::MitoEngine;
+    use mito::config::EngineConfig;
+    use mito::engine::MitoEngine;
     use tempdir::TempDir;
 
     use super::*;

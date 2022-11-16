@@ -807,6 +807,7 @@ dependencies = [
  "lazy_static",
  "log-store",
  "meta-client",
+ "mito",
  "object-store",
  "opendal",
  "regex",
@@ -815,7 +816,6 @@ dependencies = [
  "snafu",
  "storage",
  "table",
- "table-engine",
  "tempdir",
  "tokio",
 ]
@@ -1739,6 +1739,7 @@ dependencies = [
  "meta-client",
  "meta-srv",
  "metrics",
+ "mito",
  "object-store",
  "query",
  "script",
@@ -1751,7 +1752,6 @@ dependencies = [
  "store-api",
  "substrait 0.1.0",
  "table",
- "table-engine",
  "tempdir",
  "tokio",
  "tokio-stream",
@@ -3185,6 +3185,36 @@ dependencies = [
  "log",
  "wasi 0.11.0+wasi-snapshot-preview1",
  "windows-sys",
+]
+
+[[package]]
+name = "mito"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "common-catalog",
+ "common-error",
+ "common-query",
+ "common-recordbatch",
+ "common-telemetry",
+ "common-time",
+ "datafusion",
+ "datafusion-common",
+ "datatypes",
+ "futures",
+ "log-store",
+ "object-store",
+ "serde",
+ "serde_json",
+ "snafu",
+ "storage",
+ "store-api",
+ "table",
+ "tempdir",
+ "tokio",
 ]
 
 [[package]]
@@ -5092,6 +5122,7 @@ dependencies = [
  "futures",
  "futures-util",
  "log-store",
+ "mito",
  "paste",
  "query",
  "ron",
@@ -5106,7 +5137,6 @@ dependencies = [
  "sql",
  "storage",
  "table",
- "table-engine",
  "tempdir",
  "tokio",
  "tokio-test",
@@ -5469,10 +5499,10 @@ dependencies = [
  "common-time",
  "datatypes",
  "itertools",
+ "mito",
  "once_cell",
  "snafu",
  "sqlparser",
- "table-engine",
 ]
 
 [[package]]
@@ -5776,36 +5806,6 @@ dependencies = [
  "tempdir",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "table-engine"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "async-stream",
- "async-trait",
- "chrono",
- "common-catalog",
- "common-error",
- "common-query",
- "common-recordbatch",
- "common-telemetry",
- "common-time",
- "datafusion",
- "datafusion-common",
- "datatypes",
- "futures",
- "log-store",
- "object-store",
- "serde",
- "serde_json",
- "snafu",
- "storage",
- "store-api",
- "table",
- "tempdir",
- "tokio",
 ]
 
 [[package]]

@@ -24,7 +24,7 @@ use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::metadata::TableId;
 use table::table::{TableIdProvider, TableIdProviderRef};
-use table_engine::config::EngineConfig as TableEngineConfig;
+use mito::config::EngineConfig as TableEngineConfig;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::Result;
@@ -38,7 +38,7 @@ impl Instance {
     // This method is used in other crate's testing codes, so move it out of "cfg(test)".
     // TODO(LFC): Delete it when callers no longer need it.
     pub async fn new_mock() -> Result<Self> {
-        use table_engine::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
+        use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 
         let mock_info = meta_srv::mocks::mock_with_memstore().await;
         let meta_client = Some(Arc::new(mock_meta_client(mock_info, 0).await));

@@ -23,8 +23,8 @@ use frontend::frontend::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::CreateTableRequest;
-use table_engine::config::EngineConfig;
-use table_engine::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
+use mito::config::EngineConfig;
+use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use tempdir::TempDir;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};

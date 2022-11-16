@@ -33,8 +33,8 @@ use snafu::prelude::*;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::table::TableIdProviderRef;
-use table_engine::config::EngineConfig as TableEngineConfig;
-use table_engine::engine::MitoEngine;
+use mito::config::EngineConfig as TableEngineConfig;
+use mito::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{self, CatalogSnafu, MetaClientInitSnafu, NewCatalogSnafu, Result};

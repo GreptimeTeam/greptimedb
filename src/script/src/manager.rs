@@ -97,8 +97,8 @@ impl ScriptManager {
 mod tests {
     use catalog::CatalogManager;
     use query::QueryEngineFactory;
-    use table_engine::config::EngineConfig as TableEngineConfig;
-    use table_engine::table::test_util::new_test_object_store;
+    use mito::config::EngineConfig as TableEngineConfig;
+    use mito::table::test_util::new_test_object_store;
 
     use super::*;
     type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
@@ -106,7 +106,7 @@ mod tests {
     use log_store::fs::log::LocalFileLogStore;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
-    use table_engine::engine::MitoEngine;
+    use mito::engine::MitoEngine;
     use tempdir::TempDir;
 
     #[tokio::test]

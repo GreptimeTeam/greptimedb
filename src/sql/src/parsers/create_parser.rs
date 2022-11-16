@@ -21,7 +21,7 @@ use sqlparser::ast::Value;
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::tokenizer::{Token, Word};
-use table_engine::engine;
+use mito::engine;
 
 use crate::ast::{ColumnDef, Ident, TableConstraint, Value as SqlValue};
 use crate::error::{self, InvalidTimeIndexSnafu, Result, SyntaxSnafu};

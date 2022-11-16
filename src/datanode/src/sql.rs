@@ -106,8 +106,8 @@ mod tests {
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
     use table::{Table, TableRef};
-    use table_engine::config::EngineConfig as TableEngineConfig;
-    use table_engine::engine::MitoEngine;
+    use mito::config::EngineConfig as TableEngineConfig;
+    use mito::engine::MitoEngine;
     use tempdir::TempDir;
 
     use super::*;

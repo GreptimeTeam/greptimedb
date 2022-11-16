@@ -46,7 +46,7 @@ storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 substrait = { path = "../common/substrait" }
 table = { path = "../table" }
-table-engine = { path = "../table-engine", features = ["test"] }
+mito = { path = "../mito", features = ["test"] }
 tokio = { version = "1.18", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"
