@@ -97,6 +97,8 @@ mod tests {
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
     use log_store::fs::noop::NoopLogStore;
+    use mito::config::EngineConfig as TableEngineConfig;
+    use mito::engine::MitoEngine;
     use object_store::services::fs::Builder;
     use object_store::ObjectStore;
     use query::QueryEngineFactory;
@@ -106,8 +108,6 @@ mod tests {
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
     use table::{Table, TableRef};
-    use mito::config::EngineConfig as TableEngineConfig;
-    use mito::engine::MitoEngine;
     use tempdir::TempDir;
 
     use super::*;

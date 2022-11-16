@@ -20,11 +20,11 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use frontend::frontend::Mode;
+use mito::config::EngineConfig;
+use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::CreateTableRequest;
-use mito::config::EngineConfig;
-use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use tempdir::TempDir;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};

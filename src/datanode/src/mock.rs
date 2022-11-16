@@ -19,12 +19,12 @@ use catalog::remote::MetaKvBackend;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_srv::mocks::MockInfo;
+use mito::config::EngineConfig as TableEngineConfig;
 use query::QueryEngineFactory;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::metadata::TableId;
 use table::table::{TableIdProvider, TableIdProviderRef};
-use mito::config::EngineConfig as TableEngineConfig;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::Result;

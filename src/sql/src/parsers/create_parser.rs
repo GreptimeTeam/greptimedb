@@ -15,13 +15,13 @@
 use std::cmp::Ordering;
 
 use itertools::Itertools;
+use mito::engine;
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::Value;
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::tokenizer::{Token, Word};
-use mito::engine;
 
 use crate::ast::{ColumnDef, Ident, TableConstraint, Value as SqlValue};
 use crate::error::{self, InvalidTimeIndexSnafu, Result, SyntaxSnafu};
