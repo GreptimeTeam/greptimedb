@@ -58,7 +58,7 @@ log-store = { path = "../log-store" }
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 storage = { path = "../storage" }
-table-engine = { path = "../table-engine", features = ["test"] }
+mito = { path = "../mito", features = ["test"] }
 tempdir = "0.3"
 tokio = { version = "1.18", features = ["full"] }
 tokio-test = "0.4"

@@ -42,6 +42,6 @@ log-store = { path = "../log-store" }
 object-store = { path = "../object-store" }
 opendal = "0.17"
 storage = { path = "../storage" }
-table-engine = { path = "../table-engine" }
+mito = { path = "../mito" }
 tempdir = "0.3"
 tokio = { version = "1.0", features = ["full"] }

@@ -64,7 +64,7 @@ fn table_dir(schema_name: &str, table_name: &str) -> String {
 /// [TableEngine] implementation.
 ///
 /// About mito <https://en.wikipedia.org/wiki/Alfa_Romeo_MiTo>.
-/// "you can't be a true petrolhead until you've owned an Alfa Romeo" -- by Jeremy Clarkson
+/// "You can't be a true petrolhead until you've owned an Alfa Romeo." -- by Jeremy Clarkson
 #[derive(Clone)]
 pub struct MitoEngine<S: StorageEngine> {
     inner: Arc<MitoEngineInner<S>>,

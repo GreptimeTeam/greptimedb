@@ -25,6 +25,8 @@ use log_store::fs::config::LogConfig;
 use log_store::fs::log::LocalFileLogStore;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
+use mito::config::EngineConfig as TableEngineConfig;
+use mito::engine::MitoEngine;
 use object_store::layers::LoggingLayer;
 use object_store::services::fs::Builder;
 use object_store::{util, ObjectStore};
@@ -33,8 +35,6 @@ use snafu::prelude::*;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::table::TableIdProviderRef;
-use table_engine::config::EngineConfig as TableEngineConfig;
-use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
