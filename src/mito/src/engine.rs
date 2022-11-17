@@ -952,7 +952,7 @@ mod tests {
             catalog_name: None,
             schema_name: None,
             table_name: TABLE_NAME.to_string(),
-            alter_kind: AlterKind::RemoveColumns {
+            alter_kind: AlterKind::DropColumns {
                 names: vec![String::from("memory"), String::from("my_field")],
             },
         };

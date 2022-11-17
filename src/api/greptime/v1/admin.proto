@@ -51,6 +51,7 @@ message AlterExpr {
   string table_name = 3;
   oneof kind {
     AddColumns add_columns = 4;
+    DropColumns drop_columns = 5;
   }
 }
 
@@ -58,9 +59,17 @@ message AddColumns {
   repeated AddColumn add_columns = 1;
 }
 
+message DropColumns {
+  repeated DropColumn drop_columns = 1;
+}
+
 message AddColumn {
   ColumnDef column_def = 1;
   bool is_key = 2;
+}
+
+message DropColumn {
+  string name = 1;
 }
 
 message CreateDatabaseExpr {

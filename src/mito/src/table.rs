@@ -481,7 +481,7 @@ fn create_alter_operation(
         AlterKind::AddColumns { columns } => {
             create_add_columns_operation(table_name, columns, table_meta)
         }
-        AlterKind::RemoveColumns { names } => Ok(AlterOperation::DropColumns {
+        AlterKind::DropColumns { names } => Ok(AlterOperation::DropColumns {
             names: names.to_vec(),
         }),
     }
