@@ -413,6 +413,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
+
+    #[snafu(display("Missing meta_client_opts section in config"))]
+    MissingMetasrvOpts { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -496,6 +499,7 @@ impl ErrorExt for Error {
             Error::CollectRecordbatchStream { source } | Error::CreateRecordbatches { source } => {
                 source.status_code()
             }
+            Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
         }
     }
 

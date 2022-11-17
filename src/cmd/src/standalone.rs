@@ -105,7 +105,7 @@ impl StandaloneOptions {
             prometheus_options: self.prometheus_options,
             mode: self.mode,
             datanode_rpc_addr: "127.0.0.1:3001".to_string(),
-            metasrv_addr: None,
+            meta_client_opts: None,
         }
     }
 

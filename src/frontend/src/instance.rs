@@ -60,7 +60,8 @@ use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterTableOnInsertionSnafu, AlterTableSnafu, CatalogNotFoundSnafu, CatalogSnafu,
     CreateDatabaseSnafu, CreateTableSnafu, DeserializeInsertBatchSnafu,
-    FindNewColumnsOnInsertionSnafu, InsertSnafu, Result, SchemaNotFoundSnafu, SelectSnafu,
+    FindNewColumnsOnInsertionSnafu, InsertSnafu, MissingMetasrvOptsSnafu, Result,
+    SchemaNotFoundSnafu, SelectSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::{FrontendOptions, Mode};
@@ -129,10 +130,11 @@ impl Instance {
         instance.dist_instance = match &opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => {
-                let metasrv_addr = opts
-                    .metasrv_addr
-                    .clone()
-                    .expect("Forgot to set metasrv_addr");
+                let metasrv_addr = &opts
+                    .meta_client_opts
+                    .as_ref()
+                    .context(MissingMetasrvOptsSnafu)?
+                    .metasrv_addrs;
                 info!(
                     "Creating Frontend instance in distributed mode with Meta server addr {:?}",
                     metasrv_addr
