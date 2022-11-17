@@ -15,13 +15,19 @@
 /// SQL structure for `DESCRIBE TABLE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeTable {
+    pub catalog_name: String,
+    pub schema_name: String,
     pub table_name: String,
 }
 
 impl DescribeTable {
-    /// Creates a statement for `DESCRIBE tABLE`
-    pub fn new(table_name: String) -> Self {
-        DescribeTable { table_name }
+    /// Creates a statement for `DESCRIBE TABLE`
+    pub fn new(catalog_name: String, schema_name: String, table_name: String) -> Self {
+        DescribeTable {
+            catalog_name,
+            schema_name,
+            table_name,
+        }
     }
 }
 
@@ -35,7 +41,7 @@ mod tests {
     use crate::statements::statement::Statement;
 
     #[test]
-    pub fn test_show_create_table() {
+    pub fn test_describe_table() {
         let sql = "DESCRIBE TABLE test";
         let stmts: Vec<Statement> =
             ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
@@ -43,16 +49,53 @@ mod tests {
         assert_matches!(&stmts[0], Statement::DescribeTable { .. });
         match &stmts[0] {
             Statement::DescribeTable(show) => {
-                let table_name = show.table_name.as_str();
-                assert_eq!(table_name, "test");
+                assert_eq!(show.table_name.as_str(), "test");
             }
             _ => {
                 unreachable!();
             }
         }
     }
+
     #[test]
-    pub fn test_show_create_missing_table_name() {
+    pub fn test_describe_schema_table() {
+        let sql = "DESCRIBE TABLE test_schema.test";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::DescribeTable { .. });
+        match &stmts[0] {
+            Statement::DescribeTable(show) => {
+                assert_eq!(show.schema_name.as_str(), "test_schema");
+                assert_eq!(show.table_name.as_str(), "test");
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    pub fn test_describe_catalog_schema_table() {
+        let sql = "DESCRIBE TABLE test_catalog.test_schema.test";
+        let stmts: Vec<Statement> =
+            ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::DescribeTable { .. });
+        match &stmts[0] {
+            Statement::DescribeTable(show) => {
+                assert_eq!(show.catalog_name.as_str(), "test_catalog");
+                assert_eq!(show.schema_name.as_str(), "test_schema");
+                assert_eq!(show.table_name.as_str(), "test");
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    pub fn test_describe_missing_table_name() {
         let sql = "DESCRIBE TABLE";
         ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap_err();
     }

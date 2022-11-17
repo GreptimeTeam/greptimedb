@@ -108,9 +108,10 @@ pub fn show_tables(stmt: ShowTables, catalog_manager: CatalogManagerRef) -> Resu
 }
 
 pub fn describe_table(stmt: DescribeTable, catalog_manager: CatalogManagerRef) -> Result<Output> {
-    let schema = DEFAULT_SCHEMA_NAME;
+    let catalog = stmt.catalog_name.as_str();
+    let schema = stmt.schema_name.as_str();
     let schema = catalog_manager
-        .schema(DEFAULT_CATALOG_NAME, schema)
+        .schema(catalog, schema)
         .context(error::CatalogSnafu)?
         .context(error::SchemaNotFoundSnafu { schema })?;
     let table = schema
