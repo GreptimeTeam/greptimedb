@@ -185,7 +185,7 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Invalid table info in catalog, source: {:?}", source))]
+    #[snafu(display("Invalid table info in catalog, source: {}", source))]
     InvalidTableInfoInCatalog {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
