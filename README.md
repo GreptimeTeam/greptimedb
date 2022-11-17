@@ -172,7 +172,7 @@ community, please check out:
 
 In addition, you may:
 
-- View our official [Blog](https://greptime.com/blog)
+- View our official [Blog](https://greptime.com/blogs/index)
 - Connect us with [Linkedin](https://www.linkedin.com/company/greptime/)
 - Follow us on [Twitter](https://twitter.com/greptime)
 
