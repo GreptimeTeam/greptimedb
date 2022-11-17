@@ -184,8 +184,7 @@ async fn fetch_tables(
         }
         let tv = tv.unwrap();
 
-        let table_id = tv.id as u64;
-        let tr_key = TableRouteKey::with_table_global_key(table_id, &tk);
+        let tr_key = TableRouteKey::with_table_global_key(tv.table_id() as u64, &tk);
         let tr = get_table_route_value(kv_store, &tr_key).await?;
 
         tables.push((tv, tr));
