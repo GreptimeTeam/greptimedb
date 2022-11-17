@@ -185,8 +185,8 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Invalid table schema in catalog, source: {:?}", source))]
-    InvalidSchemaInCatalog {
+    #[snafu(display("Invalid table info in catalog, source: {:?}", source))]
+    InvalidTableInfoInCatalog {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
@@ -233,7 +233,7 @@ impl ErrorExt for Error {
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableSchema { source, .. } => source.status_code(),
-            Error::InvalidSchemaInCatalog { .. } => StatusCode::Unexpected,
+            Error::InvalidTableInfoInCatalog { .. } => StatusCode::Unexpected,
             Error::Internal { source, .. } => source.status_code(),
         }
     }
