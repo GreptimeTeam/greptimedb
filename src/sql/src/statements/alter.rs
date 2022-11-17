@@ -75,9 +75,7 @@ impl TryFrom<AlterTable> for AlterExpr {
             }
             AlterTableOperation::DropColumn { name } => {
                 alter_expr::Kind::DropColumns(api::v1::DropColumns {
-                    drop_columns: vec![DropColumn {
-                        name: name.value.clone(),
-                    }],
+                    drop_columns: vec![DropColumn { name: name.value }],
                 })
             }
         };

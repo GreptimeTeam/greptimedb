@@ -102,7 +102,13 @@ mod tests {
 
     #[test]
     fn test_parse_alter_drop_column() {
-        let sql = "ALTER TABLE my_metric_1 DROP column a";
+        let sql = "ALTER TABLE my_metric_1 DROP a";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap_err();
+        assert!(result
+            .to_string()
+            .contains("expect keyword COLUMN after DROP"));
+
+        let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
         let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
         assert_eq!(1, result.len());
 
