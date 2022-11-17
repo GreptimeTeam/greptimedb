@@ -53,8 +53,10 @@ To compile GreptimeDB from source, you'll need:
   install correct Rust version for you.
 - Protobuf: `protoc` is required for compiling `.proto` files. `protobuf` is
   available from major package manager on macos and linux distributions. You can
-  find an installation instructions
-  [here](https://grpc.io/docs/protoc-installation/).
+  find an installation instructions [here](https://grpc.io/docs/protoc-installation/).
+  **Note that `protoc` version should >= 3.15** because we have used the `optional`
+  keyword. You can check it with `protoc --version`.
+  
 
 #### Build with Docker
 
