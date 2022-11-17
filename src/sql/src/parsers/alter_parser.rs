@@ -47,7 +47,7 @@ impl<'a> ParserContext<'a> {
                 AlterTableOperation::DropColumn { name }
             } else {
                 return Err(ParserError::ParserError(format!(
-                    "expect keyword COLUMN after DROP, found {}",
+                    "expect keyword COLUMN after ALTER TABLE DROP, found {}",
                     parser.peek_token()
                 )));
             }
