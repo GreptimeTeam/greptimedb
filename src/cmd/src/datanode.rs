@@ -152,7 +152,7 @@ mod tests {
             tcp_nodelay,
         } = options.meta_client_opts.unwrap();
 
-        assert_eq!(vec!["1.1.1.1:3002".to_string()], metasrv_addr);
+        assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
         assert_eq!(5000, connect_timeout_millis);
         assert_eq!(3000, timeout_millis);
         assert!(!tcp_nodelay);
@@ -230,7 +230,7 @@ mod tests {
             connect_timeout_millis,
             tcp_nodelay,
         } = dn_opts.meta_client_opts.unwrap();
-        assert_eq!(vec!["1.1.1.1:3002".to_string()], metasrv_addr);
+        assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
         assert_eq!(3000, timeout_millis);
         assert_eq!(5000, connect_timeout_millis);
         assert!(!tcp_nodelay);
