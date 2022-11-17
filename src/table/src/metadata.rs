@@ -576,7 +576,7 @@ mod tests {
         // Add more columns so we have enough candidate columns to remove.
         let meta = add_columns_to_meta(&meta);
 
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("col2"), String::from("my_field")],
         };
         let new_meta = meta
@@ -625,7 +625,7 @@ mod tests {
             .unwrap();
 
         // Remove columns in reverse order to test whether timestamp index is valid.
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("col3"), String::from("col1")],
         };
         let new_meta = meta
@@ -685,7 +685,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("unknown")],
         };
 
@@ -708,7 +708,7 @@ mod tests {
             .unwrap();
 
         // Remove column in primary key.
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("col1")],
         };
 
@@ -719,7 +719,7 @@ mod tests {
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
 
         // Remove timestamp column.
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("ts")],
         };
 
