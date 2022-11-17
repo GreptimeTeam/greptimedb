@@ -106,7 +106,7 @@ mod tests {
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap_err();
         assert!(result
             .to_string()
-            .contains("expect keyword COLUMN after DROP"));
+            .contains("expect keyword COLUMN after ALTER TABLE DROP"));
 
         let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
         let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
