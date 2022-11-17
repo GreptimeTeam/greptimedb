@@ -114,7 +114,10 @@ about Kubernetes deployment, check our [docs](https://docs.greptime.com/).
 4. Query the data:
 
    ```SQL
-   mysql> SELECT * FROM monitor;
+   SELECT * FROM monitor;
+   ```
+
+   ```TEXT
    +-------+---------------------+------+--------+
    | host  | ts                  | cpu  | memory |
    +-------+---------------------+------+--------+
