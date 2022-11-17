@@ -21,6 +21,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use crate::error::{
     self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu, TokenizerSnafu,
 };
+use crate::statements::describe::DescribeTable;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
 
@@ -83,6 +84,11 @@ impl<'a> ParserContext<'a> {
                     Keyword::SHOW => {
                         self.parser.next_token();
                         self.parse_show()
+                    }
+
+                    Keyword::DESCRIBE | Keyword::DESC => {
+                        self.parser.next_token();
+                        self.parse_describe()
                     }
 
                     Keyword::INSERT => self.parse_insert(),
@@ -215,6 +221,36 @@ impl<'a> ParserContext<'a> {
         };
 
         Ok(Statement::ShowTables(ShowTables { kind, database }))
+    }
+
+    /// Parses DESCRIBE statements
+    fn parse_describe(&mut self) -> Result<Statement> {
+        if self.matches_keyword(Keyword::TABLE) {
+            self.parser.next_token();
+            self.parse_describe_table()
+        } else {
+            self.unsupported(self.peek_token_as_string())
+        }
+    }
+
+    fn parse_describe_table(&mut self) -> Result<Statement> {
+        let table_name =
+            self.parser
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a table name",
+                    actual: self.peek_token_as_string(),
+                })?;
+        ensure!(
+            !table_name.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: table_name.to_string(),
+            }
+        );
+        Ok(Statement::DescribeTable(DescribeTable {
+            table_name: table_name.to_string(),
+        }))
     }
 
     fn parse_explain(&mut self) -> Result<Statement> {

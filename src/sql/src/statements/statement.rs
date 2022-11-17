@@ -17,6 +17,7 @@ use sqlparser::parser::ParserError;
 
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
+use crate::statements::describe::DescribeTable;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
@@ -40,6 +41,8 @@ pub enum Statement {
     ShowTables(ShowTables),
     // SHOW CREATE TABLE
     ShowCreateTable(ShowCreateTable),
+    // DESCRIBE TABLE
+    DescribeTable(DescribeTable),
 }
 
 /// Converts Statement to sqlparser statement
@@ -56,6 +59,9 @@ impl TryFrom<Statement> for SpStatement {
             )),
             Statement::ShowCreateTable(_) => Err(ParserError::ParserError(
                 "sqlparser does not support SHOW CREATE TABLE query.".to_string(),
+            )),
+            Statement::DescribeTable(_) => Err(ParserError::ParserError(
+                "sqlparser does not support DESCRIBE TABLE query.".to_string(),
             )),
             Statement::Query(s) => Ok(SpStatement::Query(Box::new(s.inner))),
             Statement::Insert(i) => Ok(i.inner),

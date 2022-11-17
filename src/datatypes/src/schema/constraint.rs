@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use common_time::util;
@@ -50,6 +51,15 @@ impl TryFrom<ColumnDefaultConstraint> for Vec<u8> {
     fn try_from(value: ColumnDefaultConstraint) -> std::result::Result<Self, Self::Error> {
         let s = serde_json::to_string(&value).context(error::SerializeSnafu)?;
         Ok(s.into_bytes())
+    }
+}
+
+impl Display for ColumnDefaultConstraint {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ColumnDefaultConstraint::Function(expr) => write!(f, "{}", expr),
+            ColumnDefaultConstraint::Value(v) => write!(f, "{}", v),
+        }
     }
 }
 
