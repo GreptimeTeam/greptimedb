@@ -2,12 +2,19 @@ on:
   push:
     tags:
       - "v*.*.*"
+  schedule:
+    # At 00:00 Everyday
+    # https://crontab.guru/every-day-at-midnight
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 name: Release
 
 env:
   RUST_TOOLCHAIN: nightly-2022-07-14
+
+  # FIXME(zyy17): It's better to fetch the latest tag from git, but for a long time, we will stay at 'v0.1.0-alpha-*'
+  NIGHTLY_BUILD_VERSION_PREFIX: v0.1.0-alpha
 
 jobs:
   build:
@@ -106,8 +113,25 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v3
 
+      - name: Configure nigthly build version # the version would be ${NIGHTLY_BUILD_VERSION_PREFIX}-YYYYMMDD-nightly, like v0.1.0-alpha-20221119-nightly.
+        shell: bash
+        if: github.event_name == 'schedule'
+        run: |
+          buildTime=`date "+%Y%m%d"`
+          NIGHTLY_VERSION=${{ env.NIGHTLY_BUILD_VERSION_PREFIX }}-$buildTime-nigthly
+          echo "VERSION=${NIGHTLY_VERSION}" >> $GITHUB_ENV
+
+      - name: Publish nigthly release # configure the different release title.
+        uses: softprops/action-gh-release@v1
+        if: github.event_name == 'schedule'
+        with:
+          name: "Release ${{ env.NIGHTLY_VERSION }}"
+          files: |
+            **/greptime-*
+
       - name: Publish release
         uses: softprops/action-gh-release@v1
+        if: github.event_name != 'schedule'
         with:
           name: "Release ${{ github.ref_name }}"
           files: |
@@ -158,8 +182,17 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Configure nigthly build image tag # the tag would be ${NIGHTLY_BUILD_VERSION_PREFIX}-YYYYMMDD-nightly
+        shell: bash
+        if: github.event_name == 'schedule'
+        run: |
+          buildTime=`date "+%Y%m%d"`
+          VERSION=${{ env.NIGHTLY_BUILD_VERSION_PREFIX }}-$buildTime-nigthly
+          echo "VERSION=${VERSION:1}" >> $GITHUB_ENV
+
       - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
         shell: bash
+        if: github.event_name != 'schedule'
         run: |
           VERSION=${{ github.ref_name }}
           echo "VERSION=${VERSION:1}" >> $GITHUB_ENV
