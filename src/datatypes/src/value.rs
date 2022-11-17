@@ -65,7 +65,7 @@ pub enum Value {
 
 impl Display for Value {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match *self {
+        match self {
             Value::Null => write!(f, "{}", self.data_type().name()),
             Value::Boolean(v) => write!(f, "{}", v),
             Value::UInt8(v) => write!(f, "{}", v),
@@ -78,8 +78,8 @@ impl Display for Value {
             Value::Int64(v) => write!(f, "{}", v),
             Value::Float32(v) => write!(f, "{}", v),
             Value::Float64(v) => write!(f, "{}", v),
-            Value::String(ref v) => write!(f, "{}", v.as_utf8()),
-            Value::Binary(ref v) => {
+            Value::String(v) => write!(f, "{}", v.as_utf8()),
+            Value::Binary(v) => {
                 let hex = v
                     .iter()
                     .map(|b| format!("{:02x}", b))
@@ -90,7 +90,7 @@ impl Display for Value {
             Value::Date(v) => write!(f, "{}", v),
             Value::DateTime(v) => write!(f, "{}", v),
             Value::Timestamp(v) => write!(f, "{}", v.to_iso8601_string()),
-            Value::List(ref v) => {
+            Value::List(v) => {
                 let default = Box::new(vec![]);
                 let items = v.items().as_ref().unwrap_or(&default);
                 let items = items
