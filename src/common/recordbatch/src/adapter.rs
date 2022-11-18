@@ -23,6 +23,7 @@ use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datafusion_common::DataFusionError;
 use datatypes::arrow::error::{ArrowError, Result as ArrowResult};
 use datatypes::schema::{Schema, SchemaRef};
+use futures::ready;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -147,34 +148,22 @@ impl Stream for AsyncRecordBatchStreamAdapter {
         loop {
             match &mut self.state {
                 AsyncRecordBatchStreamAdapterState::Uninit(stream_future) => {
-                    match Pin::new(stream_future).poll(cx) {
-                        Poll::Ready(stream) => {
-                            self.state = AsyncRecordBatchStreamAdapterState::Inited(stream);
-                            continue;
-                        }
-                        Poll::Pending => return Poll::Pending,
-                    }
+                    self.state = AsyncRecordBatchStreamAdapterState::Inited(ready!(Pin::new(
+                        stream_future
+                    )
+                    .poll(cx)));
+                    continue;
                 }
                 AsyncRecordBatchStreamAdapterState::Inited(stream) => match stream {
-                    Ok(stream) => match Pin::new(stream).poll_next(cx) {
-                        Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Some(df_recordbatch)) => {
-                            return Poll::Ready(Some(Ok(RecordBatch {
+                    Ok(stream) => {
+                        return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)).map(|df| {
+                            Ok(RecordBatch {
                                 schema: self.schema(),
-                                df_recordbatch: df_recordbatch.context(error::PollStreamSnafu)?,
-                            })))
-                        }
-                        Poll::Ready(None) => return Poll::Ready(None),
-                    },
-                    Err(e) => {
-                        return Poll::Ready(Some(
-                            error::CreateRecordBatchesSnafu {
-                                reason: format!("Read error {:?} from stream", e),
-                            }
-                            .fail()
-                            .map_err(|e| e.into()),
-                        ))
+                                df_recordbatch: df.context(error::PollStreamSnafu)?,
+                            })
+                        }));
                     }
+                    Err(_) => todo!(),
                 },
             }
         }
