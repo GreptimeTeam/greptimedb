@@ -17,7 +17,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
+use common_recordbatch::adapter::{AsyncRecordBatchStreamAdapter, DfRecordBatchStreamAdapter};
 use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
@@ -39,7 +39,6 @@ pub type PhysicalPlanRef = Arc<dyn PhysicalPlan>;
 /// creating the actual `async` [`SendableRecordBatchStream`]s
 /// of [`RecordBatch`] that incrementally compute the operator's
 /// output from its input partition.
-#[async_trait]
 pub trait PhysicalPlan: Debug + Send + Sync {
     /// Returns the physical plan as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.
@@ -61,7 +60,7 @@ pub trait PhysicalPlan: Debug + Send + Sync {
     fn with_new_children(&self, children: Vec<PhysicalPlanRef>) -> Result<PhysicalPlanRef>;
 
     /// Creates an RecordBatch stream.
-    async fn execute(
+    fn execute(
         &self,
         partition: usize,
         runtime: Arc<RuntimeEnv>,
@@ -84,7 +83,6 @@ impl PhysicalPlanAdapter {
     }
 }
 
-#[async_trait]
 impl PhysicalPlan for PhysicalPlanAdapter {
     fn as_any(&self) -> &dyn Any {
         self
@@ -118,18 +116,15 @@ impl PhysicalPlan for PhysicalPlanAdapter {
         Ok(Arc::new(PhysicalPlanAdapter::new(self.schema(), plan)))
     }
 
-    async fn execute(
+    fn execute(
         &self,
         partition: usize,
         runtime: Arc<RuntimeEnv>,
     ) -> Result<SendableRecordBatchStream> {
-        let stream = self
-            .df_plan
-            .execute(partition, runtime)
-            .await
-            .context(error::DataFusionExecutionPlanSnafu)?;
-        let stream = RecordBatchStreamAdapter::try_new(stream)
-            .context(error::ConvertDfRecordBatchStreamSnafu)?;
+        let df_plan = self.df_plan.clone();
+        let stream = Box::pin(async move { df_plan.execute(partition, runtime).await });
+        let stream = AsyncRecordBatchStreamAdapter::new(self.schema(), stream);
+
         Ok(Box::pin(stream))
     }
 }
@@ -187,7 +182,7 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
         partition: usize,
         runtime: Arc<RuntimeEnv>,
     ) -> DfResult<DfSendableRecordBatchStream> {
-        let stream = self.0.execute(partition, runtime).await?;
+        let stream = self.0.execute(partition, runtime)?;
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream)))
     }
 
@@ -250,7 +245,6 @@ mod test {
         schema: SchemaRef,
     }
 
-    #[async_trait]
     impl PhysicalPlan for MyExecutionPlan {
         fn as_any(&self) -> &dyn Any {
             self
@@ -272,7 +266,7 @@ mod test {
             unimplemented!()
         }
 
-        async fn execute(
+        fn execute(
             &self,
             _partition: usize,
             _runtime: Arc<RuntimeEnv>,

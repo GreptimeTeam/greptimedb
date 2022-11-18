@@ -219,7 +219,6 @@ impl QueryExecutor for DatafusionQueryEngine {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan
                 .execute(0, ctx.state().runtime())
-                .await
                 .context(error::ExecutePhysicalPlanSnafu)?),
             _ => {
                 // merge into a single partition
