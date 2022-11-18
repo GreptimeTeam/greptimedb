@@ -64,6 +64,7 @@ pub struct HttpServer {
     prom_handler: Option<PrometheusProtocolHandlerRef>,
     script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
+    request_timeout: Duration,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
@@ -279,6 +280,7 @@ impl HttpServer {
             prom_handler: None,
             script_handler: None,
             shutdown_tx: Mutex::new(None),
+            request_timeout: Duration::from_secs(30),
         }
     }
 
@@ -312,6 +314,10 @@ impl HttpServer {
             "Prometheus protocol handler can be set only once!"
         );
         self.prom_handler.get_or_insert(handler);
+    }
+
+    pub fn set_request_timeout(&mut self, timeout: Duration) {
+        self.request_timeout = timeout;
     }
 
     pub fn make_app(&self) -> Router {
@@ -386,7 +392,7 @@ impl HttpServer {
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
                     // TODO(LFC): make timeout configurable
-                    .layer(TimeoutLayer::new(Duration::from_secs(30)))
+                    .layer(TimeoutLayer::new(self.request_timeout))
                     // custom layer
                     .layer(middleware::from_fn(context::build_ctx)),
             )

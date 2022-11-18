@@ -294,10 +294,11 @@ mod tests {
         let fe_opts = FrontendOptions::try_from(cmd).unwrap();
         assert_eq!(Mode::Standalone, fe_opts.mode);
         assert_eq!("127.0.0.1:3001".to_string(), fe_opts.datanode_rpc_addr);
-        assert_eq!(
-            "127.0.0.1:4000".to_string(),
-            fe_opts.http_options.unwrap().addr
-        );
+
+        let http_opts = fe_opts.http_options.unwrap();
+        assert_eq!("127.0.0.1:4000".to_string(), http_opts.addr);
+        assert_eq!(Some(10), http_opts.request_timeout_seconds);
+
         assert_eq!(
             "127.0.0.1:4001".to_string(),
             fe_opts.grpc_options.unwrap().addr

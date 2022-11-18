@@ -14,6 +14,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
@@ -137,6 +138,10 @@ impl Services {
                 http_server.set_prom_handler(instance.clone());
             }
             http_server.set_script_handler(instance.clone());
+
+            if let Some(timeout) = http_opts.request_timeout_seconds {
+                http_server.set_request_timeout(Duration::from_secs(timeout));
+            }
 
             Some((Box::new(http_server) as _, http_addr))
         } else {

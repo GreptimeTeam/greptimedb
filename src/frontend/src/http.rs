@@ -17,12 +17,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HttpOptions {
     pub addr: String,
+    pub request_timeout_seconds: Option<u64>,
 }
 
 impl Default for HttpOptions {
     fn default() -> Self {
         Self {
             addr: "127.0.0.1:4000".to_string(),
+            request_timeout_seconds: Some(30),
         }
     }
 }
