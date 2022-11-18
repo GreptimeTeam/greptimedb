@@ -229,17 +229,33 @@ fn create_table_global_value(
     let node_id = region_routes[0]
         .leader_peer
         .as_ref()
-        .context(error::FindLeaderPeerSnafu {
+        .with_context(|| error::FindLeaderPeerSnafu {
             region: region_routes[0].region.id,
             table_name: table_name.to_string(),
         })?
         .id;
 
+    let mut regions_id_map = HashMap::new();
+    for route in region_routes.iter() {
+        let node_id = route
+            .leader_peer
+            .as_ref()
+            .with_context(|| error::FindLeaderPeerSnafu {
+                region: route.region.id,
+                table_name: table_name.to_string(),
+            })?
+            .id;
+        regions_id_map
+            .entry(node_id)
+            .or_insert_with(Vec::new)
+            .push(route.region.id as u32);
+    }
+
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
 
     for (idx, column) in create_table.column_defs.iter().enumerate() {
-        column_schemas.push(create_column_schema(column)?);
+        column_schemas.push(create_column_schema(column, &create_table.time_index)?);
         column_name_to_index_map.insert(column.name.clone(), idx);
     }
 
@@ -291,13 +307,13 @@ fn create_table_global_value(
 
     Ok(TableGlobalValue {
         node_id,
-        regions_id_map: HashMap::new(),
+        regions_id_map,
         table_info,
     })
 }
 
 // Remove this duplication in the future
-fn create_column_schema(column_def: &api::v1::ColumnDef) -> Result<ColumnSchema> {
+fn create_column_schema(column_def: &api::v1::ColumnDef, time_index: &str) -> Result<ColumnSchema> {
     let data_type =
         ColumnDataTypeWrapper::try_new(column_def.datatype).context(error::ColumnDataTypeSnafu)?;
     let default_constraint = match &column_def.default_constraint {
@@ -313,6 +329,7 @@ fn create_column_schema(column_def: &api::v1::ColumnDef) -> Result<ColumnSchema>
         data_type.into(),
         column_def.is_nullable,
     )
+    .with_time_index(column_def.name == time_index)
     .with_default_constraint(default_constraint)
     .context(ConvertColumnDefaultConstraintSnafu {
         column_name: &column_def.name,

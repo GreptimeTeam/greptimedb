@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
-use common_telemetry::error;
+use common_telemetry::{debug, error};
 use opensrv_mysql::{
     AsyncMysqlShim, ErrorKind, ParamParser, QueryResultWriter, StatementMetaWriter,
 };
 use rand::RngCore;
+use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
 
 use crate::context::AuthHashMethod::DoubleSha1;
@@ -63,7 +64,7 @@ impl MysqlInstanceShim {
 }
 
 #[async_trait]
-impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
+impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShim {
     type Error = error::Error;
 
     fn salt(&self) -> [u8; 20] {
@@ -108,15 +109,12 @@ impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
         };
     }
 
-    async fn on_prepare<'a>(
-        &'a mut self,
-        _: &'a str,
-        writer: StatementMetaWriter<'a, W>,
-    ) -> Result<()> {
-        writer.error(
+    async fn on_prepare<'a>(&'a mut self, _: &'a str, w: StatementMetaWriter<'a, W>) -> Result<()> {
+        w.error(
             ErrorKind::ER_UNKNOWN_ERROR,
-            "prepare statement is not supported yet".as_bytes(),
-        )?;
+            b"prepare statement is not supported yet",
+        )
+        .await?;
         Ok(())
     }
 
@@ -124,12 +122,13 @@ impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
         &'a mut self,
         _: u32,
         _: ParamParser<'a>,
-        writer: QueryResultWriter<'a, W>,
+        w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        writer.error(
+        w.error(
             ErrorKind::ER_UNKNOWN_ERROR,
-            "prepare statement is not supported yet".as_bytes(),
-        )?;
+            b"prepare statement is not supported yet",
+        )
+        .await?;
         Ok(())
     }
 
@@ -145,6 +144,9 @@ impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
+        debug!("Start executing query: '{}'", query);
+        let start = Instant::now();
+
         // TODO(LFC): Find a better way:
         // `check` uses regex to filter out unsupported statements emitted by MySQL's federated
         // components, this is quick and dirty, there must be a better way to do it.
@@ -154,7 +156,13 @@ impl<W: io::Write + Send + Sync> AsyncMysqlShim<W> for MysqlInstanceShim {
             self.query_handler.do_query(query).await
         };
 
+        debug!(
+            "Finished executing query: '{}', total time costs in microseconds: {}",
+            query,
+            start.elapsed().as_micros()
+        );
+
         let mut writer = MysqlResultWriter::new(writer);
-        writer.write(output).await
+        writer.write(query, output).await
     }
 }

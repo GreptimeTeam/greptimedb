@@ -22,12 +22,16 @@ use common_telemetry::logging::{error, info};
 use futures::StreamExt;
 use opensrv_mysql::AsyncMysqlIntermediary;
 use tokio;
+use tokio::io::BufWriter;
 use tokio::net::TcpStream;
 
 use crate::error::Result;
 use crate::mysql::handler::MysqlInstanceShim;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
+
+// Default size of ResultSet write buffer: 100KB
+const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;
 
 pub struct MysqlServer {
     base_server: BaseTcpServer,
@@ -58,7 +62,8 @@ impl MysqlServer {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
-                        if let Err(error) = Self::handle(io_stream, io_runtime, query_handler) {
+                        if let Err(error) = Self::handle(io_stream, io_runtime, query_handler).await
+                        {
                             error!(error; "Unexpected error when handling TcpStream");
                         };
                     }
@@ -67,15 +72,28 @@ impl MysqlServer {
         })
     }
 
-    pub fn handle(
+    async fn handle(
         stream: TcpStream,
         io_runtime: Arc<Runtime>,
         query_handler: SqlQueryHandlerRef,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
         let shim = MysqlInstanceShim::create(query_handler, stream.peer_addr()?.to_string());
-        // TODO(LFC): Relate "handler" with MySQL session; also deal with panics there.
-        let _handler = io_runtime.spawn(AsyncMysqlIntermediary::run_on(shim, stream));
+
+        let (r, w) = stream.into_split();
+        let w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
+        // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
+        let spawn_result = io_runtime
+            .spawn(AsyncMysqlIntermediary::run_on(shim, r, w))
+            .await;
+        match spawn_result {
+            Ok(run_result) => {
+                if let Err(e) = run_result {
+                    error!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time.")
+                }
+            }
+            Err(e) => error!("IO runtime cannot execute task, error: {}", e),
+        }
         Ok(())
     }
 }
