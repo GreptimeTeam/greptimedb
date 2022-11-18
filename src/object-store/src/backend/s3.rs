@@ -12,4 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use opendal::services::s3::{Backend, Builder};
+pub use opendal::services::s3::Builder;
