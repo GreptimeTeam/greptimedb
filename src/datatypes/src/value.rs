@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
+use std::fmt::{Display, Formatter};
 
 use common_base::bytes::{Bytes, StringBytes};
 use common_time::date::Date;
@@ -60,6 +61,47 @@ pub enum Value {
     Timestamp(Timestamp),
 
     List(ListValue),
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Null => write!(f, "{}", self.data_type().name()),
+            Value::Boolean(v) => write!(f, "{}", v),
+            Value::UInt8(v) => write!(f, "{}", v),
+            Value::UInt16(v) => write!(f, "{}", v),
+            Value::UInt32(v) => write!(f, "{}", v),
+            Value::UInt64(v) => write!(f, "{}", v),
+            Value::Int8(v) => write!(f, "{}", v),
+            Value::Int16(v) => write!(f, "{}", v),
+            Value::Int32(v) => write!(f, "{}", v),
+            Value::Int64(v) => write!(f, "{}", v),
+            Value::Float32(v) => write!(f, "{}", v),
+            Value::Float64(v) => write!(f, "{}", v),
+            Value::String(v) => write!(f, "{}", v.as_utf8()),
+            Value::Binary(v) => {
+                let hex = v
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<String>>()
+                    .join("");
+                write!(f, "{}", hex)
+            }
+            Value::Date(v) => write!(f, "{}", v),
+            Value::DateTime(v) => write!(f, "{}", v),
+            Value::Timestamp(v) => write!(f, "{}", v.to_iso8601_string()),
+            Value::List(v) => {
+                let default = Box::new(vec![]);
+                let items = v.items().as_ref().unwrap_or(&default);
+                let items = items
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                write!(f, "{}[{}]", v.datatype.name(), items)
+            }
+        }
+    }
 }
 
 impl Value {
@@ -624,6 +666,7 @@ impl<'a> PartialOrd for ListValueRef<'a> {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
+    use num_traits::Float;
 
     use super::*;
 
@@ -1033,7 +1076,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::Value::Number(5000i32.into()),
-            to_json(Value::Date(common_time::date::Date::new(5000)))
+            to_json(Value::Date(Date::new(5000)))
         );
         assert_eq!(
             serde_json::Value::Number(5000i64.into()),
@@ -1216,5 +1259,52 @@ mod tests {
             ValueRef::from(hello.as_bytes())
         );
         assert_eq!(ValueRef::String(hello), ValueRef::from(hello));
+    }
+
+    #[test]
+    fn test_display() {
+        assert_eq!(Value::Null.to_string(), "Null");
+        assert_eq!(Value::UInt8(8).to_string(), "8");
+        assert_eq!(Value::UInt16(16).to_string(), "16");
+        assert_eq!(Value::UInt32(32).to_string(), "32");
+        assert_eq!(Value::UInt64(64).to_string(), "64");
+        assert_eq!(Value::Int8(-8).to_string(), "-8");
+        assert_eq!(Value::Int16(-16).to_string(), "-16");
+        assert_eq!(Value::Int32(-32).to_string(), "-32");
+        assert_eq!(Value::Int64(-64).to_string(), "-64");
+        assert_eq!(Value::Float32((-32.123).into()).to_string(), "-32.123");
+        assert_eq!(Value::Float64((-64.123).into()).to_string(), "-64.123");
+        assert_eq!(Value::Float64(OrderedF64::infinity()).to_string(), "inf");
+        assert_eq!(Value::Float64(OrderedF64::nan()).to_string(), "NaN");
+        assert_eq!(Value::String(StringBytes::from("123")).to_string(), "123");
+        assert_eq!(
+            Value::Binary(Bytes::from(vec![1, 2, 3])).to_string(),
+            "010203"
+        );
+        assert_eq!(Value::Date(Date::new(0)).to_string(), "1970-01-01");
+        assert_eq!(
+            Value::DateTime(DateTime::new(0)).to_string(),
+            "1970-01-01 00:00:00"
+        );
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
+            "1970-01-01 00:00:01+0000"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![Value::Int8(1), Value::Int8(2)])),
+                ConcreteDataType::int8_datatype(),
+            ))
+            .to_string(),
+            "Int8[1, 2]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+            ))
+            .to_string(),
+            "Timestamp[]"
+        );
     }
 }

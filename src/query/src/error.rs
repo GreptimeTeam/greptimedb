@@ -44,6 +44,9 @@ pub enum InnerError {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Table not found: {}", table))]
+    TableNotFound { table: String, backtrace: Backtrace },
+
     #[snafu(display("Failed to do vector computation, source: {}", source))]
     VectorComputation {
         #[snafu(backtrace)]
@@ -62,9 +65,10 @@ impl ErrorExt for InnerError {
         use InnerError::*;
 
         match self {
-            UnsupportedExpr { .. } | CatalogNotFound { .. } | SchemaNotFound { .. } => {
-                StatusCode::InvalidArguments
-            }
+            UnsupportedExpr { .. }
+            | CatalogNotFound { .. }
+            | SchemaNotFound { .. }
+            | TableNotFound { .. } => StatusCode::InvalidArguments,
             Catalog { source } => source.status_code(),
             VectorComputation { source } => source.status_code(),
             CreateRecordBatch { source } => source.status_code(),

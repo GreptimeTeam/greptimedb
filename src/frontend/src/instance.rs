@@ -608,7 +608,9 @@ impl SqlQueryHandler for Instance {
                     .context(server_error::ExecuteQuerySnafu { query })
             }
 
-            Statement::ShowDatabases(_) | Statement::ShowTables(_) => self
+            Statement::ShowDatabases(_)
+            | Statement::ShowTables(_)
+            | Statement::DescribeTable(_) => self
                 .handle_select(Select::Sql(query.to_string()), stmt)
                 .await
                 .map_err(BoxedError::new)
