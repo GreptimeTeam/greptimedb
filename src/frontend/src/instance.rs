@@ -459,7 +459,7 @@ impl Instance {
             .context(error::TableSnafu)
     }
 
-    fn insert_batch_by_insert_stmt(
+    fn stmt_to_insert_batch(
         &self,
         catalog: &str,
         schema: &str,
@@ -533,7 +533,7 @@ impl SqlQueryHandler for Instance {
                         })?;
 
                     let InsertBatch { row_count, columns } = self
-                        .insert_batch_by_insert_stmt(&catalog_name, &schema_name, insert)
+                        .stmt_to_insert_batch(&catalog_name, &schema_name, insert)
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteQuerySnafu { query })?;
 
