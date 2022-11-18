@@ -15,6 +15,7 @@
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions, Mode};
 use frontend::grpc::GrpcOptions;
+use frontend::http::HttpOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
@@ -94,8 +95,23 @@ impl TryFrom<StartCommand> for FrontendOptions {
             FrontendOptions::default()
         };
 
+        // keep backward compatibility with `http_addr` from config files
+        if let Some(ref addr) = opts.http_addr {
+            if let Some(http_opts) = opts.http_options.as_mut() {
+                http_opts.addr = addr.clone();
+            } else {
+                opts.http_options = Some(HttpOptions {
+                    addr: addr.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+
         if let Some(addr) = cmd.http_addr {
-            opts.http_addr = Some(addr);
+            opts.http_options = Some(HttpOptions {
+                addr,
+                ..Default::default()
+            });
         }
         if let Some(addr) = cmd.grpc_addr {
             opts.grpc_options = Some(GrpcOptions {
@@ -156,7 +172,7 @@ mod tests {
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();
-        assert_eq!(opts.http_addr, Some("127.0.0.1:1234".to_string()));
+        assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
         assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
         assert_eq!(
             opts.postgres_options.as_ref().unwrap().addr,

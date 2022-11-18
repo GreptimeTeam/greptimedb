@@ -18,6 +18,7 @@ use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::{Frontend, FrontendOptions, Mode};
 use frontend::grpc::GrpcOptions;
+use frontend::http::HttpOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::Instance as FeInstance;
 use frontend::mysql::MysqlOptions;
@@ -61,6 +62,7 @@ impl SubCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StandaloneOptions {
     pub http_addr: Option<String>,
+    pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
     pub postgres_options: Option<PostgresOptions>,
@@ -78,6 +80,7 @@ impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
             http_addr: Some("127.0.0.1:4000".to_string()),
+            http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
             postgres_options: Some(PostgresOptions::default()),
@@ -97,6 +100,7 @@ impl StandaloneOptions {
     fn frontend_options(self) -> FrontendOptions {
         FrontendOptions {
             http_addr: self.http_addr,
+            http_options: self.http_options,
             grpc_options: self.grpc_options,
             mysql_options: self.mysql_options,
             postgres_options: self.postgres_options,
@@ -203,9 +207,25 @@ impl TryFrom<StartCommand> for FrontendOptions {
 
         opts.mode = Mode::Standalone;
 
-        if let Some(addr) = cmd.http_addr {
-            opts.http_addr = Some(addr);
+        // keep backward compatibility with `http_addr` from config files
+        if let Some(ref addr) = opts.http_addr {
+            if let Some(http_opts) = opts.http_options.as_mut() {
+                http_opts.addr = addr.clone();
+            } else {
+                opts.http_options = Some(HttpOptions {
+                    addr: addr.clone(),
+                    ..Default::default()
+                });
+            }
         }
+
+        if let Some(addr) = cmd.http_addr {
+            opts.http_options = Some(HttpOptions {
+                addr,
+                ..Default::default()
+            });
+        }
+
         if let Some(addr) = cmd.rpc_addr {
             // frontend grpc addr conflict with datanode default grpc addr
             let datanode_grpc_addr = DatanodeOptions::default().rpc_addr;
@@ -274,7 +294,10 @@ mod tests {
         let fe_opts = FrontendOptions::try_from(cmd).unwrap();
         assert_eq!(Mode::Standalone, fe_opts.mode);
         assert_eq!("127.0.0.1:3001".to_string(), fe_opts.datanode_rpc_addr);
-        assert_eq!(Some("127.0.0.1:4000".to_string()), fe_opts.http_addr);
+        assert_eq!(
+            "127.0.0.1:4000".to_string(),
+            fe_opts.http_options.unwrap().addr
+        );
         assert_eq!(
             "127.0.0.1:4001".to_string(),
             fe_opts.grpc_options.unwrap().addr

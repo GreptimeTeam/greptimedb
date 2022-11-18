@@ -116,8 +116,8 @@ impl Services {
             None
         };
 
-        let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
-            let http_addr = parse_addr(http_addr)?;
+        let http_server_and_addr = if let Some(http_opts) = &opts.http_options {
+            let http_addr = parse_addr(&http_opts.addr)?;
 
             let mut http_server = HttpServer::new(instance.clone());
             if opentsdb_server_and_addr.is_some() {

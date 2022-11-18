@@ -20,6 +20,7 @@ use snafu::prelude::*;
 
 use crate::error::{self, Result};
 use crate::grpc::GrpcOptions;
+use crate::http::HttpOptions;
 use crate::influxdb::InfluxdbOptions;
 use crate::instance::FrontendInstance;
 use crate::mysql::MysqlOptions;
@@ -31,6 +32,7 @@ use crate::server::Services;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrontendOptions {
     pub http_addr: Option<String>,
+    pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
     pub postgres_options: Option<PostgresOptions>,
@@ -45,7 +47,8 @@ pub struct FrontendOptions {
 impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
-            http_addr: Some("127.0.0.1:4000".to_string()),
+            http_addr: None,
+            http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
             postgres_options: Some(PostgresOptions::default()),

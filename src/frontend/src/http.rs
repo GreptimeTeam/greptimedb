@@ -12,25 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+use serde::{Deserialize, Serialize};
 
-mod catalog;
-mod datanode;
-pub mod error;
-mod expr_factory;
-pub mod frontend;
-pub mod grpc;
-pub mod http;
-pub mod influxdb;
-pub mod instance;
-pub mod mysql;
-pub mod opentsdb;
-pub mod partitioning;
-pub mod postgres;
-pub mod prometheus;
-mod server;
-pub mod spliter;
-mod sql;
-mod table;
-#[cfg(test)]
-mod tests;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HttpOptions {
+    pub addr: String,
+}
+
+impl Default for HttpOptions {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:4000".to_string(),
+        }
+    }
+}
