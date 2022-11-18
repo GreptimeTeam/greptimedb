@@ -1234,7 +1234,6 @@ name = "common-query"
 version = "0.1.0"
 dependencies = [
  "arrow2",
- "async-stream",
  "async-trait",
  "common-base",
  "common-error",

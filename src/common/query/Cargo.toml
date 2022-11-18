@@ -6,7 +6,6 @@ license = "Apache-2.0"
 
 [dependencies]
 async-trait = "0.1"
-async-stream = "*"
 common-error = { path = "../error" }
 common-recordbatch = { path = "../recordbatch" }
 common-time = { path = "../time" }
@@ -18,7 +17,6 @@ datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", bran
 datatypes = { path = "../../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 statrs = "0.15"
-tokio = { version = "1.0", features = ["full"] }
 
 [dependencies.arrow]
 package = "arrow2"
