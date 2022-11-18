@@ -610,11 +610,12 @@ impl SqlQueryHandler for Instance {
 
             Statement::ShowDatabases(_)
             | Statement::ShowTables(_)
-            | Statement::DescribeTable(_) => self
-                .handle_select(Select::Sql(query.to_string()), stmt)
-                .await
-                .map_err(BoxedError::new)
-                .context(server_error::ExecuteQuerySnafu { query }),
+            | Statement::DescribeTable(_)
+            | Statement::ShowCreateTable(_) => self
+                    .handle_select(Select::Sql(query.to_string()), stmt)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(server_error::ExecuteQuerySnafu { query }),
 
             Statement::CreateDatabase(c) => {
                 let expr = CreateDatabaseExpr {
@@ -634,9 +635,6 @@ impl SqlQueryHandler for Instance {
                 .await
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
-            Statement::ShowCreateTable(_) => {
-                return server_error::NotSupportedSnafu { feat: query }.fail()
-            }
         }
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu { query })

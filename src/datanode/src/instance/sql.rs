@@ -120,8 +120,10 @@ impl Instance {
                     .execute(SqlRequest::DescribeTable(stmt))
                     .await
             }
-            Statement::ShowCreateTable(_stmt) => {
-                unimplemented!("SHOW CREATE TABLE is unimplemented yet");
+            Statement::ShowCreateTable(stmt) => {
+                self.sql_handler
+                    .execute(SqlRequest::ShowCreateTable(stmt))
+                    .await
             }
         }
     }

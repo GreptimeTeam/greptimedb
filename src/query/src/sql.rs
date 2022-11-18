@@ -24,7 +24,7 @@ use datatypes::vectors::{Helper, StringVector};
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
-use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
+use sql::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 
 use crate::error::{self, Result};
 
@@ -115,6 +115,7 @@ pub fn show_tables(stmt: ShowTables, catalog_manager: CatalogManagerRef) -> Resu
         }
     );
 
+    println!("tables: {:?}", stmt);
     let schema = stmt.database.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
     let schema = catalog_manager
         .schema(DEFAULT_CATALOG_NAME, schema)
@@ -158,6 +159,7 @@ pub fn describe_table(stmt: DescribeTable, catalog_manager: CatalogManagerRef) -
 
     let table_info = table.table_info();
     let columns_schemas = table_info.meta.schema.column_schemas();
+    common_telemetry::info!("table_info: {:#?}", table_info);
     let columns = vec![
         describe_column_names(columns_schemas),
         describe_column_types(columns_schemas),
@@ -225,6 +227,36 @@ fn describe_column_semantic_types(
             })
             .collect::<Vec<String>>(),
     ))
+}
+
+pub fn show_create_table(stmt: ShowCreateTable, catalog_manager: CatalogManagerRef) -> Result<Output> {
+    common_telemetry::info!("stmt: {:?}", stmt);
+    // catalog_manager
+    //     .catalog(DEFAULT_SCHEMA_NAME)
+    //     .context(error::CatalogSnafu)?
+    //     .context(error::CatalogNotFoundSnafu { catalog: DEFAULT_CATALOG_NAME, })?;
+
+    let schema = catalog_manager
+        .schema(DEFAULT_CATALOG_NAME, DEFAULT_CATALOG_NAME)
+        .context(error::CatalogSnafu)?
+        .context(error::SchemaNotFoundSnafu {schema: DEFAULT_CATALOG_NAME,})?;
+
+    let table = schema
+        .table(&stmt.table_name)
+        .context(error::CatalogSnafu)?
+        .context(error::TableNotFoundSnafu { table: &stmt.table_name })?;
+
+    let table_info = table.table_info();
+
+    let columns_schemas = table_info.meta.schema.column_schemas();
+
+    let columns = vec![
+        describe_column_names(columns_schemas),
+    ];
+
+    let records = RecordBatches::try_from_columns(DESCRIBE_TABLE_OUTPUT_SCHEMA.clone(), columns)
+        .context(error::CreateRecordBatchSnafu)?;
+    Ok(Output::RecordBatches(records))
 }
 
 #[cfg(test)]
