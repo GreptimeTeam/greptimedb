@@ -425,7 +425,7 @@ impl PhysicalPlan for DistTableScan {
             exec.as_stream().await
         });
         let stream = AsyncRecordBatchStreamAdapter::new(self.schema(), stream);
-        return Ok(Box::pin(stream));
+        Ok(Box::pin(stream))
     }
 }
 
