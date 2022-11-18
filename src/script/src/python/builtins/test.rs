@@ -30,9 +30,10 @@ use rustpython_vm::scope::Scope;
 use rustpython_vm::{AsObject, PyObjectRef, VirtualMachine};
 use serde::{Deserialize, Serialize};
 
-use super::{greptime_builtin, *};
+use super::*;
 use crate::python::utils::{format_py_error, is_instance};
 use crate::python::PyVector;
+
 #[test]
 fn convert_scalar_to_py_obj_and_back() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {

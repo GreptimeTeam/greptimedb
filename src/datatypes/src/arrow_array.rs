@@ -100,7 +100,9 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
 #[cfg(test)]
 mod test {
     use arrow::array::{
-        Int64Array as ArrowI64Array, MutableListArray, MutablePrimitiveArray, TryExtend, *,
+        BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
+        Int64Array as ArrowI64Array, Int8Array, MutableListArray, MutablePrimitiveArray, TryExtend,
+        UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
     use arrow::buffer::Buffer;
     use arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
