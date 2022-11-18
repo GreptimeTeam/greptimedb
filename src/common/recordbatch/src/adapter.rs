@@ -163,7 +163,15 @@ impl Stream for AsyncRecordBatchStreamAdapter {
                             })
                         }));
                     }
-                    Err(_) => todo!(),
+                    Err(e) => {
+                        return Poll::Ready(Some(
+                            error::CreateRecordBatchesSnafu {
+                                reason: format!("Read error {:?} from stream", e),
+                            }
+                            .fail()
+                            .map_err(|e| e.into()),
+                        ))
+                    }
                 },
             }
         }
