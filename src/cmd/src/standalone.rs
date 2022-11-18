@@ -87,7 +87,7 @@ impl Default for StandaloneOptions {
             mode: Mode::Standalone,
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
-            datanode_mysql_addr: "127.0.0.1:3306".to_string(),
+            datanode_mysql_addr: "127.0.0.1:4406".to_string(),
             datanode_mysql_runtime_size: 4,
         }
     }
