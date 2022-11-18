@@ -16,8 +16,9 @@
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
-use query::sql::{show_databases, show_tables};
+use query::sql::{describe_table, show_databases, show_tables};
 use snafu::{OptionExt, ResultExt};
+use sql::statements::describe::DescribeTable;
 use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineRef, TableReference};
 use table::requests::*;
@@ -37,6 +38,7 @@ pub enum SqlRequest {
     Alter(AlterTableRequest),
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
+    DescribeTable(DescribeTable),
 }
 
 // Handler to execute SQL except query
@@ -64,6 +66,9 @@ impl SqlHandler {
             }
             SqlRequest::ShowTables(stmt) => {
                 show_tables(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+            }
+            SqlRequest::DescribeTable(stmt) => {
+                describe_table(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
             }
         }
     }

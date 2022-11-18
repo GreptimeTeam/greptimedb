@@ -66,6 +66,7 @@ where
             Statement::ShowTables(_)
             | Statement::ShowDatabases(_)
             | Statement::ShowCreateTable(_)
+            | Statement::DescribeTable(_)
             | Statement::CreateTable(_)
             | Statement::CreateDatabase(_)
             | Statement::Alter(_)
