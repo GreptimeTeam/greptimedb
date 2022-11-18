@@ -268,11 +268,15 @@ impl Instance {
 
     /// Handle alter expr
     pub async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
-        self.admin(expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME))
-            .alter(expr)
-            .await
-            .and_then(admin_result_to_output)
-            .context(AlterTableSnafu)
+        match &self.dist_instance {
+            Some(dist_instance) => dist_instance.handle_alter_table(expr).await,
+            None => self
+                .admin(expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME))
+                .alter(expr)
+                .await
+                .and_then(admin_result_to_output)
+                .context(AlterTableSnafu),
+        }
     }
 
     /// Handle batch inserts
@@ -333,8 +337,8 @@ impl Instance {
         region_number: u32,
         values: &insert_expr::Values,
     ) -> Result<Output> {
-        let insert_batches =
-            common_insert::insert_batches(&values.values).context(DeserializeInsertBatchSnafu)?;
+        let insert_batches = common_grpc_expr::insert_batches(&values.values)
+            .context(DeserializeInsertBatchSnafu)?;
         self.create_or_alter_table_on_demand(
             catalog_name,
             schema_name,
@@ -399,8 +403,9 @@ impl Instance {
             }
             Some(table) => {
                 let schema = table.schema();
-                if let Some(add_columns) = common_insert::find_new_columns(&schema, insert_batches)
-                    .context(FindNewColumnsOnInsertionSnafu)?
+                if let Some(add_columns) =
+                    common_grpc_expr::find_new_columns(&schema, insert_batches)
+                        .context(FindNewColumnsOnInsertionSnafu)?
                 {
                     info!(
                         "Find new columns {:?} on insertion, try to alter table: {}.{}.{}",

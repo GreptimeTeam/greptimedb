@@ -14,22 +14,21 @@
 
 use std::sync::Arc;
 
-use api::helper::ColumnDataTypeWrapper;
 use api::result::AdminResultBuilder;
-use api::v1::alter_expr::Kind;
-use api::v1::{AdminResult, AlterExpr, ColumnDef, CreateExpr, DropColumns};
+use api::v1::{AdminResult, AlterExpr, CreateExpr};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
+use common_grpc_expr::{alter_expr_to_request, create_column_schema};
 use common_query::Output;
 use common_telemetry::{error, info};
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use snafu::prelude::*;
 use table::metadata::TableId;
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
+use table::requests::CreateTableRequest;
 
 use crate::error::{
-    self, BumpTableIdSnafu, ColumnDefaultConstraintSnafu, MissingFieldSnafu, Result,
+    self, AlterExprToRequestSnafu, BumpTableIdSnafu, ColumnDefToSchemaSnafu, Result,
 };
 use crate::instance::Instance;
 use crate::sql::SqlRequest;
@@ -97,14 +96,17 @@ impl Instance {
     }
 
     pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> AdminResult {
-        let request = match alter_expr_to_request(expr).transpose() {
-            Some(req) => req,
+        let request = match alter_expr_to_request(expr)
+            .context(AlterExprToRequestSnafu)
+            .transpose()
+        {
             None => {
                 return AdminResultBuilder::default()
                     .status_code(StatusCode::Success as u32)
                     .mutate_result(0, 0)
                     .build()
             }
+            Some(req) => req,
         };
 
         let result = futures::future::ready(request)
@@ -163,57 +165,13 @@ async fn create_expr_to_request(table_id: TableId, expr: CreateExpr) -> Result<C
     })
 }
 
-fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
-    match expr.kind {
-        Some(Kind::AddColumns(add_columns)) => {
-            let mut add_column_requests = vec![];
-            for add_column_expr in add_columns.add_columns {
-                let column_def = add_column_expr.column_def.context(MissingFieldSnafu {
-                    field: "column_def",
-                })?;
-
-                let schema = create_column_schema(&column_def)?;
-                add_column_requests.push(AddColumnRequest {
-                    column_schema: schema,
-                    is_key: add_column_expr.is_key,
-                })
-            }
-
-            let alter_kind = AlterKind::AddColumns {
-                columns: add_column_requests,
-            };
-
-            let request = AlterTableRequest {
-                catalog_name: expr.catalog_name,
-                schema_name: expr.schema_name,
-                table_name: expr.table_name,
-                alter_kind,
-            };
-            Ok(Some(request))
-        }
-        Some(Kind::DropColumns(DropColumns { drop_columns })) => {
-            let alter_kind = AlterKind::DropColumns {
-                names: drop_columns.into_iter().map(|c| c.name).collect(),
-            };
-
-            let request = AlterTableRequest {
-                catalog_name: expr.catalog_name,
-                schema_name: expr.schema_name,
-                table_name: expr.table_name,
-                alter_kind,
-            };
-            Ok(Some(request))
-        }
-        None => Ok(None),
-    }
-}
-
 fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
     let column_schemas = expr
         .column_defs
         .iter()
         .map(create_column_schema)
-        .collect::<Result<Vec<ColumnSchema>>>()?;
+        .collect::<common_grpc_expr::error::Result<Vec<ColumnSchema>>>()
+        .context(ColumnDefToSchemaSnafu)?;
 
     ensure!(
         column_schemas
@@ -243,28 +201,12 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
     ))
 }
 
-fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
-    let data_type =
-        ColumnDataTypeWrapper::try_new(column_def.datatype).context(error::ColumnDataTypeSnafu)?;
-    let default_constraint = match &column_def.default_constraint {
-        None => None,
-        Some(v) => {
-            Some(ColumnDefaultConstraint::try_from(&v[..]).context(ColumnDefaultConstraintSnafu)?)
-        }
-    };
-    ColumnSchema::new(
-        column_def.name.clone(),
-        data_type.into(),
-        column_def.is_nullable,
-    )
-    .with_default_constraint(default_constraint)
-    .context(ColumnDefaultConstraintSnafu)
-}
-
 #[cfg(test)]
 mod tests {
+    use api::v1::ColumnDef;
     use common_catalog::consts::MIN_USER_TABLE_ID;
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;
 
     use super::*;

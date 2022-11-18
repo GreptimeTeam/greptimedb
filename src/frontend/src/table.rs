@@ -18,8 +18,12 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::v1::AlterExpr;
 use async_trait::async_trait;
+use client::admin::Admin;
 use client::Database;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_error::prelude::BoxedError;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
@@ -43,7 +47,7 @@ use table::Table;
 use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Error, Result};
+use crate::error::{self, Error, RequestDatanodeSnafu, Result};
 use crate::partitioning::columns::RangeColumnsPartitionRule;
 use crate::partitioning::range::RangePartitionRule;
 use crate::partitioning::{
@@ -347,6 +351,23 @@ impl DistTable {
             }
         };
         Ok(partition_rule)
+    }
+
+    /// Define a `alter_by_expr` instead of impl [`Table::alter`] to avoid redundant conversion between  
+    /// [`table::requests::AlterTableRequest`] and [`AlterExpr`].
+    pub(crate) async fn alter_by_expr(&self, expr: AlterExpr) -> Result<()> {
+        let table_routes = self.table_routes.get_route(&self.table_name).await.unwrap();
+        for datanode in table_routes.find_leaders() {
+            let admin = Admin::new(
+                DEFAULT_CATALOG_NAME,
+                self.datanode_clients.get_client(&datanode).await,
+            );
+            let _result = admin
+                .alter(expr.clone())
+                .await
+                .context(RequestDatanodeSnafu)?;
+        }
+        Ok(())
     }
 }
 

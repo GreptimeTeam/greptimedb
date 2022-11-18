@@ -20,7 +20,7 @@ use api::v1::InsertExpr;
 use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
-use common_insert::column_to_vector;
+use common_grpc_expr::column_to_vector;
 use servers::error as server_error;
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::InfluxdbLineProtocolHandler;
@@ -67,7 +67,7 @@ impl Instance {
         for insert in inserts {
             let self_clone = self.clone();
             let insert_batches = match &insert.expr.unwrap() {
-                Expr::Values(values) => common_insert::insert_batches(&values.values)
+                Expr::Values(values) => common_grpc_expr::insert_batches(&values.values)
                     .context(DeserializeInsertBatchSnafu)?,
                 Expr::Sql(_) => unreachable!(),
             };

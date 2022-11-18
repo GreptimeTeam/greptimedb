@@ -69,7 +69,8 @@ pub trait Table: Send + Sync {
         Ok(FilterPushDownType::Unsupported)
     }
 
-    async fn alter(&self, _request: AlterTableRequest) -> Result<()> {
+    async fn alter(&self, request: AlterTableRequest) -> Result<()> {
+        let _ = request;
         unimplemented!()
     }
 }

@@ -12,8 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod alter;
+mod column;
 pub mod error;
 mod insert;
+
+pub use alter::alter_expr_to_request;
+pub use column::create_column_schema;
 pub use insert::{
     build_alter_table_request, build_create_expr_from_insertion, column_to_vector,
     find_new_columns, insert_batches, insertion_expr_to_request,

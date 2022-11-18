@@ -16,7 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{CreateDatabaseExpr, CreateExpr};
+use api::v1::{AlterExpr, CreateDatabaseExpr, CreateExpr};
+use catalog::CatalogList;
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -42,10 +43,12 @@ use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, CatalogEntrySerdeSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
-    PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result, StartMetaClientSnafu,
+    self, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu, ColumnDataTypeSnafu,
+    ConvertColumnDefaultConstraintSnafu, PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result,
+    SchemaNotFoundSnafu, StartMetaClientSnafu, TableNotFoundSnafu,
 };
 use crate::partitioning::{PartitionBound, PartitionDef};
+use crate::table::DistTable;
 
 #[derive(Clone)]
 pub(crate) struct DistInstance {
@@ -164,6 +167,34 @@ impl DistInstance {
             .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
         client.put(request.into()).await.context(RequestMetaSnafu)?;
         Ok(Output::AffectedRows(1))
+    }
+
+    pub async fn handle_alter_table(&self, expr: AlterExpr) -> Result<Output> {
+        let catalog_name = expr.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
+        let schema_name = expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
+        let table_name = expr.table_name.as_str();
+        let table = self
+            .catalog_manager
+            .catalog(catalog_name)
+            .context(CatalogSnafu)?
+            .context(CatalogNotFoundSnafu { catalog_name })?
+            .schema(schema_name)
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", catalog_name, schema_name),
+            })?
+            .table(table_name)
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu {
+                table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+            })?;
+
+        let dist_table = table
+            .as_any()
+            .downcast_ref::<DistTable>()
+            .expect("Table impl must be DistTable in distributed mode");
+        dist_table.alter_by_expr(expr).await.unwrap();
+        Ok(Output::AffectedRows(0))
     }
 
     async fn create_table_in_meta(

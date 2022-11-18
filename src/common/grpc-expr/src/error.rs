@@ -70,6 +70,15 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Missing required field in protobuf, field: {}", field))]
+    MissingField { field: String, backtrace: Backtrace },
+
+    #[snafu(display("Invalid column default constraint, source: {}", source))]
+    ColumnDefaultConstraint {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -87,6 +96,8 @@ impl ErrorExt for Error {
             | Error::MissingTimestampColumn { .. } => StatusCode::InvalidArguments,
             Error::InvalidColumnProto { .. } => StatusCode::InvalidArguments,
             Error::CreateVector { .. } => StatusCode::InvalidArguments,
+            Error::MissingField { .. } => StatusCode::InvalidArguments,
+            Error::ColumnDefaultConstraint { source, .. } => source.status_code(),
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

@@ -13,7 +13,7 @@ common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
-common-insert = { path = "../common/insert" }
+common-grpc-expr = { path = "../common/grpc-expr" }
 common-time = { path = "../common/time" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
     "simd",
