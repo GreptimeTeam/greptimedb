@@ -171,36 +171,27 @@ pub fn describe_table(stmt: DescribeTable, catalog_manager: CatalogManagerRef) -
 }
 
 fn describe_column_names(columns_schemas: &[ColumnSchema]) -> VectorRef {
-    Arc::new(StringVector::from(
-        columns_schemas
-            .iter()
-            .map(|cs| cs.name.clone())
-            .collect::<Vec<String>>(),
+    Arc::new(StringVector::from_iterator(
+        columns_schemas.iter().map(|cs| cs.name.as_str()),
     ))
 }
 
 fn describe_column_types(columns_schemas: &[ColumnSchema]) -> VectorRef {
-    Arc::new(StringVector::from(
-        columns_schemas
-            .iter()
-            .map(|cs| cs.data_type.name().to_owned())
-            .collect::<Vec<String>>(),
+    Arc::new(StringVector::from_iterator(
+        columns_schemas.iter().map(|cs| cs.data_type.name()),
     ))
 }
 
 fn describe_column_nullables(columns_schemas: &[ColumnSchema]) -> VectorRef {
-    Arc::new(StringVector::from(
-        columns_schemas
-            .iter()
-            .map(|cs| {
-                if cs.is_nullable() {
-                    String::from(NULLABLE_YES)
-                } else {
-                    String::from(NULLABLE_NO)
-                }
-            })
-            .collect::<Vec<String>>(),
-    ))
+    Arc::new(StringVector::from_iterator(columns_schemas.iter().map(
+        |cs| {
+            if cs.is_nullable() {
+                NULLABLE_YES
+            } else {
+                NULLABLE_NO
+            }
+        },
+    )))
 }
 
 fn describe_column_defaults(columns_schemas: &[ColumnSchema]) -> VectorRef {
