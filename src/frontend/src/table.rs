@@ -477,10 +477,10 @@ impl PartitionExec {
 mod test {
     use std::time::Duration;
 
-    use api::v1::codec::InsertBatch;
     use api::v1::column::SemanticType;
-    use api::v1::{column, insert_expr, Column, ColumnDataType};
+    use api::v1::{column, Column, ColumnDataType};
     use catalog::remote::MetaKvBackend;
+    use common_grpc::InsertBatch;
     use common_recordbatch::util;
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
@@ -968,9 +968,7 @@ mod test {
                 },
             ],
             row_count: rows,
-        }
-        .into()];
-        let values = insert_expr::Values { values };
+        }];
         dn_instance
             .execute_grpc_insert(
                 &table_name.catalog_name,

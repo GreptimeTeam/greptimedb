@@ -14,13 +14,13 @@
 
 use std::collections::HashMap;
 
-use api::v1::codec::InsertBatch;
 use api::v1::column::{SemanticType, Values};
 use api::v1::{Column, ColumnDataType};
 use common_base::BitVec;
 use snafu::ensure;
 
 use crate::error::{Result, TypeMismatchSnafu};
+use crate::InsertBatch;
 
 type ColumnName = String;
 

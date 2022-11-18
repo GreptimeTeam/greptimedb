@@ -14,9 +14,9 @@
 
 use std::collections::HashMap;
 
-use api::v1::insert_expr::{self, Expr};
 use api::v1::InsertExpr;
 use common_grpc::writer::{LinesWriter, Precision};
+use common_grpc::InsertBatch;
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
 use table::requests::InsertRequest;
@@ -165,14 +165,16 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
 
         Ok(writers
             .into_iter()
-            .map(|(table_name, writer)| InsertExpr {
-                schema_name: schema_name.clone(),
-                table_name,
-                expr: Some(Expr::Values(insert_expr::Values {
-                    values: vec![writer.finish().into()],
-                })),
-                options: HashMap::default(),
-                region_number: 0,
+            .map(|(table_name, writer)| {
+                let InsertBatch { columns, row_count } = writer.finish();
+                InsertExpr {
+                    schema_name: schema_name.clone(),
+                    table_name,
+                    options: HashMap::default(),
+                    region_number: 0,
+                    columns,
+                    row_count,
+                }
             })
             .collect())
     }
@@ -180,14 +182,12 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Deref;
     use std::sync::Arc;
 
-    use api::v1::codec::InsertBatch;
     use api::v1::column::{SemanticType, Values};
-    use api::v1::insert_expr::Expr;
     use api::v1::{Column, ColumnDataType, InsertExpr};
     use common_base::BitVec;
+    use common_grpc::InsertBatch;
     use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
     use datatypes::value::Value;
@@ -242,12 +242,10 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
 
         for expr in insert_exprs {
             assert_eq!("public", expr.schema_name);
-            let values = match expr.expr.unwrap() {
-                Expr::Values(vals) => vals,
-                Expr::Sql(_) => panic!(),
+            let batch = InsertBatch {
+                columns: expr.columns,
+                row_count: expr.row_count,
             };
-            let raw_batch = values.values.get(0).unwrap();
-            let batch: InsertBatch = raw_batch.deref().try_into().unwrap();
             match &expr.table_name[..] {
                 "monitor1" => assert_monitor_1(&batch),
                 "monitor2" => assert_monitor_2(&batch),

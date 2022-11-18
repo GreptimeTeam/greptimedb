@@ -1220,6 +1220,7 @@ dependencies = [
  "async-trait",
  "common-base",
  "common-error",
+ "common-grpc",
  "common-query",
  "common-telemetry",
  "common-time",

@@ -14,14 +14,15 @@
 
 use api::result::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use api::v1::{
-    admin_expr, insert_expr, object_expr, select_expr, AdminExpr, AdminResult, CreateDatabaseExpr,
-    ObjectExpr, ObjectResult, SelectExpr,
+    admin_expr, object_expr, select_expr, AdminExpr, AdminResult, CreateDatabaseExpr, ObjectExpr,
+    ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_grpc::select::to_object_result;
+use common_grpc::InsertBatch;
 use common_insert::insertion_expr_to_request;
 use common_query::Output;
 use query::plan::LogicalPlan;
@@ -44,7 +45,7 @@ impl Instance {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        values: insert_expr::Values,
+        insert_batches: Vec<InsertBatch>,
     ) -> Result<Output> {
         let schema_provider = self
             .catalog_manager
@@ -54,12 +55,7 @@ impl Instance {
             .schema(schema_name)
             .context(CatalogSnafu)?
             .context(SchemaNotFoundSnafu { name: schema_name })?;
-
-        let insert_batches =
-            common_insert::insert_batches(&values.values).context(InsertDataSnafu)?;
-
         ensure!(!insert_batches.is_empty(), EmptyInsertBatchSnafu);
-
         let table = schema_provider
             .table(table_name)
             .context(CatalogSnafu)?
@@ -87,10 +83,10 @@ impl Instance {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        values: insert_expr::Values,
+        insert_batches: Vec<InsertBatch>,
     ) -> ObjectResult {
         match self
-            .execute_grpc_insert(catalog_name, schema_name, table_name, values)
+            .execute_grpc_insert(catalog_name, schema_name, table_name, insert_batches)
             .await
         {
             Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
@@ -170,25 +166,16 @@ impl GrpcQueryHandler for Instance {
                 let catalog_name = DEFAULT_CATALOG_NAME;
                 let schema_name = &insert_expr.schema_name;
                 let table_name = &insert_expr.table_name;
-                let expr = insert_expr
-                    .expr
-                    .context(servers::error::InvalidQuerySnafu {
-                        reason: "missing `expr` in `InsertExpr`",
-                    })?;
 
                 // TODO(fys): _region_number is for later use.
                 let _region_number: u32 = insert_expr.region_number;
 
-                match expr {
-                    insert_expr::Expr::Values(values) => {
-                        self.handle_insert(catalog_name, schema_name, table_name, values)
-                            .await
-                    }
-                    insert_expr::Expr::Sql(sql) => {
-                        let output = self.execute_sql(&sql).await;
-                        to_object_result(output).await
-                    }
-                }
+                let insert_batches = vec![InsertBatch {
+                    columns: insert_expr.columns.clone(),
+                    row_count: insert_expr.row_count,
+                }];
+                self.handle_insert(catalog_name, schema_name, table_name, insert_batches)
+                    .await
             }
             Some(object_expr::Expr::Select(select_expr)) => self.handle_select(select_expr).await,
             other => {

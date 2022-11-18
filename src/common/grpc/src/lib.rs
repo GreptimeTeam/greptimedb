@@ -14,10 +14,13 @@
 
 pub mod channel_manager;
 pub mod error;
+mod insert;
 pub mod physical;
 pub mod select;
 pub mod writer;
 
 pub use error::Error;
 pub use physical::plan::{DefaultAsPlanImpl, MockExecution};
-pub use physical::AsExecutionPlan;
+pub use physical::AsExcutionPlan;
+
+pub use crate::insert::{InsertBatch, InsertBatchRef};

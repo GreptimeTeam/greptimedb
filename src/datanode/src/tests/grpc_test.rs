@@ -19,11 +19,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::alter_expr::Kind;
-use api::v1::codec::InsertBatch;
 use api::v1::column::SemanticType;
 use api::v1::{
-    admin_result, column, insert_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType,
-    ColumnDef, CreateExpr, InsertExpr, MutateResult,
+    admin_result, column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
+    CreateExpr, InsertExpr, MutateResult,
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
@@ -230,7 +229,11 @@ async fn insert_and_assert(db: &Database) {
     // testing data:
     let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
 
-    let values = vec![InsertBatch {
+    let expr = InsertExpr {
+        schema_name: "public".to_string(),
+        table_name: "demo".to_string(),
+        options: HashMap::default(),
+        region_number: 0,
         columns: vec![
             expected_host_col.clone(),
             expected_cpu_col.clone(),
@@ -238,14 +241,6 @@ async fn insert_and_assert(db: &Database) {
             expected_ts_col.clone(),
         ],
         row_count: 4,
-    }
-    .into()];
-    let expr = InsertExpr {
-        schema_name: "public".to_string(),
-        table_name: "demo".to_string(),
-        expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
-        options: HashMap::default(),
-        region_number: 0,
     };
     let result = db.insert(expr).await;
     result.unwrap();
