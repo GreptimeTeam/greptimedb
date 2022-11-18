@@ -199,7 +199,6 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
 
 #[cfg(test)]
 mod test {
-    use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datafusion::arrow_print;
     use datafusion::datasource::TableProvider as DfTableProvider;
@@ -209,6 +208,7 @@ mod test {
     use datafusion::prelude::ExecutionContext;
     use datafusion_common::field_util::SchemaExt;
     use datafusion_expr::Expr;
+    use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datatypes::schema::Schema;
     use datatypes::vectors::Int32Vector;
 

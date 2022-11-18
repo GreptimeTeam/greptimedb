@@ -903,7 +903,7 @@ pub(crate) mod greptime_builtin {
         duration: i64,
         vm: &VirtualMachine,
     ) -> PyResult<Vec<PrimitiveScalar<i64>>> {
-        use arrow::datatypes::DataType;
+        use datatypes::arrow::datatypes::DataType;
         match (oldest.data_type(), newest.data_type()) {
             (DataType::Int64, DataType::Int64) => (),
             _ => {

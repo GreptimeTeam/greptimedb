@@ -327,8 +327,8 @@ fn set_items_in_scope(
 /// ```ignore
 /// use std::sync::Arc;
 /// use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-/// use arrow::array::PrimitiveArray;
-/// use arrow::datatypes::{DataType, Field, Schema};
+/// use datatypes::arrow::array::PrimitiveArray;
+/// use datatypes::arrow::datatypes::{DataType, Field, Schema};
 /// use common_function::scalars::python::exec_coprocessor;
 /// let python_source = r#"
 /// @copr(args=["cpu", "mem"], returns=["perf", "what"])

@@ -231,7 +231,6 @@ fn describe_column_semantic_types(
 mod test {
     use std::sync::Arc;
 
-    use arrow::array::PrimitiveArray;
     use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
     use catalog::{CatalogList, CatalogManagerRef, CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -239,6 +238,7 @@ mod test {
     use common_query::Output;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use common_time::timestamp::TimeUnit;
+    use datatypes::arrow::array::PrimitiveArray;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{StringVector, TimestampVector, UInt32Vector, VectorRef};
