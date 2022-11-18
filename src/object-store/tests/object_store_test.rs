@@ -17,7 +17,7 @@ use std::env;
 use anyhow::Result;
 use common_telemetry::logging;
 use object_store::backend::{fs, s3};
-use object_store::{util, DirStreamer, Object, ObjectMode, ObjectStore};
+use object_store::{util, Object, ObjectMode, ObjectStore, ObjectStreamer};
 use tempdir::TempDir;
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
@@ -61,7 +61,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 
     // List objects
     let o: Object = store.object("/");
-    let obs: DirStreamer = o.list().await?;
+    let obs: ObjectStreamer = o.list().await?;
     let objects = util::collect(obs).await?;
     assert_eq!(3, objects.len());
 
