@@ -17,7 +17,7 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::result::AdminResultBuilder;
 use api::v1::alter_expr::Kind;
-use api::v1::{AdminResult, AlterExpr, ColumnDef, CreateExpr};
+use api::v1::{AdminResult, AlterExpr, ColumnDef, CreateExpr, DropColumns};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
@@ -181,6 +181,19 @@ fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
 
             let alter_kind = AlterKind::AddColumns {
                 columns: add_column_requests,
+            };
+
+            let request = AlterTableRequest {
+                catalog_name: expr.catalog_name,
+                schema_name: expr.schema_name,
+                table_name: expr.table_name,
+                alter_kind,
+            };
+            Ok(Some(request))
+        }
+        Some(Kind::DropColumns(DropColumns { drop_columns })) => {
+            let alter_kind = AlterKind::DropColumns {
+                names: drop_columns.into_iter().map(|c| c.name).collect(),
             };
 
             let request = AlterTableRequest {

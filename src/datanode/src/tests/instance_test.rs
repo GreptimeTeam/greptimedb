@@ -179,8 +179,7 @@ async fn assert_query_result(instance: &Instance, sql: &str, ts: i64, host: &str
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_execute_insert() {
+async fn setup_test_instance() -> Instance {
     common_telemetry::init_default_ut_logging();
 
     let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_insert");
@@ -195,6 +194,12 @@ async fn test_execute_insert() {
     .await
     .unwrap();
 
+    instance
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_execute_insert() {
+    let instance = setup_test_instance().await;
     let output = instance
         .execute_sql(
             r#"insert into demo(host, cpu, memory, ts) values
@@ -479,6 +484,7 @@ async fn test_alter_table() {
         .await
         .unwrap();
 
+    // Add column
     let output = instance
         .execute_sql("alter table demo add my_tag string null")
         .await
@@ -498,7 +504,10 @@ async fn test_alter_table() {
         .unwrap();
     assert!(matches!(output, Output::AffectedRows(1)));
 
-    let output = instance.execute_sql("select * from demo").await.unwrap();
+    let output = instance
+        .execute_sql("select * from demo order by ts")
+        .await
+        .unwrap();
     let expected = vec![
         "+-------+-----+--------+---------------------+--------+",
         "| host  | cpu | memory | ts                  | my_tag |",
@@ -507,6 +516,51 @@ async fn test_alter_table() {
         "| host2 | 2.2 | 200    | 1970-01-01 00:00:02 | hello  |",
         "| host3 | 3.3 | 300    | 1970-01-01 00:00:03 |        |",
         "+-------+-----+--------+---------------------+--------+",
+    ];
+    check_output_stream(output, expected).await;
+
+    // Drop a column
+    let output = instance
+        .execute_sql("alter table demo drop column memory")
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = instance
+        .execute_sql("select * from demo order by ts")
+        .await
+        .unwrap();
+    let expected = vec![
+        "+-------+-----+---------------------+--------+",
+        "| host  | cpu | ts                  | my_tag |",
+        "+-------+-----+---------------------+--------+",
+        "| host1 | 1.1 | 1970-01-01 00:00:01 |        |",
+        "| host2 | 2.2 | 1970-01-01 00:00:02 | hello  |",
+        "| host3 | 3.3 | 1970-01-01 00:00:03 |        |",
+        "+-------+-----+---------------------+--------+",
+    ];
+    check_output_stream(output, expected).await;
+
+    // insert a new row
+    let output = instance
+        .execute_sql("insert into demo(host, cpu, ts, my_tag) values ('host4', 400, 4000, 'world')")
+        .await
+        .unwrap();
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    let output = instance
+        .execute_sql("select * from demo order by ts")
+        .await
+        .unwrap();
+    let expected = vec![
+        "+-------+-----+---------------------+--------+",
+        "| host  | cpu | ts                  | my_tag |",
+        "+-------+-----+---------------------+--------+",
+        "| host1 | 1.1 | 1970-01-01 00:00:01 |        |",
+        "| host2 | 2.2 | 1970-01-01 00:00:02 | hello  |",
+        "| host3 | 3.3 | 1970-01-01 00:00:03 |        |",
+        "| host4 | 400 | 1970-01-01 00:00:04 | world  |",
+        "+-------+-----+---------------------+--------+",
     ];
     check_output_stream(output, expected).await;
 }

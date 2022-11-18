@@ -19,7 +19,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
-use table::metadata::{RawTableMeta, TableId, TableVersion};
+use table::metadata::{RawTableInfo, TableId, TableVersion};
 
 use crate::consts::{
     CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_GLOBAL_KEY_PREFIX, TABLE_REGIONAL_KEY_PREFIX,
@@ -128,15 +128,18 @@ impl TableGlobalKey {
 /// table id, table meta(schema...), region id allocation across datanodes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableGlobalValue {
-    /// Table id is the same across all datanodes.
-    pub id: TableId,
     /// Id of datanode that created the global table info kv. only for debugging.
     pub node_id: u64,
     // TODO(LFC): Maybe remove it?
     /// Allocation of region ids across all datanodes.
     pub regions_id_map: HashMap<u64, Vec<u32>>,
-    // TODO(LFC): Too much for assembling the table schema that DistTable needs, find another way.
-    pub meta: RawTableMeta,
+    pub table_info: RawTableInfo,
+}
+
+impl TableGlobalValue {
+    pub fn table_id(&self) -> TableId {
+        self.table_info.ident.table_id
+    }
 }
 
 /// Table regional info that varies between datanode, so it contains a `node_id` field.
@@ -279,6 +282,7 @@ define_catalog_value!(
 mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema, Schema};
+    use table::metadata::{RawTableMeta, TableIdent, TableType};
 
     use super::*;
 
@@ -339,11 +343,23 @@ mod tests {
             region_numbers: vec![1],
         };
 
+        let table_info = RawTableInfo {
+            ident: TableIdent {
+                table_id: 42,
+                version: 1,
+            },
+            name: "table_1".to_string(),
+            desc: Some("blah".to_string()),
+            catalog_name: "catalog_1".to_string(),
+            schema_name: "schema_1".to_string(),
+            meta,
+            table_type: TableType::Base,
+        };
+
         let value = TableGlobalValue {
-            id: 42,
             node_id: 0,
             regions_id_map: HashMap::from([(0, vec![1, 2, 3])]),
-            meta,
+            table_info,
         };
         let serialized = serde_json::to_string(&value).unwrap();
         let deserialized = TableGlobalValue::parse(&serialized).unwrap();

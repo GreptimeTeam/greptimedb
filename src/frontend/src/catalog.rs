@@ -16,7 +16,7 @@ use std::any::Any;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use catalog::error::{InvalidCatalogValueSnafu, InvalidSchemaInCatalogSnafu};
+use catalog::error::{self as catalog_err, InvalidCatalogValueSnafu};
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
     CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSchemaRequest,
@@ -276,17 +276,16 @@ impl SchemaProvider for FrontendSchemaProvider {
                 let val = TableGlobalValue::parse(String::from_utf8_lossy(&res.1))
                     .context(InvalidCatalogValueSnafu)?;
 
-                let table = Arc::new(DistTable {
+                let table = Arc::new(DistTable::new(
                     table_name,
-                    schema: Arc::new(
-                        val.meta
-                            .schema
+                    Arc::new(
+                        val.table_info
                             .try_into()
-                            .context(InvalidSchemaInCatalogSnafu)?,
+                            .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
                     ),
                     table_routes,
                     datanode_clients,
-                });
+                ));
                 Ok(Some(table as _))
             })
         })

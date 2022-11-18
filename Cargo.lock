@@ -1076,6 +1076,7 @@ dependencies = [
  "datanode",
  "frontend",
  "futures",
+ "meta-client",
  "meta-srv",
  "serde",
  "snafu",

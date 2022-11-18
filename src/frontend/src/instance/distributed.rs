@@ -37,7 +37,7 @@ use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 use sqlparser::ast::Value as SqlValue;
-use table::metadata::RawTableMeta;
+use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
@@ -274,11 +274,23 @@ fn create_table_global_value(
         created_on: DateTime::default(),
     };
 
+    let table_info = RawTableInfo {
+        ident: TableIdent {
+            table_id: table_route.table.id as u32,
+            version: 0,
+        },
+        name: table_name.table_name.clone(),
+        desc: create_table.desc.clone(),
+        catalog_name: table_name.catalog_name.clone(),
+        schema_name: table_name.schema_name.clone(),
+        meta,
+        table_type: TableType::Base,
+    };
+
     Ok(TableGlobalValue {
-        id: table_route.table.id as u32,
         node_id,
         regions_id_map: HashMap::new(),
-        meta,
+        table_info,
     })
 }
 

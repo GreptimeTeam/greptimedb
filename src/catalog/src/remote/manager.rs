@@ -250,10 +250,7 @@ impl RemoteCatalogManager {
             let table_ref = self.open_or_create_table(&table_key, &table_value).await?;
             schema.register_table(table_key.table_name.to_string(), table_ref)?;
             info!("Registered table {}", &table_key.table_name);
-            if table_value.id > max_table_id {
-                info!("Max table id: {} -> {}", max_table_id, table_value.id);
-                max_table_id = table_value.id;
-            }
+            max_table_id = max_table_id.max(table_value.table_id());
             table_num += 1;
         }
         info!(
@@ -311,9 +308,10 @@ impl RemoteCatalogManager {
             ..
         } = table_key;
 
+        let table_id = table_value.table_id();
+
         let TableGlobalValue {
-            id,
-            meta,
+            table_info,
             regions_id_map,
             ..
         } = table_value;
@@ -322,14 +320,17 @@ impl RemoteCatalogManager {
             catalog_name: catalog_name.clone(),
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
-            table_id: *id,
+            table_id,
         };
         match self
             .engine
             .open_table(&context, request)
             .await
             .with_context(|_| OpenTableSnafu {
-                table_info: format!("{}.{}.{}, id:{}", catalog_name, schema_name, table_name, id,),
+                table_info: format!(
+                    "{}.{}.{}, id:{}",
+                    catalog_name, schema_name, table_name, table_id
+                ),
             })? {
             Some(table) => {
                 info!(
@@ -344,6 +345,7 @@ impl RemoteCatalogManager {
                     catalog_name, schema_name, table_name
                 );
 
+                let meta = &table_info.meta;
                 let schema = meta
                     .schema
                     .clone()
@@ -353,7 +355,7 @@ impl RemoteCatalogManager {
                         schema: meta.schema.clone(),
                     })?;
                 let req = CreateTableRequest {
-                    id: *id,
+                    id: table_id,
                     catalog_name: catalog_name.clone(),
                     schema_name: schema_name.clone(),
                     table_name: table_name.clone(),
@@ -371,7 +373,7 @@ impl RemoteCatalogManager {
                     .context(CreateTableSnafu {
                         table_info: format!(
                             "{}.{}.{}, id:{}",
-                            &catalog_name, &schema_name, &table_name, id
+                            &catalog_name, &schema_name, &table_name, table_id
                         ),
                     })
             }

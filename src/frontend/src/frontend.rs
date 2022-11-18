@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
 use snafu::prelude::*;
 
@@ -38,7 +39,7 @@ pub struct FrontendOptions {
     pub prometheus_options: Option<PrometheusOptions>,
     pub mode: Mode,
     pub datanode_rpc_addr: String,
-    pub metasrv_addr: Option<Vec<String>>,
+    pub meta_client_opts: Option<MetaClientOpts>,
 }
 
 impl Default for FrontendOptions {
@@ -53,7 +54,7 @@ impl Default for FrontendOptions {
             prometheus_options: Some(PrometheusOptions::default()),
             mode: Mode::Standalone,
             datanode_rpc_addr: "127.0.0.1:3001".to_string(),
-            metasrv_addr: None,
+            meta_client_opts: None,
         }
     }
 }

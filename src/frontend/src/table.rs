@@ -55,10 +55,10 @@ pub(crate) mod scan;
 
 #[derive(Clone)]
 pub struct DistTable {
-    pub(crate) table_name: TableName,
-    pub(crate) schema: SchemaRef,
-    pub(crate) table_routes: Arc<TableRoutes>,
-    pub(crate) datanode_clients: Arc<DatanodeClients>,
+    table_name: TableName,
+    table_info: TableInfoRef,
+    table_routes: Arc<TableRoutes>,
+    datanode_clients: Arc<DatanodeClients>,
 }
 
 #[async_trait]
@@ -68,11 +68,11 @@ impl Table for DistTable {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.table_info.meta.schema.clone()
     }
 
     fn table_info(&self) -> TableInfoRef {
-        unimplemented!()
+        self.table_info.clone()
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
@@ -133,6 +133,20 @@ impl Table for DistTable {
 }
 
 impl DistTable {
+    pub(crate) fn new(
+        table_name: TableName,
+        table_info: TableInfoRef,
+        table_routes: Arc<TableRoutes>,
+        datanode_clients: Arc<DatanodeClients>,
+    ) -> Self {
+        Self {
+            table_name,
+            table_info,
+            table_routes,
+            datanode_clients,
+        }
+    }
+
     // TODO(LFC): Finding regions now seems less efficient, should be further looked into.
     fn find_regions(
         &self,
@@ -477,6 +491,7 @@ mod test {
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
     use sqlparser::dialect::GenericDialect;
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::TableRef;
     use tempdir::TempDir;
 
@@ -496,11 +511,22 @@ mod test {
             ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
         ];
         let schema = Arc::new(Schema::new(column_schemas.clone()));
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .next_column_id(1)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(&table_name.table_name)
+            .meta(meta)
+            .build()
+            .unwrap();
 
         let table_routes = Arc::new(TableRoutes::new(Arc::new(MetaClient::default())));
         let table = DistTable {
             table_name: table_name.clone(),
-            schema,
+            table_info: Arc::new(table_info),
             table_routes: table_routes.clone(),
             datanode_clients: Arc::new(DatanodeClients::new()),
         };
@@ -862,9 +888,20 @@ mod test {
             insert_testing_data(&table_name, instance.clone(), numbers, start_ts).await;
         }
 
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .next_column_id(1)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(&table_name.table_name)
+            .meta(meta)
+            .build()
+            .unwrap();
         DistTable {
             table_name,
-            schema,
+            table_info: Arc::new(table_info),
             table_routes,
             datanode_clients,
         }
@@ -968,9 +1005,21 @@ mod test {
             ConcreteDataType::int32_datatype(),
             true,
         )]));
+        let table_name = TableName::new("greptime", "public", "foo");
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .next_column_id(1)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(&table_name.table_name)
+            .meta(meta)
+            .build()
+            .unwrap();
         let table = DistTable {
-            table_name: TableName::new("greptime", "public", "foo"),
-            schema,
+            table_name,
+            table_info: Arc::new(table_info),
             table_routes: Arc::new(TableRoutes::new(Arc::new(MetaClient::default()))),
             datanode_clients: Arc::new(DatanodeClients::new()),
         };

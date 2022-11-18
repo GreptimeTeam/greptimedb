@@ -72,6 +72,9 @@ impl SqlHandler {
                     is_key: false,
                 }],
             },
+            AlterTableOperation::DropColumn { name } => AlterKind::DropColumns {
+                names: vec![name.value.clone()],
+            },
         };
         Ok(AlterTableRequest {
             catalog_name: Some(catalog_name),
