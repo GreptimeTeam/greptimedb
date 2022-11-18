@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::DataType as ArrowDataType;
 use datafusion_expr::ReturnTypeFunction as DfReturnTypeFunction;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;

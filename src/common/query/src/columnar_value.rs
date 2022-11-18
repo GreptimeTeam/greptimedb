@@ -80,7 +80,7 @@ impl From<ColumnarValue> for DfColumnarValue {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::datatypes::DataType as ArrowDataType;
+    use datatypes::arrow::datatypes::DataType as ArrowDataType;
     use datatypes::vectors::BooleanVector;
 
     use super::*;

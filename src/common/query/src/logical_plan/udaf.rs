@@ -19,11 +19,11 @@
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
 
-use arrow::datatypes::DataType as ArrowDataType;
 use datafusion_expr::{
     AccumulatorFunctionImplementation as DfAccumulatorFunctionImplementation,
     AggregateUDF as DfAggregateUdf, StateTypeFunction as DfStateTypeFunction,
 };
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::*;
 
 use crate::function::{
