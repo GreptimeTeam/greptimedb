@@ -100,9 +100,9 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
 #[cfg(test)]
 mod test {
     use arrow::array::{
-        BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
-        Int64Array as ArrowI64Array, Int8Array, MutableListArray, MutablePrimitiveArray, TryExtend,
-        UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+        BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+        MutableListArray, MutablePrimitiveArray, TryExtend, UInt16Array, UInt32Array, UInt64Array,
+        UInt8Array,
     };
     use arrow::buffer::Buffer;
     use arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
@@ -128,7 +128,7 @@ mod test {
         assert_eq!(Value::Int32(2), arrow_array_get(&array1, 1).unwrap());
         let array1 = UInt32Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(Value::UInt32(2), arrow_array_get(&array1, 1).unwrap());
-        let array = ArrowI64Array::from_vec(vec![1, 2, 3, 4]);
+        let array = Int64Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(Value::Int64(2), arrow_array_get(&array, 1).unwrap());
         let array1 = UInt64Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(Value::UInt64(2), arrow_array_get(&array1, 1).unwrap());
@@ -161,7 +161,7 @@ mod test {
         );
         assert_eq!(Value::Null, arrow_array_get(&array3, 1).unwrap());
 
-        let vector = TimestampVector::new(ArrowI64Array::from_vec(vec![1, 2, 3, 4]));
+        let vector = TimestampVector::new(Int64Array::from_vec(vec![1, 2, 3, 4]));
         let array = vector.to_boxed_arrow_array();
         let value = arrow_array_get(&*array, 1).unwrap();
         assert_eq!(
