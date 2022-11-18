@@ -16,7 +16,6 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
 use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef, RuntimeEnv};
@@ -48,7 +47,6 @@ impl SimpleTableScan {
     }
 }
 
-#[async_trait]
 impl PhysicalPlan for SimpleTableScan {
     fn as_any(&self) -> &dyn Any {
         self
@@ -70,7 +68,7 @@ impl PhysicalPlan for SimpleTableScan {
         unimplemented!()
     }
 
-    async fn execute(
+    fn execute(
         &self,
         _partition: usize,
         _runtime: Arc<RuntimeEnv>,
@@ -117,12 +115,12 @@ mod test {
         assert_eq!(scan.schema(), schema);
 
         let runtime = Arc::new(RuntimeEnv::default());
-        let stream = scan.execute(0, runtime.clone()).await.unwrap();
+        let stream = scan.execute(0, runtime.clone()).unwrap();
         let recordbatches = util::collect(stream).await.unwrap();
         assert_eq!(recordbatches[0], batch1);
         assert_eq!(recordbatches[1], batch2);
 
-        let result = scan.execute(0, runtime).await;
+        let result = scan.execute(0, runtime);
         assert!(result.is_err());
         match result {
             Err(e) => assert!(e

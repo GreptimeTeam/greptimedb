@@ -20,14 +20,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use client::Database;
-use common_error::prelude::BoxedError;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
+use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::Expr as DfExpr;
-use datafusion::physical_plan::Partitioning;
+use datafusion::physical_plan::{
+    Partitioning, SendableRecordBatchStream as DfSendableRecordBatchStream,
+};
+use datafusion_common::DataFusionError;
 use datatypes::prelude::Value;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::{Peer, TableName};
@@ -110,14 +113,14 @@ impl Table for DistTable {
             let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 
             // TODO(LFC): Pass in "regions" when Datanode supports multi regions for a table.
-            partition_execs.push(PartitionExec {
+            partition_execs.push(Arc::new(PartitionExec {
                 table_name: self.table_name.clone(),
                 datanode_instance,
                 projection: projection.clone(),
                 filters: filters.to_vec(),
                 limit,
                 batches: Arc::new(RwLock::new(None)),
-            })
+            }));
         }
 
         let dist_scan = DistTableScan {
@@ -385,10 +388,9 @@ fn reverse_operator(op: &Operator) -> Operator {
 #[derive(Debug)]
 struct DistTableScan {
     schema: SchemaRef,
-    partition_execs: Vec<PartitionExec>,
+    partition_execs: Vec<Arc<PartitionExec>>,
 }
 
-#[async_trait]
 impl PhysicalPlan for DistTableScan {
     fn as_any(&self) -> &dyn Any {
         self
@@ -410,14 +412,20 @@ impl PhysicalPlan for DistTableScan {
         unimplemented!()
     }
 
-    async fn execute(
+    fn execute(
         &self,
         partition: usize,
         _runtime: Arc<RuntimeEnv>,
     ) -> QueryResult<SendableRecordBatchStream> {
-        let exec = &self.partition_execs[partition];
-        exec.maybe_init().await.map_err(BoxedError::new)?;
-        Ok(exec.as_stream().await)
+        let exec = self.partition_execs[partition].clone();
+        let stream = Box::pin(async move {
+            exec.maybe_init()
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            exec.as_stream().await
+        });
+        let stream = AsyncRecordBatchStreamAdapter::new(self.schema(), stream);
+        return Ok(Box::pin(stream));
     }
 }
 
@@ -453,12 +461,12 @@ impl PartitionExec {
         Ok(())
     }
 
-    async fn as_stream(&self) -> SendableRecordBatchStream {
-        let batches = self.batches.read().await;
+    async fn as_stream(&self) -> std::result::Result<DfSendableRecordBatchStream, DataFusionError> {
+        let mut batches = self.batches.write().await;
         batches
-            .as_ref()
+            .take()
             .expect("should have been initialized in \"maybe_init\"")
-            .as_stream()
+            .into_df_stream()
     }
 }
 
@@ -759,7 +767,6 @@ mod test {
         for partition in 0..table_scan.output_partitioning().partition_count() {
             let result = table_scan
                 .execute(partition, Arc::new(RuntimeEnv::default()))
-                .await
                 .unwrap();
             let recordbatches = util::collect(result).await.unwrap();
 

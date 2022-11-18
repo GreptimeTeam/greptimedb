@@ -21,7 +21,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use datafusion::arrow_print;
+use datafusion::physical_plan::memory::MemoryStream;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
+use datafusion_common::DataFusionError;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{Schema, SchemaRef};
 use error::Result;
@@ -131,6 +133,21 @@ impl RecordBatches {
             },
             index: 0,
         })
+    }
+
+    pub fn into_df_stream(
+        self,
+    ) -> std::result::Result<DfSendableRecordBatchStream, DataFusionError> {
+        let df_record_batches = self
+            .batches
+            .into_iter()
+            .map(|batch| batch.df_recordbatch)
+            .collect();
+        Ok(Box::pin(MemoryStream::try_new(
+            df_record_batches,
+            self.schema.arrow_schema().clone(),
+            None,
+        )?))
     }
 }
 

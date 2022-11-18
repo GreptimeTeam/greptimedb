@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -19,6 +20,7 @@ use std::task::{Context, Poll};
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::physical_plan::RecordBatchStream as DfRecordBatchStream;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use datafusion_common::DataFusionError;
 use datatypes::arrow::error::{ArrowError, Result as ArrowResult};
 use datatypes::schema::{Schema, SchemaRef};
 use snafu::ResultExt;
@@ -102,5 +104,86 @@ impl Stream for RecordBatchStreamAdapter {
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.stream.size_hint()
+    }
+}
+
+enum AsyncRecordBatchStreamAdapterState {
+    Uninit(
+        Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<DfSendableRecordBatchStream, DataFusionError>,
+                    > + Send,
+            >,
+        >,
+    ),
+    Inited(std::result::Result<DfSendableRecordBatchStream, DataFusionError>),
+}
+
+pub struct AsyncRecordBatchStreamAdapter {
+    schema: SchemaRef,
+    state: AsyncRecordBatchStreamAdapterState,
+}
+
+impl AsyncRecordBatchStreamAdapter {
+    pub fn new(
+        schema: SchemaRef,
+        stream: Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<DfSendableRecordBatchStream, DataFusionError>,
+                    > + Send,
+            >,
+        >,
+    ) -> Self {
+        Self {
+            schema,
+            state: AsyncRecordBatchStreamAdapterState::Uninit(stream),
+        }
+    }
+}
+
+impl RecordBatchStream for AsyncRecordBatchStreamAdapter {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl Stream for AsyncRecordBatchStreamAdapter {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match &mut self.state {
+                AsyncRecordBatchStreamAdapterState::Uninit(stream_future) => {
+                    match Pin::new(stream_future).poll(cx) {
+                        Poll::Ready(stream) => {
+                            self.state = AsyncRecordBatchStreamAdapterState::Inited(stream);
+                            continue;
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                AsyncRecordBatchStreamAdapterState::Inited(stream) => match stream {
+                    Ok(stream) => match Pin::new(stream).poll_next(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Some(df_recordbatch)) => {
+                            return Poll::Ready(Some(Ok(RecordBatch {
+                                schema: self.schema(),
+                                df_recordbatch: df_recordbatch.context(error::PollStreamSnafu)?,
+                            })))
+                        }
+                        Poll::Ready(None) => return Poll::Ready(None),
+                    },
+                    Err(_) => todo!(),
+                },
+            }
+        }
+    }
+
+    // This is not supported for lazy stream.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, None)
     }
 }
