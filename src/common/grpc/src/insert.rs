@@ -25,13 +25,3 @@ pub struct InsertBatch {
     /// Note: the row_count of all columns in a InsertExpr must be same.
     pub row_count: u32,
 }
-
-/// Data struct about data insertion.
-///
-/// Note: Compared with InsertBatch, InsertBatchRef does not have ownership of
-/// columns
-#[derive(Clone)]
-pub struct InsertBatchRef<'a> {
-    pub columns: &'a [Column],
-    pub row_count: u32,
-}
