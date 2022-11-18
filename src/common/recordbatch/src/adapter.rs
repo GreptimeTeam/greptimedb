@@ -30,6 +30,14 @@ use crate::{
     DfSendableRecordBatchStream, RecordBatch, RecordBatchStream, SendableRecordBatchStream, Stream,
 };
 
+type FutureStream = Pin<
+    Box<
+        dyn std::future::Future<
+                Output = std::result::Result<DfSendableRecordBatchStream, DataFusionError>,
+            > + Send,
+    >,
+>;
+
 /// Greptime SendableRecordBatchStream -> DataFusion RecordBatchStream
 pub struct DfRecordBatchStreamAdapter {
     stream: SendableRecordBatchStream,
@@ -108,15 +116,7 @@ impl Stream for RecordBatchStreamAdapter {
 }
 
 enum AsyncRecordBatchStreamAdapterState {
-    Uninit(
-        Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = std::result::Result<DfSendableRecordBatchStream, DataFusionError>,
-                    > + Send,
-            >,
-        >,
-    ),
+    Uninit(FutureStream),
     Inited(std::result::Result<DfSendableRecordBatchStream, DataFusionError>),
 }
 
@@ -126,16 +126,7 @@ pub struct AsyncRecordBatchStreamAdapter {
 }
 
 impl AsyncRecordBatchStreamAdapter {
-    pub fn new(
-        schema: SchemaRef,
-        stream: Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = std::result::Result<DfSendableRecordBatchStream, DataFusionError>,
-                    > + Send,
-            >,
-        >,
-    ) -> Self {
+    pub fn new(schema: SchemaRef, stream: FutureStream) -> Self {
         Self {
             schema,
             state: AsyncRecordBatchStreamAdapterState::Uninit(stream),
@@ -175,7 +166,15 @@ impl Stream for AsyncRecordBatchStreamAdapter {
                         }
                         Poll::Ready(None) => return Poll::Ready(None),
                     },
-                    Err(_) => todo!(),
+                    Err(e) => {
+                        return Poll::Ready(Some(
+                            error::CreateRecordBatchesSnafu {
+                                reason: format!("Read error {:?} from stream", e),
+                            }
+                            .fail()
+                            .map_err(|e| e.into()),
+                        ))
+                    }
                 },
             }
         }

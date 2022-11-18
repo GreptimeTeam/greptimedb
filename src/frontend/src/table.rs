@@ -461,12 +461,13 @@ impl PartitionExec {
         Ok(())
     }
 
+    /// Notice: the record batch will be consumed.
     async fn as_stream(&self) -> std::result::Result<DfSendableRecordBatchStream, DataFusionError> {
         let mut batches = self.batches.write().await;
-        batches
+        Ok(batches
             .take()
             .expect("should have been initialized in \"maybe_init\"")
-            .into_df_stream()
+            .into_df_stream())
     }
 }
 
