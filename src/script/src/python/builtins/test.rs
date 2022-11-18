@@ -18,9 +18,9 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, Int64Array, PrimitiveArray};
-use arrow::compute::cast::CastOptions;
-use arrow::datatypes::DataType;
+use datatypes::arrow::array::{Float64Array, Int64Array, PrimitiveArray};
+use datatypes::arrow::compute::cast::CastOptions;
+use datatypes::arrow::datatypes::DataType;
 use datatypes::vectors::VectorRef;
 use ron::from_str as from_ron_string;
 use rustpython_vm::builtins::{PyFloat, PyInt, PyList};
