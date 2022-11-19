@@ -13,7 +13,7 @@ name: Release
 env:
   RUST_TOOLCHAIN: nightly-2022-07-14
 
-  # FIXME(zyy17): It's better to fetch the latest tag from git, but for a long time, we will stay at 'v0.1.0-alpha-*'
+  # FIXME(zyy17): Would be better to use `gh release list -L 1 | cut -f 3` to get the latest release version tag, but for a long time, we will stay at 'v0.1.0-alpha-*'.
   NIGHTLY_BUILD_VERSION_PREFIX: v0.1.0-alpha
 
 jobs:
@@ -113,19 +113,26 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v3
 
-      - name: Configure nigthly build version # the version would be ${NIGHTLY_BUILD_VERSION_PREFIX}-YYYYMMDD-nightly, like v0.1.0-alpha-20221119-nightly.
+      - name: Configure nightly build version # the version would be ${NIGHTLY_BUILD_VERSION_PREFIX}-YYYYMMDD-nightly, like v0.1.0-alpha-20221119-nightly.
         shell: bash
         if: github.event_name == 'schedule'
         run: |
           buildTime=`date "+%Y%m%d"`
-          NIGHTLY_VERSION=${{ env.NIGHTLY_BUILD_VERSION_PREFIX }}-$buildTime-nigthly
-          echo "VERSION=${NIGHTLY_VERSION}" >> $GITHUB_ENV
+          NIGHTLY_VERSION=${{ env.NIGHTLY_BUILD_VERSION_PREFIX }}-$buildTime-nightly
+          echo "NIGHTLY_VERSION=${NIGHTLY_VERSION}" >> $GITHUB_ENV
 
-      - name: Publish nigthly release # configure the different release title.
+      - name: Create nightly git tag
+        if: github.event_name == 'schedule'
+        run: |
+          git tag ${{ env.NIGHTLY_VERSION }}
+
+      - name: Publish nightly release # configure the different release title and tags.
         uses: softprops/action-gh-release@v1
         if: github.event_name == 'schedule'
         with:
           name: "Release ${{ env.NIGHTLY_VERSION }}"
+          tag_name: ${{ env.NIGHTLY_VERSION }}
+          generate_release_notes: true
           files: |
             **/greptime-*
 
@@ -182,20 +189,20 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Configure nigthly build image tag # the tag would be ${NIGHTLY_BUILD_VERSION_PREFIX}-YYYYMMDD-nightly
+      - name: Configure nightly build image tag # the tag would be ${NIGHTLY_BUILD_VERSION_PREFIX}-YYYYMMDD-nightly
         shell: bash
         if: github.event_name == 'schedule'
         run: |
           buildTime=`date "+%Y%m%d"`
-          VERSION=${{ env.NIGHTLY_BUILD_VERSION_PREFIX }}-$buildTime-nigthly
-          echo "VERSION=${VERSION:1}" >> $GITHUB_ENV
+          NIGHTLY_VERSION=${{ env.NIGHTLY_BUILD_VERSION_PREFIX }}-$buildTime-nightly
+          echo "IMAGE_TAG=${NIGHTLY_VERSION:1}" >> $GITHUB_ENV
 
       - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
         shell: bash
         if: github.event_name != 'schedule'
         run: |
           VERSION=${{ github.ref_name }}
-          echo "VERSION=${VERSION:1}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
@@ -212,6 +219,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: |
             greptime/greptimedb:latest
-            greptime/greptimedb:${{ env.VERSION }}
+            greptime/greptimedb:${{ env.IMAGE_TAG }}
             uhub.service.ucloud.cn/greptime/greptimedb:latest
-            uhub.service.ucloud.cn/greptime/greptimedb:${{ env.VERSION }}
+            uhub.service.ucloud.cn/greptime/greptimedb:${{ env.IMAGE_TAG }}
