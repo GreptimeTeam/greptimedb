@@ -244,9 +244,7 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
         column_def
             .options
             .iter()
-            .any(|o| {
-                matches!(o.option, ColumnOption::Null)
-            })
+            .any(|o| matches!(o.option, ColumnOption::Null))
     };
     let name = column_def.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&column_def.data_type)?;
