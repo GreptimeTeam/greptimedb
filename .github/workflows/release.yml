@@ -13,7 +13,7 @@ name: Release
 env:
   RUST_TOOLCHAIN: nightly-2022-07-14
 
-  # FIXME(zyy17): It's better to fetch the latest tag from git, but for a long time, we will stay at 'v0.1.0-alpha-*'
+  # FIXME(zyy17): Would be better to use `gh release list -L 1 | cut -f 3` to get the latest release version tag, but for a long time, we will stay at 'v0.1.0-alpha-*'.
   NIGHTLY_BUILD_VERSION_PREFIX: v0.1.0-alpha
 
 jobs:
@@ -121,11 +121,18 @@ jobs:
           NIGHTLY_VERSION=${{ env.NIGHTLY_BUILD_VERSION_PREFIX }}-$buildTime-nigthly
           echo "VERSION=${NIGHTLY_VERSION}" >> $GITHUB_ENV
 
-      - name: Publish nigthly release # configure the different release title.
+      - name: Create nigthly git tag
+        if: github.event_name == 'schedule'
+        run: |
+          git tag ${{ env.NIGHTLY_VERSION }}
+
+      - name: Publish nigthly release # configure the different release title and tags.
         uses: softprops/action-gh-release@v1
         if: github.event_name == 'schedule'
         with:
           name: "Release ${{ env.NIGHTLY_VERSION }}"
+          tag_name: ${{ env.NIGHTLY_VERSION }}
+          generate_release_notes: true
           files: |
             **/greptime-*
 
