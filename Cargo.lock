@@ -6104,6 +6104,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "tests-integration"
+version = "0.1.0"
+dependencies = [
+ "axum 0.6.0-rc.2",
+ "axum-test-helper",
+ "catalog",
+ "common-catalog",
+ "common-telemetry",
+ "datanode",
+ "datatypes",
+ "frontend",
+ "mito",
+ "serde",
+ "serde_json",
+ "servers",
+ "snafu",
+ "sql",
+ "table",
+ "tempdir",
+ "tokio",
+]
+
+[[package]]
 name = "textwrap"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -17,15 +17,14 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use axum::Router;
 use axum_test_helper::TestClient;
+use datanode::instance::{Instance, InstanceRef};
 use datatypes::prelude::ConcreteDataType;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use serde_json::json;
 use servers::http::{ColumnSchema, HttpOptions, HttpServer, JsonOutput, JsonResponse, Schema};
 use test_util::TestGuard;
-
-use crate::instance::{Instance, InstanceRef};
-use crate::tests::test_util;
+use tests_integration::test_util;
 
 async fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
     let fe_opts = FrontendOptions::default();
