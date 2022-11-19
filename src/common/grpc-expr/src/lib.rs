@@ -1,3 +1,4 @@
+#![feature(assert_matches)]
 // Copyright 2022 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +19,7 @@ pub mod error;
 mod insert;
 
 pub use alter::alter_expr_to_request;
-pub use column::create_column_schema;
+pub use column::column_def_to_column_schema;
 pub use insert::{
     build_alter_table_request, build_create_expr_from_insertion, column_to_vector,
     find_new_columns, insert_batches, insertion_expr_to_request,

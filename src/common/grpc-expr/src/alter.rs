@@ -17,7 +17,7 @@ use api::v1::{AlterExpr, DropColumns};
 use snafu::OptionExt;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
 
-use crate::column::create_column_schema;
+use crate::column::column_def_to_column_schema;
 use crate::error::{MissingFieldSnafu, Result};
 
 /// Convert an [`AlterExpr`] to an optional [`AlterTableRequest`]
@@ -30,7 +30,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
                     field: "column_def",
                 })?;
 
-                let schema = create_column_schema(&column_def)?;
+                let schema = column_def_to_column_schema(&column_def)?;
                 add_column_requests.push(AddColumnRequest {
                     column_schema: schema,
                     is_key: add_column_expr.is_key,
@@ -60,5 +60,77 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
             Ok(Some(request))
         }
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::{AddColumn, AddColumns, ColumnDataType, ColumnDef, DropColumn};
+    use datatypes::prelude::ConcreteDataType;
+
+    use super::*;
+
+    #[test]
+    fn test_alter_expr_to_request() {
+        let expr = AlterExpr {
+            catalog_name: None,
+            schema_name: None,
+            table_name: "monitor".to_string(),
+
+            kind: Some(Kind::AddColumns(AddColumns {
+                add_columns: vec![AddColumn {
+                    column_def: Some(ColumnDef {
+                        name: "mem_usage".to_string(),
+                        datatype: ColumnDataType::Float64 as i32,
+                        is_nullable: false,
+                        default_constraint: None,
+                    }),
+                    is_key: false,
+                }],
+            })),
+        };
+
+        let alter_request = alter_expr_to_request(expr).unwrap().unwrap();
+        assert_eq!(None, alter_request.catalog_name);
+        assert_eq!(None, alter_request.schema_name);
+        assert_eq!("monitor".to_string(), alter_request.table_name);
+        let add_column = match alter_request.alter_kind {
+            AlterKind::AddColumns { mut columns } => columns.pop().unwrap(),
+            _ => unreachable!(),
+        };
+
+        assert!(!add_column.is_key);
+        assert_eq!("mem_usage", add_column.column_schema.name);
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            add_column.column_schema.data_type
+        );
+    }
+
+    #[test]
+    fn test_drop_column_expr() {
+        let expr = AlterExpr {
+            catalog_name: Some("test_catalog".to_string()),
+            schema_name: Some("test_schema".to_string()),
+            table_name: "monitor".to_string(),
+
+            kind: Some(Kind::DropColumns(DropColumns {
+                drop_columns: vec![DropColumn {
+                    name: "mem_usage".to_string(),
+                }],
+            })),
+        };
+
+        let alter_request = alter_expr_to_request(expr).unwrap().unwrap();
+        assert_eq!(Some("test_catalog".to_string()), alter_request.catalog_name);
+        assert_eq!(Some("test_schema".to_string()), alter_request.schema_name);
+        assert_eq!("monitor".to_string(), alter_request.table_name);
+
+        let mut drop_names = match alter_request.alter_kind {
+            AlterKind::DropColumns { names } => names,
+            _ => unreachable!(),
+        };
+        assert_eq!(1, drop_names.len());
+        assert_eq!("mem_usage".to_string(), drop_names.pop().unwrap());
     }
 }

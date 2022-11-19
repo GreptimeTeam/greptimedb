@@ -23,7 +23,6 @@ use async_trait::async_trait;
 use client::admin::Admin;
 use client::Database;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
-use common_error::prelude::BoxedError;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};

@@ -18,7 +18,7 @@ use api::result::AdminResultBuilder;
 use api::v1::{AdminResult, AlterExpr, CreateExpr};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
-use common_grpc_expr::{alter_expr_to_request, create_column_schema};
+use common_grpc_expr::{alter_expr_to_request, column_def_to_column_schema};
 use common_query::Output;
 use common_telemetry::{error, info};
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
@@ -169,7 +169,7 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
     let column_schemas = expr
         .column_defs
         .iter()
-        .map(create_column_schema)
+        .map(column_def_to_column_schema)
         .collect::<common_grpc_expr::error::Result<Vec<ColumnSchema>>>()
         .context(ColumnDefToSchemaSnafu)?;
 
@@ -263,7 +263,7 @@ mod tests {
             is_nullable: true,
             default_constraint: None,
         };
-        let result = create_column_schema(&column_def);
+        let result = column_def_to_column_schema(&column_def);
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
@@ -276,7 +276,7 @@ mod tests {
             is_nullable: true,
             default_constraint: None,
         };
-        let column_schema = create_column_schema(&column_def).unwrap();
+        let column_schema = column_def_to_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
         assert!(column_schema.is_nullable());
@@ -288,7 +288,7 @@ mod tests {
             is_nullable: true,
             default_constraint: Some(default_constraint.clone().try_into().unwrap()),
         };
-        let column_schema = create_column_schema(&column_def).unwrap();
+        let column_schema = column_def_to_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
         assert!(column_schema.is_nullable());
