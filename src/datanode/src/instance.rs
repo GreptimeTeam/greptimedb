@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fs, path};
 
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
@@ -29,7 +28,7 @@ use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
 use object_store::layers::LoggingLayer;
 use object_store::services::fs::Builder;
-use object_store::ObjectStore;
+use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
 use snafu::prelude::*;
@@ -70,7 +69,7 @@ pub type InstanceRef = Arc<Instance>;
 
 impl Instance {
     pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
-        let object_store = new_object_store(opts).await?;
+        let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
 
         let meta_client = match opts.mode {
@@ -170,27 +169,21 @@ impl Instance {
     }
 }
 
-pub(crate) async fn new_object_store(opts: &DatanodeOptions) -> Result<ObjectStore> {
+pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
     // TODO(dennis): supports other backend
-    let data_dir = match &opts.storage {
+    let data_dir = util::normalize_dir(match store_config {
         ObjectStoreConfig::File { data_dir } => data_dir,
-    };
+    });
 
-    let mut path = PathBuf::from(data_dir);
-    if let Some(node_id) = opts.node_id {
-        path.push(node_id.to_string());
-    }
-    let data_dir = path
-        .to_str()
-        .expect("Storage data directory cannot contain non UTF-8 chars!");
-    info!("Creating storage directory: {}", data_dir);
+    fs::create_dir_all(path::Path::new(&data_dir))
+        .context(error::CreateDirSnafu { dir: &data_dir })?;
 
-    fs::create_dir_all(data_dir).context(error::CreateDirSnafu { dir: data_dir })?;
+    info!("The storage directory is: {}", &data_dir);
 
     let accessor = Builder::default()
-        .root(data_dir)
+        .root(&data_dir)
         .build()
-        .context(error::InitBackendSnafu { dir: data_dir })?;
+        .context(error::InitBackendSnafu { dir: &data_dir })?;
 
     let object_store = ObjectStore::new(accessor).layer(LoggingLayer); // Add logging
 
@@ -229,20 +222,14 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Resul
 pub(crate) async fn create_local_file_log_store(
     opts: &DatanodeOptions,
 ) -> Result<LocalFileLogStore> {
-    let wal_dir = &opts.wal_dir;
-    let mut path = PathBuf::from(wal_dir);
-    if let Some(node_id) = opts.node_id {
-        path.push(node_id.to_string());
-    }
-    let wal_dir = path
-        .to_str()
-        .expect("Storage data directory cannot contain non UTF-8 chars!");
-    info!("Creating WAL directory: {}", wal_dir);
+    // create WAL directory
+    fs::create_dir_all(path::Path::new(&opts.wal_dir))
+        .context(error::CreateDirSnafu { dir: &opts.wal_dir })?;
 
-    fs::create_dir_all(wal_dir).context(error::CreateDirSnafu { dir: wal_dir })?;
+    info!("The WAL directory is: {}", &opts.wal_dir);
 
     let log_config = LogConfig {
-        log_file_dir: wal_dir.to_string(),
+        log_file_dir: opts.wal_dir.clone(),
         ..Default::default()
     };
 
