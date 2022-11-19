@@ -238,11 +238,16 @@ fn parse_column_default_constraint(
 // a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
 pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Result<ColumnSchema> {
-    let is_nullable = column_def
-        .options
-        .iter()
-        .any(|o| matches!(o.option, ColumnOption::Null));
-
+    let is_nullable = if column_def.options.len() == 0 {
+        true
+    } else {
+        column_def
+            .options
+            .iter()
+            .any(|o| {
+                matches!(o.option, ColumnOption::Null)
+            })
+    };
     let name = column_def.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&column_def.data_type)?;
     let default_constraint =
