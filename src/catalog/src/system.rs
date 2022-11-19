@@ -134,7 +134,6 @@ impl SystemCatalogTable {
             .context(error::SystemCatalogTableScanSnafu)?;
         let stream = scan
             .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
             .context(error::SystemCatalogTableScanExecSnafu)?;
         Ok(stream)
     }

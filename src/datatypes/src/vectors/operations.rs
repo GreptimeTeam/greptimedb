@@ -20,8 +20,10 @@ use arrow::bitmap::MutableBitmap;
 
 use crate::error::Result;
 use crate::types::PrimitiveElement;
-use crate::vectors::all::*;
-use crate::vectors::{Vector, VectorRef};
+use crate::vectors::{
+    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, ListVector,
+    NullVector, PrimitiveVector, StringVector, TimestampVector, Vector, VectorRef,
+};
 
 /// Vector compute operations.
 pub trait VectorOp {

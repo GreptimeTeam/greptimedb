@@ -569,10 +569,7 @@ mod tests {
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
         let stream = table.scan(&None, &[], None).await.unwrap();
-        let stream = stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
-            .unwrap();
+        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
 
@@ -605,10 +602,7 @@ mod tests {
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
         let stream = table.scan(&None, &[], None).await.unwrap();
-        let stream = stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
-            .unwrap();
+        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
 
@@ -660,10 +654,7 @@ mod tests {
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
         let stream = table.scan(&None, &[], None).await.unwrap();
-        let stream = stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
-            .unwrap();
+        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
         assert_eq!(batches[0].df_recordbatch.num_columns(), 4);
@@ -685,10 +676,7 @@ mod tests {
 
         // Scan with projections: cpu and memory
         let stream = table.scan(&Some(vec![1, 2]), &[], None).await.unwrap();
-        let stream = stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
-            .unwrap();
+        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
         assert_eq!(batches[0].df_recordbatch.num_columns(), 2);
@@ -706,10 +694,7 @@ mod tests {
 
         // Scan with projections: only ts
         let stream = table.scan(&Some(vec![3]), &[], None).await.unwrap();
-        let stream = stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
-            .unwrap();
+        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
         assert_eq!(batches[0].df_recordbatch.num_columns(), 1);
@@ -749,10 +734,7 @@ mod tests {
         assert_eq!(test_batch_size, table.insert(insert_req).await.unwrap());
 
         let stream = table.scan(&None, &[], None).await.unwrap();
-        let stream = stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
-            .unwrap();
+        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
         let batches = util::collect(stream).await.unwrap();
         let mut total = 0;
         for batch in batches {

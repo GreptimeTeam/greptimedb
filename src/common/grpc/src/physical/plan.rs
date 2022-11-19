@@ -18,8 +18,6 @@ use std::sync::Arc;
 
 use api::v1::codec::physical_plan_node::PhysicalPlanType;
 use api::v1::codec::{MockInputExecNode, PhysicalPlanNode, ProjectionExecNode};
-use arrow::array::{PrimitiveArray, Utf8Array};
-use arrow::datatypes::{DataType, Field, Schema};
 use async_trait::async_trait;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::field_util::SchemaExt;
@@ -29,6 +27,8 @@ use datafusion::physical_plan::{
     ExecutionPlan, PhysicalExpr, SendableRecordBatchStream, Statistics,
 };
 use datafusion::record_batch::RecordBatch;
+use datatypes::arrow::array::{PrimitiveArray, Utf8Array};
+use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
@@ -162,11 +162,11 @@ impl ExecutionPlan for MockExecution {
         self
     }
 
-    fn schema(&self) -> arrow::datatypes::SchemaRef {
+    fn schema(&self) -> SchemaRef {
         let field1 = Field::new("id", DataType::UInt32, false);
         let field2 = Field::new("name", DataType::Utf8, false);
         let field3 = Field::new("age", DataType::UInt32, false);
-        Arc::new(arrow::datatypes::Schema::new(vec![field1, field2, field3]))
+        Arc::new(Schema::new(vec![field1, field2, field3]))
     }
 
     fn output_partitioning(&self) -> datafusion::physical_plan::Partitioning {

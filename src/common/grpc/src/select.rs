@@ -19,12 +19,12 @@ use api::result::{build_err_result, ObjectResultBuilder};
 use api::v1::codec::SelectResult;
 use api::v1::column::{SemanticType, Values};
 use api::v1::{Column, ObjectResult};
-use arrow::array::{Array, BooleanArray, PrimitiveArray};
 use common_base::BitVec;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatches, SendableRecordBatchStream};
+use datatypes::arrow::array::{Array, BooleanArray, PrimitiveArray};
 use datatypes::arrow_array::{BinaryArray, StringArray};
 use datatypes::schema::SchemaRef;
 use snafu::{OptionExt, ResultExt};
@@ -136,7 +136,8 @@ pub fn null_mask(arrays: &Vec<Arc<dyn Array>>, row_count: usize) -> Vec<u8> {
 }
 
 macro_rules! convert_arrow_array_to_grpc_vals {
-    ($data_type: expr, $arrays: ident,  $(($Type: pat, $CastType: ty, $field: ident, $MapFunction: expr)), +) => {
+    ($data_type: expr, $arrays: ident,  $(($Type: pat, $CastType: ty, $field: ident, $MapFunction: expr)), +) => {{
+        use datatypes::arrow::datatypes::{DataType, TimeUnit};
         match $data_type {
             $(
                 $Type => {
@@ -155,7 +156,7 @@ macro_rules! convert_arrow_array_to_grpc_vals {
             )+
             _ => unimplemented!(),
         }
-    };
+    }};
 }
 
 pub fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
@@ -164,7 +165,6 @@ pub fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
     }
     let data_type = arrays[0].data_type();
 
-    use arrow::datatypes::DataType;
     convert_arrow_array_to_grpc_vals!(
         data_type, arrays,
 
@@ -192,7 +192,7 @@ pub fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
         (DataType::Date32,        PrimitiveArray<i32>,    date_values,    |x| {*x as i32}),
         (DataType::Date64,        PrimitiveArray<i64>,    datetime_values,|x| {*x as i64}),
 
-        (DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, _), PrimitiveArray<i64>, ts_millis_values, |x| {*x})
+        (DataType::Timestamp(TimeUnit::Millisecond, _), PrimitiveArray<i64>, ts_millis_values, |x| {*x})
     )
 }
 
@@ -200,11 +200,10 @@ pub fn values(arrays: &[Arc<dyn Array>]) -> Result<Values> {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Array, BooleanArray, PrimitiveArray};
-    use arrow::datatypes::{DataType, Field};
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datafusion::field_util::SchemaExt;
-    use datatypes::arrow::datatypes::Schema as ArrowSchema;
+    use datatypes::arrow::array::{Array, BooleanArray, PrimitiveArray};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datatypes::arrow_array::StringArray;
     use datatypes::schema::Schema;
     use datatypes::vectors::{UInt32Vector, VectorRef};

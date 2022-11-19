@@ -219,7 +219,6 @@ impl QueryExecutor for DatafusionQueryEngine {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan
                 .execute(0, ctx.state().runtime())
-                .await
                 .context(error::ExecutePhysicalPlanSnafu)?),
             _ => {
                 // merge into a single partition
@@ -244,13 +243,13 @@ impl QueryExecutor for DatafusionQueryEngine {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::UInt64Array;
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
     use catalog::{CatalogList, CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
     use datafusion::field_util::{FieldExt, SchemaExt};
+    use datatypes::arrow::array::UInt64Array;
     use table::table::numbers::NumbersTable;
 
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};

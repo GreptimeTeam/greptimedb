@@ -169,12 +169,12 @@ jobs:
           tar xvf greptime-linux-arm64.tgz
           rm greptime-linux-arm64.tgz
 
-      - name: Login to GitHub Container Registry
+      - name: Login to UCloud Container Registry
         uses: docker/login-action@v2
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: uhub.service.ucloud.cn
+          username: ${{ secrets.UCLOUD_USERNAME }}
+          password: ${{ secrets.UCLOUD_PASSWORD }}
 
       - name: Login to Dockerhub
         uses: docker/login-action@v2
@@ -213,4 +213,5 @@ jobs:
           tags: |
             greptime/greptimedb:latest
             greptime/greptimedb:${{ env.VERSION }}
-            ghcr.io/greptimeteam/greptimedb:${{ env.VERSION }}
+            uhub.service.ucloud.cn/greptime/greptimedb:latest
+            uhub.service.ucloud.cn/greptime/greptimedb:${{ env.VERSION }}
