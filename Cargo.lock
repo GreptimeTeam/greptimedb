@@ -1158,7 +1158,6 @@ name = "common-function"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "arrow2",
  "chrono-tz",
  "common-error",
  "common-function-macro",
@@ -1195,7 +1194,6 @@ name = "common-grpc"
 version = "0.1.0"
 dependencies = [
  "api",
- "arrow2",
  "async-trait",
  "common-base",
  "common-error",
@@ -1233,7 +1231,6 @@ dependencies = [
 name = "common-query"
 version = "0.1.0"
 dependencies = [
- "arrow2",
  "async-trait",
  "common-base",
  "common-error",
@@ -1732,7 +1729,6 @@ name = "datanode"
 version = "0.1.0"
 dependencies = [
  "api",
- "arrow2",
  "async-trait",
  "axum 0.6.0-rc.2",
  "axum-macros",
@@ -2113,7 +2109,6 @@ name = "frontend"
 version = "0.1.0"
 dependencies = [
  "api",
- "arrow2",
  "async-stream",
  "async-trait",
  "catalog",
@@ -4355,7 +4350,6 @@ version = "0.1.0"
 dependencies = [
  "approx_eq",
  "arc-swap",
- "arrow2",
  "async-trait",
  "catalog",
  "common-catalog",

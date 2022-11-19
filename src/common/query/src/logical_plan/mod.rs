@@ -72,12 +72,12 @@ pub fn create_aggregate_function(
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::BooleanArray;
-    use arrow::datatypes::DataType;
     use datafusion_expr::{
         ColumnarValue as DfColumnarValue, ScalarUDF as DfScalarUDF,
         TypeSignature as DfTypeSignature,
     };
+    use datatypes::arrow::array::BooleanArray;
+    use datatypes::arrow::datatypes::DataType;
     use datatypes::prelude::*;
     use datatypes::vectors::{BooleanVector, VectorRef};
 

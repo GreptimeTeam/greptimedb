@@ -212,7 +212,6 @@ mod test {
         let scan_stream = table.scan(&Some(vec![1]), &[], None).await.unwrap();
         let scan_stream = scan_stream
             .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
             .unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
@@ -235,7 +234,6 @@ mod test {
         let scan_stream = table.scan(&None, &[], Some(2)).await.unwrap();
         let scan_stream = scan_stream
             .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
             .unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());

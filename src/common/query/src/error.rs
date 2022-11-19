@@ -14,9 +14,9 @@
 
 use std::any::Any;
 
-use arrow::datatypes::DataType as ArrowDatatype;
 use common_error::prelude::*;
 use datafusion_common::DataFusionError;
+use datatypes::arrow::datatypes::DataType as ArrowDatatype;
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
 use statrs::StatsError;
@@ -180,7 +180,7 @@ impl From<BoxedError> for Error {
 
 #[cfg(test)]
 mod tests {
-    use arrow::error::ArrowError;
+    use datatypes::arrow::error::ArrowError;
     use snafu::GenerateImplicitData;
 
     use super::*;

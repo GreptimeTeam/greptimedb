@@ -14,13 +14,13 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::DataType;
 use common_query::logical_plan::create_aggregate_function;
 use datafusion::catalog::TableReference;
 use datafusion::datasource::TableProvider;
 use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::sql::planner::{ContextProvider, SqlToRel};
+use datatypes::arrow::datatypes::DataType;
 use snafu::ResultExt;
 use sql::statements::query::Query;
 use sql::statements::statement::Statement;

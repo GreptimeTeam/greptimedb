@@ -17,11 +17,11 @@
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::compute::arithmetics;
-use arrow::datatypes::DataType as ArrowDatatype;
-use arrow::scalar::PrimitiveScalar;
 use common_query::error::{IntoVectorSnafu, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::{Signature, Volatility};
+use datatypes::arrow::compute::arithmetics;
+use datatypes::arrow::datatypes::DataType as ArrowDatatype;
+use datatypes::arrow::scalar::PrimitiveScalar;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{TimestampVector, VectorRef};
 use snafu::ResultExt;

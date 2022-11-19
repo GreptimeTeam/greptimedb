@@ -18,9 +18,9 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, Int64Array, PrimitiveArray};
-use arrow::compute::cast::CastOptions;
-use arrow::datatypes::DataType;
+use datatypes::arrow::array::{Float64Array, Int64Array, PrimitiveArray};
+use datatypes::arrow::compute::cast::CastOptions;
+use datatypes::arrow::datatypes::DataType;
 use datatypes::vectors::VectorRef;
 use ron::from_str as from_ron_string;
 use rustpython_vm::builtins::{PyFloat, PyInt, PyList};
@@ -30,9 +30,10 @@ use rustpython_vm::scope::Scope;
 use rustpython_vm::{AsObject, PyObjectRef, VirtualMachine};
 use serde::{Deserialize, Serialize};
 
-use super::{greptime_builtin, *};
+use super::*;
 use crate::python::utils::{format_py_error, is_instance};
 use crate::python::PyVector;
+
 #[test]
 fn convert_scalar_to_py_obj_and_back() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {

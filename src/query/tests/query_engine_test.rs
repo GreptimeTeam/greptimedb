@@ -16,7 +16,6 @@ mod pow;
 
 use std::sync::Arc;
 
-use arrow::array::UInt32Array;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -26,6 +25,7 @@ use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
 use datafusion::field_util::{FieldExt, SchemaExt};
 use datafusion::logical_plan::LogicalPlanBuilder;
+use datatypes::arrow::array::UInt32Array;
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
