@@ -368,7 +368,6 @@ mod tests {
         let tables_stream = tables.scan(&None, &[], None).await.unwrap();
         let mut tables_stream = tables_stream
             .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
             .unwrap();
 
         if let Some(t) = tables_stream.next().await {

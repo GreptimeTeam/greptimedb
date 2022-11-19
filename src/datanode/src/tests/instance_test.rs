@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arrow::array::{Int64Array, UInt64Array, Utf8Array};
 use common_query::Output;
 use common_recordbatch::util;
 use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use datatypes::arrow::array::{Int64Array, UInt64Array, Utf8Array};
 use datatypes::arrow_array::StringArray;
 use datatypes::prelude::ConcreteDataType;
 

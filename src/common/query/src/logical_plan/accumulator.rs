@@ -17,10 +17,10 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
 use common_time::timestamp::TimeUnit;
 use datafusion_common::Result as DfResult;
 use datafusion_expr::Accumulator as DfAccumulator;
+use datatypes::arrow::array::ArrayRef;
 use datatypes::prelude::*;
 use datatypes::value::ListValue;
 use datatypes::vectors::{Helper as VectorHelper, VectorRef};
@@ -266,9 +266,9 @@ fn try_convert_list_value(list: ListValue) -> Result<ScalarValue> {
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::DataType;
     use common_base::bytes::{Bytes, StringBytes};
     use datafusion_common::ScalarValue;
+    use datatypes::arrow::datatypes::DataType;
     use datatypes::value::{ListValue, OrderedFloat};
 
     use super::*;

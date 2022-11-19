@@ -18,10 +18,6 @@ datatypes = { path = "../../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 statrs = "0.15"
 
-[dependencies.arrow]
-package = "arrow2"
-version = "0.10"
-
 [dev-dependencies]
 common-base = { path = "../base" }
 tokio = { version = "1.0", features = ["full"] }

@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use arrow::array::PrimitiveArray;
-use arrow::compute::cast::primitive_to_primitive;
-use arrow::datatypes::DataType::Float64;
+use datatypes::arrow::array::PrimitiveArray;
+use datatypes::arrow::compute::cast::primitive_to_primitive;
+use datatypes::arrow::datatypes::DataType::Float64;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;

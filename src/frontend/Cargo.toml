@@ -46,20 +46,6 @@ store-api = { path = "../store-api" }
 table = { path = "../table" }
 tokio = { version = "1.18", features = ["full"] }
 
-[dependencies.arrow]
-package = "arrow2"
-version = "0.10"
-features = [
-    "io_csv",
-    "io_json",
-    "io_parquet",
-    "io_parquet_compression",
-    "io_ipc",
-    "ahash",
-    "compute",
-    "serde_types",
-]
-
 [dev-dependencies]
 datanode = { path = "../datanode" }
 futures = "0.3"
