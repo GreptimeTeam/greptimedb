@@ -238,7 +238,7 @@ fn parse_column_default_constraint(
 // a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
 pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Result<ColumnSchema> {
-    let is_nullable = if column_def.options.len() == 0 {
+    let is_nullable = if column_def.options.is_empty() {
         true
     } else {
         column_def
