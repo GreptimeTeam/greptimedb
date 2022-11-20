@@ -26,12 +26,6 @@ impl TryFrom<SpStatement> for Explain {
     type Error = Error;
 
     fn try_from(value: SpStatement) -> Result<Self, Self::Error> {
-        match value {
-            SpStatement::ExplainTable { .. } => {}
-            SpStatement::Explain { .. } => {}
-            _ => {}
-        }
-
         Ok(Explain { inner: value })
     }
 }

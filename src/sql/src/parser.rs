@@ -259,12 +259,13 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_explain(&mut self) -> Result<Statement> {
+        //TODO Catch `explain <table_name>`
         let explain_statement =
             self.parser
                 .parse_explain(false)
                 .with_context(|_| error::UnexpectedSnafu {
                     sql: self.sql,
-                    expected: "a table name or select statement",
+                    expected: "a query statement",
                     actual: self.peek_token_as_string(),
                 })?;
 
