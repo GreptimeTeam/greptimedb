@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "benchmarks",
+    "benchmarks/src/bin/logstore",
     "src/api",
     "src/catalog",
     "src/client",
