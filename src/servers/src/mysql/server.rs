@@ -89,6 +89,8 @@ impl MysqlServer {
         match spawn_result {
             Ok(run_result) => {
                 if let Err(e) = run_result {
+                    // TODO(LFC): Write this error and the below one to client as well, in MySQL text protocol.
+                    // Looks like we have to expose opensrv-mysql's `PacketWriter`?
                     error!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time.")
                 }
             }

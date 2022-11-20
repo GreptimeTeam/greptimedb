@@ -24,7 +24,7 @@ use common_catalog::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use common_query::Output;
 use common_telemetry::{debug, info};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
+use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
 use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
@@ -42,8 +42,8 @@ use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, CatalogEntrySerdeSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
-    PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result, StartMetaClientSnafu,
+    self, CatalogEntrySerdeSnafu, ColumnDataTypeSnafu, PrimaryKeyNotFoundSnafu, RequestMetaSnafu,
+    Result, StartMetaClientSnafu,
 };
 use crate::partitioning::{PartitionBound, PartitionDef};
 
@@ -255,7 +255,14 @@ fn create_table_global_value(
     let mut column_name_to_index_map = HashMap::new();
 
     for (idx, column) in create_table.column_defs.iter().enumerate() {
-        column_schemas.push(create_column_schema(column, &create_table.time_index)?);
+        let schema = column
+            .try_as_column_schema()
+            .context(error::InvalidColumnDefSnafu {
+                column: &column.name,
+            })?;
+        let schema = schema.with_time_index(column.name == create_table.time_index);
+
+        column_schemas.push(schema);
         column_name_to_index_map.insert(column.name.clone(), idx);
     }
 
@@ -309,30 +316,6 @@ fn create_table_global_value(
         node_id,
         regions_id_map,
         table_info,
-    })
-}
-
-// Remove this duplication in the future
-fn create_column_schema(column_def: &api::v1::ColumnDef, time_index: &str) -> Result<ColumnSchema> {
-    let data_type =
-        ColumnDataTypeWrapper::try_new(column_def.datatype).context(error::ColumnDataTypeSnafu)?;
-    let default_constraint = match &column_def.default_constraint {
-        None => None,
-        Some(v) => Some(ColumnDefaultConstraint::try_from(&v[..]).context(
-            ConvertColumnDefaultConstraintSnafu {
-                column_name: &column_def.name,
-            },
-        )?),
-    };
-    ColumnSchema::new(
-        column_def.name.clone(),
-        data_type.into(),
-        column_def.is_nullable,
-    )
-    .with_time_index(column_def.name == time_index)
-    .with_default_constraint(default_constraint)
-    .context(ConvertColumnDefaultConstraintSnafu {
-        column_name: &column_def.name,
     })
 }
 

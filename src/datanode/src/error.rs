@@ -208,10 +208,15 @@ pub enum Error {
         source: api::error::Error,
     },
 
-    #[snafu(display("Invalid column default constraint, source: {}", source))]
-    ColumnDefaultConstraint {
+    #[snafu(display(
+        "Invalid column proto definition, column: {}, source: {}",
+        column,
+        source
+    ))]
+    InvalidColumnDef {
+        column: String,
         #[snafu(backtrace)]
-        source: datatypes::error::Error,
+        source: api::error::Error,
     },
 
     #[snafu(display("Failed to parse SQL, source: {}", source))]
@@ -311,8 +316,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::ColumnDefaultConstraint { source, .. }
-            | Error::CreateSchema { source, .. }
+            Error::CreateSchema { source, .. }
             | Error::ConvertSchema { source, .. }
             | Error::VectorComputation { source } => source.status_code(),
 
@@ -337,8 +341,11 @@ impl ErrorExt for Error {
             | Error::RegisterSchema { .. }
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }
-            | Error::ColumnDataType { .. }
             | Error::Catalog { .. } => StatusCode::Internal,
+
+            Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
+                source.status_code()
+            }
 
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
