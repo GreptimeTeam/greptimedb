@@ -205,7 +205,6 @@ impl LogFile {
         let handle = tokio::spawn(async move {
             while !state.is_stopped() {
                 let batch = Self::recv_batch(&mut rx, &state, &notify, true).await;
-                debug!("Receive write request, size: {}", batch.len());
                 if !batch.is_empty() {
                     Self::handle_batch(batch, &state, &writer).await;
                 }
@@ -257,7 +256,6 @@ impl LogFile {
                 .write_offset
                 .fetch_add(req.data.len(), Ordering::AcqRel);
             last_id = req.id;
-            debug!("Entry id: {}, offset: {}", req.id, req.offset,);
         }
 
         match writer.write_batch(&batch).await {
@@ -265,14 +263,6 @@ impl LogFile {
                 Ok(_) => {
                     let prev_ofs = state.flush_offset.swap(max_offset, Ordering::Acquire);
                     let prev_id = state.last_entry_id.swap(last_id, Ordering::Acquire);
-                    debug!(
-                        "Flush offset: {} -> {}, max offset in batch: {}, entry id: {}->{}",
-                        prev_ofs,
-                        state.flush_offset.load(Ordering::Acquire),
-                        max_offset,
-                        prev_id,
-                        state.last_entry_id.load(Ordering::Acquire),
-                    );
                     batch.into_iter().for_each(AppendRequest::complete);
                 }
                 Err(e) => {

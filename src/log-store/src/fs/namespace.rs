@@ -26,7 +26,7 @@ impl Default for LocalNamespace {
 }
 
 impl LocalNamespace {
-    pub(crate) fn new(id: Id) -> Self {
+    pub fn new(id: Id) -> Self {
         Self { id }
     }
 }
