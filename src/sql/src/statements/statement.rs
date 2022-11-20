@@ -17,13 +17,14 @@ use sqlparser::parser::ParserError;
 
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
-use crate::statements::explain::Explain;
 use crate::statements::describe::DescribeTable;
+use crate::statements::explain::Explain;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
 
 /// Tokens parsed by `DFParser` are converted into these values.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     // Query
@@ -44,7 +45,7 @@ pub enum Statement {
     ShowCreateTable(ShowCreateTable),
     // DESCRIBE TABLE
     DescribeTable(DescribeTable),
-    // EXPLAIN [[ DESCRIBE| DESC ]] select_statement
+    // EXPLAIN QUERY
     Explain(Explain),
 }
 

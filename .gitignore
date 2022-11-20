@@ -18,6 +18,7 @@ debug/
 
 # JetBrains IDE config directory
 .idea/
+*.iml
 
 # VSCode IDE config directory
 .vscode/

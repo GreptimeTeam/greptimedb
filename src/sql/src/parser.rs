@@ -21,10 +21,9 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use crate::error::{
     self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu, TokenizerSnafu,
 };
-use crate::statements::explain::Explain;
 use crate::statements::describe::DescribeTable;
+use crate::statements::explain::Explain;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
-use crate::statements::statement::*;
 use crate::statements::statement::Statement;
 use crate::statements::table_idents_to_full_name;
 
@@ -260,21 +259,12 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_explain(&mut self) -> Result<Statement> {
-        let has_describe_alias = match self.parser.next_token() {
-            Token::Word(word) => match word.keyword {
-                Keyword::DESC => true,
-                Keyword::DESCRIBE => true,
-                _ => false,
-            },
-            _ => false,
-        };
-
         let explain_statement =
             self.parser
-                .parse_explain(has_describe_alias)
+                .parse_explain(false)
                 .with_context(|_| error::UnexpectedSnafu {
                     sql: self.sql,
-                    expected: "a statement",
+                    expected: "a table name or select statement",
                     actual: self.peek_token_as_string(),
                 })?;
 

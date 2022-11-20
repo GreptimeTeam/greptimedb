@@ -12,20 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use sqlparser::ast::Statement;
-
-/// Explain statement instance.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Explain {
-    pub inner: Statement,
-}
+use sqlparser::ast::Statement as SpStatement;
 
 use crate::error::Error;
 
-impl TryFrom<Statement> for Explain {
+/// Explain statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Explain {
+    pub inner: SpStatement,
+}
+
+impl TryFrom<SpStatement> for Explain {
     type Error = Error;
 
-    fn try_from(value: Statement) -> Result<Self, Self::Error> {
+    fn try_from(value: SpStatement) -> Result<Self, Self::Error> {
+        match value {
+            SpStatement::ExplainTable { .. } => {}
+            SpStatement::Explain { .. } => {}
+            _ => {}
+        }
+
         Ok(Explain { inner: value })
+    }
+}
+
+impl ToString for Explain {
+    fn to_string(&self) -> String {
+        self.inner.to_string()
     }
 }

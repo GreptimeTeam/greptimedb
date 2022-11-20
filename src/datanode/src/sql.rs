@@ -16,9 +16,11 @@
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
-use query::sql::{describe_table, show_databases, show_tables};
+use query::query_engine::QueryEngineRef;
+use query::sql::{describe_table, explain, show_databases, show_tables};
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
+use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineRef, TableReference};
 use table::requests::*;
@@ -30,6 +32,7 @@ mod alter;
 mod create;
 mod insert;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum SqlRequest {
     Insert(InsertRequest),
@@ -39,19 +42,26 @@ pub enum SqlRequest {
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
+    Explain(Box<Explain>),
 }
 
 // Handler to execute SQL except query
 pub struct SqlHandler {
     table_engine: TableEngineRef,
     catalog_manager: CatalogManagerRef,
+    query_engine: QueryEngineRef,
 }
 
 impl SqlHandler {
-    pub fn new(table_engine: TableEngineRef, catalog_manager: CatalogManagerRef) -> Self {
+    pub fn new(
+        table_engine: TableEngineRef,
+        catalog_manager: CatalogManagerRef,
+        query_engine: QueryEngineRef,
+    ) -> Self {
         Self {
             table_engine,
             catalog_manager,
+            query_engine,
         }
     }
 
@@ -70,6 +80,9 @@ impl SqlHandler {
             SqlRequest::DescribeTable(stmt) => {
                 describe_table(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
             }
+            SqlRequest::Explain(stmt) => explain(stmt, self.query_engine.clone())
+                .await
+                .context(error::ExecuteSqlSnafu),
         }
     }
 
@@ -216,7 +229,7 @@ mod tests {
         );
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine();
-        let sql_handler = SqlHandler::new(table_engine, catalog_list);
+        let sql_handler = SqlHandler::new(table_engine, catalog_list, query_engine.clone());
 
         let stmt = match query_engine.sql_to_statement(sql).unwrap() {
             Statement::Insert(i) => i,

@@ -115,8 +115,10 @@ impl Instance {
             Statement::ShowTables(stmt) => {
                 self.sql_handler.execute(SqlRequest::ShowTables(stmt)).await
             }
-            Statement::Explain(_explain) => {
-                unimplemented!()
+            Statement::Explain(stmt) => {
+                self.sql_handler
+                    .execute(SqlRequest::Explain(Box::new(stmt)))
+                    .await
             }
             Statement::DescribeTable(stmt) => {
                 self.sql_handler

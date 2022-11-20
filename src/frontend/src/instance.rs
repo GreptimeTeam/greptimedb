@@ -52,6 +52,7 @@ use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::create::Partitions;
+use sql::statements::explain::Explain;
 use sql::statements::insert::Insert;
 use sql::statements::statement::Statement;
 
@@ -276,8 +277,14 @@ impl Instance {
     }
 
     /// Handle explain expr
-    pub async fn handle_explain(&self) -> Result<Output> {
-        todo!()
+    pub async fn handle_explain(&self, sql: &str, explain_stmt: Explain) -> Result<Output> {
+        if let Some(dist_instance) = &self.dist_instance {
+            dist_instance
+                .handle_sql(sql, Statement::Explain(explain_stmt))
+                .await
+        } else {
+            Ok(Output::AffectedRows(0))
+        }
     }
 
     /// Handle batch inserts
@@ -639,12 +646,13 @@ impl SqlQueryHandler for Instance {
                 .await
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
-            Statement::Explain(_explain) => {
-                // self.handle_explain()
-                unimplemented!()
-            }
+            Statement::Explain(explain_stmt) => self
+                .handle_explain(query, explain_stmt)
+                .await
+                .map_err(BoxedError::new)
+                .context(server_error::ExecuteQuerySnafu { query }),
             Statement::ShowCreateTable(_) => {
-                return server_error::NotSupportedSnafu { feat: query }.fail()
+                return server_error::NotSupportedSnafu { feat: query }.fail();
             }
         }
         .map_err(BoxedError::new)
