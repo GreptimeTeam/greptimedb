@@ -257,17 +257,15 @@ fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
         create_sql_column.push(cs.name.clone());
         create_sql_column.push(cs.data_type.name().to_string());
         let default_val = if cs.is_nullable() {
-            format!("null")
+            "null".to_string()
+        } else if cs.default_constraint().is_none() {
+            "".to_string()
         } else {
-            if cs.default_constraint().is_none() {
-                format!("")
-            } else {
-                format!(
-                    "default {}",
-                    cs.default_constraint()
-                        .map_or(String::from(""), |dc| dc.to_string())
-                )
-            }
+            format!(
+                "default {}",
+                cs.default_constraint()
+                    .map_or(String::from(""), |dc| dc.to_string())
+            )
         };
         create_sql_column.push(default_val);
         if index != columns_schemas.len() - 1 {

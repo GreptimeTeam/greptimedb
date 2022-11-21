@@ -154,9 +154,9 @@ impl<'a> ParserContext<'a> {
         let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_idents)?;
 
         Ok(Statement::ShowCreateTable(ShowCreateTable {
-            schema_name: schema_name.to_string(),
-            catalog_name: catalog_name.to_string(),
-            table_name: table_name.to_string(),
+            schema_name,
+            catalog_name,
+            table_name,
         }))
     }
 
