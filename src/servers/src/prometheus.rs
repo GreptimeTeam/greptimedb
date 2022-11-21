@@ -509,7 +509,6 @@ mod tests {
     use std::sync::Arc;
 
     use api::prometheus::remote::LabelMatcher;
-    use common_grpc::InsertBatch;
     use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
     use datatypes::value::Value;
@@ -679,13 +678,10 @@ mod tests {
 
         let expr = exprs.get(0).unwrap();
 
-        let batch = InsertBatch {
-            columns: expr.columns.clone(),
-            row_count: expr.row_count,
-        };
+        let columns = &expr.columns;
+        let row_count = expr.row_count;
 
-        assert_eq!(2, batch.row_count);
-        let columns = batch.columns;
+        assert_eq!(2, row_count);
         assert_eq!(columns.len(), 3);
 
         assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
@@ -708,13 +704,10 @@ mod tests {
 
         let expr = exprs.get(1).unwrap();
 
-        let batch = InsertBatch {
-            columns: expr.columns.clone(),
-            row_count: expr.row_count,
-        };
+        let columns = &expr.columns;
+        let row_count = expr.row_count;
 
-        assert_eq!(2, batch.row_count);
-        let columns = batch.columns;
+        assert_eq!(2, row_count);
         assert_eq!(columns.len(), 4);
 
         assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
@@ -742,13 +735,10 @@ mod tests {
 
         let expr = exprs.get(2).unwrap();
 
-        let batch = InsertBatch {
-            columns: expr.columns.clone(),
-            row_count: expr.row_count,
-        };
+        let columns = &expr.columns;
+        let row_count = expr.row_count;
 
-        assert_eq!(3, batch.row_count);
-        let columns = batch.columns;
+        assert_eq!(3, row_count);
         assert_eq!(columns.len(), 4);
 
         assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);

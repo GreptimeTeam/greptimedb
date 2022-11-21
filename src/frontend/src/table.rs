@@ -480,7 +480,6 @@ mod test {
     use api::v1::column::SemanticType;
     use api::v1::{column, Column, ColumnDataType};
     use catalog::remote::MetaKvBackend;
-    use common_grpc::InsertBatch;
     use common_recordbatch::util;
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
@@ -936,8 +935,8 @@ mod test {
         start_ts: i64,
     ) {
         let rows = data.len() as u32;
-        let values = vec![InsertBatch {
-            columns: vec![
+        let values = vec![(
+            vec![
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(column::Values {
@@ -967,8 +966,8 @@ mod test {
                     ..Default::default()
                 },
             ],
-            row_count: rows,
-        }];
+            rows,
+        )];
         dn_instance
             .execute_grpc_insert(
                 &table_name.catalog_name,

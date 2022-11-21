@@ -34,7 +34,7 @@ pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
 pub trait CreateExprFactory {
     async fn create_expr_by_stmt(&self, stmt: &CreateTable) -> Result<CreateExpr>;
 
-    async fn create_expr_by_insert_columns(
+    async fn create_expr_by_columns(
         &self,
         catalog_name: &str,
         schema_name: &str,
@@ -52,7 +52,7 @@ impl CreateExprFactory for DefaultCreateExprFactory {
         create_to_expr(None, vec![0], stmt)
     }
 
-    async fn create_expr_by_insert_columns(
+    async fn create_expr_by_columns(
         &self,
         catalog_name: &str,
         schema_name: &str,

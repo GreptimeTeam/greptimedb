@@ -16,7 +16,6 @@ use std::collections::HashMap;
 
 use api::v1::InsertExpr;
 use common_grpc::writer::{LinesWriter, Precision};
-use common_grpc::InsertBatch;
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
 use table::requests::InsertRequest;
@@ -166,7 +165,7 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
         Ok(writers
             .into_iter()
             .map(|(table_name, writer)| {
-                let InsertBatch { columns, row_count } = writer.finish();
+                let (columns, row_count) = writer.finish();
                 InsertExpr {
                     schema_name: schema_name.clone(),
                     table_name,
@@ -186,7 +185,6 @@ mod tests {
     use api::v1::column::{SemanticType, Values};
     use api::v1::{Column, ColumnDataType, InsertExpr};
     use common_base::BitVec;
-    use common_grpc::InsertBatch;
     use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
     use datatypes::value::Value;
@@ -241,13 +239,9 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
 
         for expr in insert_exprs {
             assert_eq!("public", expr.schema_name);
-            let batch = InsertBatch {
-                columns: expr.columns,
-                row_count: expr.row_count,
-            };
             match &expr.table_name[..] {
-                "monitor1" => assert_monitor_1(&batch),
-                "monitor2" => assert_monitor_2(&batch),
+                "monitor1" => assert_monitor_1(&expr.columns),
+                "monitor2" => assert_monitor_2(&expr.columns),
                 _ => panic!(),
             }
         }
@@ -324,8 +318,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         }
     }
 
-    fn assert_monitor_1(insert_batch: &InsertBatch) {
-        let columns = &insert_batch.columns;
+    fn assert_monitor_1(columns: &[Column]) {
         assert_eq!(4, columns.len());
         verify_column(
             &columns[0],
@@ -376,8 +369,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         );
     }
 
-    fn assert_monitor_2(insert_batch: &InsertBatch) {
-        let columns = &insert_batch.columns;
+    fn assert_monitor_2(columns: &[Column]) {
         assert_eq!(4, columns.len());
         verify_column(
             &columns[0],

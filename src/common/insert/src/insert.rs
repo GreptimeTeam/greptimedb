@@ -20,7 +20,6 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::{SemanticType, Values};
 use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateExpr};
 use common_base::BitVec;
-use common_grpc::InsertBatch;
 use common_time::timestamp::Timestamp;
 use common_time::{Date, DateTime};
 use datatypes::data_type::ConcreteDataType;
@@ -247,7 +246,7 @@ pub fn build_create_expr_from_insertion(
         create_if_not_exists: true,
         table_options: Default::default(),
         table_id,
-        region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
+        region_ids: vec![0],
     };
 
     Ok(expr)
@@ -257,13 +256,13 @@ pub fn insertion_expr_to_request(
     catalog_name: &str,
     schema_name: &str,
     table_name: &str,
-    insert_batches: Vec<InsertBatch>,
+    insert_batches: Vec<(Vec<Column>, u32)>,
     table: Arc<dyn Table>,
 ) -> Result<InsertRequest> {
     let schema = table.schema();
     let mut columns_builders = HashMap::with_capacity(schema.column_schemas().len());
 
-    for InsertBatch { columns, row_count } in insert_batches {
+    for (columns, row_count) in insert_batches {
         for Column {
             column_name,
             values,
@@ -438,7 +437,6 @@ mod tests {
     use api::v1::column::{self, SemanticType, Values};
     use api::v1::{Column, ColumnDataType};
     use common_base::BitVec;
-    use common_grpc::InsertBatch;
     use common_query::physical_plan::PhysicalPlanRef;
     use common_query::prelude::Expr;
     use common_time::timestamp::Timestamp;
@@ -484,7 +482,7 @@ mod tests {
         let insert_batch = mock_insert_batch();
 
         let create_expr =
-            build_create_expr_from_insertion("", "", table_id, table_name, &insert_batch.columns)
+            build_create_expr_from_insertion("", "", table_id, table_name, &insert_batch.0)
                 .unwrap();
 
         assert_eq!(table_id, create_expr.table_id);
@@ -572,9 +570,7 @@ mod tests {
 
         let insert_batch = mock_insert_batch();
 
-        let add_columns = find_new_columns(&schema, &insert_batch.columns)
-            .unwrap()
-            .unwrap();
+        let add_columns = find_new_columns(&schema, &insert_batch.0).unwrap().unwrap();
 
         assert_eq!(2, add_columns.add_columns.len());
         let host_column = &add_columns.add_columns[0];
@@ -702,7 +698,7 @@ mod tests {
         }
     }
 
-    fn mock_insert_batch() -> InsertBatch {
+    fn mock_insert_batch() -> (Vec<Column>, u32) {
         let row_count = 2;
 
         let host_vals = column::Values {
@@ -753,9 +749,9 @@ mod tests {
             datatype: ColumnDataType::Timestamp as i32,
         };
 
-        InsertBatch {
-            columns: vec![host_column, cpu_column, mem_column, ts_column],
+        (
+            vec![host_column, cpu_column, mem_column, ts_column],
             row_count,
-        }
+        )
     }
 }

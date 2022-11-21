@@ -74,7 +74,7 @@ impl Instance {
             self.create_or_alter_table_on_demand(catalog_name, &schema_name, &table_name, columns)
                 .await?;
 
-            let request = Self::insert_batch_to_request(
+            let request = Self::columns_to_request(
                 catalog_name,
                 &schema_name,
                 &table_name,
@@ -106,7 +106,7 @@ impl Instance {
         Ok(affected)
     }
 
-    fn insert_batch_to_request(
+    fn columns_to_request(
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,

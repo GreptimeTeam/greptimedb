@@ -14,15 +14,14 @@
 
 use api::result::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use api::v1::{
-    admin_expr, object_expr, select_expr, AdminExpr, AdminResult, CreateDatabaseExpr, ObjectExpr,
-    ObjectResult, SelectExpr,
+    admin_expr, object_expr, select_expr, AdminExpr, AdminResult, Column, CreateDatabaseExpr,
+    ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_grpc::select::to_object_result;
-use common_grpc::InsertBatch;
 use common_insert::insertion_expr_to_request;
 use common_query::Output;
 use query::plan::LogicalPlan;
@@ -45,7 +44,7 @@ impl Instance {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        insert_batches: Vec<InsertBatch>,
+        insert_batches: Vec<(Vec<Column>, u32)>,
     ) -> Result<Output> {
         let schema_provider = self
             .catalog_manager
@@ -83,7 +82,7 @@ impl Instance {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        insert_batches: Vec<InsertBatch>,
+        insert_batches: Vec<(Vec<Column>, u32)>,
     ) -> ObjectResult {
         match self
             .execute_grpc_insert(catalog_name, schema_name, table_name, insert_batches)
@@ -170,10 +169,7 @@ impl GrpcQueryHandler for Instance {
                 // TODO(fys): _region_number is for later use.
                 let _region_number: u32 = insert_expr.region_number;
 
-                let insert_batches = vec![InsertBatch {
-                    columns: insert_expr.columns.clone(),
-                    row_count: insert_expr.row_count,
-                }];
+                let insert_batches = vec![(insert_expr.columns, insert_expr.row_count)];
                 self.handle_insert(catalog_name, schema_name, table_name, insert_batches)
                     .await
             }

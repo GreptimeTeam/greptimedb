@@ -19,7 +19,6 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::SemanticType;
 use api::v1::{Column, InsertExpr, MutateResult};
 use client::{Database, ObjectResult};
-use common_grpc::InsertBatch;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
@@ -83,7 +82,7 @@ impl DistTable {
     }
 }
 
-pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<InsertBatch> {
+pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<(Vec<Column>, u32)> {
     let mut row_count = None;
 
     let columns = insert
@@ -128,12 +127,12 @@ pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<InsertBa
 
     let row_count = row_count.unwrap_or(0) as u32;
 
-    Ok(InsertBatch { columns, row_count })
+    Ok((columns, row_count))
 }
 
 fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<InsertExpr> {
     let table_name = insert.table_name.clone();
-    let InsertBatch { row_count, columns } = insert_request_to_insert_batch(&insert)?;
+    let (columns, row_count) = insert_request_to_insert_batch(&insert)?;
     Ok(InsertExpr {
         schema_name: insert.schema_name,
         table_name,
@@ -149,7 +148,6 @@ mod tests {
 
     use api::v1::{ColumnDataType, InsertExpr};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_grpc::InsertBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::types::StringType;
     use datatypes::vectors::VectorBuilder;
@@ -193,12 +191,7 @@ mod tests {
         let table_name = insert_expr.table_name;
         assert_eq!("demo", table_name);
 
-        let insert_batch: InsertBatch = InsertBatch {
-            columns: insert_expr.columns.clone(),
-            row_count: insert_expr.row_count,
-        };
-
-        for column in insert_batch.columns {
+        for column in insert_expr.columns {
             let name = column.column_name;
             if name == "id" {
                 assert_eq!(0, column.null_mask[0]);

@@ -212,7 +212,6 @@ impl DataPoint {
 mod test {
     use std::sync::Arc;
 
-    use common_grpc::InsertBatch;
     use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
     use datatypes::value::Value;
@@ -329,13 +328,10 @@ mod test {
         let grpc_insert = data_point.as_grpc_insert();
         assert_eq!(grpc_insert.table_name, "my_metric_1");
 
-        let insert_batch = InsertBatch {
-            columns: grpc_insert.columns,
-            row_count: grpc_insert.row_count,
-        };
+        let columns = &grpc_insert.columns;
+        let row_count = grpc_insert.row_count;
 
-        assert_eq!(insert_batch.row_count, 1);
-        let columns = insert_batch.columns;
+        assert_eq!(row_count, 1);
         assert_eq!(columns.len(), 4);
 
         assert_eq!(columns[0].column_name, OPENTSDB_TIMESTAMP_COLUMN_NAME);

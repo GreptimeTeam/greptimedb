@@ -36,7 +36,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{BoxedError, StatusCode};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_grpc::select::to_object_result;
-use common_grpc::InsertBatch;
 use common_query::Output;
 use common_telemetry::{debug, error, info};
 use distributed::DistInstance;
@@ -334,7 +333,7 @@ impl Instance {
                     "Table {}.{}.{} does not exist, try create table",
                     catalog_name, schema_name, table_name,
                 );
-                self.create_table_by_insert_batches(catalog_name, schema_name, table_name, columns)
+                self.create_table_by_columns(catalog_name, schema_name, table_name, columns)
                     .await?;
                 info!(
                     "Successfully created table on insertion: {}.{}.{}",
@@ -368,7 +367,7 @@ impl Instance {
     }
 
     /// Infer create table expr from inserting data
-    async fn create_table_by_insert_batches(
+    async fn create_table_by_columns(
         &self,
         catalog_name: &str,
         schema_name: &str,
@@ -378,7 +377,7 @@ impl Instance {
         // Create table automatically, build schema from data.
         let create_expr = self
             .create_expr_factory
-            .create_expr_by_insert_columns(catalog_name, schema_name, table_name, columns)
+            .create_expr_by_columns(catalog_name, schema_name, table_name, columns)
             .await?;
 
         info!(
@@ -439,10 +438,8 @@ impl Instance {
 
         let insert_request = insert_to_request(&schema_provider, *insert)?;
 
-        let InsertBatch {
-            columns,
-            row_count: _,
-        } = crate::table::insert::insert_request_to_insert_batch(&insert_request)?;
+        let (columns, _row_count) =
+            crate::table::insert::insert_request_to_insert_batch(&insert_request)?;
 
         self.create_or_alter_table_on_demand(&catalog, &schema, &table, &columns)
             .await?;
@@ -463,7 +460,7 @@ impl Instance {
         catalog: &str,
         schema: &str,
         insert: Box<Insert>,
-    ) -> Result<InsertBatch> {
+    ) -> Result<(Vec<Column>, u32)> {
         let catalog_provider = self.get_catalog(catalog)?;
         let schema_provider = Self::get_schema(catalog_provider, schema)?;
 
@@ -531,7 +528,7 @@ impl SqlQueryHandler for Instance {
                             msg: "Failed to get table name",
                         })?;
 
-                    let InsertBatch { row_count, columns } = self
+                    let (columns, row_count) = self
                         .stmt_to_insert_batch(&catalog_name, &schema_name, insert)
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteQuerySnafu { query })?;
@@ -639,6 +636,7 @@ impl GrpcQueryHandler for Instance {
         if let Some(expr) = &query.expr {
             match expr {
                 Expr::Insert(insert) => {
+                    // TODO(fys): refact it, avoid clone
                     let result = self.handle_insert(insert.clone()).await;
                     result
                         .map(|o| match o {
