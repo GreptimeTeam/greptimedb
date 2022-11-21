@@ -55,7 +55,7 @@ impl<'a, S: ContextProvider + Send + Sync> DfPlanner<'a, S> {
         Ok(LogicalPlan::DfPlan(result))
     }
 
-    /// Converts QUERY statement to logical plan.
+    /// Converts EXPLAIN statement to logical plan.
     pub fn explain_to_plan(&self, explain: Explain) -> Result<LogicalPlan> {
         let result = self
             .sql_to_rel
