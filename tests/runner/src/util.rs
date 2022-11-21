@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use client::api::v1::{column::Values, ColumnDataType};
+use client::api::v1::column::Values;
+use client::api::v1::ColumnDataType;
 
 pub fn values_to_string(data_type: ColumnDataType, values: Values) -> Vec<String> {
     match data_type {
