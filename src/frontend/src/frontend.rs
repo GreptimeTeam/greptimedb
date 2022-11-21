@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
+use servers::Mode;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
@@ -96,11 +97,4 @@ where
         let instance = Arc::new(instance);
         Services::start(&self.opts, instance).await
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    Standalone,
-    Distributed,
 }

@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use common_telemetry::info;
-use frontend::frontend::Mode;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
+use servers::Mode;
 
 use crate::error::Result;
 use crate::instance::{Instance, InstanceRef};

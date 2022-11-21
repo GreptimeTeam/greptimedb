@@ -14,13 +14,12 @@
 
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
-use servers::error as server_error;
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;
+use servers::{error as server_error, Mode};
 use snafu::prelude::*;
 
 use crate::error::Result;
-use crate::frontend::Mode;
 use crate::instance::Instance;
 
 #[async_trait]
