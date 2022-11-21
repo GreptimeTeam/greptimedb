@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Methods that perform convertion between Substrait's type ([Type](SType)) and GreptimeDB's type ([ConcreteDataType]).
+//! Methods that perform conversion between Substrait's type ([Type](SType)) and GreptimeDB's type ([ConcreteDataType]).
 //!
 //! Substrait use [type variation](https://substrait.io/types/type_variations/) to express different "logical types".
-//! Current we only have variations on integer types. Variation 0 (system prefered) are the same with base types, which
+//! Current we only have variations on integer types. Variation 0 (system preferred) are the same with base types, which
 //! are signed integer (i.e. I8 -> [i8]), and Variation 1 stands for unsigned integer (i.e. I8 -> [u8]).
 
 use datatypes::prelude::ConcreteDataType;

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bitvec::prelude as bv;
+pub use bitvec::prelude;
 
 // `Lsb0` provides the best codegen for bit manipulation,
 // see https://github.com/bitvecto-rs/bitvec/blob/main/doc/order/Lsb0.md
-pub type BitVec = bv::BitVec<u8, bv::Lsb0>;
+pub type BitVec = prelude::BitVec<u8>;

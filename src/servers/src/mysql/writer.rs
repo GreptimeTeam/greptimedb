@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io;
 use std::ops::Deref;
 
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
+use common_telemetry::error;
 use common_time::datetime::DateTime;
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
@@ -25,6 +25,7 @@ use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
 use snafu::prelude::*;
+use tokio::io::AsyncWrite;
 
 use crate::error::{self, Error, Result};
 
@@ -33,18 +34,18 @@ struct QueryResult {
     schema: SchemaRef,
 }
 
-pub struct MysqlResultWriter<'a, W: io::Write> {
+pub struct MysqlResultWriter<'a, W: AsyncWrite + Unpin> {
     // `QueryResultWriter` will be consumed when the write completed (see
     // QueryResultWriter::completed), thus we use an option to wrap it.
     inner: Option<QueryResultWriter<'a, W>>,
 }
 
-impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
+impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     pub fn new(inner: QueryResultWriter<'a, W>) -> MysqlResultWriter<'a, W> {
         MysqlResultWriter::<'a, W> { inner: Some(inner) }
     }
 
-    pub async fn write(&mut self, output: Result<Output>) -> Result<()> {
+    pub async fn write(&mut self, query: &str, output: Result<Output>) -> Result<()> {
         let writer = self.inner.take().context(error::InternalSnafu {
             err_msg: "inner MySQL writer is consumed",
         })?;
@@ -59,48 +60,53 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                         recordbatches,
                         schema,
                     };
-                    Self::write_query_result(query_result, writer)?
+                    Self::write_query_result(query, query_result, writer).await?
                 }
                 Output::RecordBatches(recordbatches) => {
                     let query_result = QueryResult {
                         schema: recordbatches.schema(),
                         recordbatches: recordbatches.take(),
                     };
-                    Self::write_query_result(query_result, writer)?
+                    Self::write_query_result(query, query_result, writer).await?
                 }
-                Output::AffectedRows(rows) => Self::write_affected_rows(writer, rows)?,
+                Output::AffectedRows(rows) => Self::write_affected_rows(writer, rows).await?,
             },
-            Err(error) => Self::write_query_error(error, writer)?,
+            Err(error) => Self::write_query_error(query, error, writer).await?,
         }
         Ok(())
     }
 
-    fn write_affected_rows(writer: QueryResultWriter<W>, rows: usize) -> Result<()> {
-        writer.completed(OkResponse {
+    async fn write_affected_rows(w: QueryResultWriter<'a, W>, rows: usize) -> Result<()> {
+        w.completed(OkResponse {
             affected_rows: rows as u64,
             ..Default::default()
-        })?;
+        })
+        .await?;
         Ok(())
     }
 
-    fn write_query_result(
+    async fn write_query_result(
+        query: &str,
         query_result: QueryResult,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
         match create_mysql_column_def(&query_result.schema) {
             Ok(column_def) => {
-                let mut row_writer = writer.start(&column_def)?;
+                let mut row_writer = writer.start(&column_def).await?;
                 for recordbatch in &query_result.recordbatches {
-                    Self::write_recordbatch(&mut row_writer, recordbatch)?;
+                    Self::write_recordbatch(&mut row_writer, recordbatch).await?;
                 }
-                row_writer.finish()?;
+                row_writer.finish().await?;
                 Ok(())
             }
-            Err(error) => Self::write_query_error(error, writer),
+            Err(error) => Self::write_query_error(query, error, writer).await,
         }
     }
 
-    fn write_recordbatch(row_writer: &mut RowWriter<W>, recordbatch: &RecordBatch) -> Result<()> {
+    async fn write_recordbatch(
+        row_writer: &mut RowWriter<'_, W>,
+        recordbatch: &RecordBatch,
+    ) -> Result<()> {
         for row in recordbatch.rows() {
             let row = row.context(error::CollectRecordbatchSnafu)?;
             for value in row.into_iter() {
@@ -133,13 +139,20 @@ impl<'a, W: io::Write> MysqlResultWriter<'a, W> {
                     }
                 }
             }
-            row_writer.end_row()?;
+            row_writer.end_row().await?;
         }
         Ok(())
     }
 
-    fn write_query_error(error: Error, writer: QueryResultWriter<'a, W>) -> Result<()> {
-        writer.error(ErrorKind::ER_INTERNAL_ERROR, error.to_string().as_bytes())?;
+    async fn write_query_error(
+        query: &str,
+        error: Error,
+        w: QueryResultWriter<'a, W>,
+    ) -> Result<()> {
+        error!(error; "Failed to execute query '{}'", query);
+
+        let kind = ErrorKind::ER_INTERNAL_ERROR;
+        w.error(kind, error.to_string().as_bytes()).await?;
         Ok(())
     }
 }

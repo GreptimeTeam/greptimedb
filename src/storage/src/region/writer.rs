@@ -547,7 +547,7 @@ impl WriterInner {
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
-            // In write thread, safe to use current commited sequence.
+            // In write thread, safe to use current committed sequence.
             flush_sequence: version_control.committed_sequence(),
             shared: ctx.shared.clone(),
             sst_layer: ctx.sst_layer.clone(),

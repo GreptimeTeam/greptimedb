@@ -71,8 +71,6 @@ pub struct StandaloneOptions {
     pub mode: Mode,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
-    pub datanode_mysql_addr: String,
-    pub datanode_mysql_runtime_size: usize,
 }
 
 impl Default for StandaloneOptions {
@@ -88,8 +86,6 @@ impl Default for StandaloneOptions {
             mode: Mode::Standalone,
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
-            datanode_mysql_addr: "127.0.0.1:4406".to_string(),
-            datanode_mysql_runtime_size: 4,
         }
     }
 }
@@ -114,8 +110,6 @@ impl StandaloneOptions {
         DatanodeOptions {
             wal_dir: self.wal_dir,
             storage: self.storage,
-            mysql_addr: self.datanode_mysql_addr,
-            mysql_runtime_size: self.datanode_mysql_runtime_size,
             ..Default::default()
         }
     }

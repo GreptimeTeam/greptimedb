@@ -16,7 +16,7 @@ mod filter;
 mod find_unique;
 mod replicate;
 
-use arrow::bitmap::MutableBitmap;
+use common_base::BitVec;
 
 use crate::error::Result;
 use crate::types::PrimitiveElement;
@@ -50,7 +50,7 @@ pub trait VectorOp {
     /// Panics if
     /// - `selected.len() < self.len()`.
     /// - `prev_vector` and `self` have different data types.
-    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>);
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>);
 
     /// Filters the vector, returns elements matching the `filter` (i.e. where the values are true).
     ///
@@ -65,7 +65,7 @@ macro_rules! impl_scalar_vector_op {
                 replicate::$replicate(self, offsets)
             }
 
-            fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+            fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
                 let prev_vector = prev_vector.map(|pv| pv.as_any().downcast_ref::<$VectorType>().unwrap());
                 find_unique::find_unique_scalar(self, selected, prev_vector);
             }
@@ -92,7 +92,7 @@ impl VectorOp for ConstantVector {
         replicate::replicate_constant(self, offsets)
     }
 
-    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
         let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<ConstantVector>());
         find_unique::find_unique_constant(self, selected, prev_vector);
     }
@@ -107,7 +107,7 @@ impl VectorOp for NullVector {
         replicate::replicate_null(self, offsets)
     }
 
-    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
         let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<NullVector>());
         find_unique::find_unique_null(self, selected, prev_vector);
     }
@@ -125,7 +125,7 @@ where
         replicate::replicate_primitive(self, offsets)
     }
 
-    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
         let prev_vector =
             prev_vector.and_then(|pv| pv.as_any().downcast_ref::<PrimitiveVector<T>>());
         find_unique::find_unique_scalar(self, selected, prev_vector);

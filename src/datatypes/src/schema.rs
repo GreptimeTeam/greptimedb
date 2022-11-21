@@ -156,7 +156,7 @@ impl Schema {
     /// Create a schema from a vector of [ColumnSchema].
     ///
     /// # Panics
-    /// Panics when ColumnSchema's `default_constrait` can't be serialized into json.
+    /// Panics when ColumnSchema's `default_constraint` can't be serialized into json.
     pub fn new(column_schemas: Vec<ColumnSchema>) -> Schema {
         // Builder won't fail in this case
         SchemaBuilder::try_from(column_schemas)

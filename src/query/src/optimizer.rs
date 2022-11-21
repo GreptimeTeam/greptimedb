@@ -15,7 +15,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use common_telemetry::debug;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::execution::context::ExecutionProps;
 use datafusion::logical_plan::plan::Filter;
@@ -169,10 +168,6 @@ impl<'a> TypeConverter<'a> {
         match (left, right) {
             (Expr::Column(col), Expr::Literal(value)) => {
                 let casted_right = Self::cast_scalar_value(value, left_type)?;
-                debug!(
-                    "Converting type, origin_left:{:?}, type:{:?}, right:{:?}, casted_right:{:?}",
-                    col, left_type, value, casted_right
-                );
                 if casted_right.is_null() {
                     return Err(DataFusionError::Plan(format!(
                         "column:{:?} value:{:?} is invalid",
