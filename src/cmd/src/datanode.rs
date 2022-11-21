@@ -14,9 +14,9 @@
 
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions};
-use frontend::frontend::Mode;
+use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
 use meta_client::MetaClientOpts;
+use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{Error, MissingConfigSnafu, Result, StartDatanodeSnafu};
@@ -47,7 +47,7 @@ impl SubCommand {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Parser, Default)]
 struct StartCommand {
     #[clap(long)]
     node_id: Option<u64>,
@@ -59,6 +59,10 @@ struct StartCommand {
     metasrv_addr: Option<String>,
     #[clap(short, long)]
     config_file: Option<String>,
+    #[clap(long)]
+    data_dir: Option<String>,
+    #[clap(long)]
+    wal_dir: Option<String>,
 }
 
 impl StartCommand {
@@ -115,6 +119,14 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             }
             .fail();
         }
+
+        if let Some(data_dir) = cmd.data_dir {
+            opts.storage = ObjectStoreConfig::File { data_dir };
+        }
+
+        if let Some(wal_dir) = cmd.wal_dir {
+            opts.wal_dir = wal_dir;
+        }
         Ok(opts)
     }
 }
@@ -124,21 +136,18 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use datanode::datanode::ObjectStoreConfig;
-    use frontend::frontend::Mode;
+    use servers::Mode;
 
     use super::*;
 
     #[test]
     fn test_read_from_config_file() {
         let cmd = StartCommand {
-            node_id: None,
-            rpc_addr: None,
-            mysql_addr: None,
-            metasrv_addr: None,
             config_file: Some(format!(
                 "{}/../../config/datanode.example.toml",
                 std::env::current_dir().unwrap().as_path().to_str().unwrap()
             )),
+            ..Default::default()
         };
         let options: DatanodeOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
@@ -168,44 +177,30 @@ mod tests {
     fn test_try_from_cmd() {
         assert_eq!(
             Mode::Standalone,
-            DatanodeOptions::try_from(StartCommand {
-                node_id: None,
-                rpc_addr: None,
-                mysql_addr: None,
-                metasrv_addr: None,
-                config_file: None
-            })
-            .unwrap()
-            .mode
+            DatanodeOptions::try_from(StartCommand::default())
+                .unwrap()
+                .mode
         );
 
         let mode = DatanodeOptions::try_from(StartCommand {
             node_id: Some(42),
-            rpc_addr: None,
-            mysql_addr: None,
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
-            config_file: None,
+            ..Default::default()
         })
         .unwrap()
         .mode;
         assert_matches!(mode, Mode::Distributed);
 
         assert!(DatanodeOptions::try_from(StartCommand {
-            node_id: None,
-            rpc_addr: None,
-            mysql_addr: None,
             metasrv_addr: Some("127.0.0.1:3002".to_string()),
-            config_file: None,
+            ..Default::default()
         })
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
         DatanodeOptions::try_from(StartCommand {
             node_id: Some(42),
-            rpc_addr: None,
-            mysql_addr: None,
-            metasrv_addr: None,
-            config_file: None,
+            ..Default::default()
         })
         .unwrap();
     }
@@ -213,14 +208,11 @@ mod tests {
     #[test]
     fn test_merge_config() {
         let dn_opts = DatanodeOptions::try_from(StartCommand {
-            node_id: None,
-            rpc_addr: None,
-            mysql_addr: None,
-            metasrv_addr: None,
             config_file: Some(format!(
                 "{}/../../config/datanode.example.toml",
                 std::env::current_dir().unwrap().as_path().to_str().unwrap()
             )),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(Some(42), dn_opts.node_id);

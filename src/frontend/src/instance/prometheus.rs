@@ -24,9 +24,9 @@ use prost::Message;
 use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
+use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
-use crate::frontend::Mode;
 use crate::instance::{parse_stmt, Instance};
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;

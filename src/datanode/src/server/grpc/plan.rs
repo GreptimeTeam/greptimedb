@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_grpc::{AsExcutionPlan, DefaultAsPlanImpl};
+use common_grpc::{AsExecutionPlan, DefaultAsPlanImpl};
 use common_query::physical_plan::{PhysicalPlanAdapter, PhysicalPlanRef};
 use common_query::Output;
 use datatypes::schema::Schema;

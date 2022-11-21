@@ -450,7 +450,7 @@ impl PyVector {
     #[pymethod(magic)]
     fn rfloordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            // FIXME: DataType convert problem, target_type should be infered?
+            // FIXME: DataType convert problem, target_type should be inferred?
             self.scalar_arith_op(other, Some(DataType::Int64), arrow2_rfloordiv_scalar, vm)
         } else {
             self.arith_op(
@@ -482,7 +482,7 @@ impl PyVector {
     // The Comparable Trait only support normal cmp
     // (yes there is a slot_richcompare function, but it is not used in anywhere)
     // so use our own function
-    // TODO(discord9): test those funciton
+    // TODO(discord9): test those function
 
     #[pymethod(name = "eq")]
     #[pymethod(magic)]
@@ -676,7 +676,7 @@ impl PyVector {
         }
     }
 
-    /// Unsupport
+    /// Unsupported
     /// TODO(discord9): make it work
     #[allow(unused)]
     fn setitem_by_index(
@@ -689,7 +689,7 @@ impl PyVector {
     }
 }
 
-/// get corrsponding arrow op function according to given PyComaprsionOp
+/// get corresponding arrow op function according to given PyComaprsionOp
 ///
 /// TODO(discord9): impl scalar version function
 fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> Box<dyn Array> {
@@ -708,7 +708,7 @@ fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> Box<dy
     }
 }
 
-/// get corrsponding arrow scalar op function according to given PyComaprsionOp
+/// get corresponding arrow scalar op function according to given PyComaprsionOp
 ///
 /// TODO(discord9): impl scalar version function
 fn get_arrow_scalar_op(

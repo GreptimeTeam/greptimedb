@@ -20,4 +20,4 @@ pub mod writer;
 
 pub use error::Error;
 pub use physical::plan::{DefaultAsPlanImpl, MockExecution};
-pub use physical::AsExcutionPlan;
+pub use physical::AsExecutionPlan;
