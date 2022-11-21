@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod bitset;
+pub mod bit_vec;
 pub mod buffer;
 pub mod bytes;
 
-pub use bitset::BitVec;
+pub use bit_vec::BitVec;
