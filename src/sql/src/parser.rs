@@ -247,7 +247,6 @@ impl<'a> ParserContext<'a> {
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;
-        println!("table_idents: {:?}", table_idents);
         ensure!(
             !table_idents.0.is_empty(),
             InvalidTableNameSnafu {
