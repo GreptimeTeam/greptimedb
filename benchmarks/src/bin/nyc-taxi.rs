@@ -103,7 +103,6 @@ async fn write_data(
         let insert_expr = InsertExpr {
             schema_name: "public".to_string(),
             table_name: TABLE_NAME.to_string(),
-            options: HashMap::default(),
             region_number: 0,
             columns,
             row_count,

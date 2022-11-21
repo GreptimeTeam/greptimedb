@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use api::v1::*;
 use client::{Client, Database};
 use common_grpc::InsertBatch;
@@ -35,7 +33,6 @@ async fn run() {
     let expr = InsertExpr {
         schema_name: "public".to_string(),
         table_name: "demo".to_string(),
-        options: HashMap::default(),
         region_number: 0,
         columns,
         row_count,

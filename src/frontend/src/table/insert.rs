@@ -138,7 +138,6 @@ fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<
         schema_name: insert.schema_name,
         table_name,
         region_number,
-        options: Default::default(),
         columns,
         row_count,
     })

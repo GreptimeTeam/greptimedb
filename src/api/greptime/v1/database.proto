@@ -52,7 +52,6 @@ message InsertExpr {
 
   // The region number of current insert request.
   uint32 region_number = 5;
-  map<string, bytes> options = 6;
 }
 
 // TODO(jiachun)

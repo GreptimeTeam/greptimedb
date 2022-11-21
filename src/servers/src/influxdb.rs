@@ -170,7 +170,6 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
                 InsertExpr {
                     schema_name: schema_name.clone(),
                     table_name,
-                    options: HashMap::default(),
                     region_number: 0,
                     columns,
                     row_count,

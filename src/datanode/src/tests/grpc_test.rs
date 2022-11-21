@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::assert_matches::assert_matches;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -232,7 +231,6 @@ async fn insert_and_assert(db: &Database) {
     let expr = InsertExpr {
         schema_name: "public".to_string(),
         table_name: "demo".to_string(),
-        options: HashMap::default(),
         region_number: 0,
         columns: vec![
             expected_host_col.clone(),

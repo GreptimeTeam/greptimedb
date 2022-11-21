@@ -14,7 +14,7 @@
 
 //! prometheus protocol supportings
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 use api::prometheus::remote::label_matcher::Type as MatcherType;
@@ -418,7 +418,6 @@ fn timeseries_to_insert_expr(database: &str, mut timeseries: TimeSeries) -> Resu
         table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
         })?,
-        options: HashMap::default(),
         region_number: 0,
         columns,
         row_count: row_count as u32,

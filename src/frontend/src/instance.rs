@@ -17,7 +17,6 @@ mod influxdb;
 mod opentsdb;
 mod prometheus;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -541,7 +540,6 @@ impl SqlQueryHandler for Instance {
                         schema_name,
                         table_name,
                         region_number: 0,
-                        options: HashMap::default(),
                         columns,
                         row_count,
                     };
@@ -901,7 +899,6 @@ mod tests {
         let insert_expr = InsertExpr {
             schema_name: "public".to_string(),
             table_name: "demo".to_string(),
-            options: HashMap::default(),
             region_number: 0,
             columns,
             row_count,
