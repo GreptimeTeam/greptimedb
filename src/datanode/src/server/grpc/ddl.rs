@@ -14,23 +14,20 @@
 
 use std::sync::Arc;
 
-use api::helper::ColumnDataTypeWrapper;
 use api::result::AdminResultBuilder;
 use api::v1::alter_expr::Kind;
-use api::v1::{AdminResult, AlterExpr, ColumnDef, CreateExpr, DropColumns};
+use api::v1::{AdminResult, AlterExpr, CreateExpr, DropColumns};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_query::Output;
 use common_telemetry::{error, info};
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use snafu::prelude::*;
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
 
-use crate::error::{
-    self, BumpTableIdSnafu, ColumnDefaultConstraintSnafu, MissingFieldSnafu, Result,
-};
+use crate::error::{self, BumpTableIdSnafu, MissingFieldSnafu, Result};
 use crate::instance::Instance;
 use crate::sql::SqlRequest;
 
@@ -172,7 +169,12 @@ fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
                     field: "column_def",
                 })?;
 
-                let schema = create_column_schema(&column_def)?;
+                let schema =
+                    column_def
+                        .try_as_column_schema()
+                        .context(error::InvalidColumnDefSnafu {
+                            column: &column_def.name,
+                        })?;
                 add_column_requests.push(AddColumnRequest {
                     column_schema: schema,
                     is_key: add_column_expr.is_key,
@@ -212,7 +214,10 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
     let column_schemas = expr
         .column_defs
         .iter()
-        .map(create_column_schema)
+        .map(|x| {
+            x.try_as_column_schema()
+                .context(error::InvalidColumnDefSnafu { column: &x.name })
+        })
         .collect::<Result<Vec<ColumnSchema>>>()?;
 
     ensure!(
@@ -243,28 +248,12 @@ fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
     ))
 }
 
-fn create_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
-    let data_type =
-        ColumnDataTypeWrapper::try_new(column_def.datatype).context(error::ColumnDataTypeSnafu)?;
-    let default_constraint = match &column_def.default_constraint {
-        None => None,
-        Some(v) => {
-            Some(ColumnDefaultConstraint::try_from(&v[..]).context(ColumnDefaultConstraintSnafu)?)
-        }
-    };
-    ColumnSchema::new(
-        column_def.name.clone(),
-        data_type.into(),
-        column_def.is_nullable,
-    )
-    .with_default_constraint(default_constraint)
-    .context(ColumnDefaultConstraintSnafu)
-}
-
 #[cfg(test)]
 mod tests {
+    use api::v1::ColumnDef;
     use common_catalog::consts::MIN_USER_TABLE_ID;
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;
 
     use super::*;
@@ -321,12 +310,11 @@ mod tests {
             is_nullable: true,
             default_constraint: None,
         };
-        let result = create_column_schema(&column_def);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Column datatype error, source: Unknown proto column datatype: 1024"
-        );
+        let result = column_def.try_as_column_schema();
+        assert!(matches!(
+            result.unwrap_err(),
+            api::error::Error::UnknownColumnDataType { .. }
+        ));
 
         let column_def = ColumnDef {
             name: "a".to_string(),
@@ -334,7 +322,7 @@ mod tests {
             is_nullable: true,
             default_constraint: None,
         };
-        let column_schema = create_column_schema(&column_def).unwrap();
+        let column_schema = column_def.try_as_column_schema().unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
         assert!(column_schema.is_nullable());
@@ -346,7 +334,7 @@ mod tests {
             is_nullable: true,
             default_constraint: Some(default_constraint.clone().try_into().unwrap()),
         };
-        let column_schema = create_column_schema(&column_def).unwrap();
+        let column_schema = column_def.try_as_column_schema().unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
         assert!(column_schema.is_nullable());

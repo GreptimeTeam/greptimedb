@@ -316,11 +316,15 @@ impl RemoteCatalogManager {
             ..
         } = table_value;
 
+        // unwrap safety: checked in yielding this table when `iter_remote_tables`
+        let region_numbers = regions_id_map.get(&self.node_id).unwrap();
+
         let request = OpenTableRequest {
             catalog_name: catalog_name.clone(),
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
             table_id,
+            region_numbers: region_numbers.clone(),
         };
         match self
             .engine
@@ -361,7 +365,7 @@ impl RemoteCatalogManager {
                     table_name: table_name.clone(),
                     desc: None,
                     schema: Arc::new(schema),
-                    region_numbers: regions_id_map.get(&self.node_id).unwrap().clone(), // this unwrap is safe because region_id_map is checked in `iter_remote_tables`
+                    region_numbers: region_numbers.clone(),
                     primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,
                     table_options: meta.options.clone(),

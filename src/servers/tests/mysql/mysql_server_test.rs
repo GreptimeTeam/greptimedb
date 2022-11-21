@@ -184,6 +184,7 @@ async fn test_query_concurrently() -> Result<()> {
 
                 let should_recreate_conn = expected == 1;
                 if should_recreate_conn {
+                    connection.disconnect().await.unwrap();
                     connection = create_connection(server_port, index % 2 == 0)
                         .await
                         .unwrap();
