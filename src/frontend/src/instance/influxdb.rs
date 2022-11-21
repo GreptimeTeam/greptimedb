@@ -26,8 +26,7 @@ use snafu::{OptionExt, ResultExt};
 use table::requests::InsertRequest;
 
 use crate::error;
-use crate::error::{DeserializeInsertBatchSnafu, InsertBatchToRequestSnafu, Result};
-use crate::frontend::Mode;
+use crate::error::{InsertBatchToRequestSnafu, Result};
 use crate::instance::Instance;
 
 #[async_trait]
