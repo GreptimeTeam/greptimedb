@@ -53,7 +53,7 @@ pub struct Signature {
 }
 
 #[inline]
-fn concret_types_to_arrow_types(ts: Vec<ConcreteDataType>) -> Vec<ArrowDataType> {
+fn concrete_types_to_arrow_types(ts: Vec<ConcreteDataType>) -> Vec<ArrowDataType> {
     ts.iter().map(ConcreteDataType::as_arrow_type).collect()
 }
 
@@ -118,14 +118,14 @@ impl From<TypeSignature> for DfTypeSignature {
     fn from(type_signature: TypeSignature) -> DfTypeSignature {
         match type_signature {
             TypeSignature::Variadic(types) => {
-                DfTypeSignature::Variadic(concret_types_to_arrow_types(types))
+                DfTypeSignature::Variadic(concrete_types_to_arrow_types(types))
             }
             TypeSignature::VariadicEqual => DfTypeSignature::VariadicEqual,
             TypeSignature::Uniform(n, types) => {
-                DfTypeSignature::Uniform(n, concret_types_to_arrow_types(types))
+                DfTypeSignature::Uniform(n, concrete_types_to_arrow_types(types))
             }
             TypeSignature::Exact(types) => {
-                DfTypeSignature::Exact(concret_types_to_arrow_types(types))
+                DfTypeSignature::Exact(concrete_types_to_arrow_types(types))
             }
             TypeSignature::Any(n) => DfTypeSignature::Any(n),
             TypeSignature::OneOf(ts) => {

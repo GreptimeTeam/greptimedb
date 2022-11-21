@@ -67,7 +67,7 @@ fn gen_call(name: &str, deco_args: &DecoratorArgs, loc: &Location) -> ast::Stmt<
 
 /// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
 ///
-/// The rationale is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
+/// The rationale is that rustpython's vm is not very efficient according to [official benchmark](https://rustpython.github.io/benchmarks),
 /// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
 /// And add a function call in the end and also
 /// strip type annotation
@@ -108,8 +108,8 @@ pub fn compile_script(name: &str, deco_args: &DecoratorArgs, script: &str) -> Re
             }
             loc = Some(stmt.location);
 
-            // This manually construct ast has no corrsponding code
-            // in the script, so just give it a location that don't exist in orginal script
+            // This manually construct ast has no corresponding code
+            // in the script, so just give it a location that don't exist in original script
             // (which doesn't matter because Location usually only used in pretty print errors)
         }
         // Append statement which calling coprocessor function.

@@ -81,7 +81,7 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Table quering not found: {}", name))]
+    #[snafu(display("Table querying not found: {}", name))]
     TableNotFound { name: String, backtrace: Backtrace },
 
     #[snafu(display("Cannot convert plan doesn't belong to GreptimeDB"))]

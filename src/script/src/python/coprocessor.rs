@@ -49,7 +49,7 @@ use crate::python::PyVector;
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnotationInfo {
-    /// if None, use types infered by PyVector
+    /// if None, use types inferred by PyVector
     pub datatype: Option<DataType>,
     pub is_nullable: bool,
 }
@@ -115,7 +115,7 @@ impl Coprocessor {
                         datatype: ty,
                         is_nullable,
                     } = anno[idx].to_owned().unwrap_or_else(||
-                    // default to be not nullable and use DataType infered by PyVector itself
+                    // default to be not nullable and use DataType inferred by PyVector itself
                     AnnotationInfo{
                         datatype: Some(real_ty.to_owned()),
                         is_nullable: false
@@ -208,7 +208,7 @@ fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
             }
             _ => {
                 return ret_other_error_with(format!(
-                    "Unsupport data type at column {idx}: {:?} for coprocessor",
+                    "Unsupported data type at column {idx}: {:?} for coprocessor",
                     arg.data_type()
                 ))
                 .fail()
@@ -348,7 +348,7 @@ fn set_items_in_scope(
 /// ```
 ///
 /// # Type Annotation
-/// you can use type annotations in args and returns to designate types, so coprocessor will check for corrsponding types.
+/// you can use type annotations in args and returns to designate types, so coprocessor will check for corresponding types.
 ///
 /// Currently support types are `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64` and `f16`, `f32`, `f64`
 ///

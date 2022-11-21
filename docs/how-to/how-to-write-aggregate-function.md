@@ -55,7 +55,7 @@ The DataFusion basically execute aggregate like this:
 2. Call `update_batch` on each accumulator with partitioned data, to let you update your aggregate calculation.
 3. Call `state` to get each accumulator's internal state, the medial calculation result.
 4. Call `merge_batch` to merge all accumulator's internal state to one.
-5. Execute `evalute` on the chosen one to get the final calculation result.
+5. Execute `evaluate` on the chosen one to get the final calculation result.
 
 Once you know the meaning of each method, you can easily write your accumulator. You can refer to `Median` accumulator or `SUM` accumulator defined in  file `my_sum_udaf_example.rs` for more details.
 
@@ -63,7 +63,7 @@ Once you know the meaning of each method, you can easily write your accumulator.
 
 You can call `register_aggregate_function` method in query engine to register your aggregate function. To do that, you have to new an instance of struct `AggregateFunctionMeta`. The struct has three fields, first is the name of your aggregate function's name. The function name is case-sensitive due to DataFusion's restriction. We strongly recommend using lowercase for your name. If you have to use uppercase name, wrap your aggregate function with quotation marks. For example, if you define an aggregate function named "my_aggr", you can use "`SELECT MY_AGGR(x)`"; if you define "my_AGGR", you have to use "`SELECT "my_AGGR"(x)`".
 
-The second field is arg_counts ,the count of the arguments. Like accumulator `percentile`, caculating the p_number of the column. We need to input the value of column and the value of p to cacalate, and so the count of the arguments is two.
+The second field is arg_counts ,the count of the arguments. Like accumulator `percentile`, calculating the p_number of the column. We need to input the value of column and the value of p to cacalate, and so the count of the arguments is two.
 
 The third field is a function about how to create your accumulator creator that you defined in step 1 above. Create creator, that's a bit intertwined, but it is how we make DataFusion use a newly created aggregate function each time it executes a SQL, preventing the stored input types from affecting each other. The key detail can be starting looking at our `DfContextProviderAdapter` struct's `get_aggregate_meta` method.
 

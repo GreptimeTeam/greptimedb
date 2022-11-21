@@ -39,7 +39,7 @@ message NodeStat {
   uint64 wcus = 2;
   // Table number in this node
   uint64 table_num = 3;
-  // Regon number in this node
+  // Region number in this node
   uint64 region_num = 4;
 
   double cpu_usage = 5;

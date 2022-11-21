@@ -140,7 +140,7 @@ impl ErrorExt for Error {
         self
     }
 }
-// impl from for those error so one can use question mark and implictly cast into `CoprError`
+// impl from for those error so one can use question mark and implicitly cast into `CoprError`
 impl From<DataTypeError> for Error {
     fn from(e: DataTypeError) -> Self {
         Self::TypeCast { source: e }
