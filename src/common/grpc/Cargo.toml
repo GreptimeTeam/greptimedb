@@ -14,9 +14,7 @@ common-recordbatch = { path = "../recordbatch" }
 common-runtime = { path = "../runtime" }
 datatypes = { path = "../../datatypes" }
 dashmap = "5.4"
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
-    "simd",
-] }
+datafusion = "14.0.0"
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.0", features = ["full"] }
 tonic = "0.8"

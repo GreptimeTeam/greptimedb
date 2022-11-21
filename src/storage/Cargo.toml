@@ -6,7 +6,6 @@ license = "Apache-2.0"
 
 [dependencies]
 arc-swap = "1.0"
-arrow-format = { version = "0.4", features = ["ipc"] }
 async-stream = "0.3"
 async-trait = "0.1"
 bytes = "1.1"

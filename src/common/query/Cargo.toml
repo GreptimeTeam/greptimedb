@@ -9,11 +9,9 @@ async-trait = "0.1"
 common-error = { path = "../error" }
 common-recordbatch = { path = "../recordbatch" }
 common-time = { path = "../time" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
-    "simd",
-] }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+datafusion = "14.0.0"
+datafusion-common = "14.0.0"
+datafusion-expr = "14.0.0"
 datatypes = { path = "../../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 statrs = "0.15"
