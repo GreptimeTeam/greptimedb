@@ -383,7 +383,7 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn test_decode_catalog_enrty() {
+    pub fn test_decode_catalog_entry() {
         let entry = decode_system_catalog(
             Some(EntryType::Catalog as u8),
             Some("some_catalog".as_bytes()),

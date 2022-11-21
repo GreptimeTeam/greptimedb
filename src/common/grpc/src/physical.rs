@@ -22,7 +22,7 @@ use datafusion::physical_plan::ExecutionPlan;
 
 pub type ExecutionPlanRef = Arc<dyn ExecutionPlan>;
 
-pub trait AsExcutionPlan {
+pub trait AsExecutionPlan {
     type Error: std::error::Error;
 
     fn try_into_physical_plan(&self) -> Result<ExecutionPlanRef, Self::Error>;

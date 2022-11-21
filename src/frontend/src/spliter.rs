@@ -32,7 +32,7 @@ pub struct WriteSpliter {
 }
 
 impl WriteSpliter {
-    pub fn with_patition_rule(rule: PartitionRuleRef<Error>) -> Self {
+    pub fn with_partition_rule(rule: PartitionRuleRef<Error>) -> Self {
         Self {
             partition_rule: rule,
         }
@@ -204,7 +204,7 @@ mod tests {
     fn test_writer_spliter() {
         let insert = mock_insert_request();
         let rule = Arc::new(MockPartitionRule) as PartitionRuleRef<Error>;
-        let spliter = WriteSpliter::with_patition_rule(rule);
+        let spliter = WriteSpliter::with_partition_rule(rule);
         let ret = spliter.split(insert).unwrap();
 
         assert_eq!(2, ret.len());
@@ -354,16 +354,16 @@ mod tests {
         let vectors = vec![v1, v2];
 
         let row_0_vals = partition_values(&vectors, 0);
-        let expeted: Vec<Value> = vec![true.into(), "host1".into()];
-        assert_eq!(expeted, row_0_vals);
+        let expected: Vec<Value> = vec![true.into(), "host1".into()];
+        assert_eq!(expected, row_0_vals);
 
         let row_1_vals = partition_values(&vectors, 1);
-        let expeted: Vec<Value> = vec![false.into(), Value::Null];
-        assert_eq!(expeted, row_1_vals);
+        let expected: Vec<Value> = vec![false.into(), Value::Null];
+        assert_eq!(expected, row_1_vals);
 
         let row_2_vals = partition_values(&vectors, 2);
-        let expeted: Vec<Value> = vec![true.into(), "host3".into()];
-        assert_eq!(expeted, row_2_vals);
+        let expected: Vec<Value> = vec![true.into(), "host3".into()];
+        assert_eq!(expected, row_2_vals);
     }
 
     fn mock_insert_request() -> InsertRequest {

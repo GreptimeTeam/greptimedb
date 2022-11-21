@@ -39,7 +39,7 @@ pub trait Server: Send {
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr>;
 }
 
-struct AccpetTask {
+struct AcceptTask {
     // `abort_handle` and `abort_registration` are used in pairs in shutting down the server.
     // They work like sender and receiver for aborting stream. When the server is shutting down,
     // calling `abort_handle.abort()` will "notify" `abort_registration` to stop emitting new
@@ -51,7 +51,7 @@ struct AccpetTask {
     join_handle: Option<JoinHandle<()>>,
 }
 
-impl AccpetTask {
+impl AcceptTask {
     async fn shutdown(&mut self, name: &str) -> Result<()> {
         match self.join_handle.take() {
             Some(join_handle) => {
@@ -118,7 +118,7 @@ impl AccpetTask {
 
 pub(crate) struct BaseTcpServer {
     name: String,
-    accept_task: Mutex<AccpetTask>,
+    accept_task: Mutex<AcceptTask>,
     io_runtime: Arc<Runtime>,
 }
 
@@ -127,7 +127,7 @@ impl BaseTcpServer {
         let (abort_handle, registration) = AbortHandle::new_pair();
         Self {
             name: name.into(),
-            accept_task: Mutex::new(AccpetTask {
+            accept_task: Mutex::new(AcceptTask {
                 abort_handle,
                 abort_registration: Some(registration),
                 join_handle: None,

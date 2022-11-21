@@ -186,7 +186,7 @@ impl TryFrom<PbTable> for Table {
         let table_name = t
             .table_name
             .context(error::RouteInfoCorruptedSnafu {
-                err_msg: "table name requied",
+                err_msg: "table name required",
             })?
             .into();
         Ok(Self {

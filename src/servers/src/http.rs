@@ -453,7 +453,7 @@ mod test {
     use super::*;
 
     #[tokio::test]
-    async fn test_recordbatches_convertion() {
+    async fn test_recordbatches_conversion() {
         let column_schemas = vec![
             ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),

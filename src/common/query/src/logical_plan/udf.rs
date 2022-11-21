@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Udf module contains foundational types that are used to represent UDFs.
-//! It's modifed from datafusion.
+//! It's modified from datafusion.
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;

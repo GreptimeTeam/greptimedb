@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
         assert!(column_schema.is_nullable());
 
-        let default_constraint = ColumnDefaultConstraint::Value(Value::from("defaut value"));
+        let default_constraint = ColumnDefaultConstraint::Value(Value::from("default value"));
         let column_def = ColumnDef {
             name: "a".to_string(),
             datatype: 12, // string

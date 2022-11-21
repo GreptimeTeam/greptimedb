@@ -85,7 +85,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
 
                         match tx.send(Err(err)).await {
                             Ok(_) => (),
-                            Err(_err) => break, // response was droped
+                            Err(_err) => break, // response was dropped
                         }
                     }
                 }

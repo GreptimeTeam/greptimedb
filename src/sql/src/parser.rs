@@ -117,7 +117,7 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parses SHOW statements
-    /// todo(hl) support `show settings`/`show create`/`show users` ect.
+    /// todo(hl) support `show settings`/`show create`/`show users` etc.
     fn parse_show(&mut self) -> Result<Statement> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             self.parse_show_databases()
