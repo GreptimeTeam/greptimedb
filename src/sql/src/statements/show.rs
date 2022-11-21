@@ -57,6 +57,8 @@ pub struct ShowTables {
 /// SQL structure for `SHOW CREATE TABLE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowCreateTable {
+    pub catalog_name: String,
+    pub schema_name: String,
     pub table_name: String,
 }
 

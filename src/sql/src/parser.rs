@@ -137,7 +137,7 @@ impl<'a> ParserContext<'a> {
 
     /// Parse SHOW CREATE TABLE statement
     fn parse_show_create_table(&mut self) -> Result<Statement> {
-        let table_name =
+        let table_idents =
             self.parser
                 .parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
@@ -146,12 +146,16 @@ impl<'a> ParserContext<'a> {
                     actual: self.peek_token_as_string(),
                 })?;
         ensure!(
-            !table_name.0.is_empty(),
+            !table_idents.0.is_empty(),
             InvalidTableNameSnafu {
-                name: table_name.to_string(),
+                name: table_idents.to_string(),
             }
         );
+        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_idents)?;
+
         Ok(Statement::ShowCreateTable(ShowCreateTable {
+            schema_name: schema_name.to_string(),
+            catalog_name: catalog_name.to_string(),
             table_name: table_name.to_string(),
         }))
     }
@@ -243,6 +247,7 @@ impl<'a> ParserContext<'a> {
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;
+        println!("table_idents: {:?}", table_idents);
         ensure!(
             !table_idents.0.is_empty(),
             InvalidTableNameSnafu {

@@ -25,11 +25,14 @@ use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
 use sql::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
+use table::metadata::TableInfoRef;
 
 use crate::error::{self, Result};
 
 const SCHEMAS_COLUMN: &str = "Schemas";
 const TABLES_COLUMN: &str = "Tables";
+const TABLE_COLUMN: &str = "table";
+const CREATE_TABLE_COLUMN: &str = "create_table";
 const COLUMN_NAME_COLUMN: &str = "Field";
 const COLUMN_TYPE_COLUMN: &str = "Type";
 const COLUMN_NULLABLE_COLUMN: &str = "Null";
@@ -67,6 +70,21 @@ static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
         ),
         ColumnSchema::new(
             COLUMN_SEMANTIC_TYPE_COLUMN,
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+    ]))
+});
+
+static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(||  {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            TABLE_COLUMN,
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            CREATE_TABLE_COLUMN,
             ConcreteDataType::string_datatype(),
             false,
         ),
@@ -115,7 +133,6 @@ pub fn show_tables(stmt: ShowTables, catalog_manager: CatalogManagerRef) -> Resu
         }
     );
 
-    println!("tables: {:?}", stmt);
     let schema = stmt.database.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
     let schema = catalog_manager
         .schema(DEFAULT_CATALOG_NAME, schema)
@@ -159,7 +176,6 @@ pub fn describe_table(stmt: DescribeTable, catalog_manager: CatalogManagerRef) -
 
     let table_info = table.table_info();
     let columns_schemas = table_info.meta.schema.column_schemas();
-    common_telemetry::info!("table_info: {:#?}", table_info);
     let columns = vec![
         describe_column_names(columns_schemas),
         describe_column_types(columns_schemas),
@@ -229,32 +245,88 @@ fn describe_column_semantic_types(
     ))
 }
 
+fn show_create_column_name(table_name: Vec<String>) -> VectorRef {
+    Arc::new(StringVector::from(table_name))
+}
+
+fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
+    let mut create_sql_column: Vec<String> = Vec::new();
+
+    let columns_schemas = table_info.meta.schema.column_schemas();
+    let primary_key_indices = &table_info.meta.primary_key_indices;
+    let table_name = &table_info.name;
+
+    create_sql_column.push(format!("CREATE TABLE {} ( ", table_name));
+    for (index, cs) in columns_schemas.iter().enumerate() {
+        create_sql_column.push(cs.name.clone());
+        create_sql_column.push(cs.data_type.name().to_string());
+        let default_val = if cs.is_nullable() {
+            format!("null")
+        } else {
+            if cs.default_constraint().is_none() {
+                format!("")
+            } else {
+                format!("default {}", cs.default_constraint().map_or(String::from(""), |dc| dc.to_string()))
+            }
+        };
+        create_sql_column.push(default_val);
+        if index != columns_schemas.len() - 1 {
+            create_sql_column.push(",".to_string());
+        }
+    }
+
+    let mut create_sql_index: Vec<String> = Vec::new();
+    for (index, cs) in columns_schemas.iter().enumerate() {
+        if primary_key_indices.contains(&index) {
+            create_sql_index.push(format!("primary key({})", cs.name));
+            create_sql_index.push(",".to_string());
+        } else if cs.is_time_index() {
+            create_sql_index.push(format!("time index({})", cs.name));
+            create_sql_index.push(",".to_string());
+        } else {
+
+        };
+    }
+
+    if create_sql_index.is_empty() {
+
+    } else {
+        create_sql_column.push(",".to_string());
+        create_sql_index.remove(create_sql_index.len() - 1);
+        create_sql_index.push(")".to_string());
+    }
+
+    create_sql_index.push(format!("engine={} with(regions={});", table_info.meta.engine, table_info.meta.region_numbers.len()));
+
+    let create_sql_column_value = create_sql_column.join(" ");
+    let create_sql_column_index = create_sql_index.join(" ");
+    Arc::new(StringVector::from(vec![format!("{}{}", create_sql_column_value, create_sql_column_index)]))
+}
+
 pub fn show_create_table(stmt: ShowCreateTable, catalog_manager: CatalogManagerRef) -> Result<Output> {
-    common_telemetry::info!("stmt: {:?}", stmt);
-    // catalog_manager
-    //     .catalog(DEFAULT_SCHEMA_NAME)
-    //     .context(error::CatalogSnafu)?
-    //     .context(error::CatalogNotFoundSnafu { catalog: DEFAULT_CATALOG_NAME, })?;
-
-    let schema = catalog_manager
-        .schema(DEFAULT_CATALOG_NAME, DEFAULT_CATALOG_NAME)
+    let catalog = stmt.catalog_name.as_str();
+    let schema = stmt.schema_name.as_str();
+    catalog_manager
+        .catalog(catalog)
         .context(error::CatalogSnafu)?
-        .context(error::SchemaNotFoundSnafu {schema: DEFAULT_CATALOG_NAME,})?;
-
+        .context(error::CatalogNotFoundSnafu { catalog })?;
+    let schema = catalog_manager
+        .schema(catalog, schema)
+        .context(error::CatalogSnafu)?
+        .context(error::SchemaNotFoundSnafu { schema })?;
     let table = schema
         .table(&stmt.table_name)
         .context(error::CatalogSnafu)?
-        .context(error::TableNotFoundSnafu { table: &stmt.table_name })?;
+        .context(error::TableNotFoundSnafu {
+            table: &stmt.table_name,
+        })?;
 
     let table_info = table.table_info();
-
-    let columns_schemas = table_info.meta.schema.column_schemas();
-
     let columns = vec![
-        describe_column_names(columns_schemas),
+        show_create_column_name(vec![stmt.table_name]),
+        show_create_table_column_name(table_info),
     ];
-
-    let records = RecordBatches::try_from_columns(DESCRIBE_TABLE_OUTPUT_SCHEMA.clone(), columns)
+    let records = RecordBatches::try_from_columns(SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(), columns)
         .context(error::CreateRecordBatchSnafu)?;
     Ok(Output::RecordBatches(records))
 }
