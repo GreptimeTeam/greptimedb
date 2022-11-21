@@ -14,8 +14,7 @@
 
 use std::cmp::Ordering;
 
-use arrow::compute::arithmetics::basic::NativeArithmetics;
-use arrow::types::NativeType;
+use arrow::datatypes::ArrowPrimitiveType;
 use num::NumCast;
 
 use crate::prelude::Scalar;
@@ -29,9 +28,8 @@ pub trait Primitive:
     + Copy
     + Into<Value>
     + IntoValueRef<'static>
-    + NativeType
+    + ArrowPrimitiveType
     + serde::Serialize
-    + NativeArithmetics
     + NumCast
     + Scalar
 {

@@ -15,8 +15,8 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, BinaryValueIter, MutableArray};
-use arrow::bitmap::utils::ZipValidity;
+use arrow::array::{Array, ArrayRef};
+use arrow::array::{ArrayIter, GenericByteArray};
 use snafu::{OptionExt, ResultExt};
 
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};
@@ -106,7 +106,7 @@ impl Vector for BinaryVector {
 impl ScalarVector for BinaryVector {
     type OwnedItem = Vec<u8>;
     type RefItem<'a> = &'a [u8];
-    type Iter<'a> = ZipValidity<'a, &'a [u8], BinaryValueIter<'a, i64>>;
+    type Iter<'a> = ArrayIter<&'a BinaryArray>;
     type Builder = BinaryVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {

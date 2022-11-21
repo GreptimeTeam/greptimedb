@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arrow::array::{
-    self, Array, BinaryArray as ArrowBinaryArray, ListArray,
-    MutableBinaryArray as ArrowMutableBinaryArray, MutableUtf8Array, PrimitiveArray, Utf8Array,
-};
-use arrow::datatypes::DataType as ArrowDataType;
+use arrow::array::{self, Array, ListArray, PrimitiveArray};
+use arrow::datatypes::DataType;
 use common_time::timestamp::Timestamp;
 use snafu::OptionExt;
 
@@ -24,10 +21,10 @@ use crate::error::{ConversionSnafu, Result};
 use crate::prelude::ConcreteDataType;
 use crate::value::{ListValue, Value};
 
-pub type BinaryArray = ArrowBinaryArray<i64>;
-pub type MutableBinaryArray = ArrowMutableBinaryArray<i64>;
-pub type MutableStringArray = MutableUtf8Array<i32>;
-pub type StringArray = Utf8Array<i32>;
+pub type BinaryArray = arrow::array::LargeBinaryArray;
+pub type MutableBinaryArray = arrow::array::LargeBinaryBuilder;
+pub type StringArray = arrow::array::StringArray;
+pub type MutableStringArray = arrow::array::StringBuilder;
 
 macro_rules! cast_array {
     ($arr: ident, $CastType: ty) => {
@@ -45,37 +42,29 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
     }
 
     let result = match array.data_type() {
-        ArrowDataType::Null => Value::Null,
-        ArrowDataType::Boolean => {
-            Value::Boolean(cast_array!(array, array::BooleanArray).value(idx))
-        }
-        ArrowDataType::Binary | ArrowDataType::LargeBinary => {
+        DataType::Null => Value::Null,
+        DataType::Boolean => Value::Boolean(cast_array!(array, array::BooleanArray).value(idx)),
+        DataType::Binary | DataType::LargeBinary => {
             Value::Binary(cast_array!(array, BinaryArray).value(idx).into())
         }
-        ArrowDataType::Int8 => Value::Int8(cast_array!(array, PrimitiveArray::<i8>).value(idx)),
-        ArrowDataType::Int16 => Value::Int16(cast_array!(array, PrimitiveArray::<i16>).value(idx)),
-        ArrowDataType::Int32 => Value::Int32(cast_array!(array, PrimitiveArray::<i32>).value(idx)),
-        ArrowDataType::Int64 => Value::Int64(cast_array!(array, PrimitiveArray::<i64>).value(idx)),
-        ArrowDataType::UInt8 => Value::UInt8(cast_array!(array, PrimitiveArray::<u8>).value(idx)),
-        ArrowDataType::UInt16 => {
-            Value::UInt16(cast_array!(array, PrimitiveArray::<u16>).value(idx))
-        }
-        ArrowDataType::UInt32 => {
-            Value::UInt32(cast_array!(array, PrimitiveArray::<u32>).value(idx))
-        }
-        ArrowDataType::UInt64 => {
-            Value::UInt64(cast_array!(array, PrimitiveArray::<u64>).value(idx))
-        }
-        ArrowDataType::Float32 => {
+        DataType::Int8 => Value::Int8(cast_array!(array, PrimitiveArray::<i8>).value(idx)),
+        DataType::Int16 => Value::Int16(cast_array!(array, PrimitiveArray::<i16>).value(idx)),
+        DataType::Int32 => Value::Int32(cast_array!(array, PrimitiveArray::<i32>).value(idx)),
+        DataType::Int64 => Value::Int64(cast_array!(array, PrimitiveArray::<i64>).value(idx)),
+        DataType::UInt8 => Value::UInt8(cast_array!(array, PrimitiveArray::<u8>).value(idx)),
+        DataType::UInt16 => Value::UInt16(cast_array!(array, PrimitiveArray::<u16>).value(idx)),
+        DataType::UInt32 => Value::UInt32(cast_array!(array, PrimitiveArray::<u32>).value(idx)),
+        DataType::UInt64 => Value::UInt64(cast_array!(array, PrimitiveArray::<u64>).value(idx)),
+        DataType::Float32 => {
             Value::Float32(cast_array!(array, PrimitiveArray::<f32>).value(idx).into())
         }
-        ArrowDataType::Float64 => {
+        DataType::Float64 => {
             Value::Float64(cast_array!(array, PrimitiveArray::<f64>).value(idx).into())
         }
-        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
+        DataType::Utf8 | DataType::LargeUtf8 => {
             Value::String(cast_array!(array, StringArray).value(idx).into())
         }
-        ArrowDataType::Timestamp(t, _) => {
+        DataType::Timestamp(t, _) => {
             let value = cast_array!(array, PrimitiveArray::<i64>).value(idx);
             let unit = match ConcreteDataType::from_arrow_time_unit(t) {
                 ConcreteDataType::Timestamp(t) => t.unit,
@@ -83,7 +72,7 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
             };
             Value::Timestamp(Timestamp::new(value, unit))
         }
-        ArrowDataType::List(_) => {
+        DataType::List(_) => {
             let array = cast_array!(array, ListArray::<i32>).value(idx);
             let inner_datatype = ConcreteDataType::try_from(array.data_type())?;
             let values = (0..array.len())
