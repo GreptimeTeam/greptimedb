@@ -16,4 +16,4 @@ pub use bitvec::prelude;
 
 // `Lsb0` provides the best codegen for bit manipulation,
 // see https://github.com/bitvecto-rs/bitvec/blob/main/doc/order/Lsb0.md
-pub type BitVec = prelude::BitVec<u8, prelude::Lsb0>;
+pub type BitVec = prelude::BitVec<u8>;

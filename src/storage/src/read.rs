@@ -20,7 +20,7 @@ mod merge;
 use std::cmp::Ordering;
 
 use async_trait::async_trait;
-use datatypes::arrow::bitmap::MutableBitmap;
+use common_base::BitVec;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{BooleanVector, MutableVector, VectorRef};
@@ -127,7 +127,7 @@ pub trait BatchOp {
     /// - `batch` and `prev` have different number of columns (unless `prev` is
     /// empty).
     /// - `selected.len()` is less than the number of rows.
-    fn find_unique(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>);
+    fn find_unique(&self, batch: &Batch, selected: &mut BitVec, prev: Option<&Batch>);
 
     /// Filters the `batch`, returns elements matching the `filter` (i.e. where the values
     /// are true).

@@ -16,8 +16,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use common_base::BitVec;
 use common_error::prelude::*;
-use datatypes::arrow::bitmap::MutableBitmap;
 use datatypes::schema::{SchemaBuilder, SchemaRef};
 use datatypes::vectors::BooleanVector;
 use store_api::storage::{Chunk, ColumnId};
@@ -303,7 +303,7 @@ impl BatchOp for ProjectedSchema {
             })
     }
 
-    fn find_unique(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>) {
+    fn find_unique(&self, batch: &Batch, selected: &mut BitVec, prev: Option<&Batch>) {
         if let Some(prev) = prev {
             assert_eq!(batch.num_columns(), prev.num_columns());
         }
@@ -503,18 +503,18 @@ mod tests {
         let schema = read_util::new_projected_schema();
         let batch = read_util::new_kv_batch(&[(1000, Some(1)), (2000, Some(2)), (2000, Some(2))]);
 
-        let mut selected = MutableBitmap::from_len_zeroed(3);
+        let mut selected = BitVec::repeat(false, 3);
         schema.find_unique(&batch, &mut selected, None);
-        assert!(selected.get(0));
-        assert!(selected.get(1));
-        assert!(!selected.get(2));
+        assert!(selected[0]);
+        assert!(selected[1]);
+        assert!(!selected[2]);
 
-        let mut selected = MutableBitmap::from_len_zeroed(3);
+        let mut selected = BitVec::repeat(false, 3);
         let prev = read_util::new_kv_batch(&[(1000, Some(1))]);
         schema.find_unique(&batch, &mut selected, Some(&prev));
-        assert!(!selected.get(0));
-        assert!(selected.get(1));
-        assert!(!selected.get(2));
+        assert!(!selected[0]);
+        assert!(selected[1]);
+        assert!(!selected[2]);
     }
 
     #[test]
