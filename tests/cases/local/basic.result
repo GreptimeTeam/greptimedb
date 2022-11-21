@@ -9,7 +9,7 @@ CREATE TABLE system_metrics (
     TIME INDEX(ts)
 );
 
-Failed to execute, error: Datanode { code: 1004, msg: "Failed to create table: system_metrics, source: Table already exists: greptime.public.system_metrics" }
+MutateResult { success: 1, failure: 0 }
 
 INSERT INTO system_metrics
 VALUES
