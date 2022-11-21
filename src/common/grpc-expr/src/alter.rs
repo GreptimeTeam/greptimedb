@@ -12,13 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::alter_expr::Kind;
-use api::v1::{AlterExpr, DropColumns};
-use snafu::OptionExt;
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
+use std::sync::Arc;
 
-use crate::column::column_def_to_column_schema;
-use crate::error::{MissingFieldSnafu, Result};
+use api::v1::alter_expr::Kind;
+use api::v1::{AlterExpr, CreateExpr, DropColumns};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+use snafu::{ensure, OptionExt, ResultExt};
+use table::metadata::TableId;
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
+
+use crate::error::{
+    ColumnNotFoundSnafu, CreateSchemaSnafu, InvalidColumnDefSnafu, MissingFieldSnafu,
+    MissingTimestampColumnSnafu, Result,
+};
 
 /// Convert an [`AlterExpr`] to an optional [`AlterTableRequest`]
 pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
@@ -30,21 +37,28 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
                     field: "column_def",
                 })?;
 
-                let schema = column_def_to_column_schema(&column_def)?;
+                let schema = column_def
+                    .try_as_column_schema()
+                    .context(InvalidColumnDefSnafu {
+                        column: &column_def.name,
+                    })?;
                 add_column_requests.push(AddColumnRequest {
                     column_schema: schema,
                     is_key: add_column_expr.is_key,
                 })
             }
 
-            Ok(Some(AlterTableRequest {
+            let alter_kind = AlterKind::AddColumns {
+                columns: add_column_requests,
+            };
+
+            let request = AlterTableRequest {
                 catalog_name: expr.catalog_name,
                 schema_name: expr.schema_name,
                 table_name: expr.table_name,
-                alter_kind: AlterKind::AddColumns {
-                    columns: add_column_requests,
-                },
-            }))
+                alter_kind,
+            };
+            Ok(Some(request))
         }
         Some(Kind::DropColumns(DropColumns { drop_columns })) => {
             let alter_kind = AlterKind::DropColumns {
@@ -61,6 +75,86 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
         }
         None => Ok(None),
     }
+}
+
+pub fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
+    let column_schemas = expr
+        .column_defs
+        .iter()
+        .map(|x| {
+            x.try_as_column_schema()
+                .context(InvalidColumnDefSnafu { column: &x.name })
+        })
+        .collect::<Result<Vec<ColumnSchema>>>()?;
+
+    ensure!(
+        column_schemas
+            .iter()
+            .any(|column| column.name == expr.time_index),
+        MissingTimestampColumnSnafu {
+            msg: format!("CreateExpr: {:?}", expr)
+        }
+    );
+
+    let column_schemas = column_schemas
+        .into_iter()
+        .map(|column_schema| {
+            if column_schema.name == expr.time_index {
+                column_schema.with_time_index(true)
+            } else {
+                column_schema
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Arc::new(
+        SchemaBuilder::try_from(column_schemas)
+            .context(CreateSchemaSnafu)?
+            .build()
+            .context(CreateSchemaSnafu)?,
+    ))
+}
+
+pub fn create_expr_to_request(table_id: TableId, expr: CreateExpr) -> Result<CreateTableRequest> {
+    let schema = create_table_schema(&expr)?;
+    let primary_key_indices = expr
+        .primary_keys
+        .iter()
+        .map(|key| {
+            schema
+                .column_index_by_name(key)
+                .context(ColumnNotFoundSnafu {
+                    column_name: key,
+                    table_name: &expr.table_name,
+                })
+        })
+        .collect::<Result<Vec<usize>>>()?;
+
+    let catalog_name = expr
+        .catalog_name
+        .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
+    let schema_name = expr
+        .schema_name
+        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+
+    let region_ids = if expr.region_ids.is_empty() {
+        vec![0]
+    } else {
+        expr.region_ids
+    };
+
+    Ok(CreateTableRequest {
+        id: table_id,
+        catalog_name,
+        schema_name,
+        table_name: expr.table_name,
+        desc: expr.desc,
+        schema,
+        region_numbers: region_ids,
+        primary_key_indices,
+        create_if_not_exists: expr.create_if_not_exists,
+        table_options: expr.table_options,
+    })
 }
 
 #[cfg(test)]

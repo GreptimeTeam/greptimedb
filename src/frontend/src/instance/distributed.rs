@@ -44,8 +44,8 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu, ColumnDataTypeSnafu,
-    ConvertColumnDefaultConstraintSnafu, PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result,
-    SchemaNotFoundSnafu, StartMetaClientSnafu, TableNotFoundSnafu,
+    PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
+    TableNotFoundSnafu,
 };
 use crate::partitioning::{PartitionBound, PartitionDef};
 use crate::table::DistTable;

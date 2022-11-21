@@ -22,7 +22,7 @@ use snafu::{Backtrace, ErrorCompat};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Column {} not found in table {}", column_name, table_name))]
+    #[snafu(display("Column `{}` not found in table `{}`", column_name, table_name))]
     ColumnNotFound {
         column_name: String,
         table_name: String,
@@ -57,8 +57,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Missing timestamp column in request"))]
-    MissingTimestampColumn { backtrace: Backtrace },
+    #[snafu(display("Missing timestamp column, msg: {}", msg))]
+    MissingTimestampColumn { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Invalid column proto: {}", err_msg))]
     InvalidColumnProto {
@@ -79,6 +79,17 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display(
+        "Invalid column proto definition, column: {}, source: {}",
+        column,
+        source
+    ))]
+    InvalidColumnDef {
+        column: String,
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -98,6 +109,7 @@ impl ErrorExt for Error {
             Error::CreateVector { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,
             Error::ColumnDefaultConstraint { source, .. } => source.status_code(),
+            Error::InvalidColumnDef { source, .. } => source.status_code(),
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

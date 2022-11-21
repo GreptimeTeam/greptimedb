@@ -1219,6 +1219,7 @@ dependencies = [
  "api",
  "async-trait",
  "common-base",
+ "common-catalog",
  "common-error",
  "common-query",
  "common-telemetry",

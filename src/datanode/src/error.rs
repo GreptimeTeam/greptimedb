@@ -205,15 +205,10 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display(
-        "Invalid column proto definition, column: {}, source: {}",
-        column,
-        source
-    ))]
-    InvalidColumnDef {
-        column: String,
+    #[snafu(display("Failed to convert create expr to request: {}", source))]
+    CreateExprToRequest {
         #[snafu(backtrace)]
-        source: api::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to parse SQL, source: {}", source))]
@@ -313,7 +308,8 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::AlterExprToRequest { source, .. } => source.status_code(),
+            Error::AlterExprToRequest { source, .. }
+            | Error::CreateExprToRequest { source, .. } => source.status_code(),
             Error::CreateSchema { source, .. }
             | Error::ConvertSchema { source, .. }
             | Error::VectorComputation { source } => source.status_code(),
@@ -340,10 +336,6 @@ impl ErrorExt for Error {
             | Error::UnsupportedExpr { .. }
             | Error::Catalog { .. } => StatusCode::Internal,
 
-            Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
-                source.status_code()
-            }
-
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
             Error::StartScriptManager { source } => source.status_code(),
@@ -356,7 +348,6 @@ impl ErrorExt for Error {
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::MissingNodeId { .. } => StatusCode::InvalidArguments,
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
-            Error::ColumnDefToSchema { source, .. } => source.status_code(),
         }
     }
 
