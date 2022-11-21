@@ -19,6 +19,7 @@ message AdminExpr {
   oneof expr {
     CreateExpr create = 2;
     AlterExpr alter = 3;
+    CreateDatabaseExpr create_database = 4;
   }
 }
 
@@ -29,6 +30,7 @@ message AdminResult {
   }
 }
 
+// TODO(hl): rename to CreateTableExpr
 message CreateExpr {
   optional string catalog_name = 1;
   optional string schema_name = 2;
@@ -39,6 +41,8 @@ message CreateExpr {
   repeated string primary_keys = 7;
   bool create_if_not_exists = 8;
   map<string, string> table_options = 9;
+  optional uint32 table_id = 10;
+  repeated uint32 region_ids = 11;
 }
 
 message AlterExpr {
@@ -46,10 +50,29 @@ message AlterExpr {
   optional string schema_name = 2;
   string table_name = 3;
   oneof kind {
-    AddColumn add_column = 4;
+    AddColumns add_columns = 4;
+    DropColumns drop_columns = 5;
   }
+}
+
+message AddColumns {
+  repeated AddColumn add_columns = 1;
+}
+
+message DropColumns {
+  repeated DropColumn drop_columns = 1;
 }
 
 message AddColumn {
   ColumnDef column_def = 1;
+  bool is_key = 2;
+}
+
+message DropColumn {
+  string name = 1;
+}
+
+message CreateDatabaseExpr {
+  //TODO(hl): maybe rename to schema_name?
+  string database_name = 1;
 }

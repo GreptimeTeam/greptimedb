@@ -1,31 +1,40 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
-use api::helper::ColumnDataTypeWrapper;
 use api::v1::codec::SelectResult as GrpcSelectResult;
+use api::v1::column::SemanticType;
 use api::v1::{
-    column::Values, object_expr, object_result, select_expr, Column, ColumnDataType,
-    DatabaseRequest, ExprHeader, InsertExpr, MutateResult as GrpcMutateResult, ObjectExpr,
-    ObjectResult as GrpcObjectResult, PhysicalPlan, SelectExpr,
+    object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr,
+    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, PhysicalPlan,
+    SelectExpr,
 };
-use common_base::BitVec;
 use common_error::status_code::StatusCode;
-use common_grpc::AsExcutionPlan;
-use common_grpc::DefaultAsPlanImpl;
+use common_grpc::{AsExecutionPlan, DefaultAsPlanImpl};
+use common_insert::column_to_vector;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
-use common_time::date::Date;
-use common_time::datetime::DateTime;
-use common_time::timestamp::Timestamp;
 use datafusion::physical_plan::ExecutionPlan;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error;
-use crate::{
-    error::{ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu},
-    Client, Result,
+use crate::error::{
+    ColumnToVectorSnafu, ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu,
 };
+use crate::{error, Client, Result};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -124,8 +133,6 @@ impl Database {
         obj_result.try_into()
     }
 
-    // TODO(jiachun) update/delete
-
     pub async fn object(&self, expr: ObjectExpr) -> Result<GrpcObjectResult> {
         let res = self.objects(vec![expr]).await?.pop().unwrap();
         Ok(res)
@@ -201,7 +208,9 @@ impl TryFrom<ObjectResult> for Output {
                 let vectors = select
                     .columns
                     .iter()
-                    .map(|column| column_to_vector(column, select.row_count))
+                    .map(|column| {
+                        column_to_vector(column, select.row_count).context(ColumnToVectorSnafu)
+                    })
                     .collect::<Result<Vec<VectorRef>>>()?;
 
                 let column_schemas = select
@@ -211,7 +220,12 @@ impl TryFrom<ObjectResult> for Output {
                     .map(|(column, vector)| {
                         let datatype = vector.data_type();
                         // nullable or not, does not affect the output
-                        ColumnSchema::new(&column.column_name, datatype, true)
+                        let mut column_schema =
+                            ColumnSchema::new(&column.column_name, datatype, true);
+                        if column.semantic_type == SemanticType::Timestamp as i32 {
+                            column_schema = column_schema.with_time_index(true);
+                        }
+                        column_schema
                     })
                     .collect::<Vec<ColumnSchema>>();
 
@@ -239,100 +253,11 @@ impl TryFrom<ObjectResult> for Output {
     }
 }
 
-fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
-    let wrapper =
-        ColumnDataTypeWrapper::try_new(column.datatype).context(error::ColumnDataTypeSnafu)?;
-    let column_datatype = wrapper.datatype();
-
-    let rows = rows as usize;
-    let mut vector = VectorBuilder::with_capacity(wrapper.into(), rows);
-
-    if let Some(values) = &column.values {
-        let values = collect_column_values(column_datatype, values);
-        let mut values_iter = values.into_iter();
-
-        let null_mask = BitVec::from_slice(&column.null_mask);
-        let mut nulls_iter = null_mask.iter().by_vals().fuse();
-
-        for i in 0..rows {
-            if let Some(true) = nulls_iter.next() {
-                vector.push_null();
-            } else {
-                let value_ref = values_iter.next().context(error::InvalidColumnProtoSnafu {
-                    err_msg: format!(
-                        "value not found at position {} of column {}",
-                        i, &column.column_name
-                    ),
-                })?;
-                vector
-                    .try_push_ref(value_ref)
-                    .context(error::CreateVectorSnafu)?;
-            }
-        }
-    } else {
-        (0..rows).for_each(|_| vector.push_null());
-    }
-    Ok(vector.finish())
-}
-
-fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Vec<ValueRef> {
-    macro_rules! collect_values {
-        ($value: expr, $mapper: expr) => {
-            $value.iter().map($mapper).collect::<Vec<ValueRef>>()
-        };
-    }
-
-    match column_datatype {
-        ColumnDataType::Boolean => collect_values!(values.bool_values, |v| ValueRef::from(*v)),
-        ColumnDataType::Int8 => collect_values!(values.i8_values, |v| ValueRef::from(*v as i8)),
-        ColumnDataType::Int16 => {
-            collect_values!(values.i16_values, |v| ValueRef::from(*v as i16))
-        }
-        ColumnDataType::Int32 => {
-            collect_values!(values.i32_values, |v| ValueRef::from(*v))
-        }
-        ColumnDataType::Int64 => {
-            collect_values!(values.i64_values, |v| ValueRef::from(*v as i64))
-        }
-        ColumnDataType::Uint8 => {
-            collect_values!(values.u8_values, |v| ValueRef::from(*v as u8))
-        }
-        ColumnDataType::Uint16 => {
-            collect_values!(values.u16_values, |v| ValueRef::from(*v as u16))
-        }
-        ColumnDataType::Uint32 => {
-            collect_values!(values.u32_values, |v| ValueRef::from(*v))
-        }
-        ColumnDataType::Uint64 => {
-            collect_values!(values.u64_values, |v| ValueRef::from(*v as u64))
-        }
-        ColumnDataType::Float32 => collect_values!(values.f32_values, |v| ValueRef::from(*v)),
-        ColumnDataType::Float64 => collect_values!(values.f64_values, |v| ValueRef::from(*v)),
-        ColumnDataType::Binary => {
-            collect_values!(values.binary_values, |v| ValueRef::from(v.as_slice()))
-        }
-        ColumnDataType::String => {
-            collect_values!(values.string_values, |v| ValueRef::from(v.as_str()))
-        }
-        ColumnDataType::Date => {
-            collect_values!(values.date_values, |v| ValueRef::Date(Date::new(*v)))
-        }
-        ColumnDataType::Datetime => {
-            collect_values!(values.datetime_values, |v| ValueRef::DateTime(
-                DateTime::new(*v)
-            ))
-        }
-        ColumnDataType::Timestamp => {
-            collect_values!(values.ts_millis_values, |v| ValueRef::Timestamp(
-                Timestamp::from_millis(*v)
-            ))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use datanode::server::grpc::select::{null_mask, values};
+    use api::helper::ColumnDataTypeWrapper;
+    use api::v1::Column;
+    use common_grpc::select::{null_mask, values};
     use datatypes::vectors::{
         BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
         Int16Vector, Int32Vector, Int64Vector, Int8Vector, StringVector, UInt16Vector,

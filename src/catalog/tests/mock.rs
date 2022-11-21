@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
@@ -13,7 +27,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
 use serde::Serializer;
-use table::engine::{EngineContext, TableEngine};
+use table::engine::{EngineContext, TableEngine, TableReference};
 use table::metadata::TableId;
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::test_util::MemTable;
@@ -151,6 +165,7 @@ impl TableEngine for MockTableEngine {
             table_id,
             catalog_name,
             schema_name,
+            vec![0],
         )) as Arc<_>;
 
         let mut tables = self.tables.write().await;
@@ -174,12 +189,28 @@ impl TableEngine for MockTableEngine {
         unimplemented!()
     }
 
-    fn get_table(&self, _ctx: &EngineContext, name: &str) -> table::Result<Option<TableRef>> {
-        futures::executor::block_on(async { Ok(self.tables.read().await.get(name).cloned()) })
+    fn get_table<'a>(
+        &self,
+        _ctx: &EngineContext,
+        table_ref: &'a TableReference,
+    ) -> table::Result<Option<TableRef>> {
+        futures::executor::block_on(async {
+            Ok(self
+                .tables
+                .read()
+                .await
+                .get(&table_ref.to_string())
+                .cloned())
+        })
     }
 
-    fn table_exists(&self, _ctx: &EngineContext, name: &str) -> bool {
-        futures::executor::block_on(async { self.tables.read().await.contains_key(name) })
+    fn table_exists<'a>(&self, _ctx: &EngineContext, table_ref: &'a TableReference) -> bool {
+        futures::executor::block_on(async {
+            self.tables
+                .read()
+                .await
+                .contains_key(&table_ref.to_string())
+        })
     }
 
     async fn drop_table(

@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -16,13 +30,14 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::OpenTableRequest;
 use table::table::numbers::NumbersTable;
+use table::table::TableIdProvider;
 use table::TableRef;
 
 use crate::error::{
-    CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, SchemaNotFoundSnafu,
-    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, Result,
+    SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu,
+    TableExistsSnafu, TableNotFoundSnafu,
 };
-use crate::error::{ReadSystemCatalogSnafu, Result};
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
     decode_system_catalog, Entry, SystemCatalogTable, TableEntry, ENTRY_TYPE_INDEX, KEY_INDEX,
@@ -31,8 +46,8 @@ use crate::system::{
 use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
-    CatalogProvider, CatalogProviderRef, RegisterSystemTableRequest, RegisterTableRequest,
-    SchemaProvider,
+    CatalogProvider, CatalogProviderRef, RegisterSchemaRequest, RegisterSystemTableRequest,
+    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -226,6 +241,7 @@ impl LocalCatalogManager {
             schema_name: t.schema_name.clone(),
             table_name: t.table_name.clone(),
             table_id: t.table_id,
+            region_numbers: vec![0],
         };
 
         let option = self
@@ -279,16 +295,18 @@ impl CatalogList for LocalCatalogManager {
 }
 
 #[async_trait::async_trait]
+impl TableIdProvider for LocalCatalogManager {
+    async fn next_table_id(&self) -> table::Result<TableId> {
+        Ok(self.next_table_id.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[async_trait::async_trait]
 impl CatalogManager for LocalCatalogManager {
     /// Start [LocalCatalogManager] to load all information from system catalog table.
     /// Make sure table engine is initialized before starting [MemoryCatalogManager].
     async fn start(&self) -> Result<()> {
         self.init().await
-    }
-
-    #[inline]
-    async fn next_table_id(&self) -> Result<TableId> {
-        Ok(self.next_table_id.fetch_add(1, Ordering::Relaxed))
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
@@ -334,6 +352,34 @@ impl CatalogManager for LocalCatalogManager {
         Ok(1)
     }
 
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+        let started = self.init_lock.lock().await;
+        ensure!(
+            *started,
+            IllegalManagerStateSnafu {
+                msg: "Catalog manager not started",
+            }
+        );
+        let catalog_name = &request.catalog;
+        let schema_name = &request.schema;
+
+        let catalog = self
+            .catalogs
+            .catalog(catalog_name)?
+            .context(CatalogNotFoundSnafu { catalog_name })?;
+        if catalog.schema(schema_name)?.is_some() {
+            return SchemaExistsSnafu {
+                schema: schema_name,
+            }
+            .fail();
+        }
+        self.system
+            .register_schema(request.catalog, schema_name.clone())
+            .await?;
+        catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
+        Ok(1)
+    }
+
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
         ensure!(
             !*self.init_lock.lock().await,
@@ -346,6 +392,15 @@ impl CatalogManager for LocalCatalogManager {
         sys_table_requests.push(request);
 
         Ok(())
+    }
+
+    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+        self.catalogs
+            .catalog(catalog)?
+            .context(CatalogNotFoundSnafu {
+                catalog_name: catalog,
+            })?
+            .schema(schema)
     }
 
     fn table(

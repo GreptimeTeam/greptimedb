@@ -1,24 +1,32 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! logging stuffs, inspired by databend
 use std::env;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::sdk::propagation::TraceContextPropagator;
 pub use tracing::{event, span, Level};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_appender::rolling::RollingFileAppender;
-use tracing_appender::rolling::Rotation;
-use tracing_bunyan_formatter::BunyanFormattingLayer;
-use tracing_bunyan_formatter::JsonStorageLayer;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
 use tracing_log::LogTracer;
-use tracing_subscriber::filter;
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::Registry;
+use tracing_subscriber::{filter, EnvFilter, Registry};
 
 pub use crate::{debug, error, info, log, trace, warn};
 

@@ -1,21 +1,32 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 mod compat;
 
-use std::{
-    any::Any,
-    collections::{BTreeSet, HashMap},
-    slice,
-    time::Duration,
-};
+use std::any::Any;
+use std::collections::{BTreeSet, HashMap};
+use std::slice;
+use std::time::Duration;
 
 use common_error::prelude::*;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::RangeMillis;
+use datatypes::arrow::error::ArrowError;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::{ScalarVector, Value};
 use datatypes::schema::{ColumnSchema, SchemaRef};
-use datatypes::vectors::{Int64Vector, TimestampVector};
-use datatypes::{
-    arrow::error::ArrowError, data_type::ConcreteDataType, prelude::ScalarVector, prelude::Value,
-    vectors::VectorRef,
-};
+use datatypes::vectors::{Int64Vector, TimestampVector, VectorRef};
 use prost::{DecodeError, EncodeError};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{consts, PutOperation, WriteRequest};
@@ -491,34 +502,27 @@ impl<'a> IntoIterator for &'a WriteBatch {
 
 pub mod codec {
 
-    use std::{io::Cursor, sync::Arc};
+    use std::io::Cursor;
+    use std::sync::Arc;
 
-    use datatypes::{
-        arrow::{
-            chunk::Chunk as ArrowChunk,
-            io::ipc::{
-                read::{self, StreamReader, StreamState},
-                write::{StreamWriter, WriteOptions},
-            },
-        },
-        schema::{Schema, SchemaRef},
-        vectors::Helper,
-    };
+    use datatypes::arrow::chunk::Chunk as ArrowChunk;
+    use datatypes::arrow::io::ipc::read::{self, StreamReader, StreamState};
+    use datatypes::arrow::io::ipc::write::{StreamWriter, WriteOptions};
+    use datatypes::schema::{Schema, SchemaRef};
+    use datatypes::vectors::Helper;
     use prost::Message;
     use snafu::{ensure, OptionExt, ResultExt};
     use store_api::storage::WriteRequest;
 
     use crate::codec::{Decoder, Encoder};
-    use crate::proto::{
-        wal::MutationType,
-        write_batch::{self, gen_columns, gen_put_data_vector},
-    };
+    use crate::proto::wal::MutationType;
+    use crate::proto::write_batch::{self, gen_columns, gen_put_data_vector};
     use crate::write_batch::{
-        DataCorruptedSnafu, DecodeArrowSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
-        Error as WriteBatchError, FromProtobufSnafu, MissingColumnSnafu, Mutation,
-        ParseSchemaSnafu, Result, StreamWaitingSnafu, ToProtobufSnafu, WriteBatch,
+        DataCorruptedSnafu, DecodeArrowSnafu, DecodeProtobufSnafu, DecodeVectorSnafu,
+        EncodeArrowSnafu, EncodeProtobufSnafu, Error as WriteBatchError, FromProtobufSnafu,
+        MissingColumnSnafu, Mutation, ParseSchemaSnafu, PutData, Result, StreamWaitingSnafu,
+        ToProtobufSnafu, WriteBatch,
     };
-    use crate::write_batch::{DecodeProtobufSnafu, EncodeProtobufSnafu, PutData};
 
     // TODO(jiachun): We can make a comparison with protobuf, including performance, storage cost,
     // CPU consumption, etc

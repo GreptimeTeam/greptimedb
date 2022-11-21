@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::sync::Arc;
 
@@ -25,8 +39,9 @@ pub enum Error {
     #[snafu(display("Missing result header"))]
     MissingHeader,
 
-    #[snafu(display("Tonic internal error, source: {}", source))]
+    #[snafu(display("Tonic internal error, addr: {}, source: {}", addr, source))]
     TonicStatus {
+        addr: String,
         source: tonic::Status,
         backtrace: Backtrace,
     },
@@ -47,22 +62,10 @@ pub enum Error {
     #[snafu(display("Mutate result has failure {}", failure))]
     MutateFailure { failure: u32, backtrace: Backtrace },
 
-    #[snafu(display("Invalid column proto: {}", err_msg))]
-    InvalidColumnProto {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
         #[snafu(backtrace)]
         source: api::error::Error,
-    },
-
-    #[snafu(display("Failed to create vector, source: {}", source))]
-    CreateVector {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to create RecordBatches, source: {}", source))]
@@ -96,6 +99,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc::error::Error,
     },
+
+    #[snafu(display("Failed to convert column to vector, source: {}", source))]
+    ColumnToVector {
+        #[snafu(backtrace)]
+        source: common_insert::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -111,15 +120,13 @@ impl ErrorExt for Error {
             | Error::Datanode { .. }
             | Error::EncodePhysical { .. }
             | Error::MutateFailure { .. }
-            | Error::InvalidColumnProto { .. }
             | Error::ColumnDataType { .. }
             | Error::MissingField { .. } => StatusCode::Internal,
-            Error::ConvertSchema { source } | Error::CreateVector { source } => {
-                source.status_code()
-            }
+            Error::ConvertSchema { source } => source.status_code(),
             Error::CreateRecordBatches { source } => source.status_code(),
             Error::CreateChannel { source, .. } => source.status_code(),
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
+            Error::ColumnToVector { source, .. } => source.status_code(),
         }
     }
 

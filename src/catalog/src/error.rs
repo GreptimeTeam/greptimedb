@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 
 use common_error::ext::{BoxedError, ErrorExt};
@@ -83,6 +97,12 @@ pub enum Error {
     #[snafu(display("Table {} already exists", table))]
     TableExists { table: String, backtrace: Backtrace },
 
+    #[snafu(display("Schema {} already exists", schema))]
+    SchemaExists {
+        schema: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to register table"))]
     RegisterTable {
         #[snafu(backtrace)]
@@ -112,7 +132,7 @@ pub enum Error {
         "Failed to insert table creation record to system catalog, source: {}",
         source
     ))]
-    InsertTableRecord {
+    InsertCatalogRecord {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
@@ -165,21 +185,8 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to bump table id"))]
-    BumpTableId { msg: String, backtrace: Backtrace },
-
-    #[snafu(display("Failed to parse table id from metasrv, data: {:?}", data))]
-    ParseTableId { data: String, backtrace: Backtrace },
-
-    #[snafu(display("Failed to deserialize partition rule from string: {:?}", data))]
-    DeserializePartitionRule {
-        data: String,
-        source: serde_json::error::Error,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Invalid table schema in catalog, source: {:?}", source))]
-    InvalidSchemaInCatalog {
+    #[snafu(display("Invalid table info in catalog, source: {}", source))]
+    InvalidTableInfoInCatalog {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
@@ -215,21 +222,18 @@ impl ErrorExt for Error {
 
             Error::RegisterTable { .. } => StatusCode::Internal,
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
+            Error::SchemaExists { .. } => StatusCode::InvalidArguments,
 
             Error::OpenSystemCatalog { source, .. }
             | Error::CreateSystemCatalog { source, .. }
-            | Error::InsertTableRecord { source, .. }
+            | Error::InsertCatalogRecord { source, .. }
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. } => source.status_code(),
             Error::MetaSrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableSchema { source, .. } => source.status_code(),
-            Error::BumpTableId { .. } | Error::ParseTableId { .. } => {
-                StatusCode::StorageUnavailable
-            }
-            Error::DeserializePartitionRule { .. } => StatusCode::Unexpected,
-            Error::InvalidSchemaInCatalog { .. } => StatusCode::Unexpected,
+            Error::InvalidTableInfoInCatalog { .. } => StatusCode::Unexpected,
             Error::Internal { source, .. } => source.status_code(),
         }
     }

@@ -1,19 +1,34 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::cmp::Ordering;
 
 use itertools::Itertools;
+use mito::engine;
 use once_cell::sync::Lazy;
-use snafu::ResultExt;
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sqlparser::ast::Value;
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::tokenizer::{Token, Word};
-use table_engine::engine;
 
 use crate::ast::{ColumnDef, Ident, TableConstraint, Value as SqlValue};
 use crate::error::{self, InvalidTimeIndexSnafu, Result, SyntaxSnafu};
 use crate::parser::ParserContext;
-use crate::statements::create_table::{CreateTable, PartitionEntry, Partitions, TIME_INDEX};
+use crate::statements::create::{
+    CreateDatabase, CreateTable, PartitionEntry, Partitions, TIME_INDEX,
+};
 use crate::statements::statement::Statement;
 use crate::statements::{sql_data_type_to_concrete_data_type, sql_value_to_value};
 
@@ -26,9 +41,37 @@ static THAN: Lazy<Token> = Lazy::new(|| Token::make_keyword("THAN"));
 /// Parses create [table] statement
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_create(&mut self) -> Result<Statement> {
-        self.parser
-            .expect_keyword(Keyword::TABLE)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+        match self.parser.peek_token() {
+            Token::Word(w) => match w.keyword {
+                Keyword::TABLE => self.parse_create_table(),
+
+                Keyword::DATABASE => self.parse_create_database(),
+
+                _ => self.unsupported(w.to_string()),
+            },
+            unexpected => self.unsupported(unexpected.to_string()),
+        }
+    }
+
+    fn parse_create_database(&mut self) -> Result<Statement> {
+        self.parser.next_token();
+
+        let database_name = self
+            .parser
+            .parse_object_name()
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a database name",
+                actual: self.peek_token_as_string(),
+            })?;
+
+        Ok(Statement::CreateDatabase(CreateDatabase {
+            name: database_name,
+        }))
+    }
+
+    fn parse_create_table(&mut self) -> Result<Statement> {
+        self.parser.next_token();
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
@@ -36,7 +79,12 @@ impl<'a> ParserContext<'a> {
         let table_name = self
             .parser
             .parse_object_name()
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "a table name",
+                actual: self.peek_token_as_string(),
+            })?;
+
         let (columns, constraints) = self.parse_columns()?;
 
         let partitions = self.parse_partitions()?;
@@ -59,7 +107,7 @@ impl<'a> ParserContext<'a> {
         };
         validate_create(&create_table)?;
 
-        Ok(Statement::Create(create_table))
+        Ok(Statement::CreateTable(create_table))
     }
 
     // "PARTITION BY ..." syntax:
@@ -70,7 +118,11 @@ impl<'a> ParserContext<'a> {
         }
         self.parser
             .expect_keywords(&[Keyword::BY, Keyword::RANGE, Keyword::COLUMNS])
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "BY, RANGE, COLUMNS",
+                actual: self.peek_token_as_string(),
+            })?;
 
         let column_list = self
             .parser
@@ -88,7 +140,11 @@ impl<'a> ParserContext<'a> {
     fn parse_partition_entry(&mut self) -> Result<PartitionEntry> {
         self.parser
             .expect_keyword(Keyword::PARTITION)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "PARTITION",
+                actual: self.peek_token_as_string(),
+            })?;
 
         let name = self
             .parser
@@ -128,7 +184,11 @@ impl<'a> ParserContext<'a> {
     {
         self.parser
             .expect_token(&Token::LParen)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "(",
+                actual: self.peek_token_as_string(),
+            })?;
 
         let mut values = vec![];
         while self.parser.peek_token() != Token::RParen {
@@ -140,7 +200,12 @@ impl<'a> ParserContext<'a> {
 
         self.parser
             .expect_token(&Token::RParen)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: ")",
+                actual: self.peek_token_as_string(),
+            })?;
+
         Ok(values)
     }
 
@@ -196,7 +261,11 @@ impl<'a> ParserContext<'a> {
             Token::Word(w) if w.keyword == Keyword::PRIMARY => {
                 self.parser
                     .expect_keyword(Keyword::KEY)
-                    .context(error::SyntaxSnafu { sql: self.sql })?;
+                    .context(error::UnexpectedSnafu {
+                        sql: self.sql,
+                        expected: "KEY",
+                        actual: self.peek_token_as_string(),
+                    })?;
                 let columns = self
                     .parser
                     .parse_parenthesized_column_list(Mandatory)
@@ -210,7 +279,12 @@ impl<'a> ParserContext<'a> {
             Token::Word(w) if w.keyword == Keyword::TIME => {
                 self.parser
                     .expect_keyword(Keyword::INDEX)
-                    .context(error::SyntaxSnafu { sql: self.sql })?;
+                    .context(error::UnexpectedSnafu {
+                        sql: self.sql,
+                        expected: "INDEX",
+                        actual: self.peek_token_as_string(),
+                    })?;
+
                 let columns = self
                     .parser
                     .parse_parenthesized_column_list(Mandatory)
@@ -248,7 +322,11 @@ impl<'a> ParserContext<'a> {
 
         self.parser
             .expect_token(&Token::Eq)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "=",
+                actual: self.peek_token_as_string(),
+            })?;
 
         match self.parser.next_token() {
             Token::Word(w) => Ok(w.value),
@@ -421,6 +499,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_parse_create_database() {
+        let sql = "create database";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unexpected token while parsing SQL statement"));
+
+        let sql = "create database prometheus";
+        let stmts = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+
+        assert_eq!(1, stmts.len());
+        match &stmts[0] {
+            Statement::CreateDatabase(c) => {
+                assert_eq!(c.name.to_string(), "prometheus");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
     fn test_validate_create() {
         let sql = r"
 CREATE TABLE rcx ( a INT, b STRING, c INT )
@@ -555,7 +654,7 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
         assert_eq!(result.len(), 1);
         match &result[0] {
-            Statement::Create(c) => {
+            Statement::CreateTable(c) => {
                 assert!(c.partitions.is_some());
 
                 let partitions = c.partitions.as_ref().unwrap();
@@ -670,7 +769,7 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
         assert_eq!(1, result.len());
         match &result[0] {
-            Statement::Create(c) => {
+            Statement::CreateTable(c) => {
                 assert!(!c.if_not_exists);
                 assert_eq!("demo", c.name.to_string());
                 assert_eq!("mito", c.engine);

@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use datatypes::prelude::ConcreteDataType;
 use datatypes::type_id::LogicalTypeId;
 use store_api::storage::{
@@ -5,7 +19,8 @@ use store_api::storage::{
     RegionDescriptor, RegionId, RowKeyDescriptorBuilder,
 };
 
-use crate::test_util::{self, schema_util::ColumnDef};
+use crate::test_util::schema_util::ColumnDef;
+use crate::test_util::{self};
 
 /// A RegionDescriptor builder for test.
 pub struct RegionDescBuilder {
@@ -25,6 +40,7 @@ impl RegionDescBuilder {
                 ConcreteDataType::timestamp_millis_datatype(),
             )
             .is_nullable(false)
+            .is_time_index(true)
             .build()
             .unwrap(),
         );
@@ -44,7 +60,7 @@ impl RegionDescBuilder {
     }
 
     pub fn timestamp(mut self, column_def: ColumnDef) -> Self {
-        let column = self.new_column(column_def);
+        let column = self.new_ts_column(column_def);
         self.key_builder = self.key_builder.timestamp(column);
         self
     }
@@ -88,6 +104,15 @@ impl RegionDescBuilder {
     fn alloc_column_id(&mut self) -> ColumnId {
         self.last_column_id += 1;
         self.last_column_id
+    }
+
+    fn new_ts_column(&mut self, column_def: ColumnDef) -> ColumnDescriptor {
+        let datatype = column_def.1.data_type();
+        ColumnDescriptorBuilder::new(self.alloc_column_id(), column_def.0, datatype)
+            .is_nullable(column_def.2)
+            .is_time_index(true)
+            .build()
+            .unwrap()
     }
 
     fn new_column(&mut self, column_def: ColumnDef) -> ColumnDescriptor {

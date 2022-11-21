@@ -1,11 +1,22 @@
-use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::ResponseHeader;
-use api::v1::meta::PROTOCOL_VERSION;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use super::Context;
-use super::HeartbeatAccumulator;
-use super::HeartbeatHandler;
+use api::v1::meta::{HeartbeatRequest, ResponseHeader, PROTOCOL_VERSION};
+
 use crate::error::Result;
+use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::metasrv::Context;
 
 pub struct ResponseHeaderHandler;
 
@@ -30,6 +41,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
     use api::v1::meta::{HeartbeatResponse, RequestHeader};
@@ -42,8 +54,11 @@ mod tests {
     async fn test_handle_heartbeat_resp_header() {
         let kv_store = Arc::new(MemStore::new());
         let ctx = Context {
-            server_addr: "0.0.0.0:0000".to_string(),
+            datanode_lease_secs: 30,
+            server_addr: "127.0.0.1:0000".to_string(),
             kv_store,
+            election: None,
+            skip_all: Arc::new(AtomicBool::new(false)),
         };
 
         let req = HeartbeatRequest {

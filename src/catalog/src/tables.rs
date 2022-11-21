@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // The `tables` table in system catalog keeps a record of all tables created by user.
 
 use std::any::Any;
@@ -24,8 +38,8 @@ use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::SimpleTableScan;
 use table::{Table, TableRef};
 
-use crate::error::{Error, InsertTableRecordSnafu};
-use crate::system::{build_table_insert_request, SystemCatalogTable};
+use crate::error::{Error, InsertCatalogRecordSnafu};
+use crate::system::{build_schema_insert_request, build_table_insert_request, SystemCatalogTable};
 use crate::{
     format_full_table_name, CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef,
 };
@@ -254,7 +268,20 @@ impl SystemCatalog {
             .system
             .insert(request)
             .await
-            .context(InsertTableRecordSnafu)
+            .context(InsertCatalogRecordSnafu)
+    }
+
+    pub async fn register_schema(
+        &self,
+        catalog: String,
+        schema: String,
+    ) -> crate::error::Result<usize> {
+        let request = build_schema_insert_request(catalog, schema);
+        self.information_schema
+            .system
+            .insert(request)
+            .await
+            .context(InsertCatalogRecordSnafu)
     }
 }
 
@@ -341,7 +368,6 @@ mod tests {
         let tables_stream = tables.scan(&None, &[], None).await.unwrap();
         let mut tables_stream = tables_stream
             .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
             .unwrap();
 
         if let Some(t) = tables_stream.next().await {

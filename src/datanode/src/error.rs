@@ -1,7 +1,20 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 
 use common_error::prelude::*;
-use datatypes::arrow::error::ArrowError;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
 
@@ -72,6 +85,9 @@ pub enum Error {
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, backtrace: Backtrace },
 
+    #[snafu(display("Missing timestamp column in request"))]
+    MissingTimestampColumn { backtrace: Backtrace },
+
     #[snafu(display(
         "Columns and values number mismatch, columns: {}, values: {}",
         columns,
@@ -129,9 +145,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to convert datafusion type: {}", from))]
-    Conversion { from: String },
-
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String },
 
@@ -177,6 +190,12 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Failed to register a new schema, source: {}", source))]
+    RegisterSchema {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
     #[snafu(display("Failed to decode as physical plan, source: {}", source))]
     IntoPhysicalPlan {
         #[snafu(backtrace)]
@@ -189,10 +208,15 @@ pub enum Error {
         source: api::error::Error,
     },
 
-    #[snafu(display("Invalid column default constraint, source: {}", source))]
-    ColumnDefaultConstraint {
+    #[snafu(display(
+        "Invalid column proto definition, column: {}, source: {}",
+        column,
+        source
+    ))]
+    InvalidColumnDef {
+        column: String,
         #[snafu(backtrace)]
-        source: datatypes::error::Error,
+        source: api::error::Error,
     },
 
     #[snafu(display("Failed to parse SQL, source: {}", source))]
@@ -207,12 +231,6 @@ pub enum Error {
         source: script::error::Error,
     },
 
-    #[snafu(display("Failed to collect RecordBatches, source: {}", source))]
-    CollectRecordBatches {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
-    },
-
     #[snafu(display(
         "Failed to parse string to timestamp, string: {}, source: {}",
         raw,
@@ -222,30 +240,6 @@ pub enum Error {
         raw: String,
         #[snafu(backtrace)]
         source: common_time::error::Error,
-    },
-
-    #[snafu(display("Failed to create a new RecordBatch, source: {}", source))]
-    NewRecordBatch {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
-    },
-
-    #[snafu(display("Failed to create a new RecordBatches, source: {}", source))]
-    NewRecordBatches {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
-    },
-
-    #[snafu(display("Arrow computation error, source: {}", source))]
-    ArrowComputation {
-        backtrace: Backtrace,
-        source: ArrowError,
-    },
-
-    #[snafu(display("Failed to cast an arrow array into vector, source: {}", source))]
-    CastVector {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to access catalog, source: {}", source))]
@@ -274,6 +268,29 @@ pub enum Error {
 
     #[snafu(display("Insert batch is empty"))]
     EmptyInsertBatch,
+
+    #[snafu(display(
+        "Table id provider not found, cannot execute SQL directly on datanode in distributed mode"
+    ))]
+    TableIdProviderNotFound { backtrace: Backtrace },
+
+    #[snafu(display("Failed to bump table id, source: {}", source))]
+    BumpTableId {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display("Failed to do vector computation, source: {}", source))]
+    VectorComputation {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Missing node id option in distributed mode"))]
+    MissingNodeId { backtrace: Backtrace },
+
+    #[snafu(display("Missing node id option in distributed mode"))]
+    MissingMetasrvOpts { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -299,16 +316,16 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::CastVector { source, .. }
-            | Error::ColumnDefaultConstraint { source, .. }
-            | Error::CreateSchema { source, .. }
-            | Error::ConvertSchema { source, .. } => source.status_code(),
+            Error::CreateSchema { source, .. }
+            | Error::ConvertSchema { source, .. }
+            | Error::VectorComputation { source } => source.status_code(),
 
             Error::ColumnValuesNumberMismatch { .. }
             | Error::InvalidSql { .. }
             | Error::KeyColumnNotFound { .. }
             | Error::InvalidPrimaryKey { .. }
             | Error::MissingField { .. }
+            | Error::MissingTimestampColumn { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::ConstraintNotSupported { .. }
@@ -321,25 +338,27 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
-            | Error::Conversion { .. }
+            | Error::RegisterSchema { .. }
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }
-            | Error::ColumnDataType { .. }
             | Error::Catalog { .. } => StatusCode::Internal,
+
+            Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
+                source.status_code()
+            }
 
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
             Error::StartScriptManager { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
-            Error::NewRecordBatch { source }
-            | Error::NewRecordBatches { source }
-            | Error::CollectRecordBatches { source } => source.status_code(),
-
-            Error::ArrowComputation { .. } => StatusCode::Unexpected,
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::InsertData { source, .. } => source.status_code(),
             Error::EmptyInsertBatch => StatusCode::InvalidArguments,
+            Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
+            Error::BumpTableId { source, .. } => source.status_code(),
+            Error::MissingNodeId { .. } => StatusCode::InvalidArguments,
+            Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
         }
     }
 
@@ -379,10 +398,6 @@ mod tests {
         })
     }
 
-    fn throw_arrow_error() -> std::result::Result<(), ArrowError> {
-        Err(ArrowError::NotYetImplemented("test".to_string()))
-    }
-
     fn assert_internal_error(err: &Error) {
         assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::Internal, err.status_code());
@@ -391,17 +406,6 @@ mod tests {
     fn assert_tonic_internal_error(err: Error) {
         let s: tonic::Status = err.into();
         assert_eq!(s.code(), tonic::Code::Internal);
-    }
-
-    #[test]
-    fn test_arrow_computation_error() {
-        let err = throw_arrow_error()
-            .context(ArrowComputationSnafu)
-            .unwrap_err();
-
-        assert!(matches!(err, Error::ArrowComputation { .. }));
-        assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::Unexpected, err.status_code());
     }
 
     #[test]

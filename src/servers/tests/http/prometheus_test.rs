@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use api::prometheus::remote::{
@@ -11,24 +25,29 @@ use prost::Message;
 use servers::error::Result;
 use servers::http::HttpServer;
 use servers::prometheus;
-use servers::prometheus::snappy_compress;
-use servers::prometheus::Metrics;
+use servers::prometheus::{snappy_compress, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse, SqlQueryHandler};
 use tokio::sync::mpsc;
 
 struct DummyInstance {
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<(String, Vec<u8>)>,
 }
 
 #[async_trait]
 impl PrometheusProtocolHandler for DummyInstance {
-    async fn write(&self, request: WriteRequest) -> Result<()> {
-        let _ = self.tx.send(request.encode_to_vec()).await;
+    async fn write(&self, db: &str, request: WriteRequest) -> Result<()> {
+        let _ = self
+            .tx
+            .send((db.to_string(), request.encode_to_vec()))
+            .await;
 
         Ok(())
     }
-    async fn read(&self, request: ReadRequest) -> Result<PrometheusResponse> {
-        let _ = self.tx.send(request.encode_to_vec()).await;
+    async fn read(&self, db: &str, request: ReadRequest) -> Result<PrometheusResponse> {
+        let _ = self
+            .tx
+            .send((db.to_string(), request.encode_to_vec()))
+            .await;
 
         let response = ReadResponse {
             results: vec![QueryResult {
@@ -53,17 +72,9 @@ impl SqlQueryHandler for DummyInstance {
     async fn do_query(&self, _query: &str) -> Result<Output> {
         unimplemented!()
     }
-
-    async fn insert_script(&self, _name: &str, _script: &str) -> Result<()> {
-        unimplemented!()
-    }
-
-    async fn execute_script(&self, _name: &str) -> Result<Output> {
-        unimplemented!()
-    }
 }
 
-fn make_test_app(tx: mpsc::Sender<Vec<u8>>) -> Router {
+fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
     let mut server = HttpServer::new(instance.clone());
     server.set_prom_handler(instance);
@@ -82,8 +93,17 @@ async fn test_prometheus_remote_write_read() {
         ..Default::default()
     };
 
+    // Write to public database
     let result = client
         .post("/v1/prometheus/write")
+        .body(snappy_compress(&write_request.clone().encode_to_vec()[..]).unwrap())
+        .send()
+        .await;
+    assert_eq!(result.status(), 204);
+    assert!(result.text().await.is_empty());
+    // Write to prometheus database
+    let result = client
+        .post("/v1/prometheus/write?db=prometheus")
         .body(snappy_compress(&write_request.clone().encode_to_vec()[..]).unwrap())
         .send()
         .await;
@@ -104,8 +124,9 @@ async fn test_prometheus_remote_write_read() {
         ..Default::default()
     };
 
+    // Read from prometheus database
     let mut result = client
-        .post("/v1/prometheus/read")
+        .post("/v1/prometheus/read?db=prometheus")
         .body(snappy_compress(&read_request.clone().encode_to_vec()[..]).unwrap())
         .send()
         .await;
@@ -127,16 +148,41 @@ async fn test_prometheus_remote_write_read() {
         prometheus::mock_timeseries()
     );
 
-    let mut requests = vec![];
+    // Read from public database
+    let result = client
+        .post("/v1/prometheus/read")
+        .body(snappy_compress(&read_request.clone().encode_to_vec()[..]).unwrap())
+        .send()
+        .await;
+    assert_eq!(result.status(), 200);
+
+    let mut requests: Vec<(String, Vec<u8>)> = vec![];
     while let Ok(s) = rx.try_recv() {
         requests.push(s);
     }
 
-    assert_eq!(2, requests.len());
+    assert_eq!(4, requests.len());
+
+    assert_eq!("public", requests[0].0);
+    assert_eq!("prometheus", requests[1].0);
+    assert_eq!("prometheus", requests[2].0);
+    assert_eq!("public", requests[3].0);
 
     assert_eq!(
         write_request,
-        WriteRequest::decode(&requests[0][..]).unwrap()
+        WriteRequest::decode(&(requests[0].1)[..]).unwrap()
     );
-    assert_eq!(read_request, ReadRequest::decode(&requests[1][..]).unwrap());
+    assert_eq!(
+        write_request,
+        WriteRequest::decode(&(requests[1].1)[..]).unwrap()
+    );
+
+    assert_eq!(
+        read_request,
+        ReadRequest::decode(&(requests[2].1)[..]).unwrap()
+    );
+    assert_eq!(
+        read_request,
+        ReadRequest::decode(&(requests[3].1)[..]).unwrap()
+    );
 }

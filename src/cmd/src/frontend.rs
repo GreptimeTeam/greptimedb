@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
@@ -6,6 +20,8 @@ use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
+use meta_client::MetaClientOpts;
+use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -52,12 +68,19 @@ pub struct StartCommand {
     config_file: Option<String>,
     #[clap(short, long)]
     influxdb_enable: Option<bool>,
+    #[clap(long)]
+    metasrv_addr: Option<String>,
 }
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        let opts = self.try_into()?;
-        let mut frontend = Frontend::new(opts, Instance::new());
+        let opts: FrontendOptions = self.try_into()?;
+        let mut frontend = Frontend::new(
+            opts.clone(),
+            Instance::try_new(&opts)
+                .await
+                .context(error::StartFrontendSnafu)?,
+        );
         frontend.start().await.context(error::StartFrontendSnafu)
     }
 }
@@ -102,6 +125,16 @@ impl TryFrom<StartCommand> for FrontendOptions {
         if let Some(enable) = cmd.influxdb_enable {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
+        if let Some(metasrv_addr) = cmd.metasrv_addr {
+            opts.meta_client_opts
+                .get_or_insert_with(MetaClientOpts::default)
+                .metasrv_addrs = metasrv_addr
+                .split(',')
+                .map(&str::trim)
+                .map(&str::to_string)
+                .collect::<Vec<_>>();
+            opts.mode = Mode::Distributed;
+        }
         Ok(opts)
     }
 }
@@ -120,6 +153,7 @@ mod tests {
             opentsdb_addr: Some("127.0.0.1:4321".to_string()),
             influxdb_enable: Some(false),
             config_file: None,
+            metasrv_addr: None,
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();

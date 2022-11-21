@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -5,9 +19,9 @@ use async_trait::async_trait;
 use common_telemetry::logging::info;
 use object_store::{util, ObjectStore};
 use snafu::ResultExt;
-use store_api::{
-    logstore::LogStore,
-    storage::{CreateOptions, EngineContext, OpenOptions, RegionDescriptor, StorageEngine},
+use store_api::logstore::LogStore;
+use store_api::storage::{
+    CreateOptions, EngineContext, OpenOptions, RegionDescriptor, StorageEngine,
 };
 
 use crate::background::JobPoolImpl;
@@ -207,7 +221,7 @@ impl<S: LogStore> EngineInner<S> {
             object_store,
             log_store,
             regions: RwLock::new(Default::default()),
-            memtable_builder: Arc::new(DefaultMemtableBuilder {}),
+            memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
         }

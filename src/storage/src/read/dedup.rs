@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use async_trait::async_trait;
 use datatypes::arrow::bitmap::MutableBitmap;
 use datatypes::vectors::BooleanVector;
@@ -39,7 +53,7 @@ impl<R> DedupReader<R> {
         // but we couldn't zero all bits in the mutable array easily.
         let mut selected = MutableBitmap::from_len_zeroed(batch.num_rows());
         self.schema
-            .dedup(&batch, &mut selected, self.prev_batch.as_ref());
+            .find_unique(&batch, &mut selected, self.prev_batch.as_ref());
 
         // Store current batch to `prev_batch` so we could compare the next batch
         // with this batch. We store batch before filtering it mainly for correctness, as

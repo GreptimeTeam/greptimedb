@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Scripts manager
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -82,15 +96,17 @@ impl ScriptManager {
 #[cfg(test)]
 mod tests {
     use catalog::CatalogManager;
+    use mito::config::EngineConfig as TableEngineConfig;
+    use mito::table::test_util::new_test_object_store;
     use query::QueryEngineFactory;
-    use table_engine::config::EngineConfig as TableEngineConfig;
-    use table_engine::table::test_util::new_test_object_store;
 
     use super::*;
     type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
-    use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
-    use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
-    use table_engine::engine::MitoEngine;
+    use log_store::fs::config::LogConfig;
+    use log_store::fs::log::LocalFileLogStore;
+    use mito::engine::MitoEngine;
+    use storage::config::EngineConfig as StorageEngineConfig;
+    use storage::EngineImpl;
     use tempdir::TempDir;
 
     #[tokio::test]
@@ -124,7 +140,7 @@ mod tests {
         );
 
         let factory = QueryEngineFactory::new(catalog_manager.clone());
-        let query_engine = factory.query_engine().clone();
+        let query_engine = factory.query_engine();
         let mgr = ScriptManager::new(catalog_manager.clone(), query_engine)
             .await
             .unwrap();

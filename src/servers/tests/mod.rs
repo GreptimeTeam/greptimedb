@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -8,15 +22,15 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::Result;
-use servers::query_handler::{SqlQueryHandler, SqlQueryHandlerRef};
+use servers::query_handler::{
+    ScriptHandler, ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
+};
 use table::test_util::MemTable;
 
 mod http;
 mod mysql;
-use script::{
-    engine::{CompileContext, EvalContext, Script, ScriptEngine},
-    python::{PyEngine, PyScript},
-};
+use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
+use script::python::{PyEngine, PyScript};
 mod opentsdb;
 mod postgres;
 
@@ -42,7 +56,10 @@ impl SqlQueryHandler for DummyInstance {
         let plan = self.query_engine.sql_to_plan(query).unwrap();
         Ok(self.query_engine.execute(&plan).await.unwrap())
     }
+}
 
+#[async_trait]
+impl ScriptHandler for DummyInstance {
     async fn insert_script(&self, name: &str, script: &str) -> Result<()> {
         let script = self
             .py_engine
@@ -64,7 +81,7 @@ impl SqlQueryHandler for DummyInstance {
     }
 }
 
-fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
+fn create_testing_instance(table: MemTable) -> DummyInstance {
     let table_name = table.table_name().to_string();
     let table = Arc::new(table);
 
@@ -80,6 +97,14 @@ fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
         .unwrap();
 
     let factory = QueryEngineFactory::new(catalog_list);
-    let query_engine = factory.query_engine().clone();
-    Arc::new(DummyInstance::new(query_engine))
+    let query_engine = factory.query_engine();
+    DummyInstance::new(query_engine)
+}
+
+fn create_testing_script_handler(table: MemTable) -> ScriptHandlerRef {
+    Arc::new(create_testing_instance(table)) as _
+}
+
+fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
+    Arc::new(create_testing_instance(table)) as _
 }

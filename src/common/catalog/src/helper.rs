@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
@@ -5,7 +19,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
-use table::metadata::{RawTableMeta, TableId, TableVersion};
+use table::metadata::{RawTableInfo, TableId, TableVersion};
 
 use crate::consts::{
     CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_GLOBAL_KEY_PREFIX, TABLE_REGIONAL_KEY_PREFIX,
@@ -29,7 +43,7 @@ lazy_static! {
 
 lazy_static! {
     static ref TABLE_GLOBAL_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)$",
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z0-9_]+)$",
         TABLE_GLOBAL_KEY_PREFIX
     ))
     .unwrap();
@@ -37,7 +51,7 @@ lazy_static! {
 
 lazy_static! {
     static ref TABLE_REGIONAL_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z_]+)-([0-9]+)$",
+        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z0-9_]+)-([0-9]+)$",
         TABLE_REGIONAL_KEY_PREFIX
     ))
     .unwrap();
@@ -114,16 +128,18 @@ impl TableGlobalKey {
 /// table id, table meta(schema...), region id allocation across datanodes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TableGlobalValue {
-    /// Table id is the same across all datanodes.
-    pub id: TableId,
     /// Id of datanode that created the global table info kv. only for debugging.
     pub node_id: u64,
+    // TODO(LFC): Maybe remove it?
     /// Allocation of region ids across all datanodes.
     pub regions_id_map: HashMap<u64, Vec<u32>>,
-    /// Node id -> region ids
-    pub meta: RawTableMeta,
-    /// Partition rules for table
-    pub partition_rules: String,
+    pub table_info: RawTableInfo,
+}
+
+impl TableGlobalValue {
+    pub fn table_id(&self) -> TableId {
+        self.table_info.ident.table_id
+    }
 }
 
 /// Table regional info that varies between datanode, so it contains a `node_id` field.
@@ -266,6 +282,7 @@ define_catalog_value!(
 mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema, Schema};
+    use table::metadata::{RawTableMeta, TableIdent, TableType};
 
     use super::*;
 
@@ -326,12 +343,23 @@ mod tests {
             region_numbers: vec![1],
         };
 
+        let table_info = RawTableInfo {
+            ident: TableIdent {
+                table_id: 42,
+                version: 1,
+            },
+            name: "table_1".to_string(),
+            desc: Some("blah".to_string()),
+            catalog_name: "catalog_1".to_string(),
+            schema_name: "schema_1".to_string(),
+            meta,
+            table_type: TableType::Base,
+        };
+
         let value = TableGlobalValue {
-            id: 42,
             node_id: 0,
             regions_id_map: HashMap::from([(0, vec![1, 2, 3])]),
-            meta,
-            partition_rules: "{}".to_string(),
+            table_info,
         };
         let serialized = serde_json::to_string(&value).unwrap();
         let deserialized = TableGlobalValue::parse(&serialized).unwrap();

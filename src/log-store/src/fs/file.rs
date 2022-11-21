@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
 use std::pin::Pin;
@@ -5,8 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_stream::stream;
-use byteorder::ByteOrder;
-use byteorder::LittleEndian;
+use byteorder::{ByteOrder, LittleEndian};
 use bytes::{Bytes, BytesMut};
 use common_error::ext::BoxedError;
 use common_telemetry::logging::{error, info};
@@ -18,8 +31,7 @@ use store_api::logstore::entry::{Encode, Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
 use store_api::logstore::namespace::Namespace;
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::mpsc::Sender as MpscSender;
+use tokio::sync::mpsc::{Receiver, Sender as MpscSender};
 use tokio::sync::oneshot::Sender as OneshotSender;
 use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinHandle;

@@ -1,18 +1,29 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 
-use api::v1::meta::CreateRequest as PbCreateRequest;
-use api::v1::meta::Partition as PbPartition;
-use api::v1::meta::Region as PbRegion;
-use api::v1::meta::RouteRequest as PbRouteRequest;
-use api::v1::meta::RouteResponse as PbRouteResponse;
-use api::v1::meta::Table as PbTable;
+use api::v1::meta::{
+    CreateRequest as PbCreateRequest, Partition as PbPartition, Region as PbRegion,
+    RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
+};
+use serde::{Deserialize, Serialize, Serializer};
 use snafu::OptionExt;
 
-use super::util;
-use super::Peer;
-use super::TableName;
 use crate::error;
 use crate::error::Result;
+use crate::rpc::{util, Peer, TableName};
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteRequest {
@@ -96,25 +107,29 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
                     err_msg: "table required",
                 })?
                 .try_into()?;
-            let region_routes = table_route
-                .region_routes
-                .into_iter()
-                .map(|region_route| {
-                    let region = region_route.region.map(Into::into);
-                    let leader_peer = get_peer(region_route.leader_peer_index);
-                    let follower_peers = region_route
-                        .follower_peer_indexes
-                        .into_iter()
-                        .filter_map(get_peer)
-                        .collect::<Vec<_>>();
 
-                    RegionRoute {
-                        region,
-                        leader_peer,
-                        follower_peers,
-                    }
-                })
-                .collect::<Vec<_>>();
+            let mut region_routes = Vec::with_capacity(table_route.region_routes.len());
+            for region_route in table_route.region_routes.into_iter() {
+                let region = region_route
+                    .region
+                    .context(error::RouteInfoCorruptedSnafu {
+                        err_msg: "'region' not found",
+                    })?
+                    .into();
+
+                let leader_peer = get_peer(region_route.leader_peer_index);
+                let follower_peers = region_route
+                    .follower_peer_indexes
+                    .into_iter()
+                    .filter_map(get_peer)
+                    .collect::<Vec<_>>();
+
+                region_routes.push(RegionRoute {
+                    region,
+                    leader_peer,
+                    follower_peers,
+                });
+            }
 
             table_routes.push(TableRoute {
                 table,
@@ -126,16 +141,41 @@ impl TryFrom<PbRouteResponse> for RouteResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TableRoute {
     pub table: Table,
     pub region_routes: Vec<RegionRoute>,
 }
 
-#[derive(Debug, Clone)]
+impl TableRoute {
+    pub fn find_leaders(&self) -> Vec<Peer> {
+        self.region_routes
+            .iter()
+            .flat_map(|x| &x.leader_peer)
+            .cloned()
+            .collect::<Vec<Peer>>()
+    }
+
+    pub fn find_leader_regions(&self, datanode: &Peer) -> Vec<u32> {
+        self.region_routes
+            .iter()
+            .filter_map(|x| {
+                if let Some(peer) = &x.leader_peer {
+                    if peer == datanode {
+                        return Some(x.region.id as u32);
+                    }
+                }
+                None
+            })
+            .collect::<Vec<u32>>()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Table {
     pub id: u64,
     pub table_name: TableName,
+    #[serde(serialize_with = "as_utf8")]
     pub table_schema: Vec<u8>,
 }
 
@@ -146,7 +186,7 @@ impl TryFrom<PbTable> for Table {
         let table_name = t
             .table_name
             .context(error::RouteInfoCorruptedSnafu {
-                err_msg: "table name requied",
+                err_msg: "table name required",
             })?
             .into();
         Ok(Self {
@@ -157,14 +197,14 @@ impl TryFrom<PbTable> for Table {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RegionRoute {
-    pub region: Option<Region>,
+    pub region: Region,
     pub leader_peer: Option<Peer>,
     pub follower_peers: Vec<Peer>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Region {
     pub id: u64,
     pub name: String,
@@ -183,10 +223,35 @@ impl From<PbRegion> for Region {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Partition {
+    #[serde(serialize_with = "as_utf8_vec")]
     pub column_list: Vec<Vec<u8>>,
+    #[serde(serialize_with = "as_utf8_vec")]
     pub value_list: Vec<Vec<u8>>,
+}
+
+fn as_utf8<S: Serializer>(val: &[u8], serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(
+        String::from_utf8(val.to_vec())
+            .unwrap_or_else(|_| "<unknown-not-UTF8>".to_string())
+            .as_str(),
+    )
+}
+
+fn as_utf8_vec<S: Serializer>(
+    val: &[Vec<u8>],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(
+        val.iter()
+            .map(|v| {
+                String::from_utf8(v.clone()).unwrap_or_else(|_| "<unknown-not-UTF8>".to_string())
+            })
+            .collect::<Vec<String>>()
+            .join(",")
+            .as_str(),
+    )
 }
 
 impl From<Partition> for PbPartition {
@@ -209,15 +274,11 @@ impl From<PbPartition> for Partition {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::Partition as PbPartition;
-    use api::v1::meta::Peer as PbPeer;
-    use api::v1::meta::Region as PbRegion;
-    use api::v1::meta::RegionRoute as PbRegionRoute;
-    use api::v1::meta::RouteRequest as PbRouteRequest;
-    use api::v1::meta::RouteResponse as PbRouteResponse;
-    use api::v1::meta::Table as PbTable;
-    use api::v1::meta::TableName as PbTableName;
-    use api::v1::meta::TableRoute as PbTableRoute;
+    use api::v1::meta::{
+        Partition as PbPartition, Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
+        RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
+        TableName as PbTableName, TableRoute as PbTableRoute,
+    };
 
     use super::*;
 
@@ -335,7 +396,7 @@ mod tests {
         let mut region_routes = table_route.region_routes;
         assert_eq!(1, region_routes.len());
         let region_route = region_routes.remove(0);
-        let region = region_route.region.unwrap();
+        let region = region_route.region;
         assert_eq!(1, region.id);
         assert_eq!("region1", region.name);
         let partition = region.partition.unwrap();

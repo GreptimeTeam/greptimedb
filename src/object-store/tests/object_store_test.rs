@@ -1,11 +1,23 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::env;
 
 use anyhow::Result;
 use common_telemetry::logging;
-use object_store::{
-    backend::{fs, s3},
-    util, DirStreamer, Object, ObjectMode, ObjectStore,
-};
+use object_store::backend::{fs, s3};
+use object_store::{util, Object, ObjectMode, ObjectStore, ObjectStreamer};
 use tempdir::TempDir;
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
@@ -49,7 +61,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 
     // List objects
     let o: Object = store.object("/");
-    let obs: DirStreamer = o.list().await?;
+    let obs: ObjectStreamer = o.list().await?;
     let objects = util::collect(obs).await?;
     assert_eq!(3, objects.len());
 
@@ -92,18 +104,20 @@ async fn test_fs_backend() -> Result<()> {
 #[tokio::test]
 async fn test_s3_backend() -> Result<()> {
     logging::init_default_ut_logging();
-    if env::var("GT_S3_BUCKET").is_ok() {
-        logging::info!("Running s3 test.");
+    if let Ok(bucket) = env::var("GT_S3_BUCKET") {
+        if !bucket.is_empty() {
+            logging::info!("Running s3 test.");
 
-        let accessor = s3::Builder::default()
-            .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
-            .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
-            .bucket(&env::var("GT_S3_BUCKET")?)
-            .build()?;
+            let accessor = s3::Builder::default()
+                .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
+                .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
+                .bucket(&bucket)
+                .build()?;
 
-        let store = ObjectStore::new(accessor);
-        test_object_crud(&store).await?;
-        test_object_list(&store).await?;
+            let store = ObjectStore::new(accessor);
+            test_object_crud(&store).await?;
+            test_object_list(&store).await?;
+        }
     }
 
     Ok(())

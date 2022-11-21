@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::{HashMap, HashSet};
 use std::num::ParseIntError;
 use std::str::FromStr;
@@ -8,8 +22,8 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Metadata};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt};
+use store_api::storage::consts::{self, ReservedColumnId};
 use store_api::storage::{
-    consts::{self, ReservedColumnId},
     AddColumn, AlterOperation, AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder,
     ColumnDescriptorBuilderError, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder,
     ColumnFamilyId, ColumnId, RegionDescriptor, RegionDescriptorBuilder, RegionId, RegionMeta,
@@ -383,8 +397,10 @@ impl ColumnMetadata {
     /// would store additional metadatas to the ColumnSchema.
     pub fn to_column_schema(&self) -> Result<ColumnSchema> {
         let desc = &self.desc;
+
         ColumnSchema::new(&desc.name, desc.data_type.clone(), desc.is_nullable())
             .with_metadata(self.to_metadata())
+            .with_time_index(self.desc.is_time_index())
             .with_default_constraint(desc.default_constraint().cloned())
             .context(ToColumnSchemaSnafu)
     }
@@ -405,6 +421,7 @@ impl ColumnMetadata {
             column_schema.data_type.clone(),
         )
         .is_nullable(column_schema.is_nullable())
+        .is_time_index(column_schema.is_time_index())
         .default_constraint(column_schema.default_constraint().cloned())
         .comment(comment)
         .build()
@@ -1002,6 +1019,7 @@ mod tests {
 
         let timestamp = ColumnDescriptorBuilder::new(2, "ts", ConcreteDataType::int64_datatype())
             .is_nullable(false)
+            .is_time_index(true)
             .build()
             .unwrap();
         let row_key = RowKeyDescriptorBuilder::new(timestamp)
@@ -1021,6 +1039,7 @@ mod tests {
         let timestamp =
             ColumnDescriptorBuilder::new(2, "ts", ConcreteDataType::timestamp_millis_datatype())
                 .is_nullable(false)
+                .is_time_index(true)
                 .build()
                 .unwrap();
         let row_key = RowKeyDescriptorBuilder::new(timestamp)

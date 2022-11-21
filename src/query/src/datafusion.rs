@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Planner, QueryEngine implementations based on DataFusion.
 
 mod catalog_adapter;
@@ -10,32 +24,30 @@ use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
-use common_query::physical_plan::PhysicalPlanAdapter;
-use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan};
-use common_query::{prelude::ScalarUdf, Output};
+use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
+use common_query::prelude::ScalarUdf;
+use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use snafu::{OptionExt, ResultExt};
+use sql::dialect::GenericDialect;
+use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
-use sql::{dialect::GenericDialect, parser::ParserContext};
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
-use crate::metric;
+use crate::datafusion::planner::{DfContextProviderAdapter, DfPlanner};
+use crate::error::Result;
+use crate::executor::QueryExecutor;
+use crate::logical_optimizer::LogicalOptimizer;
+use crate::physical_optimizer::PhysicalOptimizer;
+use crate::physical_planner::PhysicalPlanner;
+use crate::plan::LogicalPlan;
+use crate::planner::Planner;
 use crate::query_engine::{QueryContext, QueryEngineState};
-use crate::{
-    datafusion::planner::{DfContextProviderAdapter, DfPlanner},
-    error::Result,
-    executor::QueryExecutor,
-    logical_optimizer::LogicalOptimizer,
-    physical_optimizer::PhysicalOptimizer,
-    physical_planner::PhysicalPlanner,
-    plan::LogicalPlan,
-    planner::Planner,
-    QueryEngine,
-};
+use crate::{metric, QueryEngine};
 
 pub(crate) struct DatafusionQueryEngine {
     state: QueryEngineState,
@@ -207,7 +219,6 @@ impl QueryExecutor for DatafusionQueryEngine {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan
                 .execute(0, ctx.state().runtime())
-                .await
                 .context(error::ExecutePhysicalPlanSnafu)?),
             _ => {
                 // merge into a single partition
@@ -232,14 +243,13 @@ impl QueryExecutor for DatafusionQueryEngine {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::UInt64Array;
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
     use catalog::{CatalogList, CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
-    use datafusion::field_util::FieldExt;
-    use datafusion::field_util::SchemaExt;
+    use datafusion::field_util::{FieldExt, SchemaExt};
+    use datatypes::arrow::array::UInt64Array;
     use table::table::numbers::NumbersTable;
 
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
@@ -259,8 +269,7 @@ mod tests {
             .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
             .unwrap();
 
-        let factory = QueryEngineFactory::new(catalog_list);
-        factory.query_engine().clone()
+        QueryEngineFactory::new(catalog_list).query_engine()
     }
 
     #[test]

@@ -1,16 +1,29 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Accumulator module contains the trait definition for aggregation function's accumulators.
 
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
 use common_time::timestamp::TimeUnit;
 use datafusion_common::Result as DfResult;
 use datafusion_expr::Accumulator as DfAccumulator;
+use datatypes::arrow::array::ArrayRef;
 use datatypes::prelude::*;
 use datatypes::value::ListValue;
-use datatypes::vectors::Helper as VectorHelper;
-use datatypes::vectors::VectorRef;
+use datatypes::vectors::{Helper as VectorHelper, VectorRef};
 use snafu::ResultExt;
 
 use crate::error::{self, Error, FromScalarValueSnafu, IntoVectorSnafu, Result};
@@ -253,9 +266,9 @@ fn try_convert_list_value(list: ListValue) -> Result<ScalarValue> {
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::DataType;
     use common_base::bytes::{Bytes, StringBytes};
     use datafusion_common::ScalarValue;
+    use datatypes::arrow::datatypes::DataType;
     use datatypes::value::{ListValue, OrderedFloat};
 
     use super::*;

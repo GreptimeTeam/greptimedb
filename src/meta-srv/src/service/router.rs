@@ -1,34 +1,33 @@
-use api::v1::meta::router_server;
-use api::v1::meta::CreateRequest;
-use api::v1::meta::Error;
-use api::v1::meta::PeerDict;
-use api::v1::meta::PutRequest;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::Region;
-use api::v1::meta::RegionRoute;
-use api::v1::meta::ResponseHeader;
-use api::v1::meta::RouteRequest;
-use api::v1::meta::RouteResponse;
-use api::v1::meta::Table;
-use api::v1::meta::TableRoute;
-use api::v1::meta::TableRouteValue;
-use common_catalog::TableGlobalKey;
-use common_catalog::TableGlobalValue;
-use common_telemetry::warn;
-use snafu::OptionExt;
-use snafu::ResultExt;
-use tonic::Request;
-use tonic::Response;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use super::store::kv::KvStoreRef;
-use super::GrpcResult;
+use api::v1::meta::{
+    router_server, CreateRequest, Error, PeerDict, PutRequest, RangeRequest, Region, RegionRoute,
+    ResponseHeader, RouteRequest, RouteResponse, Table, TableRoute, TableRouteValue,
+};
+use common_catalog::{TableGlobalKey, TableGlobalValue};
+use common_telemetry::warn;
+use snafu::{OptionExt, ResultExt};
+use tonic::{Request, Response};
+
 use crate::error;
 use crate::error::Result;
 use crate::keys::TableRouteKey;
-use crate::metasrv::Context;
-use crate::metasrv::MetaSrv;
-use crate::metasrv::SelectorRef;
+use crate::metasrv::{Context, MetaSrv, SelectorRef};
 use crate::sequence::SequenceRef;
+use crate::service::store::kv::KvStoreRef;
+use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
 impl router_server::Router for MetaSrv {
@@ -71,7 +70,7 @@ async fn handle_route(req: RouteRequest, ctx: Context) -> Result<RouteResponse> 
             peers,
             mut table_route,
         } = tr;
-        if let Some(ref mut table_route) = table_route {
+        if let Some(table_route) = &mut table_route {
             for rr in &mut table_route.region_routes {
                 if let Some(peer) = peers.get(rr.leader_peer_index as usize) {
                     rr.leader_peer_index = peer_dict.get_or_insert(peer.clone()) as u64;
@@ -83,7 +82,7 @@ async fn handle_route(req: RouteRequest, ctx: Context) -> Result<RouteResponse> 
                 }
             }
 
-            if let Some(ref mut table) = table_route.table {
+            if let Some(table) = &mut table_route.table {
                 table.table_schema = tg.as_bytes().context(error::InvalidCatalogValueSnafu)?;
             }
         }
@@ -185,8 +184,7 @@ async fn fetch_tables(
         }
         let tv = tv.unwrap();
 
-        let table_id = tv.id as u64;
-        let tr_key = TableRouteKey::with_table_global_key(table_id, &tk);
+        let tr_key = TableRouteKey::with_table_global_key(tv.table_id() as u64, &tk);
         let tr = get_table_route_value(kv_store, &tr_key).await?;
 
         tables.push((tv, tr));

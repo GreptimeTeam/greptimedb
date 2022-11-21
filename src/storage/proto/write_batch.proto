@@ -20,6 +20,7 @@ message ColumnSchema {
   string name = 1;
   DataType data_type = 2;
   bool is_nullable = 3;
+  bool is_time_index = 4;
 }
 
 message Mutation {

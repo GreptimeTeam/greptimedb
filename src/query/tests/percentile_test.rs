@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 mod function;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
@@ -6,8 +20,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
-use datafusion::field_util::FieldExt;
-use datafusion::field_util::SchemaExt;
+use datafusion::field_util::{FieldExt, SchemaExt};
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -143,6 +156,5 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
         .register_catalog(DEFAULT_CATALOG_NAME.to_string(), catalog_provider)
         .unwrap();
 
-    let factory = QueryEngineFactory::new(catalog_list);
-    factory.query_engine().clone()
+    QueryEngineFactory::new(catalog_list).query_engine()
 }

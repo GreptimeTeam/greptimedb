@@ -1,20 +1,29 @@
-use api::v1::meta::BatchPutRequest as PbBatchPutRequest;
-use api::v1::meta::BatchPutResponse as PbBatchPutResponse;
-use api::v1::meta::CompareAndPutRequest as PbCompareAndPutRequest;
-use api::v1::meta::CompareAndPutResponse as PbCompareAndPutResponse;
-use api::v1::meta::DeleteRangeRequest as PbDeleteRangeRequest;
-use api::v1::meta::DeleteRangeResponse as PbDeleteRangeResponse;
-use api::v1::meta::KeyValue as PbKeyValue;
-use api::v1::meta::PutRequest as PbPutRequest;
-use api::v1::meta::PutResponse as PbPutResponse;
-use api::v1::meta::RangeRequest as PbRangeRequest;
-use api::v1::meta::RangeResponse as PbRangeResponse;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use super::util;
-use super::KeyValue;
-use super::ResponseHeader;
+use api::v1::meta::{
+    BatchPutRequest as PbBatchPutRequest, BatchPutResponse as PbBatchPutResponse,
+    CompareAndPutRequest as PbCompareAndPutRequest,
+    CompareAndPutResponse as PbCompareAndPutResponse, DeleteRangeRequest as PbDeleteRangeRequest,
+    DeleteRangeResponse as PbDeleteRangeResponse, KeyValue as PbKeyValue,
+    PutRequest as PbPutRequest, PutResponse as PbPutResponse, RangeRequest as PbRangeRequest,
+    RangeResponse as PbRangeResponse,
+};
+
 use crate::error;
 use crate::error::Result;
+use crate::rpc::{util, KeyValue, ResponseHeader};
 
 #[derive(Debug, Clone, Default)]
 pub struct RangeRequest {
@@ -514,17 +523,14 @@ impl DeleteRangeResponse {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::BatchPutRequest as PbBatchPutRequest;
-    use api::v1::meta::BatchPutResponse as PbBatchPutResponse;
-    use api::v1::meta::CompareAndPutRequest as PbCompareAndPutRequest;
-    use api::v1::meta::CompareAndPutResponse as PbCompareAndPutResponse;
-    use api::v1::meta::DeleteRangeRequest as PbDeleteRangeRequest;
-    use api::v1::meta::DeleteRangeResponse as PbDeleteRangeResponse;
-    use api::v1::meta::KeyValue as PbKeyValue;
-    use api::v1::meta::PutRequest as PbPutRequest;
-    use api::v1::meta::PutResponse as PbPutResponse;
-    use api::v1::meta::RangeRequest as PbRangeRequest;
-    use api::v1::meta::RangeResponse as PbRangeResponse;
+    use api::v1::meta::{
+        BatchPutRequest as PbBatchPutRequest, BatchPutResponse as PbBatchPutResponse,
+        CompareAndPutRequest as PbCompareAndPutRequest,
+        CompareAndPutResponse as PbCompareAndPutResponse,
+        DeleteRangeRequest as PbDeleteRangeRequest, DeleteRangeResponse as PbDeleteRangeResponse,
+        KeyValue as PbKeyValue, PutRequest as PbPutRequest, PutResponse as PbPutResponse,
+        RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse,
+    };
 
     use super::*;
 

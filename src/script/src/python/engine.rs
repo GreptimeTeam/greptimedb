@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Python script engine
 use std::any::Any;
 use std::pin::Pin;
@@ -7,10 +21,8 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use common_recordbatch::{
-    error::ExternalSnafu, error::Result as RecordBatchResult, RecordBatch, RecordBatchStream,
-    SendableRecordBatchStream,
-};
+use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
+use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures::Stream;
 use query::QueryEngineRef;
@@ -18,11 +30,8 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::coprocessor::{exec_parsed, parse};
-use crate::python::{
-    coprocessor::CoprocessorRef,
-    error::{self, Result},
-};
+use crate::python::coprocessor::{exec_parsed, parse, CoprocessorRef};
+use crate::python::error::{self, Result};
 
 const PY_ENGINE: &str = "python";
 
@@ -137,10 +146,8 @@ mod tests {
     use catalog::{CatalogList, CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_recordbatch::util;
-    use datafusion_common::field_util::FieldExt;
-    use datafusion_common::field_util::SchemaExt;
-    use datatypes::arrow::array::Float64Array;
-    use datatypes::arrow::array::Int64Array;
+    use datafusion_common::field_util::{FieldExt, SchemaExt};
+    use datatypes::arrow::array::{Float64Array, Int64Array};
     use query::QueryEngineFactory;
     use table::table::numbers::NumbersTable;
 

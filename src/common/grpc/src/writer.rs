@@ -1,10 +1,22 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 
-use api::v1::{
-    codec::InsertBatch,
-    column::{SemanticType, Values},
-    Column, ColumnDataType,
-};
+use api::v1::codec::InsertBatch;
+use api::v1::column::{SemanticType, Values};
+use api::v1::{Column, ColumnDataType};
 use common_base::BitVec;
 use snafu::ensure;
 
@@ -232,7 +244,8 @@ pub enum Precision {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{column::SemanticType, ColumnDataType};
+    use api::v1::column::SemanticType;
+    use api::v1::ColumnDataType;
     use common_base::BitVec;
 
     use super::LinesWriter;

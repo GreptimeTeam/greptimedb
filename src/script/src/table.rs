@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Scripts table
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,8 +24,7 @@ use common_telemetry::logging;
 use common_time::timestamp::Timestamp;
 use common_time::util;
 use datatypes::arrow::array::Utf8Array;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::prelude::ScalarVector;
+use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
 use datatypes::vectors::{StringVector, TimestampVector, VectorRef};
 use query::QueryEngineRef;
@@ -117,6 +130,8 @@ impl ScriptsTable {
 
         let _ = table
             .insert(InsertRequest {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name: SCRIPTS_TABLE_NAME.to_string(),
                 columns_values,
             })
@@ -202,7 +217,8 @@ fn build_scripts_schema() -> Schema {
             "timestamp".to_string(),
             ConcreteDataType::timestamp_millis_datatype(),
             false,
-        ),
+        )
+        .with_time_index(true),
         ColumnSchema::new(
             "gmt_created".to_string(),
             ConcreteDataType::timestamp_millis_datatype(),
@@ -216,9 +232,5 @@ fn build_scripts_schema() -> Schema {
     ];
 
     // Schema is always valid here
-    SchemaBuilder::try_from(cols)
-        .unwrap()
-        .timestamp_index(Some(3))
-        .build()
-        .unwrap()
+    SchemaBuilder::try_from(cols).unwrap().build().unwrap()
 }

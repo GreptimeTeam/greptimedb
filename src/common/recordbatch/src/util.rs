@@ -1,6 +1,21 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use futures::TryStreamExt;
 
-use crate::{error::Result, RecordBatch, SendableRecordBatchStream};
+use crate::error::Result;
+use crate::{RecordBatch, SendableRecordBatchStream};
 
 pub async fn collect(stream: SendableRecordBatchStream) -> Result<Vec<RecordBatch>> {
     stream.try_collect::<Vec<_>>().await
@@ -16,8 +31,7 @@ mod tests {
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datatypes::arrow::array::UInt32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-    use datatypes::schema::Schema;
-    use datatypes::schema::SchemaRef;
+    use datatypes::schema::{Schema, SchemaRef};
     use futures::task::{Context, Poll};
     use futures::Stream;
 

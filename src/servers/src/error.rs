@@ -1,11 +1,23 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::net::SocketAddr;
 
 use axum::http::StatusCode as HttpStatusCode;
-use axum::{
-    response::{IntoResponse, Response},
-    Json,
-};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use common_error::prelude::*;
 use serde_json::json;
 
@@ -64,6 +76,13 @@ pub enum Error {
     #[snafu(display("Failed to execute insert: {}, source: {}", msg, source))]
     ExecuteInsert {
         msg: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to execute alter: {}, source: {}", query, source))]
+    ExecuteAlter {
+        query: String,
         #[snafu(backtrace)]
         source: BoxedError,
     },
@@ -161,6 +180,18 @@ pub enum Error {
         source: tonic_reflection::server::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to start frontend service, source: {}", source))]
+    StartFrontend {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to build context, msg: {}", err_msg))]
+    BuildingContext {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -179,12 +210,14 @@ impl ErrorExt for Error {
             | AlreadyStarted { .. }
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
-            | GrpcReflectionService { .. } => StatusCode::Internal,
+            | GrpcReflectionService { .. }
+            | BuildingContext { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
             | ExecuteInsert { source, .. }
+            | ExecuteAlter { source, .. }
             | PutOpentsdbDataPoint { source, .. } => source.status_code(),
 
             NotSupported { .. }
@@ -201,6 +234,7 @@ impl ErrorExt for Error {
 
             InfluxdbLinesWrite { source, .. } => source.status_code(),
             Hyper { .. } => StatusCode::Unknown,
+            StartFrontend { source, .. } => source.status_code(),
         }
     }
 

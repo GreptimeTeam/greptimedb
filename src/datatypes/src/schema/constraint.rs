@@ -1,3 +1,18 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use common_time::util;
@@ -30,12 +45,21 @@ impl TryFrom<&[u8]> for ColumnDefaultConstraint {
     }
 }
 
-impl TryInto<Vec<u8>> for ColumnDefaultConstraint {
+impl TryFrom<ColumnDefaultConstraint> for Vec<u8> {
     type Error = error::Error;
 
-    fn try_into(self) -> Result<Vec<u8>> {
-        let s = serde_json::to_string(&self).context(error::SerializeSnafu)?;
+    fn try_from(value: ColumnDefaultConstraint) -> std::result::Result<Self, Self::Error> {
+        let s = serde_json::to_string(&value).context(error::SerializeSnafu)?;
         Ok(s.into_bytes())
+    }
+}
+
+impl Display for ColumnDefaultConstraint {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ColumnDefaultConstraint::Function(expr) => write!(f, "{}", expr),
+            ColumnDefaultConstraint::Value(v) => write!(f, "{}", v),
+        }
     }
 }
 

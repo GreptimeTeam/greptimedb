@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Utilities for resolving schema compatibility problems.
 
 use std::sync::Arc;
@@ -310,15 +324,13 @@ impl ReadAdapter {
 #[cfg(test)]
 mod tests {
     use datatypes::data_type::ConcreteDataType;
-    use store_api::storage::consts;
-    use store_api::storage::ColumnDescriptorBuilder;
+    use store_api::storage::{consts, ColumnDescriptorBuilder};
 
     use super::*;
     use crate::error::Error;
     use crate::metadata::RegionMetadata;
-    use crate::schema::tests;
-    use crate::schema::{ProjectedSchema, RegionSchema};
-    use crate::test_util::descriptor_util;
+    use crate::schema::{tests, ProjectedSchema, RegionSchema};
+    use crate::test_util::{descriptor_util, schema_util};
 
     fn check_fields(fields: &[Field], names: &[&str]) {
         for (field, name) in fields.iter().zip(names) {
@@ -390,7 +402,7 @@ mod tests {
     #[test]
     fn test_compat_same_schema() {
         // (k0, timestamp, v0, v1) with version 0.
-        let region_schema = Arc::new(tests::new_region_schema(0, 2));
+        let region_schema = Arc::new(schema_util::new_region_schema(0, 2));
         let projected_schema = Arc::new(ProjectedSchema::no_projection(region_schema.clone()));
 
         let source_schema = region_schema.store_schema().clone();
@@ -420,7 +432,7 @@ mod tests {
     #[test]
     fn test_compat_same_version_with_projection() {
         // (k0, timestamp, v0, v1) with version 0.
-        let region_schema = Arc::new(tests::new_region_schema(0, 2));
+        let region_schema = Arc::new(schema_util::new_region_schema(0, 2));
         // Just read v0, k0.
         let projected_schema =
             Arc::new(ProjectedSchema::new(region_schema.clone(), Some(vec![2, 0])).unwrap());
@@ -452,9 +464,9 @@ mod tests {
     #[test]
     fn test_compat_old_column() {
         // (k0, timestamp, v0) with version 0.
-        let region_schema_old = Arc::new(tests::new_region_schema(0, 1));
+        let region_schema_old = Arc::new(schema_util::new_region_schema(0, 1));
         // (k0, timestamp, v0, v1) with version 1.
-        let region_schema_new = Arc::new(tests::new_region_schema(1, 1));
+        let region_schema_new = Arc::new(schema_util::new_region_schema(1, 1));
 
         // Just read v0, k0
         let projected_schema =
@@ -486,9 +498,9 @@ mod tests {
     #[test]
     fn test_compat_new_column() {
         // (k0, timestamp, v0, v1) with version 0.
-        let region_schema_old = Arc::new(tests::new_region_schema(0, 2));
+        let region_schema_old = Arc::new(schema_util::new_region_schema(0, 2));
         // (k0, timestamp, v0, v1, v2) with version 1.
-        let region_schema_new = Arc::new(tests::new_region_schema(1, 3));
+        let region_schema_new = Arc::new(schema_util::new_region_schema(1, 3));
 
         // Just read v2, v0, k0
         let projected_schema =
@@ -525,7 +537,7 @@ mod tests {
     #[test]
     fn test_compat_different_column() {
         // (k0, timestamp, v0, v1) with version 0.
-        let region_schema_old = Arc::new(tests::new_region_schema(0, 2));
+        let region_schema_old = Arc::new(schema_util::new_region_schema(0, 2));
 
         let mut descriptor = descriptor_util::desc_with_value_columns(tests::REGION_NAME, 2);
         // Assign a much larger column id to v0.

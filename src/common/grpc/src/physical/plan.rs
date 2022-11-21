@@ -1,35 +1,47 @@
-use std::{ops::Deref, result::Result, sync::Arc};
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use api::v1::codec::{
-    physical_plan_node::PhysicalPlanType, MockInputExecNode, PhysicalPlanNode, ProjectionExecNode,
-};
-use arrow::{
-    array::{PrimitiveArray, Utf8Array},
-    datatypes::{DataType, Field, Schema},
-};
+use std::ops::Deref;
+use std::result::Result;
+use std::sync::Arc;
+
+use api::v1::codec::physical_plan_node::PhysicalPlanType;
+use api::v1::codec::{MockInputExecNode, PhysicalPlanNode, ProjectionExecNode};
 use async_trait::async_trait;
-use datafusion::{
-    execution::runtime_env::RuntimeEnv,
-    field_util::SchemaExt,
-    physical_plan::{
-        memory::MemoryStream, projection::ProjectionExec, ExecutionPlan, PhysicalExpr,
-        SendableRecordBatchStream, Statistics,
-    },
-    record_batch::RecordBatch,
+use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::field_util::SchemaExt;
+use datafusion::physical_plan::memory::MemoryStream;
+use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::physical_plan::{
+    ExecutionPlan, PhysicalExpr, SendableRecordBatchStream, Statistics,
 };
+use datafusion::record_batch::RecordBatch;
+use datatypes::arrow::array::{PrimitiveArray, Utf8Array};
+use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
     DecodePhysicalPlanNodeSnafu, EmptyPhysicalPlanSnafu, Error, MissingFieldSnafu,
     NewProjectionSnafu, UnsupportedDfPlanSnafu,
 };
-use crate::physical::{expr, AsExcutionPlan, ExecutionPlanRef};
+use crate::physical::{expr, AsExecutionPlan, ExecutionPlanRef};
 
 pub struct DefaultAsPlanImpl {
     pub bytes: Vec<u8>,
 }
 
-impl AsExcutionPlan for DefaultAsPlanImpl {
+impl AsExecutionPlan for DefaultAsPlanImpl {
     type Error = Error;
 
     // Vec<u8> -> PhysicalPlanNode -> ExecutionPlanRef
@@ -52,7 +64,7 @@ impl AsExcutionPlan for DefaultAsPlanImpl {
     }
 }
 
-impl AsExcutionPlan for PhysicalPlanNode {
+impl AsExecutionPlan for PhysicalPlanNode {
     type Error = Error;
 
     fn try_into_physical_plan(&self) -> Result<ExecutionPlanRef, Self::Error> {
@@ -150,11 +162,11 @@ impl ExecutionPlan for MockExecution {
         self
     }
 
-    fn schema(&self) -> arrow::datatypes::SchemaRef {
+    fn schema(&self) -> SchemaRef {
         let field1 = Field::new("id", DataType::UInt32, false);
         let field2 = Field::new("name", DataType::Utf8, false);
         let field3 = Field::new("age", DataType::UInt32, false);
-        Arc::new(arrow::datatypes::Schema::new(vec![field1, field2, field3]))
+        Arc::new(Schema::new(vec![field1, field2, field3]))
     }
 
     fn output_partitioning(&self) -> datafusion::physical_plan::Partitioning {
@@ -211,12 +223,11 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::codec::PhysicalPlanNode;
-    use datafusion::physical_plan::{expressions::Column, projection::ProjectionExec};
+    use datafusion::physical_plan::expressions::Column;
+    use datafusion::physical_plan::projection::ProjectionExec;
 
-    use crate::physical::{
-        plan::{DefaultAsPlanImpl, MockExecution},
-        {AsExcutionPlan, ExecutionPlanRef},
-    };
+    use crate::physical::plan::{DefaultAsPlanImpl, MockExecution};
+    use crate::physical::{AsExecutionPlan, ExecutionPlanRef};
 
     #[test]
     fn test_convert_df_projection_with_bytes() {
@@ -225,7 +236,7 @@ mod tests {
         let bytes = DefaultAsPlanImpl::try_from_physical_plan(projection_exec).unwrap();
         let exec = bytes.try_into_physical_plan().unwrap();
 
-        verify_df_porjection(exec);
+        verify_df_projection(exec);
     }
 
     #[test]
@@ -235,7 +246,7 @@ mod tests {
         let projection_node = PhysicalPlanNode::try_from_physical_plan(projection_exec).unwrap();
         let exec = projection_node.try_into_physical_plan().unwrap();
 
-        verify_df_porjection(exec);
+        verify_df_projection(exec);
     }
 
     fn mock_df_projection() -> Arc<ProjectionExec> {
@@ -253,7 +264,7 @@ mod tests {
         )
     }
 
-    fn verify_df_porjection(exec: ExecutionPlanRef) {
+    fn verify_df_projection(exec: ExecutionPlanRef) {
         let projection_exec = exec.as_any().downcast_ref::<ProjectionExec>().unwrap();
         let mock_input = projection_exec
             .input()

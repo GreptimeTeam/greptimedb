@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use snafu::ResultExt;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::ParserError;
@@ -27,9 +41,19 @@ impl<'a> ParserContext<'a> {
                 let column_def = parser.parse_column_def()?;
                 AlterTableOperation::AddColumn { column_def }
             }
+        } else if parser.parse_keyword(Keyword::DROP) {
+            if parser.parse_keyword(Keyword::COLUMN) {
+                let name = self.parser.parse_identifier()?;
+                AlterTableOperation::DropColumn { name }
+            } else {
+                return Err(ParserError::ParserError(format!(
+                    "expect keyword COLUMN after ALTER TABLE DROP, found {}",
+                    parser.peek_token()
+                )));
+            }
         } else {
             return Err(ParserError::ParserError(format!(
-                "expect ADD or DROP after ALTER TABLE, found {}",
+                "expect keyword ADD or DROP after ALTER TABLE, found {}",
                 parser.peek_token()
             )));
         };
@@ -68,6 +92,37 @@ mod tests {
                             .options
                             .iter()
                             .any(|o| matches!(o.option, ColumnOption::Null)));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_drop_column() {
+        let sql = "ALTER TABLE my_metric_1 DROP a";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap_err();
+        assert!(result
+            .to_string()
+            .contains("expect keyword COLUMN after ALTER TABLE DROP"));
+
+        let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
+        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::Alter { .. });
+        match statement {
+            Statement::Alter(alter_table) => {
+                assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(alter_operation, AlterTableOperation::DropColumn { .. });
+                match alter_operation {
+                    AlterTableOperation::DropColumn { name } => {
+                        assert_eq!("a", name.value);
                     }
                     _ => unreachable!(),
                 }

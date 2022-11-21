@@ -1,16 +1,31 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use common_telemetry::{
-    logging::{error, info},
-    timer,
-};
+use common_telemetry::logging::{error, info};
+use common_telemetry::timer;
 use servers::query_handler::SqlQueryHandler;
 use snafu::prelude::*;
 use sql::statements::statement::Statement;
+use table::requests::CreateDatabaseRequest;
 
-use crate::error::{CatalogSnafu, ExecuteSqlSnafu, Result};
+use crate::error::{
+    BumpTableIdSnafu, CatalogNotFoundSnafu, CatalogSnafu, ExecuteSqlSnafu, ParseSqlSnafu, Result,
+    SchemaNotFoundSnafu, TableIdProviderNotFoundSnafu,
+};
 use crate::instance::Instance;
 use crate::metric;
 use crate::sql::SqlRequest;
@@ -35,25 +50,42 @@ impl Instance {
                     .context(ExecuteSqlSnafu)
             }
             Statement::Insert(i) => {
+                let (catalog_name, schema_name, _table_name) =
+                    i.full_table_name().context(ParseSqlSnafu)?;
+
                 let schema_provider = self
                     .catalog_manager
-                    .catalog(DEFAULT_CATALOG_NAME)
-                    .expect("datafusion does not accept fallible catalog access")
-                    .unwrap()
-                    .schema(DEFAULT_SCHEMA_NAME)
-                    .expect("datafusion does not accept fallible catalog access")
-                    .unwrap();
+                    .catalog(&catalog_name)
+                    .context(CatalogSnafu)?
+                    .context(CatalogNotFoundSnafu { name: catalog_name })?
+                    .schema(&schema_name)
+                    .context(CatalogSnafu)?
+                    .context(SchemaNotFoundSnafu { name: schema_name })?;
 
                 let request = self.sql_handler.insert_to_request(schema_provider, *i)?;
                 self.sql_handler.execute(request).await
             }
 
-            Statement::Create(c) => {
+            Statement::CreateDatabase(c) => {
+                let request = CreateDatabaseRequest {
+                    db_name: c.name.to_string(),
+                };
+
+                info!("Creating a new database: {}", request.db_name);
+
+                self.sql_handler
+                    .execute(SqlRequest::CreateDatabase(request))
+                    .await
+            }
+
+            Statement::CreateTable(c) => {
                 let table_id = self
-                    .catalog_manager
+                    .table_id_provider
+                    .as_ref()
+                    .context(TableIdProviderNotFoundSnafu)?
                     .next_table_id()
                     .await
-                    .context(CatalogSnafu)?;
+                    .context(BumpTableIdSnafu)?;
                 let _engine_name = c.engine.clone();
                 // TODO(hl): Select table engine by engine_name
 
@@ -67,7 +99,9 @@ impl Instance {
                     catalog_name, schema_name, table_name, table_id
                 );
 
-                self.sql_handler.execute(SqlRequest::Create(request)).await
+                self.sql_handler
+                    .execute(SqlRequest::CreateTable(request))
+                    .await
             }
             Statement::Alter(alter_table) => {
                 let req = self.sql_handler.alter_to_request(alter_table)?;
@@ -80,6 +114,11 @@ impl Instance {
             }
             Statement::ShowTables(stmt) => {
                 self.sql_handler.execute(SqlRequest::ShowTables(stmt)).await
+            }
+            Statement::DescribeTable(stmt) => {
+                self.sql_handler
+                    .execute(SqlRequest::DescribeTable(stmt))
+                    .await
             }
             Statement::ShowCreateTable(_stmt) => {
                 unimplemented!("SHOW CREATE TABLE is unimplemented yet");
@@ -99,13 +138,5 @@ impl SqlQueryHandler for Instance {
                 BoxedError::new(e)
             })
             .context(servers::error::ExecuteQuerySnafu { query })
-    }
-
-    async fn insert_script(&self, name: &str, script: &str) -> servers::error::Result<()> {
-        self.script_executor.insert_script(name, script).await
-    }
-
-    async fn execute_script(&self, name: &str) -> servers::error::Result<Output> {
-        self.script_executor.execute_script(name).await
     }
 }

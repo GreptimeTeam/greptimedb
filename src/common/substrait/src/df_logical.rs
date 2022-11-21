@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use bytes::{Buf, Bytes, BytesMut};
@@ -7,21 +21,17 @@ use datafusion::datasource::TableProvider;
 use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
 use datafusion::physical_plan::project_schema;
 use prost::Message;
-use snafu::ensure;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use substrait_proto::protobuf::expression::mask_expression::{StructItem, StructSelect};
 use substrait_proto::protobuf::expression::MaskExpression;
 use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
 use substrait_proto::protobuf::read_rel::{NamedTable, ReadType};
 use substrait_proto::protobuf::rel::RelType;
-use substrait_proto::protobuf::PlanRel;
-use substrait_proto::protobuf::ReadRel;
-use substrait_proto::protobuf::Rel;
+use substrait_proto::protobuf::{PlanRel, ReadRel, Rel};
 use table::table::adapter::DfTableProviderAdapter;
 
-use crate::error::Error;
 use crate::error::{
-    DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, InternalSnafu,
+    DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, Error, InternalSnafu,
     InvalidParametersSnafu, MissingFieldSnafu, SchemaNotMatchSnafu, TableNotFoundSnafu,
     UnknownPlanSnafu, UnsupportedExprSnafu, UnsupportedPlanSnafu,
 };
@@ -168,14 +178,14 @@ impl DFLogicalSubstraitConvertor {
             })?;
         let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
 
-        // Get schema directly from the table, and compare it with the schema retrived from substrait proto.
+        // Get schema directly from the table, and compare it with the schema retrieved from substrait proto.
         let stored_schema = adapter.schema();
-        let retrived_schema = to_schema(read_rel.base_schema.unwrap_or_default())?;
-        let retrived_arrow_schema = retrived_schema.arrow_schema();
+        let retrieved_schema = to_schema(read_rel.base_schema.unwrap_or_default())?;
+        let retrieved_arrow_schema = retrieved_schema.arrow_schema();
         ensure!(
-            stored_schema.fields == retrived_arrow_schema.fields,
+            stored_schema.fields == retrieved_arrow_schema.fields,
             SchemaNotMatchSnafu {
-                substrait_schema: retrived_arrow_schema.clone(),
+                substrait_schema: retrieved_arrow_schema.clone(),
                 storage_schema: stored_schema
             }
         );
@@ -334,15 +344,13 @@ impl DFLogicalSubstraitConvertor {
 
 #[cfg(test)]
 mod test {
-    use catalog::local::LocalCatalogManager;
-    use catalog::{
-        local::{MemoryCatalogProvider, MemorySchemaProvider},
-        CatalogList, CatalogProvider, RegisterTableRequest,
-    };
+    use catalog::local::{LocalCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
+    use catalog::{CatalogList, CatalogProvider, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datafusion::logical_plan::DFSchema;
     use datatypes::schema::Schema;
-    use table::{requests::CreateTableRequest, test_util::EmptyTable, test_util::MockTableEngine};
+    use table::requests::CreateTableRequest;
+    use table::test_util::{EmptyTable, MockTableEngine};
 
     use super::*;
     use crate::schema::test::supported_types;

@@ -1,30 +1,34 @@
-use std::io::ErrorKind;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use api::v1::meta::heartbeat_server;
-use api::v1::meta::AskLeaderRequest;
-use api::v1::meta::AskLeaderResponse;
-use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::HeartbeatResponse;
-use api::v1::meta::Peer;
-use api::v1::meta::ResponseHeader;
-use api::v1::meta::PROTOCOL_VERSION;
-use common_telemetry::error;
-use common_telemetry::info;
+use std::io::ErrorKind;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use api::v1::meta::{
+    heartbeat_server, AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse,
+    Peer, ResponseHeader,
+};
+use common_telemetry::{error, info, warn};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::Request;
-use tonic::Response;
-use tonic::Streaming;
+use tonic::{Request, Response, Streaming};
 
-use super::GrpcResult;
-use super::GrpcStream;
 use crate::error;
 use crate::error::Result;
-use crate::handler::Context;
-use crate::metasrv::MetaSrv;
+use crate::metasrv::{Context, MetaSrv};
+use crate::service::{GrpcResult, GrpcStream};
 
 static PUSHER_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -39,17 +43,15 @@ impl heartbeat_server::Heartbeat for MetaSrv {
         let mut in_stream = req.into_inner();
         let (tx, rx) = mpsc::channel(128);
         let handler_group = self.handler_group();
-        let ctx = Context {
-            server_addr: self.options().server_addr.clone(),
-            kv_store: self.kv_store(),
-        };
+        let ctx = self.new_ctx();
         common_runtime::spawn_bg(async move {
             let mut pusher_key = None;
             while let Some(msg) = in_stream.next().await {
+                let mut quit = false;
                 match msg {
                     Ok(req) => {
                         if pusher_key.is_none() {
-                            if let Some(ref peer) = req.peer {
+                            if let Some(peer) = &req.peer {
                                 let key = format!(
                                     "{}-{}-{}",
                                     peer.addr,
@@ -61,14 +63,16 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                             }
                         }
 
-                        tx.send(
-                            handler_group
-                                .handle(req, ctx.clone())
-                                .await
-                                .map_err(|e| e.into()),
-                        )
-                        .await
-                        .expect("working rx");
+                        let res = handler_group
+                            .handle(req, ctx.clone())
+                            .await
+                            .map_err(|e| e.into());
+
+                        if let Ok(res) = &res {
+                            quit = res.is_not_leader();
+                        }
+
+                        tx.send(res).await.expect("working rx");
                     }
                     Err(err) => {
                         if let Some(io_err) = error::match_for_io_error(&err) {
@@ -81,9 +85,14 @@ impl heartbeat_server::Heartbeat for MetaSrv {
 
                         match tx.send(Err(err)).await {
                             Ok(_) => (),
-                            Err(_err) => break, // response was droped
+                            Err(_err) => break, // response was dropped
                         }
                     }
+                }
+
+                if quit {
+                    warn!("Quit because it is no longer the leader");
+                    break;
                 }
             }
             info!(
@@ -102,34 +111,34 @@ impl heartbeat_server::Heartbeat for MetaSrv {
 
     async fn ask_leader(&self, req: Request<AskLeaderRequest>) -> GrpcResult<AskLeaderResponse> {
         let req = req.into_inner();
-        let res = self.handle_ask_leader(req).await?;
+        let ctx = self.new_ctx();
+        let res = handle_ask_leader(req, ctx).await?;
 
         Ok(Response::new(res))
     }
 }
 
-impl MetaSrv {
-    // TODO(jiachun): move out when we can get the leader peer from kv store
-    async fn handle_ask_leader(&self, req: AskLeaderRequest) -> Result<AskLeaderResponse> {
-        let AskLeaderRequest { header, .. } = req;
+async fn handle_ask_leader(req: AskLeaderRequest, ctx: Context) -> Result<AskLeaderResponse> {
+    let cluster_id = req.header.as_ref().map_or(0, |h| h.cluster_id);
 
-        let res_header = ResponseHeader {
-            protocol_version: PROTOCOL_VERSION,
-            cluster_id: header.map_or(0u64, |h| h.cluster_id),
-            ..Default::default()
-        };
+    let addr = match ctx.election {
+        Some(election) => {
+            if election.is_leader() {
+                ctx.server_addr
+            } else {
+                election.leader().await?.0
+            }
+        }
+        None => ctx.server_addr,
+    };
 
-        // TODO(jiachun): return leader
-        let res = AskLeaderResponse {
-            header: Some(res_header),
-            leader: Some(Peer {
-                id: 0,
-                addr: self.options().server_addr.clone(),
-            }),
-        };
+    let leader = Some(Peer {
+        id: 0, // TODO(jiachun): meta node should have a Id
+        addr,
+    });
 
-        Ok(res)
-    }
+    let header = Some(ResponseHeader::success(cluster_id));
+    Ok(AskLeaderResponse { header, leader })
 }
 
 #[cfg(test)]
@@ -147,7 +156,7 @@ mod tests {
     #[tokio::test]
     async fn test_ask_leader() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None).await;
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None).await;
 
         let req = AskLeaderRequest {
             header: Some(RequestHeader::new((1, 1))),

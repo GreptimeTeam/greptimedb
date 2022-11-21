@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //!  Builtin module contains GreptimeDB builtin udf/udaf
 
 #[cfg(test)]
@@ -12,12 +26,8 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::vectors::Helper as HelperVec;
-use rustpython_vm::builtins::PyList;
-use rustpython_vm::pymodule;
-use rustpython_vm::{
-    builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyStr},
-    AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
-};
+use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
+use rustpython_vm::{pymodule, AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
 use crate::python::utils::is_instance;
 use crate::python::PyVector;
@@ -225,7 +235,7 @@ macro_rules! bind_call_unary_math_function {
 
 /// The macro for binding function in `datafusion_physical_expr::expressions`(most of them are aggregate function)
 ///
-/// - first arguements is the name of datafusion expression function like `Avg`
+/// - first arguments is the name of datafusion expression function like `Avg`
 /// - second is the python virtual machine ident `vm`
 /// - following is the actual args passing in(as a slice).i.e.`&[values.to_arrow_array()]`
 /// - the data type of passing in args, i.e: `Datatype::Float64`
@@ -249,7 +259,7 @@ fn from_df_err(err: DataFusionError, vm: &VirtualMachine) -> PyBaseExceptionRef 
     vm.new_runtime_error(format!("Data Fusion Error: {err:#?}"))
 }
 
-/// evalute Aggregate Expr using its backing accumulator
+/// evaluate Aggregate Expr using its backing accumulator
 fn eval_aggr_fn<T: AggregateExpr>(
     aggr: T,
     values: &[ArrayRef],
@@ -274,45 +284,31 @@ pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
-    use common_function::scalars::{
-        function::FunctionContext, math::PowFunction, Function, FunctionRef, FUNCTION_REGISTRY,
-    };
-    use datafusion::{
-        arrow::{
-            compute::comparison::{gt_eq_scalar, lt_eq_scalar},
-            datatypes::DataType,
-            error::ArrowError,
-            scalar::{PrimitiveScalar, Scalar},
-        },
-        physical_plan::expressions,
-    };
+    use common_function::scalars::function::FunctionContext;
+    use common_function::scalars::math::PowFunction;
+    use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
+    use datafusion::arrow::compute::comparison::{gt_eq_scalar, lt_eq_scalar};
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::arrow::error::ArrowError;
+    use datafusion::arrow::scalar::{PrimitiveScalar, Scalar};
+    use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
-    use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector};
-    use datatypes::{
-        arrow::{
-            self,
-            array::{ArrayRef, NullArray},
-            compute,
-        },
-        vectors::VectorRef,
-    };
+    use datatypes::arrow::array::{ArrayRef, NullArray};
+    use datatypes::arrow::{self, compute};
+    use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector, VectorRef};
     use paste::paste;
-    use rustpython_vm::{
-        builtins::{PyFloat, PyFunction, PyInt, PyStr},
-        function::{FuncArgs, KwArgs, OptionalArg},
-        AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
-    };
+    use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
+    use rustpython_vm::function::{FuncArgs, KwArgs, OptionalArg};
+    use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
 
     use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
-    use crate::python::{
-        utils::{is_instance, py_vec_obj_to_array, PyVectorRef},
-        vector::val_to_pyobj,
-        PyVector,
-    };
+    use crate::python::utils::{is_instance, py_vec_obj_to_array, PyVectorRef};
+    use crate::python::vector::val_to_pyobj;
+    use crate::python::PyVector;
 
     #[pyfunction]
     fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {
@@ -907,7 +903,7 @@ pub(crate) mod greptime_builtin {
         duration: i64,
         vm: &VirtualMachine,
     ) -> PyResult<Vec<PrimitiveScalar<i64>>> {
-        use arrow::datatypes::DataType;
+        use datatypes::arrow::datatypes::DataType;
         match (oldest.data_type(), newest.data_type()) {
             (DataType::Int64, DataType::Int64) => (),
             _ => {
@@ -1124,7 +1120,7 @@ pub(crate) mod greptime_builtin {
                 State::Num(v) => {
                     if cur_idx + 1 > parsed.len() {
                         return Err(vm.new_runtime_error(
-                            "Expect a spearator after number, found nothing!".to_string(),
+                            "Expect a separator after number, found nothing!".to_string(),
                         ));
                     }
                     let nxt = &parsed[cur_idx + 1];
@@ -1132,7 +1128,7 @@ pub(crate) mod greptime_builtin {
                         tot_time += v * factor(sep, vm)?;
                     } else {
                         return Err(vm.new_runtime_error(format!(
-                            "Expect a spearator after number, found `{nxt:#?}`"
+                            "Expect a separator after number, found `{nxt:#?}`"
                         )));
                     }
                     cur_idx += 2;

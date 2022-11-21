@@ -1,31 +1,44 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! sql handler
 
-use catalog::{schema::SchemaProviderRef, CatalogManagerRef, CatalogProviderRef};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::CatalogManagerRef;
 use common_query::Output;
+use query::sql::{describe_table, show_databases, show_tables};
 use snafu::{OptionExt, ResultExt};
+use sql::statements::describe::DescribeTable;
 use sql::statements::show::{ShowDatabases, ShowTables};
-use table::engine::{EngineContext, TableEngineRef};
+use table::engine::{EngineContext, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
-use crate::error::{
-    CatalogNotFoundSnafu, CatalogSnafu, GetTableSnafu, Result, SchemaNotFoundSnafu,
-    TableNotFoundSnafu,
-};
+use crate::error::{self, GetTableSnafu, Result, TableNotFoundSnafu};
 
 mod alter;
 mod create;
 mod insert;
-mod show;
 
 #[derive(Debug)]
 pub enum SqlRequest {
     Insert(InsertRequest),
-    Create(CreateTableRequest),
+    CreateTable(CreateTableRequest),
+    CreateDatabase(CreateDatabaseRequest),
     Alter(AlterTableRequest),
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
+    DescribeTable(DescribeTable),
 }
 
 // Handler to execute SQL except query
@@ -45,40 +58,29 @@ impl SqlHandler {
     pub async fn execute(&self, request: SqlRequest) -> Result<Output> {
         match request {
             SqlRequest::Insert(req) => self.insert(req).await,
-            SqlRequest::Create(req) => self.create(req).await,
+            SqlRequest::CreateTable(req) => self.create_table(req).await,
+            SqlRequest::CreateDatabase(req) => self.create_database(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
-            SqlRequest::ShowDatabases(stmt) => self.show_databases(stmt).await,
-            SqlRequest::ShowTables(stmt) => self.show_tables(stmt).await,
+            SqlRequest::ShowDatabases(stmt) => {
+                show_databases(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+            }
+            SqlRequest::ShowTables(stmt) => {
+                show_tables(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+            }
+            SqlRequest::DescribeTable(stmt) => {
+                describe_table(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+            }
         }
     }
 
-    pub(crate) fn get_table(&self, table_name: &str) -> Result<TableRef> {
+    pub(crate) fn get_table<'a>(&self, table_ref: &'a TableReference) -> Result<TableRef> {
         self.table_engine
-            .get_table(&EngineContext::default(), table_name)
-            .context(GetTableSnafu { table_name })?
-            .context(TableNotFoundSnafu { table_name })
-    }
-
-    pub(crate) fn get_default_catalog(&self) -> Result<CatalogProviderRef> {
-        self.catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                name: DEFAULT_CATALOG_NAME,
-            })
-    }
-
-    pub(crate) fn get_default_schema(&self) -> Result<SchemaProviderRef> {
-        self.catalog_manager
-            .catalog(DEFAULT_CATALOG_NAME)
-            .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu {
-                name: DEFAULT_CATALOG_NAME,
+            .get_table(&EngineContext::default(), table_ref)
+            .with_context(|_| GetTableSnafu {
+                table_name: table_ref.to_string(),
             })?
-            .schema(DEFAULT_SCHEMA_NAME)
-            .context(CatalogSnafu)?
-            .context(SchemaNotFoundSnafu {
-                name: DEFAULT_SCHEMA_NAME,
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
             })
     }
 
@@ -100,7 +102,10 @@ mod tests {
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
     use log_store::fs::noop::NoopLogStore;
-    use object_store::{services::fs::Builder, ObjectStore};
+    use mito::config::EngineConfig as TableEngineConfig;
+    use mito::engine::MitoEngine;
+    use object_store::services::fs::Builder;
+    use object_store::ObjectStore;
     use query::QueryEngineFactory;
     use sql::statements::statement::Statement;
     use storage::config::EngineConfig as StorageEngineConfig;
@@ -108,8 +113,6 @@ mod tests {
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
     use table::{Table, TableRef};
-    use table_engine::config::EngineConfig as TableEngineConfig;
-    use table_engine::engine::MitoEngine;
     use tempdir::TempDir;
 
     use super::*;
@@ -127,13 +130,13 @@ mod tests {
                 ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
                 ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
                 ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true),
+                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true)
+                    .with_time_index(true),
             ];
 
             Arc::new(
                 SchemaBuilder::try_from(column_schemas)
                     .unwrap()
-                    .timestamp_index(Some(3))
                     .build()
                     .unwrap(),
             )
@@ -212,7 +215,7 @@ mod tests {
                 .unwrap(),
         );
         let factory = QueryEngineFactory::new(catalog_list.clone());
-        let query_engine = factory.query_engine().clone();
+        let query_engine = factory.query_engine();
         let sql_handler = SqlHandler::new(table_engine, catalog_list);
 
         let stmt = match query_engine.sql_to_statement(sql).unwrap() {

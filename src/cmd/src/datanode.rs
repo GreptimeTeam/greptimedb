@@ -1,6 +1,22 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions, Mode};
+use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
+use meta_client::MetaClientOpts;
+use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{Error, MissingConfigSnafu, Result, StartDatanodeSnafu};
@@ -31,22 +47,22 @@ impl SubCommand {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Parser, Default)]
 struct StartCommand {
     #[clap(long)]
     node_id: Option<u64>,
-    #[clap(long)]
-    http_addr: Option<String>,
     #[clap(long)]
     rpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
     #[clap(long)]
-    postgres_addr: Option<String>,
-    #[clap(long)]
     metasrv_addr: Option<String>,
     #[clap(short, long)]
     config_file: Option<String>,
+    #[clap(long)]
+    data_dir: Option<String>,
+    #[clap(long)]
+    wal_dir: Option<String>,
 }
 
 impl StartCommand {
@@ -75,43 +91,41 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             DatanodeOptions::default()
         };
 
-        if let Some(addr) = cmd.http_addr {
-            opts.http_addr = addr;
-        }
         if let Some(addr) = cmd.rpc_addr {
             opts.rpc_addr = addr;
         }
         if let Some(addr) = cmd.mysql_addr {
             opts.mysql_addr = addr;
         }
-        if let Some(addr) = cmd.postgres_addr {
-            opts.postgres_addr = addr;
+
+        if let Some(node_id) = cmd.node_id {
+            opts.node_id = Some(node_id);
         }
 
-        match (cmd.metasrv_addr, cmd.node_id) {
-            (Some(meta_addr), Some(node_id)) => {
-                // Running mode is only set to Distributed when
-                // both metasrv addr and node id are set in
-                // commandline options
-                opts.meta_client_opts.metasrv_addr = meta_addr;
-                opts.node_id = node_id;
-                opts.mode = Mode::Distributed;
+        if let Some(meta_addr) = cmd.metasrv_addr {
+            opts.meta_client_opts
+                .get_or_insert_with(MetaClientOpts::default)
+                .metasrv_addrs = meta_addr
+                .split(',')
+                .map(&str::trim)
+                .map(&str::to_string)
+                .collect::<_>();
+            opts.mode = Mode::Distributed;
+        }
+
+        if let (Mode::Distributed, None) = (&opts.mode, &opts.node_id) {
+            return MissingConfigSnafu {
+                msg: "Missing node id option",
             }
-            (None, None) => {
-                opts.mode = Mode::Standalone;
-            }
-            (None, Some(_)) => {
-                return MissingConfigSnafu {
-                    msg: "Missing metasrv address option",
-                }
-                .fail();
-            }
-            (Some(_), None) => {
-                return MissingConfigSnafu {
-                    msg: "Missing node id option",
-                }
-                .fail();
-            }
+            .fail();
+        }
+
+        if let Some(data_dir) = cmd.data_dir {
+            opts.storage = ObjectStoreConfig::File { data_dir };
+        }
+
+        if let Some(wal_dir) = cmd.wal_dir {
+            opts.wal_dir = wal_dir;
         }
         Ok(opts)
     }
@@ -119,40 +133,38 @@ impl TryFrom<StartCommand> for DatanodeOptions {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use datanode::datanode::ObjectStoreConfig;
+    use servers::Mode;
 
     use super::*;
 
     #[test]
     fn test_read_from_config_file() {
         let cmd = StartCommand {
-            node_id: None,
-            http_addr: None,
-            rpc_addr: None,
-            mysql_addr: None,
-            postgres_addr: None,
-            metasrv_addr: None,
             config_file: Some(format!(
                 "{}/../../config/datanode.example.toml",
                 std::env::current_dir().unwrap().as_path().to_str().unwrap()
             )),
+            ..Default::default()
         };
         let options: DatanodeOptions = cmd.try_into().unwrap();
-        assert_eq!("0.0.0.0:3000".to_string(), options.http_addr);
-        assert_eq!("0.0.0.0:3001".to_string(), options.rpc_addr);
+        assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal_dir);
-        assert_eq!("0.0.0.0:3306".to_string(), options.mysql_addr);
+        assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
-        assert_eq!(
-            "1.1.1.1:3002".to_string(),
-            options.meta_client_opts.metasrv_addr
-        );
-        assert_eq!(5000, options.meta_client_opts.connect_timeout_millis);
-        assert_eq!(3000, options.meta_client_opts.timeout_millis);
-        assert!(options.meta_client_opts.tcp_nodelay);
+        let MetaClientOpts {
+            metasrv_addrs: metasrv_addr,
+            timeout_millis,
+            connect_timeout_millis,
+            tcp_nodelay,
+        } = options.meta_client_opts.unwrap();
 
-        assert_eq!("0.0.0.0:5432".to_string(), options.postgres_addr);
-        assert_eq!(4, options.postgres_runtime_size);
+        assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
+        assert_eq!(5000, connect_timeout_millis);
+        assert_eq!(3000, timeout_millis);
+        assert!(!tcp_nodelay);
 
         match options.storage {
             ObjectStoreConfig::File { data_dir } => {
@@ -165,53 +177,54 @@ mod tests {
     fn test_try_from_cmd() {
         assert_eq!(
             Mode::Standalone,
-            DatanodeOptions::try_from(StartCommand {
-                node_id: None,
-                http_addr: None,
-                rpc_addr: None,
-                mysql_addr: None,
-                postgres_addr: None,
-                metasrv_addr: None,
-                config_file: None
-            })
-            .unwrap()
-            .mode
+            DatanodeOptions::try_from(StartCommand::default())
+                .unwrap()
+                .mode
         );
 
-        assert_eq!(
-            Mode::Distributed,
-            DatanodeOptions::try_from(StartCommand {
-                node_id: Some(42),
-                http_addr: None,
-                rpc_addr: None,
-                mysql_addr: None,
-                postgres_addr: None,
-                metasrv_addr: Some("127.0.0.1:3002".to_string()),
-                config_file: None
-            })
-            .unwrap()
-            .mode
-        );
-
-        assert!(DatanodeOptions::try_from(StartCommand {
-            node_id: None,
-            http_addr: None,
-            rpc_addr: None,
-            mysql_addr: None,
-            postgres_addr: None,
-            metasrv_addr: Some("127.0.0.1:3002".to_string()),
-            config_file: None,
-        })
-        .is_err());
-        assert!(DatanodeOptions::try_from(StartCommand {
+        let mode = DatanodeOptions::try_from(StartCommand {
             node_id: Some(42),
-            http_addr: None,
-            rpc_addr: None,
-            mysql_addr: None,
-            postgres_addr: None,
-            metasrv_addr: None,
-            config_file: None,
+            metasrv_addr: Some("127.0.0.1:3002".to_string()),
+            ..Default::default()
+        })
+        .unwrap()
+        .mode;
+        assert_matches!(mode, Mode::Distributed);
+
+        assert!(DatanodeOptions::try_from(StartCommand {
+            metasrv_addr: Some("127.0.0.1:3002".to_string()),
+            ..Default::default()
         })
         .is_err());
+
+        // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
+        DatanodeOptions::try_from(StartCommand {
+            node_id: Some(42),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_merge_config() {
+        let dn_opts = DatanodeOptions::try_from(StartCommand {
+            config_file: Some(format!(
+                "{}/../../config/datanode.example.toml",
+                std::env::current_dir().unwrap().as_path().to_str().unwrap()
+            )),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(Some(42), dn_opts.node_id);
+        let MetaClientOpts {
+            metasrv_addrs: metasrv_addr,
+            timeout_millis,
+            connect_timeout_millis,
+            tcp_nodelay,
+        } = dn_opts.meta_client_opts.unwrap();
+        assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
+        assert_eq!(3000, timeout_millis);
+        assert_eq!(5000, connect_timeout_millis);
+        assert!(!tcp_nodelay);
     }
 }

@@ -1,13 +1,29 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Vector helper functions, inspired by databend Series mod
 
 use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::Array;
+use arrow::compute;
 use arrow::datatypes::DataType as ArrowDataType;
 use datafusion_common::ScalarValue;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
+use crate::arrow_array::StringArray;
 use crate::error::{ConversionSnafu, Result, UnknownVectorSnafu};
 use crate::scalars::*;
 use crate::vectors::date::DateVector;
@@ -193,6 +209,16 @@ impl Helper {
     pub fn try_into_vectors(arrays: &[ArrayRef]) -> Result<Vec<VectorRef>> {
         arrays.iter().map(Self::try_into_vector).collect()
     }
+
+    pub fn like_utf8(names: Vec<String>, s: &str) -> Result<VectorRef> {
+        let array = StringArray::from_slice(&names);
+
+        let filter =
+            compute::like::like_utf8_scalar(&array, s).context(error::ArrowComputeSnafu)?;
+
+        let result = compute::filter::filter(&array, &filter).context(error::ArrowComputeSnafu)?;
+        Helper::try_into_vector(result)
+    }
 }
 
 #[cfg(test)]
@@ -249,5 +275,30 @@ mod tests {
         for i in 0..vector.len() {
             assert_eq!(Value::DateTime(DateTime::new(42)), vector.get(i));
         }
+    }
+
+    #[test]
+    fn test_like_utf8() {
+        fn assert_vector(expected: Vec<&str>, actual: &VectorRef) {
+            let actual = actual.as_any().downcast_ref::<StringVector>().unwrap();
+            assert_eq!(*actual, StringVector::from(expected));
+        }
+
+        let names: Vec<String> = vec!["greptime", "hello", "public", "world"]
+            .into_iter()
+            .map(|x| x.to_string())
+            .collect();
+
+        let ret = Helper::like_utf8(names.clone(), "%ll%").unwrap();
+        assert_vector(vec!["hello"], &ret);
+
+        let ret = Helper::like_utf8(names.clone(), "%time").unwrap();
+        assert_vector(vec!["greptime"], &ret);
+
+        let ret = Helper::like_utf8(names.clone(), "%ld").unwrap();
+        assert_vector(vec!["world"], &ret);
+
+        let ret = Helper::like_utf8(names, "%").unwrap();
+        assert_vector(vec!["greptime", "hello", "public", "world"], &ret);
     }
 }

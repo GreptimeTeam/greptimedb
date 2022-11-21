@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -7,10 +21,8 @@ use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMeta;
 use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
-use common_query::error::CreateAccumulatorSnafu;
-use common_query::error::Result as QueryResult;
-use common_query::logical_plan::Accumulator;
-use common_query::logical_plan::AggregateFunctionCreator;
+use common_query::error::{CreateAccumulatorSnafu, Result as QueryResult};
+use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
@@ -18,8 +30,7 @@ use datafusion::arrow_print;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::PrimitiveElement;
-use datatypes::types::PrimitiveType;
+use datatypes::types::{PrimitiveElement, PrimitiveType};
 use datatypes::vectors::PrimitiveVector;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;

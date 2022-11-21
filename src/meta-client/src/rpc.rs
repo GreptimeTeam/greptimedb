@@ -1,28 +1,35 @@
-mod router;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+pub mod router;
 mod store;
 pub mod util;
 
-use api::v1::meta::KeyValue as PbKeyValue;
-use api::v1::meta::Peer as PbPeer;
-use api::v1::meta::ResponseHeader as PbResponseHeader;
-use api::v1::meta::TableName as PbTableName;
-pub use router::CreateRequest;
-pub use router::Partition;
-pub use router::Region;
-pub use router::RouteRequest;
-pub use router::RouteResponse;
-pub use router::Table;
-pub use router::TableRoute;
-pub use store::BatchPutRequest;
-pub use store::BatchPutResponse;
-pub use store::CompareAndPutRequest;
-pub use store::CompareAndPutResponse;
-pub use store::DeleteRangeRequest;
-pub use store::DeleteRangeResponse;
-pub use store::PutRequest;
-pub use store::PutResponse;
-pub use store::RangeRequest;
-pub use store::RangeResponse;
+use std::fmt::{Display, Formatter};
+
+use api::v1::meta::{
+    KeyValue as PbKeyValue, Peer as PbPeer, ResponseHeader as PbResponseHeader,
+    TableName as PbTableName,
+};
+pub use router::{
+    CreateRequest, Partition, Region, RouteRequest, RouteResponse, Table, TableRoute,
+};
+use serde::{Deserialize, Serialize};
+pub use store::{
+    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
+    DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+};
 
 #[derive(Debug, Clone)]
 pub struct ResponseHeader(PbResponseHeader);
@@ -90,11 +97,21 @@ impl KeyValue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct TableName {
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
+}
+
+impl Display for TableName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}",
+            self.catalog_name, self.schema_name, self.table_name
+        )
+    }
 }
 
 impl TableName {
@@ -131,7 +148,7 @@ impl From<PbTableName> for TableName {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Peer {
     pub id: u64,
     pub addr: String,

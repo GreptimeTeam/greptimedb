@@ -1,13 +1,24 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
-use common_query::physical_plan::Partitioning;
-use common_query::physical_plan::RuntimeEnv;
-use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
+use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef, RuntimeEnv};
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
 use snafu::OptionExt;
@@ -36,7 +47,6 @@ impl SimpleTableScan {
     }
 }
 
-#[async_trait]
 impl PhysicalPlan for SimpleTableScan {
     fn as_any(&self) -> &dyn Any {
         self
@@ -58,7 +68,7 @@ impl PhysicalPlan for SimpleTableScan {
         unimplemented!()
     }
 
-    async fn execute(
+    fn execute(
         &self,
         _partition: usize,
         _runtime: Arc<RuntimeEnv>,
@@ -70,8 +80,7 @@ impl PhysicalPlan for SimpleTableScan {
 
 #[cfg(test)]
 mod test {
-    use common_recordbatch::util;
-    use common_recordbatch::{RecordBatch, RecordBatches};
+    use common_recordbatch::{util, RecordBatch, RecordBatches};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -106,12 +115,12 @@ mod test {
         assert_eq!(scan.schema(), schema);
 
         let runtime = Arc::new(RuntimeEnv::default());
-        let stream = scan.execute(0, runtime.clone()).await.unwrap();
+        let stream = scan.execute(0, runtime.clone()).unwrap();
         let recordbatches = util::collect(stream).await.unwrap();
         assert_eq!(recordbatches[0], batch1);
         assert_eq!(recordbatches[1], batch2);
 
-        let result = scan.execute(0, runtime).await;
+        let result = scan.execute(0, runtime);
         assert!(result.is_err());
         match result {
             Err(e) => assert!(e

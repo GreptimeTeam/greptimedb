@@ -1,15 +1,30 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use snafu::{ensure, ResultExt};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
-use sqlparser::parser::Parser;
-use sqlparser::parser::ParserError;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::error::{
     self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu, TokenizerSnafu,
 };
+use crate::statements::describe::DescribeTable;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
+use crate::statements::table_idents_to_full_name;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
@@ -72,6 +87,11 @@ impl<'a> ParserContext<'a> {
                         self.parse_show()
                     }
 
+                    Keyword::DESCRIBE | Keyword::DESC => {
+                        self.parser.next_token();
+                        self.parse_describe()
+                    }
+
                     Keyword::INSERT => self.parse_insert(),
 
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
@@ -97,7 +117,7 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parses SHOW statements
-    /// todo(hl) support `show settings`/`show create`/`show users` ect.
+    /// todo(hl) support `show settings`/`show create`/`show users` etc.
     fn parse_show(&mut self) -> Result<Statement> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             self.parse_show_databases()
@@ -145,7 +165,7 @@ impl<'a> ParserContext<'a> {
                 }));
             }
 
-            // SHOW TABLES [in | FROM] [DATABSE]
+            // SHOW TABLES [in | FROM] [DATABASE]
             Token::Word(w) => match w.keyword {
                 Keyword::IN | Keyword::FROM => {
                     self.parser.next_token();
@@ -204,6 +224,39 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::ShowTables(ShowTables { kind, database }))
     }
 
+    /// Parses DESCRIBE statements
+    fn parse_describe(&mut self) -> Result<Statement> {
+        if self.matches_keyword(Keyword::TABLE) {
+            self.parser.next_token();
+            self.parse_describe_table()
+        } else {
+            self.unsupported(self.peek_token_as_string())
+        }
+    }
+
+    fn parse_describe_table(&mut self) -> Result<Statement> {
+        let table_idents =
+            self.parser
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a table name",
+                    actual: self.peek_token_as_string(),
+                })?;
+        ensure!(
+            !table_idents.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: table_idents.to_string(),
+            }
+        );
+        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_idents)?;
+        Ok(Statement::DescribeTable(DescribeTable {
+            catalog_name,
+            schema_name,
+            table_name,
+        }))
+    }
+
     fn parse_explain(&mut self) -> Result<Statement> {
         todo!()
     }
@@ -234,7 +287,7 @@ impl<'a> ParserContext<'a> {
     }
 
     #[inline]
-    fn peek_token_as_string(&self) -> String {
+    pub(crate) fn peek_token_as_string(&self) -> String {
         self.parser.peek_token().to_string()
     }
 

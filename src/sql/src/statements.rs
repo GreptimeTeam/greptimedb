@@ -1,5 +1,20 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 pub mod alter;
-pub mod create_table;
+pub mod create;
+pub mod describe;
 pub mod insert;
 pub mod query;
 pub mod show;
@@ -7,6 +22,7 @@ pub mod statement;
 
 use std::str::FromStr;
 
+use api::helper::ColumnDataTypeWrapper;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
@@ -20,7 +36,8 @@ use crate::ast::{
     Value as SqlValue,
 };
 use crate::error::{
-    self, ColumnTypeMismatchSnafu, ParseSqlValueSnafu, Result, UnsupportedDefaultValueSnafu,
+    self, ColumnTypeMismatchSnafu, ConvertToGrpcDataTypeSnafu, ParseSqlValueSnafu, Result,
+    SerializeColumnDefaultConstraintSnafu, UnsupportedDefaultValueSnafu,
 };
 
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when
@@ -32,6 +49,11 @@ pub fn table_idents_to_full_name(obj_name: &ObjectName) -> Result<(String, Strin
             DEFAULT_SCHEMA_NAME.to_string(),
             table.value.clone(),
         )),
+        [schema, table] => Ok((
+            DEFAULT_CATALOG_NAME.to_string(),
+            schema.value.clone(),
+            table.value.clone(),
+        )),
         [catalog, schema, table] => Ok((
             catalog.value.clone(),
             schema.value.clone(),
@@ -39,7 +61,7 @@ pub fn table_idents_to_full_name(obj_name: &ObjectName) -> Result<(String, Strin
         )),
         _ => error::InvalidSqlSnafu {
             msg: format!(
-                "expect table name to be <catalog>.<schema>.<table> or <table>, actual: {}",
+                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {}",
                 obj_name
             ),
         }
@@ -53,7 +75,7 @@ fn parse_string_to_value(
     data_type: &ConcreteDataType,
 ) -> Result<Value> {
     ensure!(
-        data_type.is_string(),
+        data_type.stringifiable(),
         ColumnTypeMismatchSnafu {
             column_name,
             expect: data_type.clone(),
@@ -215,7 +237,7 @@ fn parse_column_default_constraint(
 // TODO(yingwen): Make column nullable by default, and checks invalid case like
 // a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
-pub fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
+pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Result<ColumnSchema> {
     let is_nullable = column_def
         .options
         .iter()
@@ -227,10 +249,37 @@ pub fn column_def_to_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         parse_column_default_constraint(&name, &data_type, &column_def.options)?;
 
     ColumnSchema::new(name, data_type, is_nullable)
+        .with_time_index(is_time_index)
         .with_default_constraint(default_constraint)
         .context(error::InvalidDefaultSnafu {
             column: &column_def.name.value,
         })
+}
+
+/// Convert `ColumnDef` in sqlparser to `ColumnDef` in gRPC proto.
+pub fn sql_column_def_to_grpc_column_def(col: ColumnDef) -> Result<api::v1::ColumnDef> {
+    let name = col.name.value.clone();
+    let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
+
+    let nullable = !col
+        .options
+        .iter()
+        .any(|o| matches!(o.option, ColumnOption::NotNull));
+
+    let default_constraint = parse_column_default_constraint(&name, &data_type, &col.options)?
+        .map(ColumnDefaultConstraint::try_into) // serialize default constraint to bytes
+        .transpose()
+        .context(SerializeColumnDefaultConstraintSnafu)?;
+
+    let data_type = ColumnDataTypeWrapper::try_from(data_type)
+        .context(ConvertToGrpcDataTypeSnafu)?
+        .datatype() as i32;
+    Ok(api::v1::ColumnDef {
+        name,
+        datatype: data_type,
+        is_nullable: nullable,
+        default_constraint,
+    })
 }
 
 pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {

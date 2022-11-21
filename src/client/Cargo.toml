@@ -2,6 +2,7 @@
 name = "client"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -12,6 +13,7 @@ common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
+common-insert = { path = "../common/insert" }
 common-time = { path = "../common/time" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
     "simd",

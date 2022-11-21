@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::cmp;
 
 use async_trait::async_trait;
@@ -36,7 +50,7 @@ impl Snapshot for SnapshotImpl {
         let visible_sequence = self.sequence_to_read(request.sequence);
         let memtable_version = self.version.memtables();
 
-        let mutables = memtable_version.mutable_memtables();
+        let mutables = memtable_version.mutable_memtable();
         let immutables = memtable_version.immutable_memtables();
 
         let mut builder =
@@ -46,10 +60,10 @@ impl Snapshot for SnapshotImpl {
                 .filters(request.filters)
                 .batch_size(ctx.batch_size)
                 .visible_sequence(visible_sequence)
-                .pick_memtables(mutables);
+                .pick_memtables(mutables.clone());
 
-        for mem_set in immutables {
-            builder = builder.pick_memtables(mem_set);
+        for memtable in immutables {
+            builder = builder.pick_memtables(memtable.clone());
         }
 
         let reader = builder.pick_ssts(self.version.ssts())?.build().await?;

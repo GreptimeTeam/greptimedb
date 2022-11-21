@@ -1,7 +1,23 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 
 use api::v1::codec::InsertBatch;
-use api::v1::{column, column::SemanticType, insert_expr, Column, ColumnDataType, InsertExpr};
+use api::v1::column::SemanticType;
+use api::v1::{column, insert_expr, Column, ColumnDataType, InsertExpr};
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision;
 use table::requests::InsertRequest;
 
@@ -116,7 +132,7 @@ impl DataPoint {
     }
 
     pub fn as_insert_request(&self) -> InsertRequest {
-        let mut line_writer = LineWriter::with_lines(self.metric.clone(), 1);
+        let mut line_writer = LineWriter::with_lines(DEFAULT_SCHEMA_NAME, self.metric.clone(), 1);
         line_writer.write_ts(
             OPENTSDB_TIMESTAMP_COLUMN_NAME,
             (self.ts_millis(), Precision::MILLISECOND),
@@ -133,6 +149,7 @@ impl DataPoint {
 
     // TODO(fys): will remove in the future.
     pub fn as_grpc_insert(&self) -> InsertExpr {
+        let schema_name = DEFAULT_SCHEMA_NAME.to_string();
         let mut columns = Vec::with_capacity(2 + self.tags.len());
 
         let ts_column = Column {
@@ -177,11 +194,13 @@ impl DataPoint {
             row_count: 1,
         };
         InsertExpr {
+            schema_name,
             table_name: self.metric.clone(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values {
                 values: vec![batch.into()],
             })),
             options: HashMap::default(),
+            region_number: 0,
         }
     }
 
@@ -202,7 +221,8 @@ impl DataPoint {
 mod test {
     use std::sync::Arc;
 
-    use common_time::{timestamp::TimeUnit, Timestamp};
+    use common_time::timestamp::TimeUnit;
+    use common_time::Timestamp;
     use datatypes::value::Value;
     use datatypes::vectors::Vector;
 

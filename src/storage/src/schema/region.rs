@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use common_error::prelude::*;
@@ -112,11 +126,6 @@ impl RegionSchema {
         self.columns.column_metadata(idx)
     }
 
-    #[inline]
-    pub(crate) fn timestamp_key_index(&self) -> usize {
-        self.columns.timestamp_key_index()
-    }
-
     #[cfg(test)]
     pub(crate) fn columns(&self) -> &[ColumnMetadata] {
         self.columns.columns()
@@ -134,7 +143,6 @@ fn build_user_schema(columns: &ColumnsMetadata, version: u32) -> Result<Schema> 
 
     SchemaBuilder::try_from(column_schemas)
         .context(metadata::ConvertSchemaSnafu)?
-        .timestamp_index(Some(columns.timestamp_key_index()))
         .version(version)
         .build()
         .context(metadata::InvalidSchemaSnafu)
@@ -145,12 +153,11 @@ mod tests {
     use datatypes::type_id::LogicalTypeId;
 
     use super::*;
-    use crate::schema::tests;
     use crate::test_util::schema_util;
 
     #[test]
     fn test_region_schema() {
-        let region_schema = Arc::new(tests::new_region_schema(123, 1));
+        let region_schema = Arc::new(schema_util::new_region_schema(123, 1));
 
         let expect_schema = schema_util::new_schema_with_version(
             &[

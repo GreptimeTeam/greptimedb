@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use api::prometheus::remote::{ReadRequest, WriteRequest};
@@ -26,10 +40,15 @@ pub type GrpcAdminHandlerRef = Arc<dyn GrpcAdminHandler + Send + Sync>;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PrometheusProtocolHandlerRef = Arc<dyn PrometheusProtocolHandler + Send + Sync>;
+pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 
 #[async_trait]
 pub trait SqlQueryHandler {
     async fn do_query(&self, query: &str) -> Result<Output>;
+}
+
+#[async_trait]
+pub trait ScriptHandler {
     async fn insert_script(&self, name: &str, script: &str) -> Result<()>;
     async fn execute_script(&self, name: &str) -> Result<Output>;
 }
@@ -67,9 +86,9 @@ pub struct PrometheusResponse {
 #[async_trait]
 pub trait PrometheusProtocolHandler {
     /// Handling prometheus remote write requests
-    async fn write(&self, request: WriteRequest) -> Result<()>;
+    async fn write(&self, database: &str, request: WriteRequest) -> Result<()>;
     /// Handling prometheus remote read requests
-    async fn read(&self, request: ReadRequest) -> Result<PrometheusResponse>;
+    async fn read(&self, database: &str, request: ReadRequest) -> Result<PrometheusResponse>;
     /// Handling push gateway requests
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }

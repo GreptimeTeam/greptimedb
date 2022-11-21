@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 pub mod compile;
 pub mod parse;
 
@@ -12,11 +26,11 @@ use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::schema::Schema;
-use datatypes::vectors::Helper;
-use datatypes::vectors::{BooleanVector, StringVector, Vector, VectorRef};
+use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector, VectorRef};
 use rustpython_bytecode::CodeObject;
 use rustpython_vm as vm;
-use rustpython_vm::{class::PyClassImpl, AsObject};
+use rustpython_vm::class::PyClassImpl;
+use rustpython_vm::AsObject;
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
@@ -29,13 +43,13 @@ use crate::python::coprocessor::parse::DecoratorArgs;
 use crate::python::error::{
     ensure, ret_other_error_with, ArrowSnafu, OtherSnafu, Result, TypeCastSnafu,
 };
-use crate::python::utils::{format_py_error, py_vec_obj_to_array};
-use crate::python::{utils::is_instance, PyVector};
+use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
+use crate::python::PyVector;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnotationInfo {
-    /// if None, use types infered by PyVector
+    /// if None, use types inferred by PyVector
     pub datatype: Option<DataType>,
     pub is_nullable: bool,
 }
@@ -101,7 +115,7 @@ impl Coprocessor {
                         datatype: ty,
                         is_nullable,
                     } = anno[idx].to_owned().unwrap_or_else(||
-                    // default to be not nullable and use DataType infered by PyVector itself
+                    // default to be not nullable and use DataType inferred by PyVector itself
                     AnnotationInfo{
                         datatype: Some(real_ty.to_owned()),
                         is_nullable: false
@@ -194,7 +208,7 @@ fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
             }
             _ => {
                 return ret_other_error_with(format!(
-                    "Unsupport data type at column {idx}: {:?} for coprocessor",
+                    "Unsupported data type at column {idx}: {:?} for coprocessor",
                     arg.data_type()
                 ))
                 .fail()
@@ -313,8 +327,8 @@ fn set_items_in_scope(
 /// ```ignore
 /// use std::sync::Arc;
 /// use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-/// use arrow::array::PrimitiveArray;
-/// use arrow::datatypes::{DataType, Field, Schema};
+/// use datatypes::arrow::array::PrimitiveArray;
+/// use datatypes::arrow::datatypes::{DataType, Field, Schema};
 /// use common_function::scalars::python::exec_coprocessor;
 /// let python_source = r#"
 /// @copr(args=["cpu", "mem"], returns=["perf", "what"])
@@ -334,7 +348,7 @@ fn set_items_in_scope(
 /// ```
 ///
 /// # Type Annotation
-/// you can use type annotations in args and returns to designate types, so coprocessor will check for corrsponding types.
+/// you can use type annotations in args and returns to designate types, so coprocessor will check for corresponding types.
 ///
 /// Currently support types are `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64` and `f16`, `f32`, `f64`
 ///

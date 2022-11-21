@@ -1,16 +1,27 @@
-//! promethues protcol supportings
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! prometheus protocol supportings
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 
-use api::prometheus::remote::{
-    label_matcher::Type as MatcherType, Label, Query, Sample, TimeSeries, WriteRequest,
-};
-use api::v1::codec::InsertBatch;
-use api::v1::{
-    codec::SelectResult, column, column::SemanticType, insert_expr, Column, ColumnDataType,
-    InsertExpr,
-};
+use api::prometheus::remote::label_matcher::Type as MatcherType;
+use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
+use api::v1::codec::{InsertBatch, SelectResult};
+use api::v1::column::SemanticType;
+use api::v1::{column, insert_expr, Column, ColumnDataType, InsertExpr};
 use common_grpc::writer::Precision::MILLISECOND;
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt};
@@ -31,7 +42,7 @@ pub struct Metrics {
 
 /// Generate a sql from a remote request query
 /// TODO(dennis): maybe use logical plan in future to prevent sql injection
-pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
+pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
     let start_timestamp_ms = q.start_timestamp_ms;
     let end_timestamp_ms = q.end_timestamp_ms;
 
@@ -66,7 +77,7 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
         let value = &m.value;
         let m_type =
             MatcherType::from_i32(m.r#type).context(error::InvalidPromRemoteRequestSnafu {
-                msg: format!("invaid LabelMatcher type: {}", m.r#type),
+                msg: format!("invalid LabelMatcher type: {}", m.r#type),
             })?;
 
         match m_type {
@@ -76,11 +87,11 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
             MatcherType::Neq => {
                 conditions.push(format!("{}!='{}'", name, value));
             }
-            // Case senstive regexp match
+            // Case sensitive regexp match
             MatcherType::Re => {
                 conditions.push(format!("{}~'{}'", name, value));
             }
-            // Case senstive regexp not match
+            // Case sensitive regexp not match
             MatcherType::Nre => {
                 conditions.push(format!("{}!~'{}'", name, value));
             }
@@ -92,8 +103,8 @@ pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
     Ok((
         table_name.to_string(),
         format!(
-            "select * from {} where {} order by {}",
-            table_name, conditions, TIMESTAMP_COLUMN_NAME,
+            "select * from {}.{} where {} order by {}",
+            db, table_name, conditions, TIMESTAMP_COLUMN_NAME,
         ),
     ))
 }
@@ -279,16 +290,19 @@ pub fn select_result_to_timeseries(
 }
 
 /// Cast a remote write request into InsertRequest
-pub fn write_request_to_insert_reqs(mut request: WriteRequest) -> Result<Vec<InsertRequest>> {
+pub fn write_request_to_insert_reqs(
+    db: &str,
+    mut request: WriteRequest,
+) -> Result<Vec<InsertRequest>> {
     let timeseries = std::mem::take(&mut request.timeseries);
 
     timeseries
         .into_iter()
-        .map(timeseries_to_insert_request)
+        .map(|timeseries| timeseries_to_insert_request(db, timeseries))
         .collect()
 }
 
-fn timeseries_to_insert_request(mut timeseries: TimeSeries) -> Result<InsertRequest> {
+fn timeseries_to_insert_request(db: &str, mut timeseries: TimeSeries) -> Result<InsertRequest> {
     // TODO(dennis): save exemplars into a column
     let labels = std::mem::take(&mut timeseries.labels);
     let samples = std::mem::take(&mut timeseries.samples);
@@ -305,7 +319,7 @@ fn timeseries_to_insert_request(mut timeseries: TimeSeries) -> Result<InsertRequ
     })?;
 
     let row_count = samples.len();
-    let mut line_writer = LineWriter::with_lines(table_name, row_count);
+    let mut line_writer = LineWriter::with_lines(db, table_name, row_count);
 
     for sample in samples {
         let ts_millis = sample.timestamp;
@@ -328,17 +342,22 @@ fn timeseries_to_insert_request(mut timeseries: TimeSeries) -> Result<InsertRequ
 
 // TODO(fys): it will remove in the future.
 /// Cast a remote write request into gRPC's InsertExpr.
-pub fn write_request_to_insert_exprs(mut request: WriteRequest) -> Result<Vec<InsertExpr>> {
+pub fn write_request_to_insert_exprs(
+    database: &str,
+    mut request: WriteRequest,
+) -> Result<Vec<InsertExpr>> {
     let timeseries = std::mem::take(&mut request.timeseries);
 
     timeseries
         .into_iter()
-        .map(timeseries_to_insert_expr)
+        .map(|timeseries| timeseries_to_insert_expr(database, timeseries))
         .collect()
 }
 
 // TODO(fys): it will remove in the future.
-fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
+fn timeseries_to_insert_expr(database: &str, mut timeseries: TimeSeries) -> Result<InsertExpr> {
+    let schema_name = database.to_string();
+
     // TODO(dennis): save exemplars into a column
     let labels = std::mem::take(&mut timeseries.labels);
     let samples = std::mem::take(&mut timeseries.samples);
@@ -399,6 +418,7 @@ fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
         row_count: row_count as u32,
     };
     Ok(InsertExpr {
+        schema_name,
         table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
         })?,
@@ -407,6 +427,7 @@ fn timeseries_to_insert_expr(mut timeseries: TimeSeries) -> Result<InsertExpr> {
             values: vec![batch.into()],
         })),
         options: HashMap::default(),
+        region_number: 0,
     })
 }
 
@@ -497,7 +518,8 @@ mod tests {
     use api::prometheus::remote::LabelMatcher;
     use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
-    use datatypes::{value::Value, vectors::Vector};
+    use datatypes::value::Value;
+    use datatypes::vectors::Vector;
 
     use super::*;
 
@@ -513,7 +535,7 @@ mod tests {
             matchers: vec![],
             ..Default::default()
         };
-        let err = query_to_sql(&q).unwrap_err();
+        let err = query_to_sql("public", &q).unwrap_err();
         assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
 
         let q = Query {
@@ -526,9 +548,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (table, sql) = query_to_sql(&q).unwrap();
+        let (table, sql) = query_to_sql("public", &q).unwrap();
         assert_eq!("test", table);
-        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 order by greptime_timestamp", sql);
+        assert_eq!("select * from public.test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 order by greptime_timestamp", sql);
 
         let q = Query {
             start_timestamp_ms: 1000,
@@ -552,9 +574,9 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (table, sql) = query_to_sql(&q).unwrap();
+        let (table, sql) = query_to_sql("public", &q).unwrap();
         assert_eq!("test", table);
-        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 AND job~'*prom*' AND instance!='localhost' order by greptime_timestamp", sql);
+        assert_eq!("select * from public.test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 AND job~'*prom*' AND instance!='localhost' order by greptime_timestamp", sql);
     }
 
     #[test]
@@ -564,11 +586,12 @@ mod tests {
             ..Default::default()
         };
 
-        let reqs = write_request_to_insert_reqs(write_request).unwrap();
+        let reqs = write_request_to_insert_reqs("public", write_request).unwrap();
 
         assert_eq!(3, reqs.len());
 
         let req1 = reqs.get(0).unwrap();
+        assert_eq!("public", req1.schema_name);
         assert_eq!("metric1", req1.table_name);
 
         let columns = &req1.columns_values;
@@ -588,6 +611,7 @@ mod tests {
         assert_vector(&expected, val);
 
         let req2 = reqs.get(1).unwrap();
+        assert_eq!("public", req2.schema_name);
         assert_eq!("metric2", req2.table_name);
 
         let columns = &req2.columns_values;
@@ -611,6 +635,7 @@ mod tests {
         assert_vector(&expected, val);
 
         let req3 = reqs.get(2).unwrap();
+        assert_eq!("public", req3.schema_name);
         assert_eq!("metric3", req3.table_name);
 
         let columns = &req3.columns_values;
@@ -649,8 +674,11 @@ mod tests {
             ..Default::default()
         };
 
-        let exprs = write_request_to_insert_exprs(write_request).unwrap();
+        let exprs = write_request_to_insert_exprs("prometheus", write_request).unwrap();
         assert_eq!(3, exprs.len());
+        assert_eq!("prometheus", exprs[0].schema_name);
+        assert_eq!("prometheus", exprs[1].schema_name);
+        assert_eq!("prometheus", exprs[2].schema_name);
         assert_eq!("metric1", exprs[0].table_name);
         assert_eq!("metric2", exprs[1].table_name);
         assert_eq!("metric3", exprs[2].table_name);

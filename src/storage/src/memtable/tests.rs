@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use common_time::timestamp::Timestamp;
 use datatypes::arrow;
 use datatypes::arrow::array::{Int64Array, PrimitiveArray, UInt64Array, UInt8Array};
@@ -9,9 +23,6 @@ use super::*;
 use crate::metadata::RegionMetadata;
 use crate::schema::{ProjectedSchema, RegionSchemaRef};
 use crate::test_util::descriptor_util::RegionDescBuilder;
-
-// For simplicity, all memtables in test share same memtable id.
-const MEMTABLE_ID: MemtableId = 1;
 
 // Schema for testing memtable:
 // - key: Int64(timestamp), UInt64(version),
@@ -157,7 +168,7 @@ impl Default for MemtableTester {
 impl MemtableTester {
     fn new() -> MemtableTester {
         let schema = schema_for_test();
-        let builders = vec![Arc::new(DefaultMemtableBuilder {}) as _];
+        let builders = vec![Arc::new(DefaultMemtableBuilder::default()) as _];
 
         MemtableTester { schema, builders }
     }
@@ -165,7 +176,7 @@ impl MemtableTester {
     fn new_memtables(&self) -> Vec<MemtableRef> {
         self.builders
             .iter()
-            .map(|b| b.build(MEMTABLE_ID, self.schema.clone()))
+            .map(|b| b.build(self.schema.clone()))
             .collect()
     }
 

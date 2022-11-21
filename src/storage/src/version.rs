@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Version control of storage.
 //!
 //! To read latest data from `VersionControl`, we need to
@@ -9,20 +23,15 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
-use crate::memtable::{MemtableId, MemtableSet, MemtableVersion};
+use crate::memtable::{MemtableId, MemtableRef, MemtableVersion};
 use crate::metadata::RegionMetadataRef;
 use crate::schema::RegionSchemaRef;
-use crate::sst::LevelMetas;
-use crate::sst::{FileHandle, FileMeta};
+use crate::sst::{FileHandle, FileMeta, LevelMetas};
 use crate::sync::CowCell;
-
-/// Default bucket duration: 2 Hours.
-const DEFAULT_BUCKET_DURATION: Duration = Duration::from_secs(3600 * 2);
 
 pub const INIT_COMMITTED_SEQUENCE: u64 = 0;
 
@@ -79,26 +88,12 @@ impl VersionControl {
         self.committed_sequence.store(value, Ordering::Relaxed);
     }
 
-    /// Add mutable memtables and commit.
-    ///
-    /// # Panics
-    /// See [MemtableVersion::add_mutable](MemtableVersion::add_mutable).
-    pub fn add_mutable(&self, memtables_to_add: MemtableSet) {
-        let mut version_to_update = self.version.lock();
-
-        let memtable_version = version_to_update.memtables();
-        let merged = memtable_version.add_mutable(memtables_to_add);
-        version_to_update.memtables = Arc::new(merged);
-
-        version_to_update.commit();
-    }
-
     /// Freeze all mutable memtables.
-    pub fn freeze_mutable(&self) {
+    pub fn freeze_mutable(&self, new_memtable: MemtableRef) {
         let mut version_to_update = self.version.lock();
 
         let memtable_version = version_to_update.memtables();
-        let freezed = memtable_version.freeze_mutable();
+        let freezed = memtable_version.freeze_mutable(new_memtable);
         version_to_update.memtables = Arc::new(freezed);
 
         version_to_update.commit();
@@ -116,16 +111,15 @@ impl VersionControl {
         &self,
         metadata: RegionMetadataRef,
         manifest_version: ManifestVersion,
+        mutable_memtable: MemtableRef,
     ) {
         let mut version_to_update = self.version.lock();
 
         let memtable_version = version_to_update.memtables();
         // When applying metadata, mutable memtable set might be empty and there is no
         // need to freeze it.
-        if !memtable_version.mutable_memtables().is_empty() {
-            let freezed = memtable_version.freeze_mutable();
-            version_to_update.memtables = Arc::new(freezed);
-        }
+        let freezed = memtable_version.freeze_mutable(mutable_memtable);
+        version_to_update.memtables = Arc::new(freezed);
 
         version_to_update.apply_metadata(metadata, manifest_version);
         version_to_update.commit();
@@ -170,18 +164,19 @@ pub struct Version {
 impl Version {
     /// Create a new `Version` with given `metadata`.
     #[cfg(test)]
-    pub fn new(metadata: RegionMetadataRef) -> Version {
-        Version::with_manifest_version(metadata, 0)
+    pub fn new(metadata: RegionMetadataRef, memtable: MemtableRef) -> Version {
+        Version::with_manifest_version(metadata, 0, memtable)
     }
 
     /// Create a new `Version` with given `metadata` and initial `manifest_version`.
     pub fn with_manifest_version(
         metadata: RegionMetadataRef,
         manifest_version: ManifestVersion,
+        mutable_memtable: MemtableRef,
     ) -> Version {
         Version {
             metadata,
-            memtables: Arc::new(MemtableVersion::new()),
+            memtables: Arc::new(MemtableVersion::new(mutable_memtable)),
             ssts: Arc::new(LevelMetas::new()),
             flushed_sequence: 0,
             manifest_version,
@@ -204,8 +199,8 @@ impl Version {
     }
 
     #[inline]
-    pub fn mutable_memtables(&self) -> &MemtableSet {
-        self.memtables.mutable_memtables()
+    pub fn mutable_memtable(&self) -> &MemtableRef {
+        self.memtables.mutable_memtable()
     }
 
     #[inline]
@@ -221,11 +216,6 @@ impl Version {
     #[inline]
     pub fn flushed_sequence(&self) -> SequenceNumber {
         self.flushed_sequence
-    }
-
-    /// Returns duration used to partition the memtables and ssts by time.
-    pub fn bucket_duration(&self) -> Duration {
-        DEFAULT_BUCKET_DURATION
     }
 
     pub fn apply_edit(&mut self, edit: VersionEdit) {
@@ -282,16 +272,17 @@ impl Version {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::RegionMetadata;
+    use crate::memtable::{DefaultMemtableBuilder, MemtableBuilder};
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     fn new_version_control() -> VersionControl {
         let desc = RegionDescBuilder::new("version-test")
             .enable_version_column(false)
             .build();
-        let metadata: RegionMetadata = desc.try_into().unwrap();
+        let metadata: RegionMetadataRef = Arc::new(desc.try_into().unwrap());
+        let memtable = DefaultMemtableBuilder::default().build(metadata.schema().clone());
 
-        let version = Version::new(Arc::new(metadata));
+        let version = Version::new(metadata, memtable);
         VersionControl::with_version(version)
     }
 

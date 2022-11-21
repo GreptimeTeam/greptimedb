@@ -1,19 +1,34 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_grpc::writer::{to_ms_ts, Precision};
-use common_time::{timestamp::TimeUnit::Millisecond, Timestamp};
-use datatypes::{
-    prelude::ConcreteDataType,
-    types::TimestampType,
-    value::Value,
-    vectors::{VectorBuilder, VectorRef},
-};
+use common_time::timestamp::TimeUnit::Millisecond;
+use common_time::Timestamp;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::types::TimestampType;
+use datatypes::value::Value;
+use datatypes::vectors::{VectorBuilder, VectorRef};
 use table::requests::InsertRequest;
 
 type ColumnLen = usize;
 type ColumnName = String;
 
 pub struct LineWriter {
+    db: String,
     table_name: String,
     expected_rows: usize,
     current_rows: usize,
@@ -21,8 +36,9 @@ pub struct LineWriter {
 }
 
 impl LineWriter {
-    pub fn with_lines(table_name: impl Into<String>, lines: usize) -> Self {
+    pub fn with_lines(db: impl Into<String>, table_name: impl Into<String>, lines: usize) -> Self {
         Self {
+            db: db.into(),
             table_name: table_name.into(),
             expected_rows: lines,
             current_rows: 0,
@@ -120,6 +136,8 @@ impl LineWriter {
             .map(|(column_name, (mut builder, _))| (column_name, builder.finish()))
             .collect();
         InsertRequest {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: self.db,
             table_name: self.table_name,
             columns_values,
         }
@@ -130,14 +148,16 @@ impl LineWriter {
 mod tests {
     use std::sync::Arc;
 
+    use common_catalog::consts::DEFAULT_SCHEMA_NAME;
     use common_time::Timestamp;
-    use datatypes::{value::Value, vectors::Vector};
+    use datatypes::value::Value;
+    use datatypes::vectors::Vector;
 
     use crate::line_writer::{LineWriter, Precision};
 
     #[test]
     fn test_writer() {
-        let mut writer = LineWriter::with_lines("demo".to_string(), 4);
+        let mut writer = LineWriter::with_lines(DEFAULT_SCHEMA_NAME, "demo".to_string(), 4);
         writer.write_ts("ts", (1665893727685, Precision::MILLISECOND));
         writer.write_tag("host", "host-1");
         writer.write_i64("memory", 10_i64);
@@ -158,6 +178,7 @@ mod tests {
         let insert_request = writer.finish();
 
         assert_eq!("demo", insert_request.table_name);
+        assert_eq!(DEFAULT_SCHEMA_NAME, insert_request.schema_name);
 
         let columns = insert_request.columns_values;
         assert_eq!(5, columns.len());

@@ -1,8 +1,23 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use sqlparser::ast::Statement as SpStatement;
 use sqlparser::parser::ParserError;
 
 use crate::statements::alter::AlterTable;
-use crate::statements::create_table::CreateTable;
+use crate::statements::create::{CreateDatabase, CreateTable};
+use crate::statements::describe::DescribeTable;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
@@ -15,7 +30,9 @@ pub enum Statement {
     // Insert
     Insert(Box<Insert>),
     /// CREATE TABLE
-    Create(CreateTable),
+    CreateTable(CreateTable),
+    // CREATE DATABASE
+    CreateDatabase(CreateDatabase),
     /// ALTER TABLE
     Alter(AlterTable),
     // Databases.
@@ -24,6 +41,8 @@ pub enum Statement {
     ShowTables(ShowTables),
     // SHOW CREATE TABLE
     ShowCreateTable(ShowCreateTable),
+    // DESCRIBE TABLE
+    DescribeTable(DescribeTable),
 }
 
 /// Converts Statement to sqlparser statement
@@ -41,9 +60,14 @@ impl TryFrom<Statement> for SpStatement {
             Statement::ShowCreateTable(_) => Err(ParserError::ParserError(
                 "sqlparser does not support SHOW CREATE TABLE query.".to_string(),
             )),
+            Statement::DescribeTable(_) => Err(ParserError::ParserError(
+                "sqlparser does not support DESCRIBE TABLE query.".to_string(),
+            )),
             Statement::Query(s) => Ok(SpStatement::Query(Box::new(s.inner))),
             Statement::Insert(i) => Ok(i.inner),
-            Statement::Create(_) | Statement::Alter(_) => unimplemented!(),
+            Statement::CreateDatabase(_) | Statement::CreateTable(_) | Statement::Alter(_) => {
+                unimplemented!()
+            }
         }
     }
 }

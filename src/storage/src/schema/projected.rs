@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -200,7 +214,6 @@ impl ProjectedSchema {
         let store_schema = StoreSchema::new(
             columns,
             region_schema.version(),
-            region_schema.timestamp_key_index(),
             region_schema.row_key_end(),
             projection.num_user_columns,
         )?;
@@ -212,18 +225,6 @@ impl ProjectedSchema {
         region_schema: &RegionSchema,
         projection: &Projection,
     ) -> Result<SchemaRef> {
-        let timestamp_index =
-            projection
-                .projected_columns
-                .iter()
-                .enumerate()
-                .find_map(|(idx, col_idx)| {
-                    if *col_idx == region_schema.timestamp_key_index() {
-                        Some(idx)
-                    } else {
-                        None
-                    }
-                });
         let column_schemas: Vec<_> = projection
             .projected_columns
             .iter()
@@ -237,7 +238,6 @@ impl ProjectedSchema {
 
         let schema = SchemaBuilder::try_from(column_schemas)
             .context(metadata::ConvertSchemaSnafu)?
-            .timestamp_index(timestamp_index)
             .version(region_schema.version())
             .build()
             .context(metadata::InvalidSchemaSnafu)?;
@@ -280,7 +280,7 @@ impl BatchOp for ProjectedSchema {
         let indices = self.schema_to_read.row_key_indices();
         for idx in indices {
             let (left_col, right_col) = (left.column(idx), right.column(idx));
-            // Comparision of vector is done by virtual method calls currently. Consider using
+            // Comparison of vector is done by virtual method calls currently. Consider using
             // enum dispatch if this becomes bottleneck.
             let order = left_col.get_ref(i).cmp(&right_col.get_ref(j));
             if order != Ordering::Equal {
@@ -303,7 +303,7 @@ impl BatchOp for ProjectedSchema {
             })
     }
 
-    fn dedup(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>) {
+    fn find_unique(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>) {
         if let Some(prev) = prev {
             assert_eq!(batch.num_columns(), prev.num_columns());
         }
@@ -313,7 +313,7 @@ impl BatchOp for ProjectedSchema {
                 batch.column(idx),
                 prev.map(|prev| prev.column(idx).as_ref()),
             );
-            current.dedup(selected, prev_col);
+            current.find_unique(selected, prev_col);
         }
     }
 
@@ -349,7 +349,7 @@ mod tests {
     fn test_projection() {
         // Build a region schema with 2 value columns. So the final user schema is
         // (k0, timestamp, v0, v1)
-        let region_schema = tests::new_region_schema(0, 2);
+        let region_schema = schema_util::new_region_schema(0, 2);
 
         // Projection, but still keep column order.
         // After projection: (timestamp, v0)
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn test_projected_schema_with_projection() {
         // (k0, timestamp, v0, v1, v2)
-        let region_schema = Arc::new(tests::new_region_schema(123, 3));
+        let region_schema = Arc::new(schema_util::new_region_schema(123, 3));
 
         // After projection: (v1, timestamp)
         let projected_schema =
@@ -428,7 +428,7 @@ mod tests {
         // The schema to read should be same as region schema with (k0, timestamp, v0).
         // We can't use `new_schema_with_version()` because the StoreSchema also store other
         // metadata that `new_schema_with_version()` can't store.
-        let expect_schema = tests::new_region_schema(123, 1);
+        let expect_schema = schema_util::new_region_schema(123, 1);
         assert_eq!(
             expect_schema.store_schema(),
             projected_schema.schema_to_read()
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn test_projected_schema_no_projection() {
         // (k0, timestamp, v0)
-        let region_schema = Arc::new(tests::new_region_schema(123, 1));
+        let region_schema = Arc::new(schema_util::new_region_schema(123, 1));
 
         let projected_schema = ProjectedSchema::no_projection(region_schema.clone());
 
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn test_projected_schema_empty_projection() {
         // (k0, timestamp, v0)
-        let region_schema = Arc::new(tests::new_region_schema(123, 1));
+        let region_schema = Arc::new(schema_util::new_region_schema(123, 1));
 
         let err = ProjectedSchema::new(region_schema, Some(Vec::new()))
             .err()
@@ -499,18 +499,19 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_batch() {
+    fn test_batch_find_unique() {
         let schema = read_util::new_projected_schema();
         let batch = read_util::new_kv_batch(&[(1000, Some(1)), (2000, Some(2)), (2000, Some(2))]);
-        let mut selected = MutableBitmap::from_len_zeroed(3);
 
-        schema.dedup(&batch, &mut selected, None);
+        let mut selected = MutableBitmap::from_len_zeroed(3);
+        schema.find_unique(&batch, &mut selected, None);
         assert!(selected.get(0));
         assert!(selected.get(1));
         assert!(!selected.get(2));
 
+        let mut selected = MutableBitmap::from_len_zeroed(3);
         let prev = read_util::new_kv_batch(&[(1000, Some(1))]);
-        schema.dedup(&batch, &mut selected, Some(&prev));
+        schema.find_unique(&batch, &mut selected, Some(&prev));
         assert!(!selected.get(0));
         assert!(selected.get(1));
         assert!(!selected.get(2));

@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,7 +21,7 @@ use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
 use table::predicate::Predicate;
 
 use crate::error::{self, Error, Result};
-use crate::memtable::{IterContext, MemtableRef, MemtableSet};
+use crate::memtable::{IterContext, MemtableRef};
 use crate::read::{BoxedBatchReader, DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions, Visitor};
@@ -100,11 +114,8 @@ impl ChunkReaderBuilder {
         self
     }
 
-    pub fn pick_memtables(mut self, memtables: &MemtableSet) -> Self {
-        for (_range, mem) in memtables.iter() {
-            self.memtables.push(mem.clone());
-        }
-
+    pub fn pick_memtables(mut self, memtables: MemtableRef) -> Self {
+        self.memtables.push(memtables);
         self
     }
 

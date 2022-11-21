@@ -1,17 +1,29 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 pub mod write_batch_util;
 
 use std::sync::Arc;
 
-use datatypes::{
-    prelude::ScalarVector,
-    type_id::LogicalTypeId,
-    vectors::{BooleanVector, Float64Vector, StringVector, TimestampVector, UInt64Vector},
+use datatypes::prelude::ScalarVector;
+use datatypes::type_id::LogicalTypeId;
+use datatypes::vectors::{
+    BooleanVector, Float64Vector, StringVector, TimestampVector, UInt64Vector,
 };
 use rand::Rng;
-use storage::{
-    proto,
-    write_batch::{PutData, WriteBatch},
-};
+use storage::proto;
+use storage::write_batch::{PutData, WriteBatch};
 use store_api::storage::{consts, PutOperation, WriteRequest};
 
 pub fn new_test_batch() -> WriteBatch {

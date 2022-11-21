@@ -1,23 +1,29 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 pub mod etcd;
 pub mod kv;
 pub mod memory;
 
-use api::v1::meta::store_server;
-use api::v1::meta::BatchPutRequest;
-use api::v1::meta::BatchPutResponse;
-use api::v1::meta::CompareAndPutRequest;
-use api::v1::meta::CompareAndPutResponse;
-use api::v1::meta::DeleteRangeRequest;
-use api::v1::meta::DeleteRangeResponse;
-use api::v1::meta::PutRequest;
-use api::v1::meta::PutResponse;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::RangeResponse;
-use tonic::Request;
-use tonic::Response;
+use api::v1::meta::{
+    store_server, BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
+    DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+};
+use tonic::{Request, Response};
 
-use super::GrpcResult;
 use crate::metasrv::MetaSrv;
+use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
 impl store_server::Store for MetaSrv {
@@ -78,7 +84,7 @@ mod tests {
     #[tokio::test]
     async fn test_range() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None).await;
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None).await;
         let req = RangeRequest::default();
         let res = meta_srv.range(req.into_request()).await;
 
@@ -88,7 +94,7 @@ mod tests {
     #[tokio::test]
     async fn test_put() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None).await;
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None).await;
         let req = PutRequest::default();
         let res = meta_srv.put(req.into_request()).await;
 
@@ -98,7 +104,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_put() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None).await;
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None).await;
         let req = BatchPutRequest::default();
         let res = meta_srv.batch_put(req.into_request()).await;
 
@@ -108,7 +114,7 @@ mod tests {
     #[tokio::test]
     async fn test_compare_and_put() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None).await;
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None).await;
         let req = CompareAndPutRequest::default();
         let res = meta_srv.compare_and_put(req.into_request()).await;
 
@@ -118,7 +124,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_range() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None).await;
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None).await;
         let req = DeleteRangeRequest::default();
         let res = meta_srv.delete_range(req.into_request()).await;
 

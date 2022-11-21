@@ -2,6 +2,7 @@
 name = "meta-client"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [dependencies]
 api = { path = "../api" }
@@ -11,6 +12,7 @@ common-grpc = { path = "../common/grpc" }
 common-telemetry = { path = "../common/telemetry" }
 etcd-client = "0.10"
 rand = "0.8"
+serde = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.18", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }

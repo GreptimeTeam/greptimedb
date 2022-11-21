@@ -1,13 +1,25 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use clap::Parser;
 use common_telemetry::logging;
 use meta_srv::bootstrap;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
-use crate::error;
-use crate::error::Error;
-use crate::error::Result;
-use crate::toml_loader;
+use crate::error::{Error, Result};
+use crate::{error, toml_loader};
 
 #[derive(Parser)]
 pub struct Command {
@@ -92,13 +104,13 @@ mod tests {
     fn test_read_from_cmd() {
         let cmd = StartCommand {
             bind_addr: Some("127.0.0.1:3002".to_string()),
-            server_addr: Some("0.0.0.0:3002".to_string()),
+            server_addr: Some("127.0.0.1:3002".to_string()),
             store_addr: Some("127.0.0.1:2380".to_string()),
             config_file: None,
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
-        assert_eq!("0.0.0.0:3002".to_string(), options.server_addr);
+        assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
     }
 
@@ -115,8 +127,8 @@ mod tests {
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
-        assert_eq!("0.0.0.0:3002".to_string(), options.server_addr);
-        assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
-        assert_eq!(30, options.datanode_lease_secs);
+        assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
+        assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
+        assert_eq!(15, options.datanode_lease_secs);
     }
 }

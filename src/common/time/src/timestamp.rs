@@ -1,9 +1,24 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use core::default::Default;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
-use chrono::{offset::Local, DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
+use chrono::offset::Local;
+use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, ParseTimestampSnafu};
@@ -37,6 +52,21 @@ impl Timestamp {
     pub fn convert_to(&self, unit: TimeUnit) -> i64 {
         // TODO(hl): May result into overflow
         self.value * self.unit.factor() / unit.factor()
+    }
+
+    pub fn to_iso8601_string(&self) -> String {
+        let nano_factor = TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor();
+
+        let mut secs = self.convert_to(TimeUnit::Second);
+        let mut nsecs = self.convert_to(TimeUnit::Nanosecond) % nano_factor;
+
+        if nsecs < 0 {
+            secs -= 1;
+            nsecs += nano_factor;
+        }
+
+        let datetime = Utc.timestamp(secs, nsecs as u32);
+        format!("{}", datetime.format("%Y-%m-%d %H:%M:%S%.f%z"))
     }
 }
 
@@ -264,5 +294,28 @@ mod tests {
             "2020-09-08T13:42:29.0042+08:00",
             "2020-09-08 05:42:29.004200",
         );
+    }
+
+    #[test]
+    fn test_to_iso8601_string() {
+        let datetime_str = "2020-09-08 13:42:29.042+0000";
+        let ts = Timestamp::from_str(datetime_str).unwrap();
+        assert_eq!(datetime_str, ts.to_iso8601_string());
+
+        let ts_millis = 1668070237000;
+        let ts = Timestamp::from_millis(ts_millis);
+        assert_eq!("2022-11-10 08:50:37+0000", ts.to_iso8601_string());
+
+        let ts_millis = -1000;
+        let ts = Timestamp::from_millis(ts_millis);
+        assert_eq!("1969-12-31 23:59:59+0000", ts.to_iso8601_string());
+
+        let ts_millis = -1;
+        let ts = Timestamp::from_millis(ts_millis);
+        assert_eq!("1969-12-31 23:59:59.999+0000", ts.to_iso8601_string());
+
+        let ts_millis = -1001;
+        let ts = Timestamp::from_millis(ts_millis);
+        assert_eq!("1969-12-31 23:59:58.999+0000", ts.to_iso8601_string());
     }
 }

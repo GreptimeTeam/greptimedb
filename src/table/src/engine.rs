@@ -1,8 +1,36 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::fmt::{self, Display};
 use std::sync::Arc;
 
 use crate::error::Result;
 use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::TableRef;
+
+/// Represents a resolved path to a table of the form “catalog.schema.table”
+pub struct TableReference<'a> {
+    pub catalog: &'a str,
+    pub schema: &'a str,
+    pub table: &'a str,
+}
+
+impl<'a> Display for TableReference<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.catalog, self.schema, self.table)
+    }
+}
 
 /// Table engine abstraction.
 #[async_trait::async_trait]
@@ -37,11 +65,14 @@ pub trait TableEngine: Send + Sync {
     ) -> Result<TableRef>;
 
     /// Returns the table by it's name.
-    fn get_table(&self, ctx: &EngineContext, name: &str) -> Result<Option<TableRef>>;
+    fn get_table<'a>(
+        &self,
+        ctx: &EngineContext,
+        table_ref: &'a TableReference,
+    ) -> Result<Option<TableRef>>;
 
     /// Returns true when the given table is exists.
-    /// TODO(hl): support catalog and schema
-    fn table_exists(&self, ctx: &EngineContext, name: &str) -> bool;
+    fn table_exists<'a>(&self, ctx: &EngineContext, table_ref: &'a TableReference) -> bool;
 
     /// Drops the given table.
     async fn drop_table(&self, ctx: &EngineContext, request: DropTableRequest) -> Result<()>;
@@ -52,3 +83,19 @@ pub type TableEngineRef = Arc<dyn TableEngine>;
 /// Storage engine context.
 #[derive(Debug, Clone, Default)]
 pub struct EngineContext {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_reference() {
+        let table_ref = TableReference {
+            catalog: "greptime",
+            schema: "public",
+            table: "test",
+        };
+
+        assert_eq!("greptime.public.test", table_ref.to_string());
+    }
+}

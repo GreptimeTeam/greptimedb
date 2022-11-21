@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #![allow(clippy::all)]
 tonic::include_proto!("greptime.storage.write_batch.v1");
 
@@ -5,19 +19,16 @@ use std::sync::Arc;
 
 use common_base::BitVec;
 use common_error::prelude::*;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::{ScalarVector, ScalarVectorBuilder};
 use datatypes::schema;
-use datatypes::{
-    data_type::ConcreteDataType,
-    prelude::{ScalarVector, ScalarVectorBuilder},
-    vectors::{
-        BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, Float32Vector,
-        Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder,
-        Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector,
-        Int8VectorBuilder, StringVector, StringVectorBuilder, TimestampVector,
-        TimestampVectorBuilder, UInt16Vector, UInt16VectorBuilder, UInt32Vector,
-        UInt32VectorBuilder, UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
-        Vector, VectorRef,
-    },
+use datatypes::vectors::{
+    BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, Float32Vector,
+    Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder,
+    Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector,
+    Int8VectorBuilder, StringVector, StringVectorBuilder, TimestampVector, TimestampVectorBuilder,
+    UInt16Vector, UInt16VectorBuilder, UInt32Vector, UInt32VectorBuilder, UInt64Vector,
+    UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder, Vector, VectorRef,
 };
 use paste::paste;
 use snafu::OptionExt;
@@ -78,11 +89,9 @@ impl TryFrom<Schema> for schema::SchemaRef {
             .map(schema::ColumnSchema::try_from)
             .collect::<Result<Vec<_>>>()?;
 
-        let timestamp_index = schema.timestamp_index.map(|index| index.value as usize);
         let schema = Arc::new(
             schema::SchemaBuilder::try_from(column_schemas)
                 .context(ConvertSchemaSnafu)?
-                .timestamp_index(timestamp_index)
                 .build()
                 .context(ConvertSchemaSnafu)?,
         );
@@ -97,6 +106,7 @@ impl From<&schema::ColumnSchema> for ColumnSchema {
             name: cs.name.clone(),
             data_type: DataType::from(&cs.data_type).into(),
             is_nullable: cs.is_nullable(),
+            is_time_index: cs.is_time_index(),
         }
     }
 }
@@ -110,7 +120,8 @@ impl TryFrom<&ColumnSchema> for schema::ColumnSchema {
                 column_schema.name.clone(),
                 data_type.into(),
                 column_schema.is_nullable,
-            ))
+            )
+            .with_time_index(column_schema.is_time_index))
         } else {
             InvalidDataTypeSnafu {
                 data_type: column_schema.data_type,

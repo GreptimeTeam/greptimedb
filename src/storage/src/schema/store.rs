@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use common_error::prelude::*;
@@ -74,7 +88,6 @@ impl StoreSchema {
         StoreSchema::new(
             columns.columns().to_vec(),
             version,
-            columns.timestamp_key_index(),
             columns.row_key_end(),
             columns.user_column_end(),
         )
@@ -83,7 +96,6 @@ impl StoreSchema {
     pub(crate) fn new(
         columns: Vec<ColumnMetadata>,
         version: u32,
-        timestamp_key_index: usize,
         row_key_end: usize,
         user_column_end: usize,
     ) -> Result<StoreSchema> {
@@ -94,7 +106,6 @@ impl StoreSchema {
 
         let schema = SchemaBuilder::try_from(column_schemas)
             .context(metadata::ConvertSchemaSnafu)?
-            .timestamp_index(Some(timestamp_key_index))
             .version(version)
             .add_metadata(ROW_KEY_END_KEY, row_key_end.to_string())
             .add_metadata(USER_COLUMN_END_KEY, user_column_end.to_string())
@@ -222,6 +233,7 @@ mod tests {
     use super::*;
     use crate::read::Batch;
     use crate::schema::tests;
+    use crate::test_util::schema_util;
 
     fn check_chunk_batch(chunk: &ArrowChunk<Arc<dyn Array>>, batch: &Batch) {
         assert_eq!(5, chunk.columns().len());
@@ -234,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_store_schema() {
-        let region_schema = Arc::new(tests::new_region_schema(123, 1));
+        let region_schema = Arc::new(schema_util::new_region_schema(123, 1));
 
         // Checks StoreSchema.
         let store_schema = region_schema.store_schema();
@@ -252,7 +264,6 @@ mod tests {
         let expect_schema = SchemaBuilder::try_from(column_schemas)
             .unwrap()
             .version(123)
-            .timestamp_index(Some(1))
             .build()
             .unwrap();
         // Only compare column schemas since SchemaRef in StoreSchema also contains other metadata that only used

@@ -1,20 +1,34 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use mito::config::EngineConfig;
+use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
+use servers::Mode;
 use snafu::ResultExt;
-use table::engine::EngineContext;
-use table::engine::TableEngineRef;
+use table::engine::{EngineContext, TableEngineRef};
 use table::requests::CreateTableRequest;
-use table_engine::config::EngineConfig;
-use table_engine::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use tempdir::TempDir;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{CreateTableSnafu, Result};
-use crate::instance::Instance;
 use crate::sql::SqlHandler;
 
 /// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
@@ -32,6 +46,7 @@ pub fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGua
         storage: ObjectStoreConfig::File {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
         },
+        mode: Mode::Standalone,
         ..Default::default()
     };
     (
@@ -43,16 +58,20 @@ pub fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGua
     )
 }
 
-pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -> Result<()> {
+pub async fn create_test_table(
+    catalog_manager: &CatalogManagerRef,
+    sql_handler: &SqlHandler,
+    ts_type: ConcreteDataType,
+) -> Result<()> {
     let column_schemas = vec![
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("ts", ts_type, true),
+        ColumnSchema::new("ts", ts_type, true).with_time_index(true),
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = instance.sql_handler().table_engine();
+    let table_engine: TableEngineRef = sql_handler.table_engine();
     let table = table_engine
         .create_table(
             &EngineContext::default(),
@@ -65,7 +84,6 @@ pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -
                 schema: Arc::new(
                     SchemaBuilder::try_from(column_schemas)
                         .unwrap()
-                        .timestamp_index(Some(3))
                         .build()
                         .expect("ts is expected to be timestamp column"),
                 ),
@@ -78,8 +96,7 @@ pub async fn create_test_table(instance: &Instance, ts_type: ConcreteDataType) -
         .await
         .context(CreateTableSnafu { table_name })?;
 
-    let schema_provider = instance
-        .catalog_manager()
+    let schema_provider = catalog_manager
         .catalog(DEFAULT_CATALOG_NAME)
         .unwrap()
         .unwrap()

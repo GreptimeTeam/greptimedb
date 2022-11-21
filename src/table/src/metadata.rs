@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -116,7 +130,7 @@ impl TableMeta {
     ) -> Result<TableMetaBuilder> {
         match alter_kind {
             AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
-            AlterKind::RemoveColumns { names } => self.remove_columns(table_name, names),
+            AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
         }
     }
 
@@ -201,7 +215,6 @@ impl TableMeta {
                     table_name
                 ),
             })?
-            .timestamp_index(table_schema.timestamp_index())
             // Also bump the schema version.
             .version(table_schema.version() + 1);
         for (k, v) in table_schema.metadata().iter() {
@@ -271,18 +284,6 @@ impl TableMeta {
             .filter(|column_schema| !column_names.contains(&column_schema.name))
             .cloned()
             .collect();
-        // Find the index of the timestamp column.
-        let timestamp_column = table_schema.timestamp_column();
-        let timestamp_index = columns.iter().enumerate().find_map(|(idx, column_schema)| {
-            let is_timestamp = timestamp_column
-                .map(|c| c.name == column_schema.name)
-                .unwrap_or(false);
-            if is_timestamp {
-                Some(idx)
-            } else {
-                None
-            }
-        });
 
         let mut builder = SchemaBuilder::try_from_columns(columns)
             .with_context(|_| error::SchemaBuildSnafu {
@@ -291,8 +292,6 @@ impl TableMeta {
                     table_name
                 ),
             })?
-            // Need to use the newly computed timestamp index.
-            .timestamp_index(timestamp_index)
             // Also bump the schema version.
             .version(table_schema.version() + 1);
         for (k, v) in table_schema.metadata().iter() {
@@ -483,12 +482,12 @@ mod tests {
     fn new_test_schema() -> Schema {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
+                .with_time_index(true),
             ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
         ];
         SchemaBuilder::try_from(column_schemas)
             .unwrap()
-            .timestamp_index(Some(1))
             .version(123)
             .build()
             .unwrap()
@@ -577,7 +576,7 @@ mod tests {
         // Add more columns so we have enough candidate columns to remove.
         let meta = add_columns_to_meta(&meta);
 
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("col2"), String::from("my_field")],
         };
         let new_meta = meta
@@ -607,12 +606,12 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("col3", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
+                .with_time_index(true),
         ];
         let schema = Arc::new(
             SchemaBuilder::try_from(column_schemas)
                 .unwrap()
-                .timestamp_index(Some(3))
                 .version(123)
                 .build()
                 .unwrap(),
@@ -626,7 +625,7 @@ mod tests {
             .unwrap();
 
         // Remove columns in reverse order to test whether timestamp index is valid.
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("col3"), String::from("col1")],
         };
         let new_meta = meta
@@ -686,7 +685,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("unknown")],
         };
 
@@ -709,7 +708,7 @@ mod tests {
             .unwrap();
 
         // Remove column in primary key.
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("col1")],
         };
 
@@ -720,7 +719,7 @@ mod tests {
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
 
         // Remove timestamp column.
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("ts")],
         };
 

@@ -1,12 +1,25 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use common_telemetry::logging;
-use common_time::RangeMillis;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
-use store_api::storage::{AlterRequest, WriteContext, WriteRequest, WriteResponse};
+use store_api::storage::{AlterRequest, SequenceNumber, WriteContext, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
@@ -15,12 +28,13 @@ use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
-use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableSet};
+use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef};
+use crate::metadata::RegionMetadataRef;
 use crate::proto::wal::WalHeader;
-use crate::region::{RecoveredMetadataMap, RegionManifest, SharedDataRef};
+use crate::region::{RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef};
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
-use crate::version::{VersionControlRef, VersionEdit};
+use crate::version::{VersionControl, VersionControlRef, VersionEdit};
 use crate::wal::{Payload, Wal};
 use crate::write_batch::WriteBatch;
 
@@ -134,7 +148,7 @@ impl RegionWriter {
         // avoid other writers write to the region and switch the memtable safely.
         // Another potential benefit is that the write lock also protect against concurrent
         // alter request to the region.
-        let _inner = self.inner.lock().await;
+        let inner = self.inner.lock().await;
 
         let version_control = alter_ctx.version_control();
 
@@ -176,7 +190,12 @@ impl RegionWriter {
         let manifest_version = alter_ctx.manifest.update(action_list).await?;
 
         // Now we could switch memtables and apply the new metadata to the version.
-        version_control.freeze_mutable_and_apply_metadata(new_metadata, manifest_version);
+        let new_mutable = inner.memtable_builder.build(new_metadata.schema().clone());
+        version_control.freeze_mutable_and_apply_metadata(
+            new_metadata,
+            manifest_version,
+            new_mutable,
+        );
 
         self.persist_manifest_version(alter_ctx.wal, version_control, manifest_version)
             .await
@@ -250,7 +269,6 @@ impl<'a, S: LogStore> AlterContext<'a, S> {
 #[derive(Debug)]
 struct WriterInner {
     memtable_builder: MemtableBuilderRef,
-    last_memtable_id: MemtableId,
     flush_handle: Option<JobHandle>,
 }
 
@@ -258,7 +276,6 @@ impl WriterInner {
     fn new(memtable_builder: MemtableBuilderRef) -> WriterInner {
         WriterInner {
             memtable_builder,
-            last_memtable_id: 0,
             flush_handle: None,
         }
     }
@@ -274,7 +291,7 @@ impl WriterInner {
         mut request: WriteBatch,
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<WriteResponse> {
-        let time_ranges = self.preprocess_write(&request, &writer_ctx).await?;
+        self.preprocess_write(&writer_ctx).await?;
         let version_control = writer_ctx.version_control();
 
         let _lock = version_mutex.lock().await;
@@ -302,8 +319,8 @@ impl WriterInner {
             .await?;
 
         // Insert batch into memtable.
-        let mut inserter = Inserter::new(next_sequence, time_ranges, version.bucket_duration());
-        inserter.insert_memtables(&request, version.mutable_memtables())?;
+        let mut inserter = Inserter::new(next_sequence);
+        inserter.insert_memtable(&request, version.mutable_memtable())?;
 
         // Update committed_sequence to make current batch visible. The `&mut self` of WriterInner
         // guarantees the writer is exclusive.
@@ -338,23 +355,14 @@ impl WriterInner {
                     // There might be multiple metadata changes to be applied, so a loop is necessary.
                     if req_sequence > sequence_before_alter {
                         // This is the first request that use the new metadata.
-                        // It's safe to unwrap here. It's checked above. Move out metadata to avoid cloning it.
-                        let (_, (manifest_version, metadata)) = next_apply_metadata.take().unwrap();
-                        version_control.freeze_mutable_and_apply_metadata(
-                            Arc::new(metadata.try_into().context(
-                                error::InvalidRawRegionSnafu {
-                                    region: &writer_ctx.shared.name,
-                                },
-                            )?),
-                            manifest_version,
-                        );
-                        num_recovered_metadata += 1;
-                        logging::debug!(
-                            "Applied metadata to region: {} when replaying WAL: sequence={} manifest={} ",
-                            writer_ctx.shared.name,
+                        self.apply_metadata(
+                            &writer_ctx,
                             sequence_before_alter,
-                            manifest_version
-                        );
+                            next_apply_metadata,
+                            version_control,
+                        )?;
+
+                        num_recovered_metadata += 1;
                         next_apply_metadata = recovered_metadata.pop_first();
                     } else {
                         // Keep the next_apply_metadata until req_sequence > sequence_before_alter
@@ -364,7 +372,6 @@ impl WriterInner {
 
                 if let Some(request) = request {
                     num_requests += 1;
-                    let time_ranges = self.prepare_memtables(&request, version_control)?;
                     // Note that memtables of `Version` may be updated during replay.
                     let version = version_control.current();
 
@@ -373,7 +380,7 @@ impl WriterInner {
                     } else {
                         logging::error!(
                             "Sequence should not decrease during replay, found {} <= {}, \
-                            region_id: {}, region_name: {}, flushed_sequence: {}, num_requests: {}",
+                             region_id: {}, region_name: {}, flushed_sequence: {}, num_requests: {}",
                             req_sequence,
                             last_sequence,
                             writer_ctx.shared.id,
@@ -390,10 +397,32 @@ impl WriterInner {
                     }
                     // TODO(yingwen): Trigger flush if the size of memtables reach the flush threshold to avoid
                     // out of memory during replay, but we need to do it carefully to avoid dead lock.
-                    let mut inserter =
-                        Inserter::new(last_sequence, time_ranges, version.bucket_duration());
-                    inserter.insert_memtables(&request, version.mutable_memtables())?;
+                    let mut inserter = Inserter::new(last_sequence);
+                    inserter.insert_memtable(&request, version.mutable_memtable())?;
                 }
+            }
+
+            // Apply metadata after last WAL entry
+            while let Some((sequence_before_alter, _)) = next_apply_metadata {
+                assert!(
+                    sequence_before_alter >= last_sequence,
+                    "The sequence in metadata after last WAL entry is less than last sequence, \
+                         metadata sequence: {}, last_sequence: {}, region_id: {}, region_name: {}",
+                    sequence_before_alter,
+                    last_sequence,
+                    writer_ctx.shared.id,
+                    writer_ctx.shared.name
+                );
+
+                self.apply_metadata(
+                    &writer_ctx,
+                    sequence_before_alter,
+                    next_apply_metadata,
+                    version_control,
+                )?;
+
+                num_recovered_metadata += 1;
+                next_apply_metadata = recovered_metadata.pop_first();
             }
 
             version_control.set_committed_sequence(last_sequence);
@@ -412,15 +441,47 @@ impl WriterInner {
         Ok(())
     }
 
+    fn apply_metadata<S: LogStore>(
+        &self,
+        writer_ctx: &WriterContext<'_, S>,
+        sequence: SequenceNumber,
+        mut metadata: Option<RecoverdMetadata>,
+        version_control: &VersionControl,
+    ) -> Result<()> {
+        // It's safe to unwrap here, it's checked outside.
+        // Move out metadata to avoid cloning it.
+
+        let (_, (manifest_version, metadata)) = metadata.take().unwrap();
+        let region_metadata: RegionMetadataRef =
+            Arc::new(metadata.try_into().context(error::InvalidRawRegionSnafu {
+                region: &writer_ctx.shared.name,
+            })?);
+        let new_mutable = self
+            .memtable_builder
+            .build(region_metadata.schema().clone());
+        version_control.freeze_mutable_and_apply_metadata(
+            region_metadata,
+            manifest_version,
+            new_mutable,
+        );
+        logging::debug!(
+            "Applied metadata to region: {} when replaying WAL: sequence={} manifest={} ",
+            writer_ctx.shared.name,
+            sequence,
+            manifest_version
+        );
+
+        Ok(())
+    }
+
     /// Preprocess before write.
     ///
     /// Creates needed mutable memtables, ensures there is enough capacity in memtable and trigger
     /// flush if necessary. Returns time ranges of the input write batch.
     async fn preprocess_write<S: LogStore>(
         &mut self,
-        request: &WriteBatch,
         writer_ctx: &WriterContext<'_, S>,
-    ) -> Result<Vec<RangeMillis>> {
+    ) -> Result<()> {
         let version_control = writer_ctx.version_control();
         // Check whether memtable is full or flush should be triggered. We need to do this first since
         // switching memtables will clear all mutable memtables.
@@ -429,52 +490,16 @@ impl WriterInner {
             version_control,
             writer_ctx.flush_strategy,
         ) {
-            self.trigger_flush(
-                writer_ctx.shared,
-                writer_ctx.flush_scheduler,
-                writer_ctx.sst_layer,
-                writer_ctx.writer,
-                writer_ctx.wal,
-                writer_ctx.manifest,
-            )
-            .await?;
+            self.trigger_flush(writer_ctx).await?;
         }
 
-        self.prepare_memtables(request, version_control)
+        Ok(())
     }
 
-    /// Create all needed mutable memtables, returns time ranges that overlapped with `request`.
-    fn prepare_memtables(
-        &mut self,
-        request: &WriteBatch,
-        version_control: &VersionControlRef,
-    ) -> Result<Vec<RangeMillis>> {
-        let current_version = version_control.current();
-        let bucket_duration = current_version.bucket_duration();
-        let time_ranges = request
-            .time_ranges(bucket_duration)
-            .context(error::InvalidTimestampSnafu)?;
-        let mutable = current_version.mutable_memtables();
-        let mut memtables_to_add = MemtableSet::default();
-
-        // Pre-create all needed mutable memtables.
-        for range in &time_ranges {
-            if mutable.get_by_range(range).is_none()
-                && memtables_to_add.get_by_range(range).is_none()
-            {
-                // Memtable for this range is missing, need to create a new memtable.
-                let memtable_schema = current_version.schema().clone();
-                let id = self.alloc_memtable_id();
-                let memtable = self.memtable_builder.build(id, memtable_schema);
-                memtables_to_add.insert(*range, memtable);
-            }
-        }
-
-        if !memtables_to_add.is_empty() {
-            version_control.add_mutable(memtables_to_add);
-        }
-
-        Ok(time_ranges)
+    /// Create a new mutable memtable.
+    fn alloc_memtable(&self, version_control: &VersionControlRef) -> MemtableRef {
+        let memtable_schema = version_control.current().schema().clone();
+        self.memtable_builder.build(memtable_schema)
     }
 
     fn should_flush(
@@ -490,30 +515,23 @@ impl WriterInner {
         flush_strategy.should_flush(shared, mutable_bytes_allocated, total_bytes_allocated)
     }
 
-    async fn trigger_flush<S: LogStore>(
-        &mut self,
-        shared: &SharedDataRef,
-        flush_scheduler: &FlushSchedulerRef,
-        sst_layer: &AccessLayerRef,
-        writer: &RegionWriterRef,
-        wal: &Wal<S>,
-        manifest: &RegionManifest,
-    ) -> Result<()> {
-        let version_control = &shared.version_control;
+    async fn trigger_flush<S: LogStore>(&mut self, ctx: &WriterContext<'_, S>) -> Result<()> {
+        let version_control = &ctx.shared.version_control;
+        let new_mutable = self.alloc_memtable(version_control);
         // Freeze all mutable memtables so we can flush them later.
-        version_control.freeze_mutable();
+        version_control.freeze_mutable(new_mutable);
 
         if let Some(flush_handle) = self.flush_handle.take() {
             // Previous flush job is incomplete, wait util it is finished (write stall).
             // However the last flush job may fail, in which case, we just return error
             // and abort current write request. The flush handle is left empty, so the next
             // time we still have chance to trigger a new flush.
-            logging::info!("Write stall, region: {}", shared.name);
+            logging::info!("Write stall, region: {}", ctx.shared.name);
 
             // TODO(yingwen): We should release the write lock during waiting flush done, which
             // needs something like async condvar.
             flush_handle.join().await.map_err(|e| {
-                logging::error!(e; "Previous flush job failed, region: {}", shared.name);
+                logging::error!(e; "Previous flush job failed, region: {}", ctx.shared.name);
                 e
             })?;
         }
@@ -522,31 +540,28 @@ impl WriterInner {
         let (max_memtable_id, mem_to_flush) = current_version.memtables().memtables_to_flush();
 
         if max_memtable_id.is_none() {
-            logging::info!("No memtables to flush in region: {}", shared.name);
+            logging::info!("No memtables to flush in region: {}", ctx.shared.name);
             return Ok(());
         }
 
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
-            // In write thread, safe to use current commited sequence.
+            // In write thread, safe to use current committed sequence.
             flush_sequence: version_control.committed_sequence(),
-            shared: shared.clone(),
-            sst_layer: sst_layer.clone(),
-            writer: writer.clone(),
-            wal: wal.clone(),
-            manifest: manifest.clone(),
+            shared: ctx.shared.clone(),
+            sst_layer: ctx.sst_layer.clone(),
+            writer: ctx.writer.clone(),
+            wal: ctx.wal.clone(),
+            manifest: ctx.manifest.clone(),
         };
 
-        let flush_handle = flush_scheduler.schedule_flush(Box::new(flush_req)).await?;
+        let flush_handle = ctx
+            .flush_scheduler
+            .schedule_flush(Box::new(flush_req))
+            .await?;
         self.flush_handle = Some(flush_handle);
 
         Ok(())
-    }
-
-    #[inline]
-    fn alloc_memtable_id(&mut self) -> MemtableId {
-        self.last_memtable_id += 1;
-        self.last_memtable_id
     }
 }

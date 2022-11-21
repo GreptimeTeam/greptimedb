@@ -1,18 +1,31 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+pub(crate) mod check_leader;
 pub(crate) mod datanode_lease;
 pub(crate) mod response_header;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::HeartbeatResponse;
-use api::v1::meta::ResponseHeader;
+use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, ResponseHeader};
 use common_telemetry::info;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
 
 use crate::error::Result;
-use crate::service::store::kv::KvStoreRef;
+use crate::metasrv::Context;
 
 #[async_trait::async_trait]
 pub trait HeartbeatHandler: Send + Sync {
@@ -22,24 +35,6 @@ pub trait HeartbeatHandler: Send + Sync {
         ctx: &Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()>;
-}
-
-#[derive(Clone)]
-pub struct Context {
-    pub server_addr: String, // also server_id
-    pub kv_store: KvStoreRef,
-}
-
-impl Context {
-    #[inline]
-    pub fn server_addr(&self) -> &str {
-        &self.server_addr
-    }
-
-    #[inline]
-    pub fn kv_store(&self) -> KvStoreRef {
-        self.kv_store.clone()
-    }
 }
 
 #[derive(Debug, Default)]

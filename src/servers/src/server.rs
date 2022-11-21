@@ -1,11 +1,24 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::{error, info};
-use futures::future::AbortRegistration;
-use futures::future::{AbortHandle, Abortable};
+use futures::future::{AbortHandle, AbortRegistration, Abortable};
 use snafu::ResultExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -26,7 +39,7 @@ pub trait Server: Send {
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr>;
 }
 
-struct AccpetTask {
+struct AcceptTask {
     // `abort_handle` and `abort_registration` are used in pairs in shutting down the server.
     // They work like sender and receiver for aborting stream. When the server is shutting down,
     // calling `abort_handle.abort()` will "notify" `abort_registration` to stop emitting new
@@ -38,7 +51,7 @@ struct AccpetTask {
     join_handle: Option<JoinHandle<()>>,
 }
 
-impl AccpetTask {
+impl AcceptTask {
     async fn shutdown(&mut self, name: &str) -> Result<()> {
         match self.join_handle.take() {
             Some(join_handle) => {
@@ -105,7 +118,7 @@ impl AccpetTask {
 
 pub(crate) struct BaseTcpServer {
     name: String,
-    accept_task: Mutex<AccpetTask>,
+    accept_task: Mutex<AcceptTask>,
     io_runtime: Arc<Runtime>,
 }
 
@@ -114,7 +127,7 @@ impl BaseTcpServer {
         let (abort_handle, registration) = AbortHandle::new_pair();
         Self {
             name: name.into(),
-            accept_task: Mutex::new(AccpetTask {
+            accept_task: Mutex::new(AcceptTask {
                 abort_handle,
                 abort_registration: Some(registration),
                 join_handle: None,

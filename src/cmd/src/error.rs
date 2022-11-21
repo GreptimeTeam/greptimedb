@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 
 use common_error::prelude::*;
@@ -9,6 +23,12 @@ pub enum Error {
     StartDatanode {
         #[snafu(backtrace)]
         source: datanode::error::Error,
+    },
+
+    #[snafu(display("Failed to build frontend, source: {}", source))]
+    BuildFrontend {
+        #[snafu(backtrace)]
+        source: frontend::error::Error,
     },
 
     #[snafu(display("Failed to start frontend, source: {}", source))]
@@ -38,6 +58,9 @@ pub enum Error {
 
     #[snafu(display("Missing config, msg: {}", msg))]
     MissingConfig { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Illegal config: {}", msg))]
+    IllegalConfig { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -51,6 +74,8 @@ impl ErrorExt for Error {
             Error::ReadConfig { .. } | Error::ParseConfig { .. } | Error::MissingConfig { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::IllegalConfig { .. } => StatusCode::InvalidArguments,
+            Error::BuildFrontend { source, .. } => source.status_code(),
         }
     }
 

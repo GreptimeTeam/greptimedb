@@ -1,8 +1,21 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 tonic::include_proto!("greptime.v1.meta");
 
 use std::collections::HashMap;
-use std::hash::Hash;
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 
 pub const PROTOCOL_VERSION: u64 = 1;
 
@@ -71,11 +84,22 @@ impl ResponseHeader {
             error: Some(error),
         }
     }
+
+    #[inline]
+    pub fn is_not_leader(&self) -> bool {
+        if let Some(error) = &self.error {
+            if error.code == ErrorCode::NotLeader as i32 {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     NoActiveDatanodes = 1,
+    NotLeader = 2,
 }
 
 impl Error {
@@ -85,6 +109,24 @@ impl Error {
             code: ErrorCode::NoActiveDatanodes as i32,
             err_msg: "No active datanodes".to_string(),
         }
+    }
+
+    #[inline]
+    pub fn is_not_leader() -> Self {
+        Self {
+            code: ErrorCode::NotLeader as i32,
+            err_msg: "Current server is not leader".to_string(),
+        }
+    }
+}
+
+impl HeartbeatResponse {
+    #[inline]
+    pub fn is_not_leader(&self) -> bool {
+        if let Some(header) = &self.header {
+            return header.is_not_leader();
+        }
+        false
     }
 }
 

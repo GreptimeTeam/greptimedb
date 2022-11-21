@@ -1,53 +1,62 @@
-use std::collections::HashSet;
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    ops::Deref,
-    sync::Arc,
-};
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use api::{
-    helper::ColumnDataTypeWrapper,
-    v1::{
-        codec::InsertBatch,
-        column::{SemanticType, Values},
-        Column,
-    },
-};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
+use std::sync::Arc;
+
+use api::helper::ColumnDataTypeWrapper;
+use api::v1::codec::InsertBatch;
+use api::v1::column::{SemanticType, Values};
+use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateExpr};
 use common_base::BitVec;
 use common_time::timestamp::Timestamp;
-use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
-use datatypes::{data_type::ConcreteDataType, value::Value, vectors::VectorBuilder};
+use common_time::{Date, DateTime};
+use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::{ValueRef, VectorRef};
+use datatypes::schema::SchemaRef;
+use datatypes::value::Value;
+use datatypes::vectors::VectorBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
-use table::{
-    requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest, InsertRequest},
-    Table,
-};
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
+use table::Table;
 
 use crate::error::{
-    ColumnDataTypeSnafu, ColumnNotFoundSnafu, CreateSchemaSnafu, DecodeInsertSnafu,
-    DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu, MissingTimestampColumnSnafu, Result,
+    ColumnDataTypeSnafu, ColumnNotFoundSnafu, CreateVectorSnafu, DecodeInsertSnafu,
+    DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu, InvalidColumnProtoSnafu,
+    MissingTimestampColumnSnafu, Result,
 };
-
 const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
 const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
 
 #[inline]
-fn build_column_schema(column_name: &str, datatype: i32, nullable: bool) -> Result<ColumnSchema> {
-    let datatype_wrapper = ColumnDataTypeWrapper::try_new(datatype).context(ColumnDataTypeSnafu)?;
-
-    Ok(ColumnSchema::new(
-        column_name,
-        datatype_wrapper.into(),
-        nullable,
-    ))
+fn build_column_def(column_name: &str, datatype: i32, nullable: bool) -> ColumnDef {
+    ColumnDef {
+        name: column_name.to_string(),
+        datatype,
+        is_nullable: nullable,
+        default_constraint: None,
+    }
 }
 
 pub fn find_new_columns(
     schema: &SchemaRef,
     insert_batches: &[InsertBatch],
-) -> Result<Option<Vec<AddColumnRequest>>> {
-    let mut requests = Vec::default();
+) -> Result<Option<AddColumns>> {
+    let mut columns_to_add = Vec::default();
     let mut new_columns: HashSet<String> = HashSet::default();
 
     for InsertBatch { columns, row_count } in insert_batches {
@@ -65,10 +74,9 @@ pub fn find_new_columns(
             if schema.column_schema_by_name(column_name).is_none()
                 && !new_columns.contains(column_name)
             {
-                let column_schema = build_column_schema(column_name, *datatype, true)?;
-
-                requests.push(AddColumnRequest {
-                    column_schema,
+                let column_def = Some(build_column_def(column_name, *datatype, true));
+                columns_to_add.push(AddColumn {
+                    column_def,
                     is_key: *semantic_type == TAG_SEMANTIC_TYPE,
                 });
                 new_columns.insert(column_name.to_string());
@@ -76,10 +84,12 @@ pub fn find_new_columns(
         }
     }
 
-    if requests.is_empty() {
+    if columns_to_add.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(requests))
+        Ok(Some(AddColumns {
+            add_columns: columns_to_add,
+        }))
     }
 }
 
@@ -97,16 +107,104 @@ pub fn build_alter_table_request(
     }
 }
 
+pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
+    let wrapper = ColumnDataTypeWrapper::try_new(column.datatype).context(ColumnDataTypeSnafu)?;
+    let column_datatype = wrapper.datatype();
+
+    let rows = rows as usize;
+    let mut vector = VectorBuilder::with_capacity(wrapper.into(), rows);
+
+    if let Some(values) = &column.values {
+        let values = collect_column_values(column_datatype, values);
+        let mut values_iter = values.into_iter();
+
+        let null_mask = BitVec::from_slice(&column.null_mask);
+        let mut nulls_iter = null_mask.iter().by_vals().fuse();
+
+        for i in 0..rows {
+            if let Some(true) = nulls_iter.next() {
+                vector.push_null();
+            } else {
+                let value_ref = values_iter.next().context(InvalidColumnProtoSnafu {
+                    err_msg: format!(
+                        "value not found at position {} of column {}",
+                        i, &column.column_name
+                    ),
+                })?;
+                vector.try_push_ref(value_ref).context(CreateVectorSnafu)?;
+            }
+        }
+    } else {
+        (0..rows).for_each(|_| vector.push_null());
+    }
+    Ok(vector.finish())
+}
+
+fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Vec<ValueRef> {
+    macro_rules! collect_values {
+        ($value: expr, $mapper: expr) => {
+            $value.iter().map($mapper).collect::<Vec<ValueRef>>()
+        };
+    }
+
+    match column_datatype {
+        ColumnDataType::Boolean => collect_values!(values.bool_values, |v| ValueRef::from(*v)),
+        ColumnDataType::Int8 => collect_values!(values.i8_values, |v| ValueRef::from(*v as i8)),
+        ColumnDataType::Int16 => {
+            collect_values!(values.i16_values, |v| ValueRef::from(*v as i16))
+        }
+        ColumnDataType::Int32 => {
+            collect_values!(values.i32_values, |v| ValueRef::from(*v))
+        }
+        ColumnDataType::Int64 => {
+            collect_values!(values.i64_values, |v| ValueRef::from(*v as i64))
+        }
+        ColumnDataType::Uint8 => {
+            collect_values!(values.u8_values, |v| ValueRef::from(*v as u8))
+        }
+        ColumnDataType::Uint16 => {
+            collect_values!(values.u16_values, |v| ValueRef::from(*v as u16))
+        }
+        ColumnDataType::Uint32 => {
+            collect_values!(values.u32_values, |v| ValueRef::from(*v))
+        }
+        ColumnDataType::Uint64 => {
+            collect_values!(values.u64_values, |v| ValueRef::from(*v as u64))
+        }
+        ColumnDataType::Float32 => collect_values!(values.f32_values, |v| ValueRef::from(*v)),
+        ColumnDataType::Float64 => collect_values!(values.f64_values, |v| ValueRef::from(*v)),
+        ColumnDataType::Binary => {
+            collect_values!(values.binary_values, |v| ValueRef::from(v.as_slice()))
+        }
+        ColumnDataType::String => {
+            collect_values!(values.string_values, |v| ValueRef::from(v.as_str()))
+        }
+        ColumnDataType::Date => {
+            collect_values!(values.date_values, |v| ValueRef::Date(Date::new(*v)))
+        }
+        ColumnDataType::Datetime => {
+            collect_values!(values.datetime_values, |v| ValueRef::DateTime(
+                DateTime::new(*v)
+            ))
+        }
+        ColumnDataType::Timestamp => {
+            collect_values!(values.ts_millis_values, |v| ValueRef::Timestamp(
+                Timestamp::from_millis(*v)
+            ))
+        }
+    }
+}
+
 /// Try to build create table request from insert data.
-pub fn build_create_table_request(
+pub fn build_create_expr_from_insertion(
     catalog_name: &str,
     schema_name: &str,
-    table_id: TableId,
+    table_id: Option<TableId>,
     table_name: &str,
     insert_batches: &[InsertBatch],
-) -> Result<CreateTableRequest> {
+) -> Result<CreateExpr> {
     let mut new_columns: HashSet<String> = HashSet::default();
-    let mut column_schemas = Vec::default();
+    let mut column_defs = Vec::default();
     let mut primary_key_indices = Vec::default();
     let mut timestamp_index = usize::MAX;
 
@@ -125,7 +223,7 @@ pub fn build_create_table_request(
             if !new_columns.contains(column_name) {
                 let mut is_nullable = true;
                 match *semantic_type {
-                    TAG_SEMANTIC_TYPE => primary_key_indices.push(column_schemas.len()),
+                    TAG_SEMANTIC_TYPE => primary_key_indices.push(column_defs.len()),
                     TIMESTAMP_SEMANTIC_TYPE => {
                         ensure!(
                             timestamp_index == usize::MAX,
@@ -134,47 +232,50 @@ pub fn build_create_table_request(
                                 duplicated: column_name,
                             }
                         );
-                        timestamp_index = column_schemas.len();
+                        timestamp_index = column_defs.len();
                         // Timestamp column must not be null.
                         is_nullable = false;
                     }
                     _ => {}
                 }
 
-                let column_schema = build_column_schema(column_name, *datatype, is_nullable)?;
-                column_schemas.push(column_schema);
+                let column_def = build_column_def(column_name, *datatype, is_nullable);
+                column_defs.push(column_def);
                 new_columns.insert(column_name.to_string());
             }
         }
 
         ensure!(timestamp_index != usize::MAX, MissingTimestampColumnSnafu);
+        let timestamp_field_name = columns[timestamp_index].column_name.clone();
 
-        let schema = Arc::new(
-            SchemaBuilder::try_from(column_schemas)
-                .unwrap()
-                .timestamp_index(Some(timestamp_index))
-                .build()
-                .context(CreateSchemaSnafu)?,
-        );
+        let primary_keys = primary_key_indices
+            .iter()
+            .map(|idx| columns[*idx].column_name.clone())
+            .collect::<Vec<_>>();
 
-        return Ok(CreateTableRequest {
-            id: table_id,
-            catalog_name: catalog_name.to_string(),
-            schema_name: schema_name.to_string(),
+        let expr = CreateExpr {
+            catalog_name: Some(catalog_name.to_string()),
+            schema_name: Some(schema_name.to_string()),
             table_name: table_name.to_string(),
-            desc: None,
-            schema,
+            desc: Some("Created on insertion".to_string()),
+            column_defs,
+            time_index: timestamp_field_name,
+            primary_keys,
             create_if_not_exists: true,
-            primary_key_indices,
-            table_options: HashMap::new(),
-            region_numbers: vec![0],
-        });
+            table_options: Default::default(),
+            table_id,
+            region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
+        };
+
+        return Ok(expr);
     }
 
     IllegalInsertDataSnafu.fail()
 }
 
 pub fn insertion_expr_to_request(
+    catalog_name: &str,
+    schema_name: &str,
     table_name: &str,
     insert_batches: Vec<InsertBatch>,
     table: Arc<dyn Table>,
@@ -221,13 +322,15 @@ pub fn insertion_expr_to_request(
         .collect();
 
     Ok(InsertRequest {
+        catalog_name: catalog_name.to_string(),
+        schema_name: schema_name.to_string(),
         table_name: table_name.to_string(),
         columns_values,
     })
 }
 
 #[inline]
-pub fn insert_batches(bytes_vec: Vec<Vec<u8>>) -> Result<Vec<InsertBatch>> {
+pub fn insert_batches(bytes_vec: &[Vec<u8>]) -> Result<Vec<InsertBatch>> {
     bytes_vec
         .iter()
         .map(|bytes| bytes.deref().try_into().context(DecodeInsertSnafu))
@@ -359,64 +462,125 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
-    use api::v1::{
-        codec::InsertBatch,
-        column::{self, SemanticType, Values},
-        insert_expr, Column, ColumnDataType,
-    };
+    use api::helper::ColumnDataTypeWrapper;
+    use api::v1::codec::InsertBatch;
+    use api::v1::column::{self, SemanticType, Values};
+    use api::v1::{insert_expr, Column, ColumnDataType};
     use common_base::BitVec;
     use common_query::physical_plan::PhysicalPlanRef;
     use common_query::prelude::Expr;
     use common_time::timestamp::Timestamp;
-    use datatypes::{
-        data_type::ConcreteDataType,
-        schema::{ColumnSchema, SchemaBuilder, SchemaRef},
-        value::Value,
-    };
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+    use datatypes::value::Value;
+    use snafu::ResultExt;
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
     use table::Table;
 
     use super::{
-        build_column_schema, build_create_table_request, convert_values, find_new_columns,
-        insert_batches, insertion_expr_to_request, is_null, TAG_SEMANTIC_TYPE,
-        TIMESTAMP_SEMANTIC_TYPE,
+        build_create_expr_from_insertion, convert_values, find_new_columns, insert_batches,
+        insertion_expr_to_request, is_null, TAG_SEMANTIC_TYPE, TIMESTAMP_SEMANTIC_TYPE,
     };
+    use crate::error;
+    use crate::error::ColumnDataTypeSnafu;
+
+    #[inline]
+    fn build_column_schema(
+        column_name: &str,
+        datatype: i32,
+        nullable: bool,
+    ) -> error::Result<ColumnSchema> {
+        let datatype_wrapper =
+            ColumnDataTypeWrapper::try_new(datatype).context(ColumnDataTypeSnafu)?;
+
+        Ok(ColumnSchema::new(
+            column_name,
+            datatype_wrapper.into(),
+            nullable,
+        ))
+    }
 
     #[test]
     fn test_build_create_table_request() {
-        let table_id = 10;
+        let table_id = Some(10);
         let table_name = "test_metric";
 
-        assert!(build_create_table_request("", "", table_id, table_name, &[]).is_err());
+        assert!(build_create_expr_from_insertion("", "", table_id, table_name, &[]).is_err());
 
-        let insert_batches = insert_batches(mock_insert_batches()).unwrap();
+        let mock_batch_bytes = mock_insert_batches();
+        let insert_batches = insert_batches(&mock_batch_bytes).unwrap();
 
-        let req =
-            build_create_table_request("", "", table_id, table_name, &insert_batches).unwrap();
-        assert_eq!(table_id, req.id);
-        assert_eq!(table_name, req.table_name);
-        assert!(req.desc.is_none());
-        assert_eq!(vec![0], req.primary_key_indices);
+        let create_expr =
+            build_create_expr_from_insertion("", "", table_id, table_name, &insert_batches)
+                .unwrap();
 
-        let schema = req.schema;
-        assert_eq!(Some(3), schema.timestamp_index());
-        assert_eq!(4, schema.num_columns());
+        assert_eq!(table_id, create_expr.table_id);
+        assert_eq!(table_name, create_expr.table_name);
+        assert_eq!(Some("Created on insertion".to_string()), create_expr.desc);
+        assert_eq!(
+            vec![create_expr.column_defs[0].name.clone()],
+            create_expr.primary_keys
+        );
+
+        let column_defs = create_expr.column_defs;
+        assert_eq!(column_defs[3].name, create_expr.time_index);
+        assert_eq!(4, column_defs.len());
+
         assert_eq!(
             ConcreteDataType::string_datatype(),
-            schema.column_schema_by_name("host").unwrap().data_type
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    column_defs
+                        .iter()
+                        .find(|c| c.name == "host")
+                        .unwrap()
+                        .datatype
+                )
+                .unwrap()
+            )
         );
+
         assert_eq!(
             ConcreteDataType::float64_datatype(),
-            schema.column_schema_by_name("cpu").unwrap().data_type
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    column_defs
+                        .iter()
+                        .find(|c| c.name == "cpu")
+                        .unwrap()
+                        .datatype
+                )
+                .unwrap()
+            )
         );
+
         assert_eq!(
             ConcreteDataType::float64_datatype(),
-            schema.column_schema_by_name("memory").unwrap().data_type
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    column_defs
+                        .iter()
+                        .find(|c| c.name == "memory")
+                        .unwrap()
+                        .datatype
+                )
+                .unwrap()
+            )
         );
+
         assert_eq!(
             ConcreteDataType::timestamp_millis_datatype(),
-            schema.column_schema_by_name("ts").unwrap().data_type
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    column_defs
+                        .iter()
+                        .find(|c| c.name == "ts")
+                        .unwrap()
+                        .datatype
+                )
+                .unwrap()
+            )
         );
     }
 
@@ -424,36 +588,42 @@ mod tests {
     fn test_find_new_columns() {
         let mut columns = Vec::with_capacity(1);
         let cpu_column = build_column_schema("cpu", 10, true).unwrap();
-        let ts_column = build_column_schema("ts", 15, false).unwrap();
+        let ts_column = build_column_schema("ts", 15, false)
+            .unwrap()
+            .with_time_index(true);
         columns.push(cpu_column);
         columns.push(ts_column);
 
-        let schema = Arc::new(
-            SchemaBuilder::try_from(columns)
-                .unwrap()
-                .timestamp_index(Some(1))
-                .build()
-                .unwrap(),
-        );
+        let schema = Arc::new(SchemaBuilder::try_from(columns).unwrap().build().unwrap());
 
         assert!(find_new_columns(&schema, &[]).unwrap().is_none());
 
-        let insert_batches = insert_batches(mock_insert_batches()).unwrap();
-        let new_columns = find_new_columns(&schema, &insert_batches).unwrap().unwrap();
+        let mock_insert_bytes = mock_insert_batches();
+        let insert_batches = insert_batches(&mock_insert_bytes).unwrap();
+        let add_columns = find_new_columns(&schema, &insert_batches).unwrap().unwrap();
 
-        assert_eq!(2, new_columns.len());
-        let host_column = &new_columns[0];
+        assert_eq!(2, add_columns.add_columns.len());
+        let host_column = &add_columns.add_columns[0];
         assert!(host_column.is_key);
+
         assert_eq!(
             ConcreteDataType::string_datatype(),
-            host_column.column_schema.data_type
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(host_column.column_def.as_ref().unwrap().datatype)
+                    .unwrap()
+            )
         );
-        let memory_column = &new_columns[1];
+
+        let memory_column = &add_columns.add_columns[1];
         assert!(!memory_column.is_key);
+
         assert_eq!(
             ConcreteDataType::float64_datatype(),
-            memory_column.column_schema.data_type
-        )
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(memory_column.column_def.as_ref().unwrap().datatype)
+                    .unwrap()
+            )
+        );
     }
 
     #[test]
@@ -463,9 +633,12 @@ mod tests {
         let values = insert_expr::Values {
             values: mock_insert_batches(),
         };
-        let insert_batches = insert_batches(values.values).unwrap();
-        let insert_req = insertion_expr_to_request("demo", insert_batches, table).unwrap();
+        let insert_batches = insert_batches(&values.values).unwrap();
+        let insert_req =
+            insertion_expr_to_request("greptime", "public", "demo", insert_batches, table).unwrap();
 
+        assert_eq!("greptime", insert_req.catalog_name);
+        assert_eq!("public", insert_req.schema_name);
         assert_eq!("demo", insert_req.table_name);
 
         let host = insert_req.columns_values.get("host").unwrap();
@@ -532,13 +705,13 @@ mod tests {
                 ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
                 ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
                 ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true),
+                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true)
+                    .with_time_index(true),
             ];
 
             Arc::new(
                 SchemaBuilder::try_from(column_schemas)
                     .unwrap()
-                    .timestamp_index(Some(3))
                     .build()
                     .unwrap(),
             )

@@ -1,20 +1,34 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use snafu::OptionExt;
 use table::metadata::TableId;
+use table::table::TableIdProvider;
 use table::TableRef;
 
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::schema::SchemaProvider;
 use crate::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSystemTableRequest,
-    RegisterTableRequest, SchemaProviderRef,
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSchemaRequest,
+    RegisterSystemTableRequest, RegisterTableRequest, SchemaProviderRef,
 };
 
 /// Simple in-memory list of catalogs
@@ -42,14 +56,17 @@ impl Default for MemoryCatalogManager {
 }
 
 #[async_trait::async_trait]
+impl TableIdProvider for MemoryCatalogManager {
+    async fn next_table_id(&self) -> table::error::Result<TableId> {
+        Ok(self.table_id.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+#[async_trait::async_trait]
 impl CatalogManager for MemoryCatalogManager {
     async fn start(&self) -> Result<()> {
         self.table_id.store(MIN_USER_TABLE_ID, Ordering::Relaxed);
         Ok(())
-    }
-
-    async fn next_table_id(&self) -> Result<TableId> {
-        Ok(self.table_id.fetch_add(1, Ordering::Relaxed))
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
@@ -70,8 +87,28 @@ impl CatalogManager for MemoryCatalogManager {
             .map(|v| if v.is_some() { 0 } else { 1 })
     }
 
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+        let catalogs = self.catalogs.write().unwrap();
+        let catalog = catalogs
+            .get(&request.catalog)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?;
+        catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
+        Ok(1)
+    }
+
     async fn register_system_table(&self, _request: RegisterSystemTableRequest) -> Result<()> {
         unimplemented!()
+    }
+
+    fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
+        let catalogs = self.catalogs.read().unwrap();
+        if let Some(c) = catalogs.get(catalog) {
+            c.schema(schema)
+        } else {
+            Ok(None)
+        }
     }
 
     fn table(&self, catalog: &str, schema: &str, table_name: &str) -> Result<Option<TableRef>> {

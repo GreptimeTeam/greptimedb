@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use snafu::{ensure, ResultExt};
 
@@ -96,7 +110,8 @@ mod tests {
     ) -> SchemaBuilder {
         let mut column_schemas = vec![
             ColumnSchema::new("k0", ConcreteDataType::int32_datatype(), false),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false),
+            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
+                .with_time_index(true),
         ];
 
         if let Some(v0_constraint) = v0_constraint {
@@ -107,9 +122,7 @@ mod tests {
             );
         }
 
-        SchemaBuilder::try_from(column_schemas)
-            .unwrap()
-            .timestamp_index(Some(1))
+        SchemaBuilder::try_from(column_schemas).unwrap()
     }
 
     fn new_test_schema(v0_constraint: Option<Option<ColumnDefaultConstraint>>) -> SchemaRef {

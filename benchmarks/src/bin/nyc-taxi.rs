@@ -1,35 +1,41 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Use the taxi trip records from New York City dataset to bench. You can download the dataset from
 //! [here](https://www1.nyc.gov/site/tlc/about/tlc-trip-record-data.page).
 
 #![feature(once_cell)]
 #![allow(clippy::print_stdout)]
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Instant,
-};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
-use arrow::{
-    array::{ArrayRef, PrimitiveArray, StringArray, TimestampNanosecondArray},
-    datatypes::{DataType, Float64Type, Int64Type},
-    record_batch::RecordBatch,
-};
+use arrow::array::{ArrayRef, PrimitiveArray, StringArray, TimestampNanosecondArray};
+use arrow::datatypes::{DataType, Float64Type, Int64Type};
+use arrow::record_batch::RecordBatch;
 use clap::Parser;
-use client::{
-    admin::Admin,
-    api::v1::{
-        codec::InsertBatch, column::Values, insert_expr, Column, ColumnDataType, ColumnDef,
-        CreateExpr, InsertExpr,
-    },
-    Client, Database, Select,
-};
+use client::admin::Admin;
+use client::api::v1::codec::InsertBatch;
+use client::api::v1::column::Values;
+use client::api::v1::{insert_expr, Column, ColumnDataType, ColumnDef, CreateExpr, InsertExpr};
+use client::{Client, Database, Select};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use parquet::{
-    arrow::{ArrowReader, ParquetFileArrowReader},
-    file::{reader::FileReader, serialized_reader::SerializedFileReader},
-};
+use parquet::arrow::{ArrowReader, ParquetFileArrowReader};
+use parquet::file::reader::FileReader;
+use parquet::file::serialized_reader::SerializedFileReader;
 use tokio::task::JoinSet;
 
 const DATABASE_NAME: &str = "greptime";
@@ -97,11 +103,13 @@ async fn write_data(
         let row_count = record_batch.num_rows();
         let insert_batch = convert_record_batch(record_batch).into();
         let insert_expr = InsertExpr {
+            schema_name: "public".to_string(),
             table_name: TABLE_NAME.to_string(),
             expr: Some(insert_expr::Expr::Values(insert_expr::Values {
                 values: vec![insert_batch],
             })),
             options: HashMap::default(),
+            region_number: 0,
         };
         let now = Instant::now();
         db.insert(insert_expr).await.unwrap();
@@ -342,6 +350,8 @@ fn create_table_expr() -> CreateExpr {
         primary_keys: vec!["VendorID".to_string()],
         create_if_not_exists: false,
         table_options: Default::default(),
+        region_ids: vec![0],
+        table_id: Some(0),
     }
 }
 

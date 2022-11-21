@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +27,7 @@ use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
 use crate::create_testing_sql_query_handler;
 
-fn create_postgres_server(table: MemTable) -> Result<Box<dyn Server>> {
+fn create_postgres_server(table: MemTable, check_pwd: bool) -> Result<Box<dyn Server>> {
     let query_handler = create_testing_sql_query_handler(table);
     let io_runtime = Arc::new(
         RuntimeBuilder::default()
@@ -22,14 +36,18 @@ fn create_postgres_server(table: MemTable) -> Result<Box<dyn Server>> {
             .build()
             .unwrap(),
     );
-    Ok(Box::new(PostgresServer::new(query_handler, io_runtime)))
+    Ok(Box::new(PostgresServer::new(
+        query_handler,
+        check_pwd,
+        io_runtime,
+    )))
 }
 
 #[tokio::test]
 pub async fn test_start_postgres_server() -> Result<()> {
     let table = MemTable::default_numbers_table();
 
-    let pg_server = create_postgres_server(table)?;
+    let pg_server = create_postgres_server(table, false)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let result = pg_server.start(listening).await;
     assert!(result.is_ok());
@@ -43,12 +61,19 @@ pub async fn test_start_postgres_server() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_shutdown_pg_server() -> Result<()> {
+async fn test_shutdown_pg_server_range() -> Result<()> {
+    assert!(test_shutdown_pg_server(false).await.is_ok());
+    assert!(test_shutdown_pg_server(true).await.is_ok());
+    Ok(())
+}
+
+// #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_shutdown_pg_server(with_pwd: bool) -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
     let table = MemTable::default_numbers_table();
 
-    let postgres_server = create_postgres_server(table)?;
+    let postgres_server = create_postgres_server(table, with_pwd)?;
     let result = postgres_server.shutdown().await;
     assert!(result
         .unwrap_err()
@@ -63,7 +88,7 @@ async fn test_shutdown_pg_server() -> Result<()> {
     for _ in 0..2 {
         join_handles.push(tokio::spawn(async move {
             for _ in 0..1000 {
-                match create_connection(server_port).await {
+                match create_connection(server_port, with_pwd).await {
                     Ok(connection) => {
                         match connection
                             .simple_query("SELECT uint32s FROM numbers LIMIT 1")
@@ -107,7 +132,7 @@ async fn test_query_pg_concurrently() -> Result<()> {
 
     let table = MemTable::default_numbers_table();
 
-    let pg_server = create_postgres_server(table)?;
+    let pg_server = create_postgres_server(table, false)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = pg_server.start(listening).await.unwrap();
     let server_port = server_addr.port();
@@ -119,7 +144,7 @@ async fn test_query_pg_concurrently() -> Result<()> {
         join_handles.push(tokio::spawn(async move {
             let mut rand: StdRng = rand::SeedableRng::from_entropy();
 
-            let mut client = create_connection(server_port).await.unwrap();
+            let mut client = create_connection(server_port, false).await.unwrap();
 
             for _k in 0..expect_executed_queries_per_worker {
                 let expected: u32 = rand.gen_range(0..100);
@@ -140,7 +165,7 @@ async fn test_query_pg_concurrently() -> Result<()> {
                 // 1/100 chance to reconnect
                 let should_recreate_conn = expected == 1;
                 if should_recreate_conn {
-                    client = create_connection(server_port).await.unwrap();
+                    client = create_connection(server_port, false).await.unwrap();
                 }
             }
             expect_executed_queries_per_worker
@@ -154,8 +179,15 @@ async fn test_query_pg_concurrently() -> Result<()> {
     Ok(())
 }
 
-async fn create_connection(port: u16) -> std::result::Result<Client, PgError> {
-    let url = format!("host=127.0.0.1 port={} connect_timeout=2", port);
+async fn create_connection(port: u16, with_pwd: bool) -> std::result::Result<Client, PgError> {
+    let url = if with_pwd {
+        format!(
+            "host=127.0.0.1 port={} user=test_user password=test_pwd connect_timeout=2",
+            port
+        )
+    } else {
+        format!("host=127.0.0.1 port={} connect_timeout=2", port)
+    };
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     tokio::spawn(conn);
     Ok(client)

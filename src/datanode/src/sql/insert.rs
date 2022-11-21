@@ -1,29 +1,48 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use catalog::SchemaProviderRef;
 use common_query::Output;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::prelude::VectorBuilder;
-use snafu::ensure;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use datatypes::prelude::{ConcreteDataType, VectorBuilder};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
-use sql::statements::{self, insert::Insert};
+use sql::statements::insert::Insert;
+use sql::statements::{self};
+use table::engine::TableReference;
 use table::requests::*;
 
 use crate::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu, ParseSqlSnafu,
     ParseSqlValueSnafu, Result, TableNotFoundSnafu,
 };
 use crate::sql::{SqlHandler, SqlRequest};
 
 impl SqlHandler {
     pub(crate) async fn insert(&self, req: InsertRequest) -> Result<Output> {
-        let table_name = &req.table_name.to_string();
-        let table = self.get_table(table_name)?;
+        // FIXME(dennis): table_ref is used in InsertSnafu and the req is consumed
+        // in `insert`, so we have to clone catalog_name etc.
+        let table_ref = TableReference {
+            catalog: &req.catalog_name.to_string(),
+            schema: &req.schema_name.to_string(),
+            table: &req.table_name.to_string(),
+        };
 
-        let affected_rows = table
-            .insert(req)
-            .await
-            .context(InsertSnafu { table_name })?;
+        let table = self.get_table(&table_ref)?;
+
+        let affected_rows = table.insert(req).await.with_context(|_| InsertSnafu {
+            table_name: table_ref.to_string(),
+        })?;
 
         Ok(Output::AffectedRows(affected_rows))
     }
@@ -35,9 +54,8 @@ impl SqlHandler {
     ) -> Result<SqlRequest> {
         let columns = stmt.columns();
         let values = stmt.values().context(ParseSqlValueSnafu)?;
-        //TODO(dennis): table name may be in the form of `catalog.schema.table`,
-        //   but we don't process it right now.
-        let table_name = stmt.table_name();
+        let (catalog_name, schema_name, table_name) =
+            stmt.full_table_name().context(ParseSqlSnafu)?;
 
         let table = schema_provider
             .table(&table_name)
@@ -101,6 +119,8 @@ impl SqlHandler {
         }
 
         Ok(SqlRequest::Insert(InsertRequest {
+            catalog_name,
+            schema_name,
             table_name,
             columns_values: columns_builders
                 .into_iter()

@@ -1,27 +1,53 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::sync::Arc;
 use std::time::Duration;
-use std::{fs, path, sync::Arc};
+use std::{fs, path};
 
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
-use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
+use log_store::fs::config::LogConfig;
+use log_store::fs::log::LocalFileLogStore;
 use meta_client::client::{MetaClient, MetaClientBuilder};
-use object_store::{services::fs::Builder, util, ObjectStore};
+use meta_client::MetaClientOpts;
+use mito::config::EngineConfig as TableEngineConfig;
+use mito::engine::MitoEngine;
+use object_store::layers::LoggingLayer;
+use object_store::services::fs::Builder;
+use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
+use servers::Mode;
 use snafu::prelude::*;
-use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
-use table_engine::config::EngineConfig as TableEngineConfig;
-use table_engine::engine::MitoEngine;
+use storage::config::EngineConfig as StorageEngineConfig;
+use storage::EngineImpl;
+use table::table::TableIdProviderRef;
 
-use crate::datanode::{DatanodeOptions, MetaClientOpts, Mode, ObjectStoreConfig};
-use crate::error::{self, CatalogSnafu, MetaClientInitSnafu, NewCatalogSnafu, Result};
+use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
+use crate::error::{
+    self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
+    NewCatalogSnafu, Result,
+};
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
 use crate::server::grpc::plan::PhysicalPlanner;
 use crate::sql::SqlHandler;
 
 mod grpc;
+mod script;
 mod sql;
 
 pub(crate) type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
@@ -33,8 +59,9 @@ pub struct Instance {
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) physical_planner: PhysicalPlanner,
     pub(crate) script_executor: ScriptExecutor,
+    pub(crate) table_id_provider: Option<TableIdProviderRef>,
     #[allow(unused)]
-    pub(crate) meta_client: Option<MetaClient>,
+    pub(crate) meta_client: Option<Arc<MetaClient>>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
 }
 
@@ -48,7 +75,14 @@ impl Instance {
         let meta_client = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => {
-                Some(new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?)
+                let meta_client = new_metasrv_client(
+                    opts.node_id.context(MissingNodeIdSnafu)?,
+                    opts.meta_client_opts
+                        .as_ref()
+                        .context(MissingMetasrvOptsSnafu)?,
+                )
+                .await?;
+                Some(Arc::new(meta_client))
             }
         };
 
@@ -63,7 +97,7 @@ impl Instance {
         ));
 
         // create remote catalog manager
-        let (catalog_manager, factory) = match opts.mode {
+        let (catalog_manager, factory, table_id_provider) = match opts.mode {
             Mode::Standalone => {
                 let catalog = Arc::new(
                     catalog::local::LocalCatalogManager::try_new(table_engine.clone())
@@ -71,30 +105,34 @@ impl Instance {
                         .context(CatalogSnafu)?,
                 );
                 let factory = QueryEngineFactory::new(catalog.clone());
-                (catalog as CatalogManagerRef, factory)
+                (
+                    catalog.clone() as CatalogManagerRef,
+                    factory,
+                    Some(catalog as TableIdProviderRef),
+                )
             }
 
             Mode::Distributed => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
                     table_engine.clone(),
-                    opts.node_id,
+                    opts.node_id.context(MissingNodeIdSnafu)?,
                     Arc::new(MetaKvBackend {
                         client: meta_client.as_ref().unwrap().clone(),
                     }),
                 ));
                 let factory = QueryEngineFactory::new(catalog.clone());
-                (catalog as CatalogManagerRef, factory)
+                (catalog as CatalogManagerRef, factory, None)
             }
         };
 
-        let query_engine = factory.query_engine().clone();
+        let query_engine = factory.query_engine();
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
             Mode::Distributed => Some(HeartbeatTask::new(
-                opts.node_id, /*node id not set*/
+                opts.node_id.context(MissingNodeIdSnafu)?,
                 opts.rpc_addr.clone(),
                 meta_client.as_ref().unwrap().clone(),
             )),
@@ -107,6 +145,7 @@ impl Instance {
             script_executor,
             meta_client,
             heartbeat_task,
+            table_id_provider,
         })
     }
 
@@ -146,7 +185,9 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         .build()
         .context(error::InitBackendSnafu { dir: &data_dir })?;
 
-    Ok(ObjectStore::new(accessor))
+    let object_store = ObjectStore::new(accessor).layer(LoggingLayer); // Add logging
+
+    Ok(object_store)
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.
@@ -166,7 +207,7 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Resul
         .channel_manager(channel_manager)
         .build();
     meta_client
-        .start(&[&meta_config.metasrv_addr])
+        .start(&meta_config.metasrv_addrs)
         .await
         .context(MetaClientInitSnafu)?;
 

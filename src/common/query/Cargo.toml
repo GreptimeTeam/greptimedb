@@ -2,22 +2,21 @@
 name = "common-query"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [dependencies]
 async-trait = "0.1"
 common-error = { path = "../error" }
 common-recordbatch = { path = "../recordbatch" }
 common-time = { path = "../time" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = ["simd"] }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
+    "simd",
+] }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 statrs = "0.15"
-
-[dependencies.arrow]
-package = "arrow2"
-version = "0.10"
 
 [dev-dependencies]
 common-base = { path = "../base" }

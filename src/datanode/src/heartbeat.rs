@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +28,7 @@ pub struct HeartbeatTask {
     node_id: u64,
     server_addr: String,
     running: Arc<AtomicBool>,
-    meta_client: MetaClient,
+    meta_client: Arc<MetaClient>,
     interval: u64,
 }
 
@@ -26,7 +40,7 @@ impl Drop for HeartbeatTask {
 
 impl HeartbeatTask {
     /// Create a new heartbeat task instance.
-    pub fn new(node_id: u64, server_addr: String, meta_client: MetaClient) -> Self {
+    pub fn new(node_id: u64, server_addr: String, meta_client: Arc<MetaClient>) -> Self {
         Self {
             node_id,
             server_addr,

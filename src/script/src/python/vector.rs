@@ -1,43 +1,44 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::ops::Deref;
 use std::sync::Arc;
 
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
-use datatypes::arrow;
-use datatypes::arrow::array::BooleanArray;
+use datatypes::arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
 use datatypes::arrow::compute;
+use datatypes::arrow::compute::cast::{self, CastOptions};
+use datatypes::arrow::compute::{arithmetics, comparison};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::scalar::{PrimitiveScalar, Scalar};
-use datatypes::arrow::{
-    array::{Array, ArrayRef, PrimitiveArray},
-    compute::{
-        arithmetics,
-        cast::{self, CastOptions},
-        comparison,
-    },
-};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Value;
 use datatypes::value::OrderedFloat;
-use datatypes::{
-    value,
-    vectors::{Helper, NullVector, VectorBuilder, VectorRef},
-};
-use rustpython_vm::function::{Either, PyComparisonValue};
-use rustpython_vm::types::{Comparable, PyComparisonOp};
+use datatypes::vectors::{Helper, NullVector, VectorBuilder, VectorRef};
+use datatypes::{arrow, value};
+use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr};
+use rustpython_vm::function::{Either, OptionalArg, PyComparisonValue};
+use rustpython_vm::protocol::{PyMappingMethods, PySequenceMethods};
+use rustpython_vm::sliceable::{SaturatedSlice, SequenceIndex, SequenceIndexOp};
+use rustpython_vm::types::{AsMapping, AsSequence, Comparable, PyComparisonOp};
 use rustpython_vm::{
-    builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr},
-    function::OptionalArg,
-    protocol::{PyMappingMethods, PySequenceMethods},
-    pyclass, pyimpl,
-    sliceable::{SaturatedSlice, SequenceIndex, SequenceIndexOp},
-    types::{AsMapping, AsSequence},
-    AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    pyclass, pyimpl, AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
-use crate::python::utils::is_instance;
-use crate::python::utils::PyVectorRef;
+use crate::python::utils::{is_instance, PyVectorRef};
 
 #[pyclass(module = false, name = "vector")]
 #[derive(PyPayload, Debug)]
@@ -449,7 +450,7 @@ impl PyVector {
     #[pymethod(magic)]
     fn rfloordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            // FIXME: DataType convert problem, target_type should be infered?
+            // FIXME: DataType convert problem, target_type should be inferred?
             self.scalar_arith_op(other, Some(DataType::Int64), arrow2_rfloordiv_scalar, vm)
         } else {
             self.arith_op(
@@ -481,7 +482,7 @@ impl PyVector {
     // The Comparable Trait only support normal cmp
     // (yes there is a slot_richcompare function, but it is not used in anywhere)
     // so use our own function
-    // TODO(discord9): test those funciton
+    // TODO(discord9): test those function
 
     #[pymethod(name = "eq")]
     #[pymethod(magic)]
@@ -675,7 +676,7 @@ impl PyVector {
         }
     }
 
-    /// Unsupport
+    /// Unsupported
     /// TODO(discord9): make it work
     #[allow(unused)]
     fn setitem_by_index(
@@ -688,7 +689,7 @@ impl PyVector {
     }
 }
 
-/// get corrsponding arrow op function according to given PyComaprsionOp
+/// get corresponding arrow op function according to given PyComaprsionOp
 ///
 /// TODO(discord9): impl scalar version function
 fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> Box<dyn Array> {
@@ -707,7 +708,7 @@ fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> Box<dy
     }
 }
 
-/// get corrsponding arrow scalar op function according to given PyComaprsionOp
+/// get corresponding arrow scalar op function according to given PyComaprsionOp
 ///
 /// TODO(discord9): impl scalar version function
 fn get_arrow_scalar_op(
@@ -1033,7 +1034,9 @@ pub mod tests {
     use std::sync::Arc;
 
     use datatypes::vectors::{Float32Vector, Int32Vector, NullVector};
-    use rustpython_vm::{builtins::PyList, class::PyClassImpl, protocol::PySequence};
+    use rustpython_vm::builtins::PyList;
+    use rustpython_vm::class::PyClassImpl;
+    use rustpython_vm::protocol::PySequence;
     use value::Value;
 
     use super::*;

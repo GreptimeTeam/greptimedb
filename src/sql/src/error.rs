@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 
 use common_error::prelude::*;
@@ -19,7 +33,7 @@ pub enum Error {
     Unsupported { sql: String, keyword: String },
 
     #[snafu(display(
-        "Unexpected token while parsing SQL statement: {}, expected: {}, found: {}, source: {}",
+        "Unexpected token while parsing SQL statement: {}, expected: '{}', found: {}, source: {}",
         sql,
         expected,
         actual,
@@ -92,6 +106,24 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Unsupported ALTER TABLE statement: {}", msg))]
+    UnsupportedAlterTableStatement { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to serialize column default constraint, source: {}", source))]
+    SerializeColumnDefaultConstraint {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to convert data type to gRPC data type defined in proto, source: {}",
+        source
+    ))]
+    ConvertToGrpcDataType {
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -112,6 +144,9 @@ impl ErrorExt for Error {
             InvalidDatabaseName { .. } | ColumnTypeMismatch { .. } | InvalidTableName { .. } => {
                 StatusCode::InvalidArguments
             }
+            UnsupportedAlterTableStatement { .. } => StatusCode::InvalidSyntax,
+            SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
+            ConvertToGrpcDataType { source, .. } => source.status_code(),
         }
     }
 

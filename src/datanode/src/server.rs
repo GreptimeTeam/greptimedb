@@ -1,86 +1,94 @@
-pub mod grpc;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
+use std::default::Default;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
+use common_telemetry::tracing::log::info;
 use servers::grpc::GrpcServer;
-use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
-use servers::postgres::PostgresServer;
 use servers::server::Server;
+use servers::Mode;
 use snafu::ResultExt;
-use tokio::try_join;
 
 use crate::datanode::DatanodeOptions;
-use crate::error::{self, Result};
+use crate::error::{ParseAddrSnafu, Result, RuntimeResourceSnafu, StartServerSnafu};
 use crate::instance::InstanceRef;
+
+pub mod grpc;
 
 /// All rpc services.
 pub struct Services {
-    http_server: HttpServer,
     grpc_server: GrpcServer,
-    mysql_server: Box<dyn Server>,
-    postgres_server: Box<dyn Server>,
+    mysql_server: Option<Box<dyn Server>>,
 }
 
 impl Services {
-    pub fn try_new(instance: InstanceRef, opts: &DatanodeOptions) -> Result<Self> {
-        let mysql_io_runtime = Arc::new(
-            RuntimeBuilder::default()
-                .worker_threads(opts.mysql_runtime_size as usize)
-                .thread_name("mysql-io-handlers")
-                .build()
-                .context(error::RuntimeResourceSnafu)?,
-        );
-        let postgres_io_runtime = Arc::new(
-            RuntimeBuilder::default()
-                .worker_threads(opts.postgres_runtime_size as usize)
-                .thread_name("postgres-io-handlers")
-                .build()
-                .context(error::RuntimeResourceSnafu)?,
-        );
+    pub async fn try_new(instance: InstanceRef, opts: &DatanodeOptions) -> Result<Self> {
         let grpc_runtime = Arc::new(
             RuntimeBuilder::default()
                 .worker_threads(opts.rpc_runtime_size as usize)
                 .thread_name("grpc-io-handlers")
                 .build()
-                .context(error::RuntimeResourceSnafu)?,
+                .context(RuntimeResourceSnafu)?,
         );
+
+        let mysql_server = match opts.mode {
+            Mode::Standalone => {
+                info!("Disable MySQL server on datanode when running in standalone mode");
+                None
+            }
+            Mode::Distributed => {
+                let mysql_io_runtime = Arc::new(
+                    RuntimeBuilder::default()
+                        .worker_threads(opts.mysql_runtime_size as usize)
+                        .thread_name("mysql-io-handlers")
+                        .build()
+                        .context(RuntimeResourceSnafu)?,
+                );
+                Some(MysqlServer::create_server(
+                    instance.clone(),
+                    mysql_io_runtime,
+                ))
+            }
+        };
+
         Ok(Self {
-            http_server: HttpServer::new(instance.clone()),
-            grpc_server: GrpcServer::new(instance.clone(), instance.clone(), grpc_runtime),
-            mysql_server: MysqlServer::create_server(instance.clone(), mysql_io_runtime),
-            postgres_server: Box::new(PostgresServer::new(instance, postgres_io_runtime)),
+            grpc_server: GrpcServer::new(instance.clone(), instance, grpc_runtime),
+            mysql_server,
         })
     }
 
-    // TODO(LFC): make servers started on demand (not starting mysql if no needed, for example)
     pub async fn start(&mut self, opts: &DatanodeOptions) -> Result<()> {
-        let http_addr: SocketAddr = opts.http_addr.parse().context(error::ParseAddrSnafu {
-            addr: &opts.http_addr,
-        })?;
-
-        let grpc_addr: SocketAddr = opts.rpc_addr.parse().context(error::ParseAddrSnafu {
+        let grpc_addr: SocketAddr = opts.rpc_addr.parse().context(ParseAddrSnafu {
             addr: &opts.rpc_addr,
         })?;
 
-        let mysql_addr: SocketAddr = opts.mysql_addr.parse().context(error::ParseAddrSnafu {
-            addr: &opts.mysql_addr,
-        })?;
+        let mut res = vec![self.grpc_server.start(grpc_addr)];
+        if let Some(mysql_server) = &self.mysql_server {
+            let mysql_addr = &opts.mysql_addr;
+            let mysql_addr: SocketAddr = mysql_addr
+                .parse()
+                .context(ParseAddrSnafu { addr: mysql_addr })?;
+            res.push(mysql_server.start(mysql_addr));
+        };
 
-        let postgres_addr: SocketAddr =
-            opts.postgres_addr.parse().context(error::ParseAddrSnafu {
-                addr: &opts.postgres_addr,
-            })?;
-
-        try_join!(
-            self.http_server.start(http_addr),
-            self.grpc_server.start(grpc_addr),
-            self.mysql_server.start(mysql_addr),
-            self.postgres_server.start(postgres_addr),
-        )
-        .context(error::StartServerSnafu)?;
+        futures::future::try_join_all(res)
+            .await
+            .context(StartServerSnafu)?;
         Ok(())
     }
 }

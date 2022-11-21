@@ -1,9 +1,23 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Signature module contains foundational types that are used to represent signatures, types,
 //! and return types of functions.
 //! Copied and modified from datafusion.
-use arrow::datatypes::DataType as ArrowDataType;
 pub use datafusion::physical_plan::functions::Volatility;
 use datafusion_expr::{Signature as DfSignature, TypeSignature as DfTypeSignature};
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 
@@ -39,7 +53,7 @@ pub struct Signature {
 }
 
 #[inline]
-fn concret_types_to_arrow_types(ts: Vec<ConcreteDataType>) -> Vec<ArrowDataType> {
+fn concrete_types_to_arrow_types(ts: Vec<ConcreteDataType>) -> Vec<ArrowDataType> {
     ts.iter().map(ConcreteDataType::as_arrow_type).collect()
 }
 
@@ -104,14 +118,14 @@ impl From<TypeSignature> for DfTypeSignature {
     fn from(type_signature: TypeSignature) -> DfTypeSignature {
         match type_signature {
             TypeSignature::Variadic(types) => {
-                DfTypeSignature::Variadic(concret_types_to_arrow_types(types))
+                DfTypeSignature::Variadic(concrete_types_to_arrow_types(types))
             }
             TypeSignature::VariadicEqual => DfTypeSignature::VariadicEqual,
             TypeSignature::Uniform(n, types) => {
-                DfTypeSignature::Uniform(n, concret_types_to_arrow_types(types))
+                DfTypeSignature::Uniform(n, concrete_types_to_arrow_types(types))
             }
             TypeSignature::Exact(types) => {
-                DfTypeSignature::Exact(concret_types_to_arrow_types(types))
+                DfTypeSignature::Exact(concrete_types_to_arrow_types(types))
             }
             TypeSignature::Any(n) => DfTypeSignature::Any(n),
             TypeSignature::OneOf(ts) => {
@@ -129,7 +143,7 @@ impl From<Signature> for DfSignature {
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::DataType;
+    use datatypes::arrow::datatypes::DataType;
 
     use super::*;
 
