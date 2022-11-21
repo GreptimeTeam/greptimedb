@@ -14,7 +14,7 @@
 
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions};
+use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
 use meta_client::MetaClientOpts;
 use servers::Mode;
 use snafu::ResultExt;
