@@ -636,7 +636,7 @@ impl GrpcQueryHandler for Instance {
         if let Some(expr) = &query.expr {
             match expr {
                 Expr::Insert(insert) => {
-                    // TODO(fys): refact it, avoid clone
+                    // TODO(fys): refactor, avoid clone
                     let result = self.handle_insert(insert.clone()).await;
                     result
                         .map(|o| match o {
