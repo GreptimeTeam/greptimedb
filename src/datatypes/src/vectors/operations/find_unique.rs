@@ -44,7 +44,7 @@ pub(crate) fn find_unique_scalar<'a, T: ScalarVector>(
         }
     }
 
-    // Marks first element as selcted if it is different from previous element, otherwise
+    // Marks first element as selected if it is different from previous element, otherwise
     // keep selected bitmap unchanged.
     let is_first_not_duplicate = prev_vector
         .map(|pv| {

@@ -235,7 +235,7 @@ macro_rules! bind_call_unary_math_function {
 
 /// The macro for binding function in `datafusion_physical_expr::expressions`(most of them are aggregate function)
 ///
-/// - first arguements is the name of datafusion expression function like `Avg`
+/// - first arguments is the name of datafusion expression function like `Avg`
 /// - second is the python virtual machine ident `vm`
 /// - following is the actual args passing in(as a slice).i.e.`&[values.to_arrow_array()]`
 /// - the data type of passing in args, i.e: `Datatype::Float64`
@@ -259,7 +259,7 @@ fn from_df_err(err: DataFusionError, vm: &VirtualMachine) -> PyBaseExceptionRef 
     vm.new_runtime_error(format!("Data Fusion Error: {err:#?}"))
 }
 
-/// evalute Aggregate Expr using its backing accumulator
+/// evaluate Aggregate Expr using its backing accumulator
 fn eval_aggr_fn<T: AggregateExpr>(
     aggr: T,
     values: &[ArrayRef],
@@ -1120,7 +1120,7 @@ pub(crate) mod greptime_builtin {
                 State::Num(v) => {
                     if cur_idx + 1 > parsed.len() {
                         return Err(vm.new_runtime_error(
-                            "Expect a spearator after number, found nothing!".to_string(),
+                            "Expect a separator after number, found nothing!".to_string(),
                         ));
                     }
                     let nxt = &parsed[cur_idx + 1];
@@ -1128,7 +1128,7 @@ pub(crate) mod greptime_builtin {
                         tot_time += v * factor(sep, vm)?;
                     } else {
                         return Err(vm.new_runtime_error(format!(
-                            "Expect a spearator after number, found `{nxt:#?}`"
+                            "Expect a separator after number, found `{nxt:#?}`"
                         )));
                     }
                     cur_idx += 2;

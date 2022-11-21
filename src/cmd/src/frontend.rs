@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use clap::Parser;
-use frontend::frontend::{Frontend, FrontendOptions, Mode};
+use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::Instance;
@@ -21,6 +21,7 @@ use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use meta_client::MetaClientOpts;
+use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};

@@ -43,11 +43,11 @@ use common_telemetry::{debug, error, info};
 use distributed::DistInstance;
 use meta_client::client::MetaClientBuilder;
 use meta_client::MetaClientOpts;
-use servers::error as server_error;
 use servers::query_handler::{
     GrpcAdminHandler, GrpcQueryHandler, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
     PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
 };
+use servers::{error as server_error, Mode};
 use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
@@ -64,7 +64,7 @@ use crate::error::{
     SchemaNotFoundSnafu, SelectSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
-use crate::frontend::{FrontendOptions, Mode};
+use crate::frontend::FrontendOptions;
 use crate::sql::insert_to_request;
 use crate::table::route::TableRoutes;
 

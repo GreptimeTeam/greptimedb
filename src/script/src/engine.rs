@@ -51,7 +51,7 @@ pub trait ScriptEngine {
     ) -> std::result::Result<Self::Script, Self::Error>;
 }
 
-/// Evalute script context
+/// Evaluate script context
 #[derive(Debug, Default)]
 pub struct EvalContext {}
 

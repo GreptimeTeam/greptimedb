@@ -43,7 +43,7 @@ async fn run() {
 
 fn insert_batches() -> Vec<Vec<u8>> {
     const SEMANTIC_TAG: i32 = 0;
-    const SEMANTIC_FEILD: i32 = 1;
+    const SEMANTIC_FIELD: i32 = 1;
     const SEMANTIC_TS: i32 = 2;
 
     let row_count = 4;
@@ -71,7 +71,7 @@ fn insert_batches() -> Vec<Vec<u8>> {
     };
     let cpu_column = Column {
         column_name: "cpu".to_string(),
-        semantic_type: SEMANTIC_FEILD,
+        semantic_type: SEMANTIC_FIELD,
         values: Some(cpu_vals),
         null_mask: vec![2],
         ..Default::default()
@@ -83,7 +83,7 @@ fn insert_batches() -> Vec<Vec<u8>> {
     };
     let mem_column = Column {
         column_name: "memory".to_string(),
-        semantic_type: SEMANTIC_FEILD,
+        semantic_type: SEMANTIC_FIELD,
         values: Some(mem_vals),
         null_mask: vec![4],
         ..Default::default()

@@ -21,15 +21,14 @@ use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
 use common_insert::column_to_vector;
-use servers::error as server_error;
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::InfluxdbLineProtocolHandler;
+use servers::{error as server_error, Mode};
 use snafu::{OptionExt, ResultExt};
 use table::requests::InsertRequest;
 
 use crate::error;
 use crate::error::{DeserializeInsertBatchSnafu, InsertBatchToRequestSnafu, Result};
-use crate::frontend::Mode;
 use crate::instance::Instance;
 
 #[async_trait]

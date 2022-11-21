@@ -16,7 +16,7 @@ use clap::Parser;
 use common_telemetry::info;
 use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
 use datanode::instance::InstanceRef;
-use frontend::frontend::{Frontend, FrontendOptions, Mode};
+use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::Instance as FeInstance;
@@ -25,6 +25,7 @@ use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
 use serde::{Deserialize, Serialize};
+use servers::Mode;
 use snafu::ResultExt;
 use tokio::try_join;
 
@@ -70,8 +71,6 @@ pub struct StandaloneOptions {
     pub mode: Mode,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
-    pub datanode_mysql_addr: String,
-    pub datanode_mysql_runtime_size: usize,
 }
 
 impl Default for StandaloneOptions {
@@ -87,8 +86,6 @@ impl Default for StandaloneOptions {
             mode: Mode::Standalone,
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
-            datanode_mysql_addr: "127.0.0.1:4406".to_string(),
-            datanode_mysql_runtime_size: 4,
         }
     }
 }
@@ -113,8 +110,6 @@ impl StandaloneOptions {
         DatanodeOptions {
             wal_dir: self.wal_dir,
             storage: self.storage,
-            mysql_addr: self.datanode_mysql_addr,
-            mysql_runtime_size: self.datanode_mysql_runtime_size,
             ..Default::default()
         }
     }

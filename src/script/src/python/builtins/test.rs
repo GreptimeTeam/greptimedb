@@ -118,7 +118,7 @@ struct Var {
     ty: DataType,
 }
 
-/// for floating number comparsion
+/// for floating number comparison
 const EPS: f64 = 2.0 * f64::EPSILON;
 
 /// Null element just not supported for now for simplicity with writing test cases

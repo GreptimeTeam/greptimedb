@@ -280,7 +280,7 @@ impl BatchOp for ProjectedSchema {
         let indices = self.schema_to_read.row_key_indices();
         for idx in indices {
             let (left_col, right_col) = (left.column(idx), right.column(idx));
-            // Comparision of vector is done by virtual method calls currently. Consider using
+            // Comparison of vector is done by virtual method calls currently. Consider using
             // enum dispatch if this becomes bottleneck.
             let order = left_col.get_ref(i).cmp(&right_col.get_ref(j));
             if order != Ordering::Equal {

@@ -170,7 +170,7 @@ impl<S: LogStore> RegionImpl<S> {
         RegionImpl { inner }
     }
 
-    /// Open an exsiting region and recover its data.
+    /// Open an existing region and recover its data.
     ///
     /// The caller should avoid calling this method simultaneously.
     pub async fn open(

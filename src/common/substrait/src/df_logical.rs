@@ -178,14 +178,14 @@ impl DFLogicalSubstraitConvertor {
             })?;
         let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
 
-        // Get schema directly from the table, and compare it with the schema retrived from substrait proto.
+        // Get schema directly from the table, and compare it with the schema retrieved from substrait proto.
         let stored_schema = adapter.schema();
-        let retrived_schema = to_schema(read_rel.base_schema.unwrap_or_default())?;
-        let retrived_arrow_schema = retrived_schema.arrow_schema();
+        let retrieved_schema = to_schema(read_rel.base_schema.unwrap_or_default())?;
+        let retrieved_arrow_schema = retrieved_schema.arrow_schema();
         ensure!(
-            stored_schema.fields == retrived_arrow_schema.fields,
+            stored_schema.fields == retrieved_arrow_schema.fields,
             SchemaNotMatchSnafu {
-                substrait_schema: retrived_arrow_schema.clone(),
+                substrait_schema: retrieved_arrow_schema.clone(),
                 storage_schema: stored_schema
             }
         );

@@ -35,13 +35,13 @@ use crate::error::{
     DecodePhysicalPlanNodeSnafu, EmptyPhysicalPlanSnafu, Error, MissingFieldSnafu,
     NewProjectionSnafu, UnsupportedDfPlanSnafu,
 };
-use crate::physical::{expr, AsExcutionPlan, ExecutionPlanRef};
+use crate::physical::{expr, AsExecutionPlan, ExecutionPlanRef};
 
 pub struct DefaultAsPlanImpl {
     pub bytes: Vec<u8>,
 }
 
-impl AsExcutionPlan for DefaultAsPlanImpl {
+impl AsExecutionPlan for DefaultAsPlanImpl {
     type Error = Error;
 
     // Vec<u8> -> PhysicalPlanNode -> ExecutionPlanRef
@@ -64,7 +64,7 @@ impl AsExcutionPlan for DefaultAsPlanImpl {
     }
 }
 
-impl AsExcutionPlan for PhysicalPlanNode {
+impl AsExecutionPlan for PhysicalPlanNode {
     type Error = Error;
 
     fn try_into_physical_plan(&self) -> Result<ExecutionPlanRef, Self::Error> {
@@ -227,7 +227,7 @@ mod tests {
     use datafusion::physical_plan::projection::ProjectionExec;
 
     use crate::physical::plan::{DefaultAsPlanImpl, MockExecution};
-    use crate::physical::{AsExcutionPlan, ExecutionPlanRef};
+    use crate::physical::{AsExecutionPlan, ExecutionPlanRef};
 
     #[test]
     fn test_convert_df_projection_with_bytes() {
@@ -236,7 +236,7 @@ mod tests {
         let bytes = DefaultAsPlanImpl::try_from_physical_plan(projection_exec).unwrap();
         let exec = bytes.try_into_physical_plan().unwrap();
 
-        verify_df_porjection(exec);
+        verify_df_projection(exec);
     }
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
         let projection_node = PhysicalPlanNode::try_from_physical_plan(projection_exec).unwrap();
         let exec = projection_node.try_into_physical_plan().unwrap();
 
-        verify_df_porjection(exec);
+        verify_df_projection(exec);
     }
 
     fn mock_df_projection() -> Arc<ProjectionExec> {
@@ -264,7 +264,7 @@ mod tests {
         )
     }
 
-    fn verify_df_porjection(exec: ExecutionPlanRef) {
+    fn verify_df_projection(exec: ExecutionPlanRef) {
         let projection_exec = exec.as_any().downcast_ref::<ProjectionExec>().unwrap();
         let mock_input = projection_exec
             .input()
