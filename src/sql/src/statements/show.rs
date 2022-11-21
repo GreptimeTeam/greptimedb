@@ -62,6 +62,17 @@ pub struct ShowCreateTable {
     pub table_name: String,
 }
 
+impl ShowCreateTable {
+    /// Creates a statement for `SHOW_CREATE TABLE`
+    pub fn new(catalog_name: String, schema_name: String, table_name: String) -> Self {
+        ShowCreateTable {
+            catalog_name,
+            schema_name,
+            table_name,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;

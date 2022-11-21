@@ -311,10 +311,6 @@ pub fn show_create_table(
 ) -> Result<Output> {
     let catalog = stmt.catalog_name.as_str();
     let schema = stmt.schema_name.as_str();
-    catalog_manager
-        .catalog(catalog)
-        .context(error::CatalogSnafu)?
-        .context(error::CatalogNotFoundSnafu { catalog })?;
     let schema = catalog_manager
         .schema(catalog, schema)
         .context(error::CatalogSnafu)?
@@ -353,13 +349,15 @@ mod test {
     use datatypes::vectors::{StringVector, TimestampVector, UInt32Vector, VectorRef};
     use snafu::ResultExt;
     use sql::statements::describe::DescribeTable;
+    use sql::statements::show::ShowCreateTable;
     use table::test_util::MemTable;
 
     use crate::error;
     use crate::error::Result;
     use crate::sql::{
-        describe_table, DESCRIBE_TABLE_OUTPUT_SCHEMA, NULLABLE_NO, NULLABLE_YES,
-        SEMANTIC_TYPE_TIME_INDEX, SEMANTIC_TYPE_VALUE,
+        describe_table, show_create_table, CREATE_TABLE_COLUMN, DESCRIBE_TABLE_OUTPUT_SCHEMA,
+        NULLABLE_NO, NULLABLE_YES, SEMANTIC_TYPE_TIME_INDEX, SEMANTIC_TYPE_VALUE,
+        SHOW_CREATE_TABLE_OUTPUT_SCHEMA, TABLE_COLUMN,
     };
 
     #[test]
@@ -487,6 +485,71 @@ mod test {
             data,
             expected_columns,
         )
+    }
+
+    #[test]
+    fn test_show_create_table() -> Result<()> {
+        let catalog_name = DEFAULT_CATALOG_NAME;
+        let schema_name = DEFAULT_SCHEMA_NAME;
+        let table_name = "test_table";
+        let schema = vec![
+            ColumnSchema::new(TABLE_COLUMN, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                CREATE_TABLE_COLUMN,
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+        ];
+        let data = vec![
+            Arc::new(StringVector::from(vec!["a".to_string()])) as _,
+            Arc::new(StringVector::from(vec!["table a".to_string()])) as _,
+        ];
+        let expected_columns = vec![
+            Arc::new(StringVector::from(vec!["test_table".to_string()])) as _,
+            Arc::new(StringVector::from(vec!["CREATE TABLE test_table (  table String  , create_table String engine=mock with(regions=1);".to_string()])) as _,
+        ];
+
+        show_create_table_test_by_schema(
+            catalog_name,
+            schema_name,
+            table_name,
+            schema,
+            data,
+            expected_columns,
+        )
+        // Ok(())
+    }
+
+    fn show_create_table_test_by_schema(
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+        schema: Vec<ColumnSchema>,
+        data: Vec<VectorRef>,
+        expected_columns: Vec<VectorRef>,
+    ) -> Result<()> {
+        let table_schema = SchemaRef::new(Schema::new(schema));
+        let catalog_manager =
+            prepare_describe_table(catalog_name, schema_name, table_name, table_schema, data);
+
+        let expected = RecordBatches::try_from_columns(
+            SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(),
+            expected_columns,
+        )
+        .context(error::CreateRecordBatchSnafu)?;
+
+        let stmt = ShowCreateTable::new(
+            catalog_name.to_string(),
+            schema_name.to_string(),
+            table_name.to_string(),
+        );
+        if let Output::RecordBatches(res) = show_create_table(stmt, catalog_manager)? {
+            assert_eq!(res.take(), expected.take());
+        } else {
+            panic!("describe table must return record batch");
+        }
+
+        Ok(())
     }
 
     fn describe_table_test_by_schema(
