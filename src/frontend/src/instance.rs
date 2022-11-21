@@ -612,10 +612,10 @@ impl SqlQueryHandler for Instance {
             | Statement::ShowTables(_)
             | Statement::DescribeTable(_)
             | Statement::ShowCreateTable(_) => self
-                    .handle_select(Select::Sql(query.to_string()), stmt)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query }),
+                .handle_select(Select::Sql(query.to_string()), stmt)
+                .await
+                .map_err(BoxedError::new)
+                .context(server_error::ExecuteQuerySnafu { query }),
 
             Statement::CreateDatabase(c) => {
                 let expr = CreateDatabaseExpr {

@@ -143,8 +143,10 @@ impl DistInstance {
                 .context(error::ExecuteSqlSnafu { sql }),
             Statement::DescribeTable(stmt) => describe_table(stmt, self.catalog_manager.clone())
                 .context(error::ExecuteSqlSnafu { sql }),
-            Statement::ShowCreateTable(stmt) => show_create_table(stmt, self.catalog_manager.clone())
-                .context(error::ExecuteSqlSnafu { sql }),
+            Statement::ShowCreateTable(stmt) => {
+                show_create_table(stmt, self.catalog_manager.clone())
+                    .context(error::ExecuteSqlSnafu { sql })
+            }
             _ => unreachable!(),
         }
     }

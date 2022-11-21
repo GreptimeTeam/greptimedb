@@ -16,7 +16,7 @@
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
-use query::sql::{show_create_table, describe_table, show_databases, show_tables};
+use query::sql::{describe_table, show_create_table, show_databases, show_tables};
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
 use sql::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
@@ -72,7 +72,8 @@ impl SqlHandler {
                 describe_table(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
             }
             SqlRequest::ShowCreateTable(stmt) => {
-                show_create_table(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+                show_create_table(stmt, self.catalog_manager.clone())
+                    .context(error::ExecuteSqlSnafu)
             }
         }
     }

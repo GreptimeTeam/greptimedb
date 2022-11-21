@@ -76,13 +76,9 @@ static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     ]))
 });
 
-static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(||  {
+static SHOW_CREATE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
-        ColumnSchema::new(
-            TABLE_COLUMN,
-            ConcreteDataType::string_datatype(),
-            false,
-        ),
+        ColumnSchema::new(TABLE_COLUMN, ConcreteDataType::string_datatype(), false),
         ColumnSchema::new(
             CREATE_TABLE_COLUMN,
             ConcreteDataType::string_datatype(),
@@ -266,7 +262,11 @@ fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
             if cs.default_constraint().is_none() {
                 format!("")
             } else {
-                format!("default {}", cs.default_constraint().map_or(String::from(""), |dc| dc.to_string()))
+                format!(
+                    "default {}",
+                    cs.default_constraint()
+                        .map_or(String::from(""), |dc| dc.to_string())
+                )
             }
         };
         create_sql_column.push(default_val);
@@ -284,26 +284,33 @@ fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
             create_sql_index.push(format!("time index({})", cs.name));
             create_sql_index.push(",".to_string());
         } else {
-
         };
     }
 
-    if create_sql_index.is_empty() {
-
-    } else {
+    if !create_sql_index.is_empty() {
         create_sql_column.push(",".to_string());
         create_sql_index.remove(create_sql_index.len() - 1);
         create_sql_index.push(")".to_string());
     }
 
-    create_sql_index.push(format!("engine={} with(regions={});", table_info.meta.engine, table_info.meta.region_numbers.len()));
+    create_sql_index.push(format!(
+        "engine={} with(regions={});",
+        table_info.meta.engine,
+        table_info.meta.region_numbers.len()
+    ));
 
     let create_sql_column_value = create_sql_column.join(" ");
     let create_sql_column_index = create_sql_index.join(" ");
-    Arc::new(StringVector::from(vec![format!("{}{}", create_sql_column_value, create_sql_column_index)]))
+    Arc::new(StringVector::from(vec![format!(
+        "{}{}",
+        create_sql_column_value, create_sql_column_index
+    )]))
 }
 
-pub fn show_create_table(stmt: ShowCreateTable, catalog_manager: CatalogManagerRef) -> Result<Output> {
+pub fn show_create_table(
+    stmt: ShowCreateTable,
+    catalog_manager: CatalogManagerRef,
+) -> Result<Output> {
     let catalog = stmt.catalog_name.as_str();
     let schema = stmt.schema_name.as_str();
     catalog_manager
