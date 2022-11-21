@@ -286,7 +286,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                 let s = s.as_str();
                 if visited_key.contains(s) {
                     return fail_parse_error!(
-                        format!("`{s}` occur multiple times in decorator's arguements' list."),
+                        format!("`{s}` occur multiple times in decorator's arguments' list."),
                         Some(kw.location),
                     );
                 }
@@ -308,7 +308,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
             None => {
                 return fail_parse_error!(
                     format!(
-                        "Expect explictly set both `args` and `returns`, found \n{:#?}",
+                        "Expect explicitly set both `args` and `returns`, found \n{:#?}",
                         &kw.node
                     ),
                     Some(kw.location),
@@ -365,14 +365,14 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<DecoratorArgs> {
     }
 }
 
-// get type annotaion in arguments
+// get type annotation in arguments
 fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> {
     // get arg types from type annotation>
     args.args
         .iter()
         .map(|arg| {
             if let Some(anno) = &arg.node.annotation {
-                // for there is erro handling for parse_annotation
+                // for there is error handling for parse_annotation
                 parse_annotation(anno).map(Some)
             } else {
                 Ok(None)
@@ -472,7 +472,7 @@ pub fn parse_and_compile_copr(script: &str) -> Result<Coprocessor> {
                         .collect()
                 };
 
-                // make sure both arguments&returns in fucntion
+                // make sure both arguments&returns in function
                 // and in decorator have same length
                 ensure!(
                     deco_args.arg_names.len() == arg_types.len(),

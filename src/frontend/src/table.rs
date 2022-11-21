@@ -85,7 +85,7 @@ impl Table for DistTable {
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
         let partition_rule = self.find_partition_rule().await.map_err(TableError::new)?;
 
-        let spliter = WriteSpliter::with_patition_rule(partition_rule);
+        let spliter = WriteSpliter::with_partition_rule(partition_rule);
         let inserts = spliter.split(request).map_err(TableError::new)?;
         let result = match self.dist_insert(inserts).await.map_err(TableError::new)? {
             client::ObjectResult::Select(_) => unreachable!(),

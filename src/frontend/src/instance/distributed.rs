@@ -25,7 +25,7 @@ use common_catalog::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use common_query::Output;
 use common_telemetry::{debug, info};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
+use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
 use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
@@ -260,17 +260,40 @@ fn create_table_global_value(
     let node_id = region_routes[0]
         .leader_peer
         .as_ref()
-        .context(error::FindLeaderPeerSnafu {
+        .with_context(|| error::FindLeaderPeerSnafu {
             region: region_routes[0].region.id,
             table_name: table_name.to_string(),
         })?
         .id;
 
+    let mut regions_id_map = HashMap::new();
+    for route in region_routes.iter() {
+        let node_id = route
+            .leader_peer
+            .as_ref()
+            .with_context(|| error::FindLeaderPeerSnafu {
+                region: route.region.id,
+                table_name: table_name.to_string(),
+            })?
+            .id;
+        regions_id_map
+            .entry(node_id)
+            .or_insert_with(Vec::new)
+            .push(route.region.id as u32);
+    }
+
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
 
     for (idx, column) in create_table.column_defs.iter().enumerate() {
-        column_schemas.push(create_column_schema(column)?);
+        let schema = column
+            .try_as_column_schema()
+            .context(error::InvalidColumnDefSnafu {
+                column: &column.name,
+            })?;
+        let schema = schema.with_time_index(column.name == create_table.time_index);
+
+        column_schemas.push(schema);
         column_name_to_index_map.insert(column.name.clone(), idx);
     }
 
@@ -322,31 +345,8 @@ fn create_table_global_value(
 
     Ok(TableGlobalValue {
         node_id,
-        regions_id_map: HashMap::new(),
+        regions_id_map,
         table_info,
-    })
-}
-
-// Remove this duplication in the future
-fn create_column_schema(column_def: &api::v1::ColumnDef) -> Result<ColumnSchema> {
-    let data_type =
-        ColumnDataTypeWrapper::try_new(column_def.datatype).context(error::ColumnDataTypeSnafu)?;
-    let default_constraint = match &column_def.default_constraint {
-        None => None,
-        Some(v) => Some(ColumnDefaultConstraint::try_from(&v[..]).context(
-            ConvertColumnDefaultConstraintSnafu {
-                column_name: &column_def.name,
-            },
-        )?),
-    };
-    ColumnSchema::new(
-        column_def.name.clone(),
-        data_type.into(),
-        column_def.is_nullable,
-    )
-    .with_default_constraint(default_constraint)
-    .context(ConvertColumnDefaultConstraintSnafu {
-        column_name: &column_def.name,
     })
 }
 

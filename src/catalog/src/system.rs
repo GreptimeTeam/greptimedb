@@ -87,6 +87,7 @@ impl SystemCatalogTable {
             schema_name: INFORMATION_SCHEMA_NAME.to_string(),
             table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
             table_id: SYSTEM_CATALOG_TABLE_ID,
+            region_numbers: vec![0],
         };
         let schema = Arc::new(build_system_catalog_schema());
         let ctx = EngineContext::default();
@@ -383,7 +384,7 @@ mod tests {
     use super::*;
 
     #[test]
-    pub fn test_decode_catalog_enrty() {
+    pub fn test_decode_catalog_entry() {
         let entry = decode_system_catalog(
             Some(EntryType::Catalog as u8),
             Some("some_catalog".as_bytes()),

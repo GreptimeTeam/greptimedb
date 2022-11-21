@@ -66,6 +66,17 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Invalid column proto definition, column: {}, source: {}",
+        column,
+        source
+    ))]
+    InvalidColumnDef {
+        column: String,
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
+
+    #[snafu(display(
         "Failed to convert column default constraint, column: {}, source: {}",
         column_name,
         source
@@ -458,8 +469,11 @@ impl ErrorExt for Error {
             | Error::RequestDatanode { source }
             | Error::InvalidAdminResult { source } => source.status_code(),
 
-            Error::ColumnDataType { .. }
-            | Error::FindDatanode { .. }
+            Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
+                source.status_code()
+            }
+
+            Error::FindDatanode { .. }
             | Error::GetCache { .. }
             | Error::FindTableRoutes { .. }
             | Error::SerializeJson { .. }

@@ -205,10 +205,15 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display("Failed to convert ColumnDef to Schema: {}", source))]
-    ColumnDefToSchema {
+    #[snafu(display(
+        "Invalid column proto definition, column: {}, source: {}",
+        column,
+        source
+    ))]
+    InvalidColumnDef {
+        column: String,
         #[snafu(backtrace)]
-        source: common_grpc_expr::error::Error,
+        source: api::error::Error,
     },
 
     #[snafu(display("Failed to parse SQL, source: {}", source))]
@@ -334,6 +339,10 @@ impl ErrorExt for Error {
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }
             | Error::Catalog { .. } => StatusCode::Internal,
+
+            Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
+                source.status_code()
+            }
 
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
