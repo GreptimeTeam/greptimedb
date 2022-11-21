@@ -47,7 +47,7 @@ use table::Table;
 use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Error, RequestDatanodeSnafu, Result};
+use crate::error::{self, Error, LeaderNotFoundSnafu, RequestDatanodeSnafu, Result};
 use crate::partitioning::columns::RangeColumnsPartitionRule;
 use crate::partitioning::range::RangePartitionRule;
 use crate::partitioning::{
@@ -356,8 +356,18 @@ impl DistTable {
     /// Define a `alter_by_expr` instead of impl [`Table::alter`] to avoid redundant conversion between  
     /// [`table::requests::AlterTableRequest`] and [`AlterExpr`].
     pub(crate) async fn alter_by_expr(&self, expr: AlterExpr) -> Result<()> {
-        let table_routes = self.table_routes.get_route(&self.table_name).await.unwrap();
-        for datanode in table_routes.find_leaders() {
+        let table_routes = self.table_routes.get_route(&self.table_name).await?;
+        let leaders = table_routes.find_leaders();
+        ensure!(
+            !leaders.is_empty(),
+            LeaderNotFoundSnafu {
+                table: format!(
+                    "{:?}.{:?}.{}",
+                    expr.catalog_name, expr.schema_name, expr.table_name
+                )
+            }
+        );
+        for datanode in leaders {
             let admin = Admin::new(
                 DEFAULT_CATALOG_NAME,
                 self.datanode_clients.get_client(&datanode).await,

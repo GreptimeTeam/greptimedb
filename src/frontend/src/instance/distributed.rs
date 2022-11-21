@@ -193,7 +193,7 @@ impl DistInstance {
             .as_any()
             .downcast_ref::<DistTable>()
             .expect("Table impl must be DistTable in distributed mode");
-        dist_table.alter_by_expr(expr).await.unwrap();
+        dist_table.alter_by_expr(expr).await?;
         Ok(Output::AffectedRows(0))
     }
 

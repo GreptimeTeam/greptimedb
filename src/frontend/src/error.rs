@@ -433,6 +433,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc_expr::error::Error,
     },
+
+    #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
+    LeaderNotFound { table: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -521,6 +524,7 @@ impl ErrorExt for Error {
             }
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),
+            Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
         }
     }
 
