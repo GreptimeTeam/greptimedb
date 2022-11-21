@@ -30,10 +30,10 @@ use client::{Client, Database, ObjectResult};
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_runtime::Builder as RuntimeBuilder;
 use frontend::frontend::FrontendOptions;
-use frontend::frontend::Mode::Standalone;
 use frontend::grpc::GrpcOptions;
 use servers::grpc::GrpcServer;
 use servers::server::Server;
+use servers::Mode;
 
 use crate::instance::Instance;
 use crate::tests::test_util::{self, TestGuard};
@@ -62,7 +62,7 @@ async fn setup_grpc_server(
 
     let fe_grpc_addr = format!("127.0.0.1:{}", frontend_port);
     let fe_opts = FrontendOptions {
-        mode: Standalone,
+        mode: Mode::Standalone,
         datanode_rpc_addr: datanode_grpc_addr.clone(),
         grpc_options: Some(GrpcOptions {
             addr: fe_grpc_addr.clone(),

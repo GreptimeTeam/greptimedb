@@ -16,7 +16,7 @@ use clap::Parser;
 use common_telemetry::info;
 use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
 use datanode::instance::InstanceRef;
-use frontend::frontend::{Frontend, FrontendOptions, Mode};
+use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::Instance as FeInstance;
@@ -25,6 +25,7 @@ use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
 use serde::{Deserialize, Serialize};
+use servers::Mode;
 use snafu::ResultExt;
 use tokio::try_join;
 

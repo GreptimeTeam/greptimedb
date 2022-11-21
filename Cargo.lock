@@ -1098,6 +1098,7 @@ dependencies = [
  "meta-client",
  "meta-srv",
  "serde",
+ "servers",
  "snafu",
  "tempdir",
  "tokio",

@@ -15,8 +15,8 @@
 use clap::Parser;
 use common_telemetry::logging;
 use datanode::datanode::{Datanode, DatanodeOptions};
-use frontend::frontend::Mode;
 use meta_client::MetaClientOpts;
+use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{Error, MissingConfigSnafu, Result, StartDatanodeSnafu};
@@ -124,7 +124,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use datanode::datanode::ObjectStoreConfig;
-    use frontend::frontend::Mode;
+    use servers::Mode;
 
     use super::*;
 

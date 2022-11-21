@@ -14,6 +14,8 @@
 
 #![feature(assert_matches)]
 
+use serde::{Deserialize, Serialize};
+
 pub mod context;
 pub mod error;
 pub mod grpc;
@@ -27,3 +29,10 @@ pub mod prometheus;
 pub mod query_handler;
 pub mod server;
 mod shutdown;
+
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Standalone,
+    Distributed,
+}
