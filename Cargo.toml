@@ -33,6 +33,7 @@ members = [
     "src/store-api",
     "src/table",
     "src/mito",
+    "tests/runner",
 ]
 
 [profile.release]
