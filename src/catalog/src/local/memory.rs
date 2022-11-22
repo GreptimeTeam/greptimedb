@@ -339,7 +339,7 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(provider.table_exist(table_name).unwrap());
-        let other_table = NumbersTable::default();
+        let other_table = NumbersTable::new(12);
         let result = provider.register_table(table_name.to_string(), Arc::new(other_table));
         let err = result.err().unwrap();
         assert!(err.backtrace_opt().is_some());
