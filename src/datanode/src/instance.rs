@@ -139,7 +139,11 @@ impl Instance {
         };
         Ok(Self {
             query_engine: query_engine.clone(),
-            sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
+            sql_handler: SqlHandler::new(
+                table_engine,
+                catalog_manager.clone(),
+                query_engine.clone(),
+            ),
             catalog_manager,
             physical_planner: PhysicalPlanner::new(query_engine),
             script_executor,

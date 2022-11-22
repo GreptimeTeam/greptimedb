@@ -172,7 +172,7 @@ impl SqlHandler {
                     return ConstraintNotSupportedSnafu {
                         constraint: format!("{:?}", c),
                     }
-                    .fail()
+                    .fail();
                 }
             }
         }

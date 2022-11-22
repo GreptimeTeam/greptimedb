@@ -31,7 +31,7 @@ use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
     TableName, TableRoute,
 };
-use query::sql::{describe_table, show_databases, show_tables};
+use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
@@ -145,6 +145,9 @@ impl DistInstance {
             Statement::ShowTables(stmt) => show_tables(stmt, self.catalog_manager.clone())
                 .context(error::ExecuteSqlSnafu { sql }),
             Statement::DescribeTable(stmt) => describe_table(stmt, self.catalog_manager.clone())
+                .context(error::ExecuteSqlSnafu { sql }),
+            Statement::Explain(stmt) => explain(Box::new(stmt), self.query_engine.clone())
+                .await
                 .context(error::ExecuteSqlSnafu { sql }),
             _ => unreachable!(),
         }
