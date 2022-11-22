@@ -359,4 +359,35 @@ mod tests {
             .downcast_ref::<MemoryCatalogManager>()
             .unwrap();
     }
+
+    #[tokio::test]
+    pub async fn test_catalog_deregister_table() {
+        let catalog = MemoryCatalogManager::default();
+        let schema = catalog
+            .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .unwrap()
+            .unwrap();
+
+        let register_table_req = RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers".to_string(),
+            table_id: 2333,
+            table: Arc::new(NumbersTable::default()),
+        };
+        catalog.register_table(register_table_req).await.unwrap();
+        assert!(schema.table_exist("numbers").unwrap());
+
+        let deregister_table_req = DeregisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers".to_string(),
+            table_id: 2333,
+        };
+        catalog
+            .deregister_table(deregister_table_req)
+            .await
+            .unwrap();
+        assert!(!schema.table_exist("numbers").unwrap());
+    }
 }
