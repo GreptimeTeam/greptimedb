@@ -51,9 +51,9 @@ impl Env {
     pub async fn start_local() -> GreptimeDB {
         let server_process = Command::new("cargo")
             .current_dir("../")
-            .args(["run", "--", "datanode", "start"])
+            .args(["run", "--", "standalone", "start"])
             .spawn()
-            .unwrap_or_else(|_| panic!("Failed to start datanode"));
+            .unwrap_or_else(|_| panic!("Failed to start GreptimeDB"));
 
         time::sleep(Duration::from_secs(3)).await;
 
