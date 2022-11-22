@@ -99,17 +99,29 @@ impl Instance {
         // create remote catalog manager
         let (catalog_manager, factory, table_id_provider) = match opts.mode {
             Mode::Standalone => {
-                let catalog = Arc::new(
-                    catalog::local::LocalCatalogManager::try_new(table_engine.clone())
-                        .await
-                        .context(CatalogSnafu)?,
-                );
-                let factory = QueryEngineFactory::new(catalog.clone());
-                (
-                    catalog.clone() as CatalogManagerRef,
-                    factory,
-                    Some(catalog as TableIdProviderRef),
-                )
+                if opts.memory_catalog_enable {
+                    let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
+                    let factory = QueryEngineFactory::new(catalog.clone());
+
+                    (
+                        catalog.clone() as CatalogManagerRef,
+                        factory,
+                        Some(catalog as TableIdProviderRef),
+                    )
+                } else {
+                    let catalog = Arc::new(
+                        catalog::local::LocalCatalogManager::try_new(table_engine.clone())
+                            .await
+                            .context(CatalogSnafu)?,
+                    );
+                    let factory = QueryEngineFactory::new(catalog.clone());
+
+                    (
+                        catalog.clone() as CatalogManagerRef,
+                        factory,
+                        Some(catalog as TableIdProviderRef),
+                    )
+                }
             }
 
             Mode::Distributed => {

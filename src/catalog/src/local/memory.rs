@@ -117,7 +117,8 @@ impl CatalogManager for MemoryCatalogManager {
     }
 
     async fn register_system_table(&self, _request: RegisterSystemTableRequest) -> Result<()> {
-        unimplemented!()
+        // TODO(ruihang): support register system table request
+        Ok(())
     }
 
     fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {

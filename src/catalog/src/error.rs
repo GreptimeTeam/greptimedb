@@ -103,6 +103,9 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Failed to register schema"))]
+    RegisterTable { source: BoxedError },
+
     #[snafu(display("Operation {} not implemented yet", operation))]
     Unimplemented {
         operation: String,
@@ -215,6 +218,8 @@ impl ErrorExt for Error {
             | Error::EmptyValue { .. }
             | Error::ValueDeserialize { .. }
             | Error::Io { .. } => StatusCode::StorageUnavailable,
+
+            Error::RegisterTable { .. } => StatusCode::Internal,
 
             Error::ReadSystemCatalog { source, .. } => source.status_code(),
             Error::SystemCatalogTypeMismatch { source, .. } => source.status_code(),
