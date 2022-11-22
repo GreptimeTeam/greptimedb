@@ -32,7 +32,6 @@ mod alter;
 mod create;
 mod insert;
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum SqlRequest {
     Insert(InsertRequest),
