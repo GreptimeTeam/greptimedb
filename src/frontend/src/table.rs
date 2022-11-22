@@ -28,7 +28,7 @@ use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
-use common_telemetry::info;
+use common_telemetry::debug;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::Expr as DfExpr;
 use datafusion::physical_plan::{
@@ -372,12 +372,12 @@ impl DistTable {
                 DEFAULT_CATALOG_NAME,
                 self.datanode_clients.get_client(&datanode).await,
             );
-            info!("Sent alter table {:?} to {:?}", expr, admin);
+            debug!("Sent alter table {:?} to {:?}", expr, admin);
             let result = admin
                 .alter(expr.clone())
                 .await
                 .context(RequestDatanodeSnafu)?;
-            info!("Alter table result: {:?}", result);
+            debug!("Alter table result: {:?}", result);
             // TODO(hl): We should further check and track alter result in some global DDL task tracker
         }
         Ok(())

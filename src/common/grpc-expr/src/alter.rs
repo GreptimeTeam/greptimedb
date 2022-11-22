@@ -31,22 +31,26 @@ use crate::error::{
 pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
     match expr.kind {
         Some(Kind::AddColumns(add_columns)) => {
-            let mut add_column_requests = vec![];
-            for add_column_expr in add_columns.add_columns {
-                let column_def = add_column_expr.column_def.context(MissingFieldSnafu {
-                    field: "column_def",
-                })?;
-
-                let schema = column_def
-                    .try_as_column_schema()
-                    .context(InvalidColumnDefSnafu {
-                        column: &column_def.name,
+            let add_column_requests = add_columns
+                .add_columns
+                .into_iter()
+                .map(|ac| {
+                    let column_def = ac.column_def.context(MissingFieldSnafu {
+                        field: "column_def",
                     })?;
-                add_column_requests.push(AddColumnRequest {
-                    column_schema: schema,
-                    is_key: add_column_expr.is_key,
+
+                    let schema =
+                        column_def
+                            .try_as_column_schema()
+                            .context(InvalidColumnDefSnafu {
+                                column: &column_def.name,
+                            })?;
+                    Ok(AddColumnRequest {
+                        column_schema: schema,
+                        is_key: ac.is_key,
+                    })
                 })
-            }
+                .collect::<Result<Vec<_>>>()?;
 
             let alter_kind = AlterKind::AddColumns {
                 columns: add_column_requests,
