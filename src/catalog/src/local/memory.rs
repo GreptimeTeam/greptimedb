@@ -270,11 +270,16 @@ impl SchemaProvider for MemorySchemaProvider {
     }
 
     fn register_table(&self, name: String, table: TableRef) -> Result<Option<TableRef>> {
-        if self.table_exist(name.as_str())? {
-            return TableExistsSnafu { table: name }.fail()?;
-        }
         let mut tables = self.tables.write().unwrap();
-        Ok(tables.insert(name, table))
+        if let Some(existing) = tables.get(name.as_str()) {
+            // if table with the same name but different table id exists, then it's a fatal bug
+            if existing.table_info().ident.table_id != table.table_info().ident.table_id {
+                return TableExistsSnafu { table: name }.fail()?;
+            }
+            Ok(Some(existing.clone()))
+        } else {
+            Ok(tables.insert(name, table))
+        }
     }
 
     fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
