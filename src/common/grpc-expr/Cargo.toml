@@ -1,5 +1,5 @@
 [package]
-name = "common-insert"
+name = "common-grpc-expr"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
@@ -11,6 +11,7 @@ common-base = { path = "../base" }
 common-error = { path = "../error" }
 common-telemetry = { path = "../telemetry" }
 common-time = { path = "../time" }
+common-catalog = { path = "../catalog" }
 common-query = { path = "../query" }
 datatypes = { path = "../../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }

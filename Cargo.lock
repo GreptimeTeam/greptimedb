@@ -1045,7 +1045,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-grpc",
- "common-insert",
+ "common-grpc-expr",
  "common-query",
  "common-recordbatch",
  "common-time",
@@ -1213,12 +1213,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "common-insert"
+name = "common-grpc-expr"
 version = "0.1.0"
 dependencies = [
  "api",
  "async-trait",
  "common-base",
+ "common-catalog",
  "common-error",
  "common-query",
  "common-telemetry",
@@ -1740,7 +1741,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
- "common-insert",
+ "common-grpc-expr",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -2119,7 +2120,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
- "common-insert",
+ "common-grpc-expr",
  "common-query",
  "common-recordbatch",
  "common-runtime",
