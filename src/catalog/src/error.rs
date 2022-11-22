@@ -103,8 +103,11 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to register schema"))]
-    RegisterTable { source: BoxedError },
+    #[snafu(display("Failed to register table"))]
+    RegisterTable {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("Operation {} not implemented yet", operation))]
     Unimplemented {
