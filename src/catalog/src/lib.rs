@@ -83,9 +83,13 @@ pub trait CatalogManager: CatalogList {
     /// Starts a catalog manager.
     async fn start(&self) -> Result<()>;
 
-    /// Registers a table given given catalog/schema to catalog manager,
+    /// Registers a table within given catalog/schema to catalog manager,
     /// returns table registered.
     async fn register_table(&self, request: RegisterTableRequest) -> Result<usize>;
+
+    /// Deregisters a table within given catalog/schema to catalog manager,
+    /// returns table deregistered.
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<usize>;
 
     /// Register a schema with catalog name and schema name.
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize>;
@@ -121,6 +125,14 @@ pub struct RegisterTableRequest {
     pub table_name: String,
     pub table_id: TableId,
     pub table: TableRef,
+}
+
+#[derive(Clone)]
+pub struct DeregisterTableRequest {
+    pub catalog: String,
+    pub schema: String,
+    pub table_name: String,
+    pub table_id: TableId,
 }
 
 #[derive(Debug, Clone)]

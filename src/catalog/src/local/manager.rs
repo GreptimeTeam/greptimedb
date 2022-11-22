@@ -36,7 +36,7 @@ use table::TableRef;
 use crate::error::{
     CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, Result,
     SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu,
-    TableExistsSnafu, TableNotFoundSnafu,
+    TableExistsSnafu, TableNotFoundSnafu, UnimplementedSnafu,
 };
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
@@ -46,8 +46,8 @@ use crate::system::{
 use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
-    CatalogProvider, CatalogProviderRef, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
+    CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest,
+    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -350,6 +350,13 @@ impl CatalogManager for LocalCatalogManager {
 
         schema.register_table(request.table_name, request.table)?;
         Ok(1)
+    }
+
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<usize> {
+        UnimplementedSnafu {
+            operation: String::from("deregister table"),
+        }
+        .fail()
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {

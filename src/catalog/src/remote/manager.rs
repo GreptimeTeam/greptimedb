@@ -37,13 +37,13 @@ use tokio::sync::Mutex;
 
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu,
-    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu,
+    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
-    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider,
-    SchemaProviderRef,
+    DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
+    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
 };
 
 /// Catalog manager based on metasrv.
@@ -431,6 +431,13 @@ impl CatalogManager for RemoteCatalogManager {
         }
         schema_provider.register_table(request.table_name, request.table)?;
         Ok(1)
+    }
+
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<usize> {
+        UnimplementedSnafu {
+            operation: String::from("deregister table"),
+        }
+        .fail()
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {

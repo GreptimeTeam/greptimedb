@@ -27,8 +27,8 @@ use table::TableRef;
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::schema::SchemaProvider;
 use crate::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, SchemaProviderRef,
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProviderRef,
 };
 
 /// Simple in-memory list of catalogs
@@ -84,6 +84,24 @@ impl CatalogManager for MemoryCatalogManager {
             })?;
         schema
             .register_table(request.table_name, request.table)
+            .map(|v| if v.is_some() { 0 } else { 1 })
+    }
+
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<usize> {
+        let catalogs = self.catalogs.write().unwrap();
+        let catalog = catalogs
+            .get(&request.catalog)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?
+            .clone();
+        let schema = catalog
+            .schema(&request.schema)?
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", &request.catalog, &request.schema),
+            })?;
+        schema
+            .deregister_table(&request.table_name)
             .map(|v| if v.is_some() { 0 } else { 1 })
     }
 
