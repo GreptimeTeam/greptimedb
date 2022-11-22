@@ -35,8 +35,8 @@ impl Environment for Env {
 
     async fn start(&self, mode: &str, _config: Option<String>) -> Self::DB {
         match mode {
-            "local" => Self::start_local().await,
-            "remote" => Self::start_remote().await,
+            "standalone" => Self::start_standalone().await,
+            "distributed" => Self::start_distributed().await,
             _ => panic!("Unexpected mode: {}", mode),
         }
     }
@@ -48,7 +48,7 @@ impl Environment for Env {
 }
 
 impl Env {
-    pub async fn start_local() -> GreptimeDB {
+    pub async fn start_standalone() -> GreptimeDB {
         let server_process = Command::new("cargo")
             .current_dir("../")
             .args(["run", "--", "standalone", "start"])
@@ -67,7 +67,7 @@ impl Env {
         }
     }
 
-    pub async fn start_remote() -> GreptimeDB {
+    pub async fn start_distributed() -> GreptimeDB {
         todo!()
     }
 }
