@@ -22,6 +22,7 @@ use crate::error::{
     self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu, TokenizerSnafu,
 };
 use crate::statements::describe::DescribeTable;
+use crate::statements::explain::Explain;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
 use crate::statements::table_idents_to_full_name;
@@ -262,7 +263,16 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_explain(&mut self) -> Result<Statement> {
-        todo!()
+        let explain_statement =
+            self.parser
+                .parse_explain(false)
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a query statement",
+                    actual: self.peek_token_as_string(),
+                })?;
+
+        Ok(Statement::Explain(Explain::try_from(explain_statement)?))
     }
 
     // Report unexpected token
@@ -332,6 +342,7 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use sqlparser::ast::{Query as SpQuery, Statement as SpStatement};
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
@@ -474,5 +485,55 @@ mod tests {
                 database: Some(_),
             })
         );
+    }
+
+    #[test]
+    pub fn test_explain() {
+        let sql = "EXPLAIN select * from foo";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        let select = sqlparser::ast::Select {
+            distinct: false,
+            top: None,
+            projection: vec![sqlparser::ast::SelectItem::Wildcard],
+            from: vec![sqlparser::ast::TableWithJoins {
+                relation: sqlparser::ast::TableFactor::Table {
+                    name: sqlparser::ast::ObjectName(vec![sqlparser::ast::Ident::new("foo")]),
+                    alias: None,
+                    args: vec![],
+                    with_hints: vec![],
+                },
+                joins: vec![],
+            }],
+            lateral_views: vec![],
+            selection: None,
+            group_by: vec![],
+            cluster_by: vec![],
+            distribute_by: vec![],
+            sort_by: vec![],
+            having: None,
+        };
+
+        let sp_statement = SpStatement::Query(Box::new(SpQuery {
+            with: None,
+            body: sqlparser::ast::SetExpr::Select(Box::new(select)),
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            fetch: None,
+            lock: None,
+        }));
+
+        let explain = Explain::try_from(SpStatement::Explain {
+            describe_alias: false,
+            analyze: false,
+            verbose: false,
+            statement: Box::new(sp_statement),
+        })
+        .unwrap();
+
+        assert_eq!(stmts[0], Statement::Explain(explain))
     }
 }

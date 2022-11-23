@@ -21,6 +21,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use mito::config::EngineConfig;
 use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
+use query::QueryEngineFactory;
 use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
@@ -121,5 +122,9 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
             .await
             .unwrap(),
     );
-    SqlHandler::new(mock_engine, catalog_manager)
+
+    let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
+    let factory = QueryEngineFactory::new(catalog_list);
+
+    SqlHandler::new(mock_engine, catalog_manager, factory.query_engine())
 }

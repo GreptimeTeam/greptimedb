@@ -1,0 +1,11 @@
+[package]
+name = "sqlness-runner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+client = { path = "../../src/client" }
+comfy-table = "6.1"
+sqlness = { git = "https://github.com/ceresdb/sqlness.git" }
+tokio = { version = "1.21", features = ["full"] }

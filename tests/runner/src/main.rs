@@ -12,14 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::derive_partial_eq_without_eq)]
-tonic::include_proto!("greptime.v1");
+use env::Env;
+use sqlness::{ConfigBuilder, Runner};
 
-pub const GREPTIME_FD_SET: &[u8] = tonic::include_file_descriptor_set!("greptime_fd");
+mod env;
+mod util;
 
-pub mod codec {
-    tonic::include_proto!("greptime.v1.codec");
+#[tokio::main]
+async fn main() {
+    let config = ConfigBuilder::default()
+        .case_dir("../cases".to_string())
+        .build()
+        .unwrap();
+    let runner = Runner::new_with_config(config, Env {}).await.unwrap();
+    runner.run().await.unwrap();
 }
-
-mod column_def;
-pub mod meta;

@@ -1,0 +1,60 @@
+CREATE TABLE system_metrics (
+    host STRING,
+    idc STRING,
+    cpu_util DOUBLE,
+    memory_util DOUBLE,
+    disk_util DOUBLE,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(host, idc),
+    TIME INDEX(ts)
+);
+
+MutateResult { success: 1, failure: 0 }
+
+INSERT INTO system_metrics
+VALUES
+    ("host1", "idc_a", 11.8, 10.3, 10.3, 1667446797450),
+    ("host2", "idc_a", 80.1, 70.3, 90.0, 1667446797450),
+    ("host1", "idc_b", 50.0, 66.7, 40.6, 1667446797450);
+
+MutateResult { success: 3, failure: 0 }
+
+SELECT * FROM system_metrics;
+
++-----------------------+----------------------+----------------------------+-------------------------------+-----------------------------+----------------------------+
+| host, #Field, #String | idc, #Field, #String | cpu_util, #Field, #Float64 | memory_util, #Field, #Float64 | disk_util, #Field, #Float64 | ts, #Timestamp, #Timestamp |
++-----------------------+----------------------+----------------------------+-------------------------------+-----------------------------+----------------------------+
+| host1                 | idc_a                | 11.8                       | 10.3                          | 10.3                        | 1667446797450              |
+| host1                 | idc_b                | 50                         | 66.7                          | 40.6                        | 1667446797450              |
+| host2                 | idc_a                | 80.1                       | 70.3                          | 90                          | 1667446797450              |
++-----------------------+----------------------+----------------------------+-------------------------------+-----------------------------+----------------------------+
+
+SELECT count(*) FROM system_metrics;
+
++----------------------------------+
+| COUNT(UInt8(1)), #Field, #Uint64 |
++----------------------------------+
+| 3                                |
++----------------------------------+
+
+SELECT avg(cpu_util) FROM system_metrics;
+
++------------------------------------------------+
+| AVG(system_metrics.cpu_util), #Field, #Float64 |
++------------------------------------------------+
+| 47.29999999999999                              |
++------------------------------------------------+
+
+SELECT idc, avg(memory_util) FROM system_metrics GROUP BY idc ORDER BY idc;
+
++----------------------+---------------------------------------------------+
+| idc, #Field, #String | AVG(system_metrics.memory_util), #Field, #Float64 |
++----------------------+---------------------------------------------------+
+| idc_a                | 40.3                                              |
+| idc_b                | 66.7                                              |
++----------------------+---------------------------------------------------+
+
+DROP TABLE system_metrics;
+
+Failed to execute, error: Datanode { code: 1001, msg: "Failed to execute sql, source: Cannot parse SQL, source: SQL statement is not supported:  DROP TABLE system_metrics;, keyword: DROP" }
+

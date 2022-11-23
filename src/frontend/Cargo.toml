@@ -20,7 +20,7 @@ common-catalog = { path = "../common/catalog" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-common-insert = { path = "../common/insert" }
+common-grpc-expr = { path = "../common/grpc-expr" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
     "simd",
 ] }

@@ -24,10 +24,13 @@ use datatypes::vectors::{Helper, StringVector};
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
+use sql::statements::explain::Explain;
 use sql::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
+use sql::statements::statement::Statement;
 use table::metadata::TableInfoRef;
 
 use crate::error::{self, Result};
+use crate::QueryEngineRef;
 
 const SCHEMAS_COLUMN: &str = "Schemas";
 const TABLES_COLUMN: &str = "Tables";
@@ -150,6 +153,11 @@ pub fn show_tables(stmt: ShowTables, catalog_manager: CatalogManagerRef) -> Resu
     let records = RecordBatches::try_from_columns(schema, vec![tables])
         .context(error::CreateRecordBatchSnafu)?;
     Ok(Output::RecordBatches(records))
+}
+
+pub async fn explain(stmt: Box<Explain>, query_engine: QueryEngineRef) -> Result<Output> {
+    let plan = query_engine.statement_to_plan(Statement::Explain(*stmt))?;
+    query_engine.execute(&plan).await
 }
 
 pub fn describe_table(stmt: DescribeTable, catalog_manager: CatalogManagerRef) -> Result<Output> {

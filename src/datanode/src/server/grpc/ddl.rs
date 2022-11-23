@@ -12,22 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::result::AdminResultBuilder;
-use api::v1::alter_expr::Kind;
-use api::v1::{AdminResult, AlterExpr, CreateExpr, DropColumns};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use api::v1::{AdminResult, AlterExpr, CreateExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
+use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
 use common_telemetry::{error, info};
-use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::TryFutureExt;
 use snafu::prelude::*;
-use table::metadata::TableId;
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
 
-use crate::error::{self, BumpTableIdSnafu, MissingFieldSnafu, Result};
+use crate::error::{AlterExprToRequestSnafu, BumpTableIdSnafu, CreateExprToRequestSnafu};
 use crate::instance::Instance;
 use crate::sql::SqlRequest;
 
@@ -75,7 +69,7 @@ impl Instance {
             }
         };
 
-        let request = create_expr_to_request(table_id, expr).await;
+        let request = create_expr_to_request(table_id, expr).context(CreateExprToRequestSnafu);
         let result = futures::future::ready(request)
             .and_then(|request| self.sql_handler().execute(SqlRequest::CreateTable(request)))
             .await;
@@ -94,14 +88,17 @@ impl Instance {
     }
 
     pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> AdminResult {
-        let request = match alter_expr_to_request(expr).transpose() {
-            Some(req) => req,
+        let request = match alter_expr_to_request(expr)
+            .context(AlterExprToRequestSnafu)
+            .transpose()
+        {
             None => {
                 return AdminResultBuilder::default()
                     .status_code(StatusCode::Success as u32)
                     .mutate_result(0, 0)
                     .build()
             }
+            Some(req) => req,
         };
 
         let result = futures::future::ready(request)
@@ -121,154 +118,25 @@ impl Instance {
     }
 }
 
-async fn create_expr_to_request(table_id: TableId, expr: CreateExpr) -> Result<CreateTableRequest> {
-    let schema = create_table_schema(&expr)?;
-    let primary_key_indices = expr
-        .primary_keys
-        .iter()
-        .map(|key| {
-            schema
-                .column_index_by_name(key)
-                .context(error::KeyColumnNotFoundSnafu { name: key })
-        })
-        .collect::<Result<Vec<usize>>>()?;
-
-    let catalog_name = expr
-        .catalog_name
-        .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-    let schema_name = expr
-        .schema_name
-        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
-
-    let region_ids = if expr.region_ids.is_empty() {
-        vec![0]
-    } else {
-        expr.region_ids
-    };
-
-    Ok(CreateTableRequest {
-        id: table_id,
-        catalog_name,
-        schema_name,
-        table_name: expr.table_name,
-        desc: expr.desc,
-        schema,
-        region_numbers: region_ids,
-        primary_key_indices,
-        create_if_not_exists: expr.create_if_not_exists,
-        table_options: expr.table_options,
-    })
-}
-
-fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
-    match expr.kind {
-        Some(Kind::AddColumns(add_columns)) => {
-            let mut add_column_requests = vec![];
-            for add_column_expr in add_columns.add_columns {
-                let column_def = add_column_expr.column_def.context(MissingFieldSnafu {
-                    field: "column_def",
-                })?;
-
-                let schema =
-                    column_def
-                        .try_as_column_schema()
-                        .context(error::InvalidColumnDefSnafu {
-                            column: &column_def.name,
-                        })?;
-                add_column_requests.push(AddColumnRequest {
-                    column_schema: schema,
-                    is_key: add_column_expr.is_key,
-                })
-            }
-
-            let alter_kind = AlterKind::AddColumns {
-                columns: add_column_requests,
-            };
-
-            let request = AlterTableRequest {
-                catalog_name: expr.catalog_name,
-                schema_name: expr.schema_name,
-                table_name: expr.table_name,
-                alter_kind,
-            };
-            Ok(Some(request))
-        }
-        Some(Kind::DropColumns(DropColumns { drop_columns })) => {
-            let alter_kind = AlterKind::DropColumns {
-                names: drop_columns.into_iter().map(|c| c.name).collect(),
-            };
-
-            let request = AlterTableRequest {
-                catalog_name: expr.catalog_name,
-                schema_name: expr.schema_name,
-                table_name: expr.table_name,
-                alter_kind,
-            };
-            Ok(Some(request))
-        }
-        None => Ok(None),
-    }
-}
-
-fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
-    let column_schemas = expr
-        .column_defs
-        .iter()
-        .map(|x| {
-            x.try_as_column_schema()
-                .context(error::InvalidColumnDefSnafu { column: &x.name })
-        })
-        .collect::<Result<Vec<ColumnSchema>>>()?;
-
-    ensure!(
-        column_schemas
-            .iter()
-            .any(|column| column.name == expr.time_index),
-        error::KeyColumnNotFoundSnafu {
-            name: &expr.time_index,
-        }
-    );
-
-    let column_schemas = column_schemas
-        .into_iter()
-        .map(|column_schema| {
-            if column_schema.name == expr.time_index {
-                column_schema.with_time_index(true)
-            } else {
-                column_schema
-            }
-        })
-        .collect::<Vec<_>>();
-
-    Ok(Arc::new(
-        SchemaBuilder::try_from(column_schemas)
-            .context(error::CreateSchemaSnafu)?
-            .build()
-            .context(error::CreateSchemaSnafu)?,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::ColumnDef;
     use common_catalog::consts::MIN_USER_TABLE_ID;
+    use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnDefaultConstraint;
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
 
     use super::*;
-    use crate::tests::test_util;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_create_expr_to_request() {
         common_telemetry::init_default_ut_logging();
-        let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("create_expr_to_request");
-        let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-        instance.start().await.unwrap();
-
         let expr = testing_create_expr();
-        let request = create_expr_to_request(1024, expr).await.unwrap();
-        assert_eq!(request.id, common_catalog::consts::MIN_USER_TABLE_ID);
+        let request = create_expr_to_request(1024, expr).unwrap();
+        assert_eq!(request.id, MIN_USER_TABLE_ID);
         assert_eq!(request.catalog_name, "greptime".to_string());
         assert_eq!(request.schema_name, "public".to_string());
         assert_eq!(request.table_name, "my-metrics");
@@ -279,12 +147,13 @@ mod tests {
 
         let mut expr = testing_create_expr();
         expr.primary_keys = vec!["host".to_string(), "not-exist-column".to_string()];
-        let result = create_expr_to_request(1025, expr).await;
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Specified timestamp key or primary key column not found: not-exist-column"));
+        let result = create_expr_to_request(1025, expr);
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Column `not-exist-column` not found in table `my-metrics`"),
+            "{}",
+            err_msg
+        );
     }
 
     #[test]
@@ -295,11 +164,12 @@ mod tests {
 
         expr.time_index = "not-exist-column".to_string();
         let result = create_table_schema(&expr);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Specified timestamp key or primary key column not found: not-exist-column"));
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Missing timestamp column"),
+            "actual: {}",
+            err_msg
+        );
     }
 
     #[test]

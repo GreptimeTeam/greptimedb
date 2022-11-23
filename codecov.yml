@@ -7,3 +7,4 @@ coverage:
     patch: off
 ignore:
   - "**/error*.rs" # ignore all error.rs files
+  - "tests/runner/*.rs" # ignore integration test runner
