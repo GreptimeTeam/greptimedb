@@ -354,7 +354,7 @@ impl CatalogManager for LocalCatalogManager {
 
     async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<usize> {
         UnimplementedSnafu {
-            operation: String::from("deregister table"),
+            operation: "deregister table",
         }
         .fail()
     }
