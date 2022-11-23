@@ -85,15 +85,15 @@ pub trait CatalogManager: CatalogList {
 
     /// Registers a table within given catalog/schema to catalog manager,
     /// returns whether the table registered.
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize>;
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool>;
 
     /// Deregisters a table within given catalog/schema to catalog manager,
     /// returns whether the table deregistered.
-    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<usize>;
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool>;
 
     /// Register a schema with catalog name and schema name. Retuens whether the
     /// schema registered.
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize>;
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
 
     /// Register a system table, should be called before starting the manager.
     async fn register_system_table(&self, request: RegisterSystemTableRequest)

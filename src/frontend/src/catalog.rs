@@ -66,24 +66,21 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(())
     }
 
-    async fn register_table(
-        &self,
-        _request: RegisterTableRequest,
-    ) -> catalog::error::Result<usize> {
+    async fn register_table(&self, _request: RegisterTableRequest) -> catalog::error::Result<bool> {
         unimplemented!()
     }
 
     async fn deregister_table(
         &self,
         _request: DeregisterTableRequest,
-    ) -> catalog::error::Result<usize> {
+    ) -> catalog::error::Result<bool> {
         unimplemented!()
     }
 
     async fn register_schema(
         &self,
         _request: RegisterSchemaRequest,
-    ) -> catalog::error::Result<usize> {
+    ) -> catalog::error::Result<bool> {
         unimplemented!()
     }
 

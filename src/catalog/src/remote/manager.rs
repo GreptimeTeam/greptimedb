@@ -411,7 +411,7 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
@@ -430,17 +430,17 @@ impl CatalogManager for RemoteCatalogManager {
             .fail();
         }
         schema_provider.register_table(request.table_name, request.table)?;
-        Ok(1)
+        Ok(true)
     }
 
-    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<usize> {
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {
         UnimplementedSnafu {
             operation: "deregister table",
         }
         .fail()
     }
 
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
@@ -448,7 +448,7 @@ impl CatalogManager for RemoteCatalogManager {
         })?;
         let schema_provider = self.new_schema_provider(&catalog_name, &schema_name);
         catalog_provider.register_schema(schema_name, schema_provider)?;
-        Ok(1)
+        Ok(true)
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {

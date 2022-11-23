@@ -69,7 +69,7 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(())
     }
 
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let catalogs = self.catalogs.write().unwrap();
         let catalog = catalogs
             .get(&request.catalog)
@@ -84,10 +84,10 @@ impl CatalogManager for MemoryCatalogManager {
             })?;
         schema
             .register_table(request.table_name, request.table)
-            .map(|v| if v.is_some() { 0 } else { 1 })
+            .map(|v| v.is_none())
     }
 
-    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<usize> {
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
         let catalogs = self.catalogs.write().unwrap();
         let catalog = catalogs
             .get(&request.catalog)
@@ -102,10 +102,10 @@ impl CatalogManager for MemoryCatalogManager {
             })?;
         schema
             .deregister_table(&request.table_name)
-            .map(|v| if v.is_some() { 0 } else { 1 })
+            .map(|v| v.is_some())
     }
 
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let catalogs = self.catalogs.write().unwrap();
         let catalog = catalogs
             .get(&request.catalog)
@@ -113,7 +113,7 @@ impl CatalogManager for MemoryCatalogManager {
                 catalog_name: &request.catalog,
             })?;
         catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
-        Ok(1)
+        Ok(true)
     }
 
     async fn register_system_table(&self, _request: RegisterSystemTableRequest) -> Result<()> {

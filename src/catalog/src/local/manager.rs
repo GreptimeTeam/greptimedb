@@ -309,7 +309,7 @@ impl CatalogManager for LocalCatalogManager {
         self.init().await
     }
 
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let started = self.init_lock.lock().await;
 
         ensure!(
@@ -349,17 +349,17 @@ impl CatalogManager for LocalCatalogManager {
             .await?;
 
         schema.register_table(request.table_name, request.table)?;
-        Ok(1)
+        Ok(true)
     }
 
-    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<usize> {
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {
         UnimplementedSnafu {
             operation: "deregister table",
         }
         .fail()
     }
 
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let started = self.init_lock.lock().await;
         ensure!(
             *started,
@@ -384,7 +384,7 @@ impl CatalogManager for LocalCatalogManager {
             .register_schema(request.catalog, schema_name.clone())
             .await?;
         catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
-        Ok(1)
+        Ok(true)
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
