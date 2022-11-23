@@ -260,10 +260,10 @@ fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
     let primary_key_indices = &table_info.meta.primary_key_indices;
     let table_name = &table_info.name;
 
-    create_sql_column.push(format!("CREATE TABLE {} ( ", table_name));
+    create_sql_column.push(format!("CREATE TABLE {}(", table_name));
     for (index, cs) in columns_schemas.iter().enumerate() {
-        create_sql_column.push(cs.name.clone());
-        create_sql_column.push(cs.data_type.name().to_string());
+        create_sql_column.push(format!("{} ", cs.name.clone()));
+        create_sql_column.push(format!("{} ", cs.data_type.name()));
         let default_val = if cs.is_nullable() {
             "null".to_string()
         } else if cs.default_constraint().is_none() {
@@ -277,7 +277,7 @@ fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
         };
         create_sql_column.push(default_val);
         if index != columns_schemas.len() - 1 {
-            create_sql_column.push(",".to_string());
+            create_sql_column.push(", ".to_string());
         }
     }
 
@@ -285,16 +285,16 @@ fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
     for (index, cs) in columns_schemas.iter().enumerate() {
         if primary_key_indices.contains(&index) {
             create_sql_index.push(format!("PRIMARY KEY({})", cs.name));
-            create_sql_index.push(",".to_string());
+            create_sql_index.push(", ".to_string());
         } else if cs.is_time_index() {
             create_sql_index.push(format!("TIME INDEX({})", cs.name));
-            create_sql_index.push(",".to_string());
+            create_sql_index.push(", ".to_string());
         } else {
         };
     }
 
     if !create_sql_index.is_empty() {
-        create_sql_column.push(",".to_string());
+        create_sql_column.push(", ".to_string());
         create_sql_index.remove(create_sql_index.len() - 1);
         create_sql_index.push(")".to_string());
     }
@@ -305,8 +305,8 @@ fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
         table_info.meta.region_numbers.len()
     ));
 
-    let create_sql_column_value = create_sql_column.join(" ");
-    let create_sql_column_index = create_sql_index.join(" ");
+    let create_sql_column_value = create_sql_column.join("");
+    let create_sql_column_index = create_sql_index.join("");
     Arc::new(StringVector::from(vec![format!(
         "{}{}",
         create_sql_column_value, create_sql_column_index
@@ -517,7 +517,7 @@ mod test {
         ];
         let expected_columns = vec![
             Arc::new(StringVector::from(vec!["test_table".to_string()])) as _,
-            Arc::new(StringVector::from(vec!["CREATE TABLE test_table( table String, create_table String engine=mock with(regions=1);".to_string()])) as _,
+            Arc::new(StringVector::from(vec!["CREATE TABLE test_table(table String , create_table String ENGINE=mock WITH(REGIONS=1);".to_string()])) as _,
         ];
 
         show_create_table_test_by_schema(
@@ -554,6 +554,8 @@ mod test {
             table_name.to_string(),
         );
         if let Output::RecordBatches(res) = show_create_table(stmt, catalog_manager)? {
+            // println!("res: {:?}", res.take());
+            // println!("expected: {:?}", expected.take());
             assert_eq!(res.take(), expected.take());
         } else {
             panic!("show create table must return record batch");
