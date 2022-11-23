@@ -20,6 +20,7 @@ members = [
     "src/common/time",
     "src/datanode",
     "src/datatypes",
+    "src/datatypes2",
     "src/frontend",
     "src/log-store",
     "src/meta-client",
