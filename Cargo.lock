@@ -1789,6 +1789,7 @@ dependencies = [
  "axum 0.6.0-rc.2",
  "axum-macros",
  "axum-test-helper",
+ "backon",
  "catalog",
  "client",
  "common-base",
@@ -3665,6 +3666,7 @@ dependencies = [
  "http",
  "log",
  "md-5",
+ "metrics",
  "once_cell",
  "parking_lot",
  "percent-encoding",
@@ -3677,6 +3679,7 @@ dependencies = [
  "thiserror",
  "time 0.3.14",
  "tokio",
+ "tracing",
  "ureq",
 ]
 
