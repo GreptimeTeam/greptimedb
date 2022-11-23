@@ -99,7 +99,7 @@ impl Instance {
         // create remote catalog manager
         let (catalog_manager, factory, table_id_provider) = match opts.mode {
             Mode::Standalone => {
-                if opts.memory_catalog_enable {
+                if opts.enable_memory_catalog {
                     let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
                     let factory = QueryEngineFactory::new(catalog.clone());
 

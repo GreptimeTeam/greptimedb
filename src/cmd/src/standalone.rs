@@ -71,7 +71,7 @@ pub struct StandaloneOptions {
     pub mode: Mode,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
-    pub memory_catalog_enable: bool,
+    pub enable_memory_catalog: bool,
 }
 
 impl Default for StandaloneOptions {
@@ -87,7 +87,7 @@ impl Default for StandaloneOptions {
             mode: Mode::Standalone,
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
-            memory_catalog_enable: false,
+            enable_memory_catalog: false,
         }
     }
 }
@@ -112,7 +112,7 @@ impl StandaloneOptions {
         DatanodeOptions {
             wal_dir: self.wal_dir,
             storage: self.storage,
-            memory_catalog_enable: self.memory_catalog_enable,
+            enable_memory_catalog: self.enable_memory_catalog,
             ..Default::default()
         }
     }
@@ -134,13 +134,13 @@ struct StartCommand {
     influxdb_enable: bool,
     #[clap(short, long)]
     config_file: Option<String>,
-    #[clap(short, long)]
-    memory_catalog_enable: bool,
+    #[clap(short = 'm', long = "memory-catalog")]
+    enable_memory_catalog: bool,
 }
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        let memory_catalog_enable = self.memory_catalog_enable;
+        let enable_memory_catalog = self.enable_memory_catalog;
         let config_file = self.config_file.clone();
         let fe_opts = FrontendOptions::try_from(self)?;
         let dn_opts: DatanodeOptions = {
@@ -149,7 +149,7 @@ impl StartCommand {
             } else {
                 StandaloneOptions::default()
             };
-            opts.memory_catalog_enable = memory_catalog_enable;
+            opts.enable_memory_catalog = enable_memory_catalog;
             opts.datanode_options()
         };
 
@@ -271,7 +271,7 @@ mod tests {
                 std::env::current_dir().unwrap().as_path().to_str().unwrap()
             )),
             influxdb_enable: false,
-            memory_catalog_enable: false,
+            enable_memory_catalog: false,
         };
 
         let fe_opts = FrontendOptions::try_from(cmd).unwrap();
