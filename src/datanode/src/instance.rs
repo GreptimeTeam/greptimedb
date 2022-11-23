@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, path};
 
+use backon::ExponentialBackoff;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -26,7 +27,7 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
-use object_store::layers::LoggingLayer;
+use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::fs::Builder;
 use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
@@ -189,7 +190,15 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         .build()
         .context(error::InitBackendSnafu { dir: &data_dir })?;
 
-    let object_store = ObjectStore::new(accessor).layer(LoggingLayer); // Add logging
+    let object_store = ObjectStore::new(accessor)
+        // Add retry
+        .layer(RetryLayer::new(ExponentialBackoff::default().with_jitter()))
+        // Add metrics
+        .layer(MetricsLayer)
+        // Add logging
+        .layer(LoggingLayer)
+        // Add tracing
+        .layer(TracingLayer);
 
     Ok(object_store)
 }
