@@ -21,7 +21,7 @@ use common_catalog::consts::{
     SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::lock::Mutex;
@@ -337,8 +337,12 @@ impl CatalogManager for LocalCatalogManager {
         {
             let _lock = self.register_lock.lock().await;
             if let Some(existing) = schema.table(&request.table_name)? {
-                let exiting_table_id = existing.table_info().ident.table_id;
-                if exiting_table_id != request.table_id {
+                if existing.table_info().ident.table_id != request.table_id {
+                    error!(
+                        "Unexpected table register request: {:?}, existing: {:?}",
+                        request,
+                        existing.table_info()
+                    );
                     return TableExistsSnafu {
                         table: format_full_table_name(
                             catalog_name,

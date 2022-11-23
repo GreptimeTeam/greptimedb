@@ -154,8 +154,8 @@ impl RemoteCatalogManager {
                 }
                 let table_key = TableGlobalKey::parse(&String::from_utf8_lossy(&k))
                     .context(InvalidCatalogValueSnafu)?;
-                let table_value = TableGlobalValue::parse(&String::from_utf8_lossy(&v))
-                    .context(InvalidCatalogValueSnafu)?;
+                let table_value =
+                    TableGlobalValue::from_bytes(&v).context(InvalidCatalogValueSnafu)?;
 
                 info!(
                     "Found catalog table entry, key: {}, value: {:?}",
