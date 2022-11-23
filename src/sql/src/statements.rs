@@ -322,11 +322,15 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
     use common_time::timestamp::TimeUnit;
+    use datatypes::types::BooleanType;
     use datatypes::value::OrderedFloat;
 
     use super::*;
-    use crate::ast::Ident;
+    use crate::ast::{DataType, Ident};
+    use crate::statements::ColumnOption;
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
         assert_eq!(
@@ -530,5 +534,33 @@ mod tests {
             &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
         )
         .is_err());
+    }
+
+    #[test]
+    pub fn test_parse_column_default_constraint() {
+        let bool_value = sqlparser::ast::Value::Boolean(true);
+
+        let opts = vec![
+            ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Default(Expr::Value(bool_value)),
+            },
+            ColumnOptionDef {
+                name: None,
+                option: ColumnOption::NotNull,
+            },
+        ];
+
+        let constraint = parse_column_default_constraint(
+            &"coll",
+            &ConcreteDataType::Boolean(BooleanType),
+            &opts,
+        )
+        .unwrap();
+
+        assert_matches!(
+            constraint,
+            Some(ColumnDefaultConstraint::Value(Value::Boolean(true)))
+        );
     }
 }
