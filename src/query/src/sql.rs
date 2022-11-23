@@ -276,10 +276,10 @@ fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
     let mut create_sql_index: Vec<String> = Vec::new();
     for (index, cs) in columns_schemas.iter().enumerate() {
         if primary_key_indices.contains(&index) {
-            create_sql_index.push(format!("primary key({})", cs.name));
+            create_sql_index.push(format!("PRIMARY KEY({})", cs.name));
             create_sql_index.push(",".to_string());
         } else if cs.is_time_index() {
-            create_sql_index.push(format!("time index({})", cs.name));
+            create_sql_index.push(format!("TIME INDEX({})", cs.name));
             create_sql_index.push(",".to_string());
         } else {
         };
@@ -292,7 +292,7 @@ fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
     }
 
     create_sql_index.push(format!(
-        "engine={} with(regions={});",
+        "ENGINE={} WITH(REGIONS={});",
         table_info.meta.engine,
         table_info.meta.region_numbers.len()
     ));
@@ -319,7 +319,10 @@ pub fn show_create_table(
         .table(&stmt.table_name)
         .context(error::CatalogSnafu)?
         .context(error::TableNotFoundSnafu {
-            table: &stmt.table_name,
+            table: format!(
+                "table_name: {}, schema_name: {}, catalog_name: {}",
+                &stmt.table_name, &stmt.schema_name, &stmt.catalog_name
+            ),
         })?;
 
     let table_info = table.table_info();
@@ -372,7 +375,7 @@ mod test {
         )]));
         let data = vec![Arc::new(UInt32Vector::from_vec(vec![0])) as _];
         let catalog_manager =
-            prepare_describe_table(&catalog_name, &schema_name, table_name, table_schema, data);
+            prepare_table_manager_util(&catalog_name, &schema_name, table_name, table_schema, data);
 
         let stmt = DescribeTable::new("unknown".to_string(), schema_name, table_name.to_string());
 
@@ -400,7 +403,7 @@ mod test {
         )]));
         let data = vec![Arc::new(UInt32Vector::from_vec(vec![0])) as _];
         let catalog_manager =
-            prepare_describe_table(&catalog_name, &schema_name, table_name, table_schema, data);
+            prepare_table_manager_util(&catalog_name, &schema_name, table_name, table_schema, data);
 
         let stmt = DescribeTable::new(catalog_name, "unknown".to_string(), table_name.to_string());
 
@@ -428,7 +431,7 @@ mod test {
         )]));
         let data = vec![Arc::new(UInt32Vector::from_vec(vec![0])) as _];
         let catalog_manager =
-            prepare_describe_table(&catalog_name, &schema_name, table_name, table_schema, data);
+            prepare_table_manager_util(&catalog_name, &schema_name, table_name, table_schema, data);
 
         let stmt = DescribeTable::new(catalog_name, schema_name, "unknown".to_string());
 
@@ -506,7 +509,7 @@ mod test {
         ];
         let expected_columns = vec![
             Arc::new(StringVector::from(vec!["test_table".to_string()])) as _,
-            Arc::new(StringVector::from(vec!["CREATE TABLE test_table (  table String  , create_table String engine=mock with(regions=1);".to_string()])) as _,
+            Arc::new(StringVector::from(vec!["CREATE TABLE test_table( table String, create_table String engine=mock with(regions=1);".to_string()])) as _,
         ];
 
         show_create_table_test_by_schema(
@@ -517,7 +520,6 @@ mod test {
             data,
             expected_columns,
         )
-        // Ok(())
     }
 
     fn show_create_table_test_by_schema(
@@ -530,7 +532,7 @@ mod test {
     ) -> Result<()> {
         let table_schema = SchemaRef::new(Schema::new(schema));
         let catalog_manager =
-            prepare_describe_table(catalog_name, schema_name, table_name, table_schema, data);
+            prepare_table_manager_util(catalog_name, schema_name, table_name, table_schema, data);
 
         let expected = RecordBatches::try_from_columns(
             SHOW_CREATE_TABLE_OUTPUT_SCHEMA.clone(),
@@ -546,7 +548,7 @@ mod test {
         if let Output::RecordBatches(res) = show_create_table(stmt, catalog_manager)? {
             assert_eq!(res.take(), expected.take());
         } else {
-            panic!("describe table must return record batch");
+            panic!("show create table must return record batch");
         }
 
         Ok(())
@@ -562,7 +564,7 @@ mod test {
     ) -> Result<()> {
         let table_schema = SchemaRef::new(Schema::new(schema));
         let catalog_manager =
-            prepare_describe_table(catalog_name, schema_name, table_name, table_schema, data);
+            prepare_table_manager_util(catalog_name, schema_name, table_name, table_schema, data);
 
         let expected =
             RecordBatches::try_from_columns(DESCRIBE_TABLE_OUTPUT_SCHEMA.clone(), expected_columns)
@@ -582,7 +584,7 @@ mod test {
         Ok(())
     }
 
-    fn prepare_describe_table(
+    fn prepare_table_manager_util(
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
