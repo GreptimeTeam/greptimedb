@@ -61,7 +61,7 @@ impl CreateExprFactory for DefaultCreateExprFactory {
         batch: &[InsertBatch],
     ) -> Result<CreateExpr> {
         let table_id = None;
-        let create_expr = common_insert::build_create_expr_from_insertion(
+        let create_expr = common_grpc_expr::build_create_expr_from_insertion(
             catalog_name,
             schema_name,
             table_id,

@@ -22,6 +22,7 @@ use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::sql::planner::{ContextProvider, SqlToRel};
 use datatypes::arrow::datatypes::DataType;
 use snafu::ResultExt;
+use sql::statements::explain::Explain;
 use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 
@@ -53,6 +54,18 @@ impl<'a, S: ContextProvider + Send + Sync> DfPlanner<'a, S> {
 
         Ok(LogicalPlan::DfPlan(result))
     }
+
+    /// Converts EXPLAIN statement to logical plan.
+    pub fn explain_to_plan(&self, explain: Explain) -> Result<LogicalPlan> {
+        let result = self
+            .sql_to_rel
+            .sql_statement_to_plan(explain.inner.clone())
+            .context(error::PlanSqlSnafu {
+                sql: explain.to_string(),
+            })?;
+
+        Ok(LogicalPlan::DfPlan(result))
+    }
 }
 
 impl<'a, S> Planner for DfPlanner<'a, S>
@@ -63,6 +76,7 @@ where
     fn statement_to_plan(&self, statement: Statement) -> Result<LogicalPlan> {
         match statement {
             Statement::Query(qb) => self.query_to_plan(qb),
+            Statement::Explain(explain) => self.explain_to_plan(explain),
             Statement::ShowTables(_)
             | Statement::ShowDatabases(_)
             | Statement::ShowCreateTable(_)

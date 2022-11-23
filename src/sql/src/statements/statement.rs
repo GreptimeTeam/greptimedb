@@ -18,11 +18,13 @@ use sqlparser::parser::ParserError;
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
 use crate::statements::describe::DescribeTable;
+use crate::statements::explain::Explain;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowTables};
 
 /// Tokens parsed by `DFParser` are converted into these values.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     // Query
@@ -43,6 +45,8 @@ pub enum Statement {
     ShowCreateTable(ShowCreateTable),
     // DESCRIBE TABLE
     DescribeTable(DescribeTable),
+    // EXPLAIN QUERY
+    Explain(Explain),
 }
 
 /// Converts Statement to sqlparser statement
@@ -68,6 +72,7 @@ impl TryFrom<Statement> for SpStatement {
             Statement::CreateDatabase(_) | Statement::CreateTable(_) | Statement::Alter(_) => {
                 unimplemented!()
             }
+            Statement::Explain(e) => Ok(e.inner),
         }
     }
 }

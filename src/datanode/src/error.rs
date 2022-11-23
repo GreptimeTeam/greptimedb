@@ -82,9 +82,6 @@ pub enum Error {
         table_name: String,
     },
 
-    #[snafu(display("Missing required field in protobuf, field: {}", field))]
-    MissingField { field: String, backtrace: Backtrace },
-
     #[snafu(display("Missing timestamp column in request"))]
     MissingTimestampColumn { backtrace: Backtrace },
 
@@ -202,21 +199,16 @@ pub enum Error {
         source: common_grpc::Error,
     },
 
-    #[snafu(display("Column datatype error, source: {}", source))]
-    ColumnDataType {
+    #[snafu(display("Failed to convert alter expr to request: {}", source))]
+    AlterExprToRequest {
         #[snafu(backtrace)]
-        source: api::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display(
-        "Invalid column proto definition, column: {}, source: {}",
-        column,
-        source
-    ))]
-    InvalidColumnDef {
-        column: String,
+    #[snafu(display("Failed to convert create expr to request: {}", source))]
+    CreateExprToRequest {
         #[snafu(backtrace)]
-        source: api::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to parse SQL, source: {}", source))]
@@ -263,7 +255,7 @@ pub enum Error {
     #[snafu(display("Failed to insert data, source: {}", source))]
     InsertData {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Insert batch is empty"))]
@@ -316,6 +308,8 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
+            Error::AlterExprToRequest { source, .. }
+            | Error::CreateExprToRequest { source, .. } => source.status_code(),
             Error::CreateSchema { source, .. }
             | Error::ConvertSchema { source, .. }
             | Error::VectorComputation { source } => source.status_code(),
@@ -324,7 +318,6 @@ impl ErrorExt for Error {
             | Error::InvalidSql { .. }
             | Error::KeyColumnNotFound { .. }
             | Error::InvalidPrimaryKey { .. }
-            | Error::MissingField { .. }
             | Error::MissingTimestampColumn { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
@@ -342,10 +335,6 @@ impl ErrorExt for Error {
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }
             | Error::Catalog { .. } => StatusCode::Internal,
-
-            Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
-                source.status_code()
-            }
 
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),

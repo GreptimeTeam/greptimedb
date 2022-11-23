@@ -15,7 +15,7 @@ members = [
     "src/common/recordbatch",
     "src/common/runtime",
     "src/common/substrait",
-    "src/common/insert",
+    "src/common/grpc-expr",
     "src/common/telemetry",
     "src/common/time",
     "src/datanode",
@@ -33,6 +33,7 @@ members = [
     "src/store-api",
     "src/table",
     "src/mito",
+    "tests/runner",
 ]
 
 [profile.release]

@@ -12,14 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::derive_partial_eq_without_eq)]
-tonic::include_proto!("greptime.v1");
+pub use bitvec::prelude;
 
-pub const GREPTIME_FD_SET: &[u8] = tonic::include_file_descriptor_set!("greptime_fd");
-
-pub mod codec {
-    tonic::include_proto!("greptime.v1.codec");
-}
-
-mod column_def;
-pub mod meta;
+// `Lsb0` provides the best codegen for bit manipulation,
+// see https://github.com/bitvecto-rs/bitvec/blob/main/doc/order/Lsb0.md
+pub type BitVec = prelude::BitVec<u8>;
