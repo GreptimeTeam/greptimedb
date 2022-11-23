@@ -2,6 +2,7 @@ node_id = 0
 mode = 'standalone'
 http_addr = '127.0.0.1:4000'
 wal_dir = '/tmp/greptimedb/wal/'
+memory_catalog_enable = false
 
 [storage]
 type = 'File'
