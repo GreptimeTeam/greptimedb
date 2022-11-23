@@ -23,7 +23,7 @@ use client::admin::{admin_result_to_output, Admin};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use common_query::Output;
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
@@ -257,7 +257,7 @@ impl DistInstance {
             let existing_value = TableGlobalValue::parse(&String::from_utf8_lossy(&existing_bytes)) //this unwrap is safe since we compare with empty bytes and failed
                 .context(CatalogEntrySerdeSnafu)?;
             if existing_value.table_info.ident.table_id != create_table.table_id.unwrap() {
-                warn!(
+                error!(
                     "Table with name {} already exists, value in catalog: {:?}",
                     key, existing_bytes
                 );

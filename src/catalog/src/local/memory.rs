@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_telemetry::error;
 use snafu::OptionExt;
 use table::metadata::TableId;
 use table::table::TableIdProvider;
@@ -274,6 +275,11 @@ impl SchemaProvider for MemorySchemaProvider {
         if let Some(existing) = tables.get(name.as_str()) {
             // if table with the same name but different table id exists, then it's a fatal bug
             if existing.table_info().ident.table_id != table.table_info().ident.table_id {
+                error!(
+                    "Unexpected table register: {:?}, existing: {:?}",
+                    table.table_info(),
+                    existing.table_info()
+                );
                 return TableExistsSnafu { table: name }.fail()?;
             }
             Ok(Some(existing.clone()))
