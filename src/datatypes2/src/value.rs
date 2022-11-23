@@ -18,7 +18,7 @@ use std::fmt::{Display, Formatter};
 use common_base::bytes::{Bytes, StringBytes};
 use common_time::date::Date;
 use common_time::datetime::DateTime;
-use common_time::timestamp::{Timestamp};
+use common_time::timestamp::Timestamp;
 use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};

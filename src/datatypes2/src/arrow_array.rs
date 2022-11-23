@@ -17,7 +17,7 @@ use arrow::datatypes::DataType;
 use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result};
-use crate::value::{Value};
+use crate::value::Value;
 
 pub type BinaryArray = arrow::array::LargeBinaryArray;
 pub type MutableBinaryArray = arrow::array::LargeBinaryBuilder;

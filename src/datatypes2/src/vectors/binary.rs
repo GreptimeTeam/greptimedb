@@ -15,8 +15,8 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayData, ArrayRef, ArrayBuilder, ArrayIter};
-use snafu::{ResultExt};
+use arrow::array::{Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef};
+use snafu::ResultExt;
 
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};
 use crate::data_type::ConcreteDataType;
@@ -227,7 +227,10 @@ mod tests {
 
     #[test]
     fn test_binary_vector_misc() {
-        let v = BinaryVector::from(BinaryArray::from_iter_values(&[vec![1, 2, 3], vec![1, 2, 3]]));
+        let v = BinaryVector::from(BinaryArray::from_iter_values(&[
+            vec![1, 2, 3],
+            vec![1, 2, 3],
+        ]));
 
         assert_eq!(2, v.len());
         assert_eq!("BinaryVector", v.vector_type_name());
@@ -249,7 +252,10 @@ mod tests {
 
     #[test]
     fn test_serialize_binary_vector_to_json() {
-        let vector = BinaryVector::from(BinaryArray::from_iter_values(&[vec![1, 2, 3], vec![1, 2, 3]]));
+        let vector = BinaryVector::from(BinaryArray::from_iter_values(&[
+            vec![1, 2, 3],
+            vec![1, 2, 3],
+        ]));
 
         let json_value = vector.serialize_to_json().unwrap();
         assert_eq!(

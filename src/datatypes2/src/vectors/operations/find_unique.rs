@@ -15,7 +15,6 @@
 use common_base::BitVec;
 
 use crate::scalars::ScalarVector;
-// use crate::vectors::{ConstantVector, NullVector, Vector};
 
 // To implement `find_unique()` correctly, we need to keep in mind that always marks an element as
 // selected when it is different from the previous one, and leaves the `selected` unchanged

@@ -20,9 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
-use crate::types::{
-    BinaryType, BooleanType,
-};
+use crate::types::{BinaryType, BooleanType};
 use crate::value::Value;
 use crate::vectors::MutableVector;
 
@@ -191,10 +189,7 @@ macro_rules! impl_new_concrete_type_functions {
 //     Binary, String, Date, DateTime
 // );
 
-impl_new_concrete_type_functions!(
-    Boolean,
-    Binary
-);
+impl_new_concrete_type_functions!(Boolean, Binary);
 
 // impl ConcreteDataType {
 //     pub fn list_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {

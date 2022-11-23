@@ -6,9 +6,7 @@ use common_base::BitVec;
 
 use crate::error::Result;
 // use crate::types::PrimitiveElement;
-use crate::vectors::{
-    VectorRef, Vector, BinaryVector, BooleanVector
-};
+use crate::vectors::{BinaryVector, BooleanVector, Vector, VectorRef};
 
 /// Vector compute operations.
 pub trait VectorOp {

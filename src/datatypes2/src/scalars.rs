@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use crate::vectors::{Vector, MutableVector, BooleanVector, BinaryVector};
+use crate::vectors::{BinaryVector, BooleanVector, MutableVector, Vector};
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
     match iter.size_hint() {

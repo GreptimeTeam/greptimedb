@@ -10,12 +10,11 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
-
 use crate::vectors::operations::VectorOp;
 
-pub mod operations;
 pub mod binary;
 pub mod boolean;
+pub mod operations;
 
 pub use binary::{BinaryVector, BinaryVectorBuilder};
 pub use boolean::{BooleanVector, BooleanVectorBuilder};
@@ -179,7 +178,7 @@ macro_rules! impl_try_from_arrow_array_for_vector {
             ) -> crate::error::Result<$Vector> {
                 let data = array.as_ref().data().clone();
                 // TODO(yingwen): Should we check the array type?
-                let concrete_array = $Array::from(data);                
+                let concrete_array = $Array::from(data);
                 Ok($Vector::from(concrete_array))
 
                 // The original implementation using arrow2 checks array type:

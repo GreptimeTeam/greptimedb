@@ -16,8 +16,10 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, ArrayIter, ArrayData, ArrayBuilder, BooleanArray, BooleanBuilder};
-use snafu::{ResultExt};
+use arrow::array::{
+    Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef, BooleanArray, BooleanBuilder,
+};
+use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;

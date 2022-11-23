@@ -18,8 +18,8 @@ macro_rules! filter_non_constant {
     ($vector: expr, $VectorType: ty, $filter: ident) => {{
         use std::sync::Arc;
 
-        use snafu::ResultExt;
         use arrow::compute;
+        use snafu::ResultExt;
 
         let arrow_array = $vector.as_arrow();
         let filtered = compute::filter(arrow_array, $filter.as_boolean_array())
