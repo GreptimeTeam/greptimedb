@@ -58,7 +58,7 @@ impl SqlHandler {
 
         info!("Successfully dropped table: {}", table_full_name);
 
-        Ok(Output::AffectedRows(0))
+        Ok(Output::AffectedRows(1))
     }
 
     pub fn drop_table_to_request(&self, drop_table: DropTable) -> DropTableRequest {

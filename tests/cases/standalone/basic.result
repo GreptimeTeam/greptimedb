@@ -56,5 +56,5 @@ SELECT idc, avg(memory_util) FROM system_metrics GROUP BY idc ORDER BY idc;
 
 DROP TABLE system_metrics;
 
-Failed to execute, error: Datanode { code: 1001, msg: "Failed to execute sql, source: Cannot parse SQL, source: SQL statement is not supported:  DROP TABLE system_metrics;, keyword: DROP" }
+MutateResult { success: 1, failure: 0 }
 
