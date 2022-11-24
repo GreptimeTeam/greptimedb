@@ -289,8 +289,7 @@ fn show_create_table_column_name(table_info: TableInfoRef) -> VectorRef {
         } else if cs.is_time_index() {
             create_sql_index.push(format!("TIME INDEX({})", cs.name));
             create_sql_index.push(", ".to_string());
-        } else {
-        };
+        }
     }
 
     if !create_sql_index.is_empty() {
@@ -554,8 +553,6 @@ mod test {
             table_name.to_string(),
         );
         if let Output::RecordBatches(res) = show_create_table(stmt, catalog_manager)? {
-            // println!("res: {:?}", res.take());
-            // println!("expected: {:?}", expected.take());
             assert_eq!(res.take(), expected.take());
         } else {
             panic!("show create table must return record batch");
