@@ -26,6 +26,13 @@ env:
   RUST_TOOLCHAIN: nightly-2022-07-14
 
 jobs:
+  typos:
+    name: Spell Check with Typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: crate-ci/typos@v1.0.4
+
   check:
     name: Check
     if: github.event.pull_request.draft == false
