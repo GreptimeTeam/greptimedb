@@ -53,7 +53,7 @@ impl OpentsdbProtocolHandler for Instance {
 impl Instance {
     async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> Result<()> {
         let expr = data_point.as_grpc_insert();
-        self.handle_insert(&expr).await?;
+        self.handle_insert(expr).await?;
         Ok(())
     }
 }

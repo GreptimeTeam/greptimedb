@@ -17,16 +17,14 @@ mod influxdb;
 mod opentsdb;
 mod prometheus;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::result::ObjectResultBuilder;
 use api::v1::alter_expr::Kind;
-use api::v1::codec::InsertBatch;
 use api::v1::object_expr::Expr;
 use api::v1::{
-    admin_expr, insert_expr, select_expr, AddColumns, AdminExpr, AdminResult, AlterExpr,
+    admin_expr, select_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, Column,
     CreateDatabaseExpr, CreateExpr, InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
@@ -60,13 +58,13 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterTableOnInsertionSnafu, AlterTableSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    CreateDatabaseSnafu, CreateTableSnafu, DeserializeInsertBatchSnafu,
-    FindNewColumnsOnInsertionSnafu, InsertSnafu, MissingMetasrvOptsSnafu, Result,
-    SchemaNotFoundSnafu, SelectSnafu,
+    CreateDatabaseSnafu, CreateTableSnafu, FindNewColumnsOnInsertionSnafu, InsertSnafu,
+    MissingMetasrvOptsSnafu, Result, SchemaNotFoundSnafu, SelectSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::sql::insert_to_request;
+use crate::table::insert::insert_request_to_insert_batch;
 use crate::table::route::TableRoutes;
 
 #[async_trait]
@@ -292,7 +290,7 @@ impl Instance {
     }
 
     /// Handle batch inserts
-    pub async fn handle_inserts(&self, insert_expr: &[InsertExpr]) -> Result<Output> {
+    pub async fn handle_inserts(&self, insert_expr: Vec<InsertExpr>) -> Result<Output> {
         let mut success = 0;
         for expr in insert_expr {
             match self.handle_insert(expr).await? {
@@ -304,68 +302,20 @@ impl Instance {
     }
 
     /// Handle insert. for 'values' insertion, create/alter the destination table on demand.
-    pub async fn handle_insert(&self, insert_expr: &InsertExpr) -> Result<Output> {
+    pub async fn handle_insert(&self, mut insert_expr: InsertExpr) -> Result<Output> {
         let table_name = &insert_expr.table_name;
         let catalog_name = DEFAULT_CATALOG_NAME;
         let schema_name = &insert_expr.schema_name;
 
-        if let Some(expr) = &insert_expr.expr {
-            match expr {
-                api::v1::insert_expr::Expr::Values(values) => {
-                    // TODO(hl): gRPC should also support partitioning.
-                    let region_number = 0;
-                    self.handle_insert_values(
-                        catalog_name,
-                        schema_name,
-                        table_name,
-                        region_number,
-                        values,
-                    )
-                    .await
-                }
-                api::v1::insert_expr::Expr::Sql(_) => {
-                    // Frontend does not comprehend insert request that is raw SQL string
-                    self.database(schema_name)
-                        .insert(insert_expr.clone())
-                        .await
-                        .and_then(Output::try_from)
-                        .context(InsertSnafu)
-                }
-            }
-        } else {
-            // expr is empty
-            Ok(Output::AffectedRows(0))
-        }
-    }
+        let columns = &insert_expr.columns;
 
-    /// Handle insert requests in frontend
-    /// If insert is SQL string flavor, just forward to datanode
-    /// If insert is parsed InsertExpr, frontend should comprehend the schema and create/alter table on demand.
-    pub async fn handle_insert_values(
-        &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
-        region_number: u32,
-        values: &insert_expr::Values,
-    ) -> Result<Output> {
-        let insert_batches = common_grpc_expr::insert_batches(&values.values)
-            .context(DeserializeInsertBatchSnafu)?;
-        self.create_or_alter_table_on_demand(
-            catalog_name,
-            schema_name,
-            table_name,
-            &insert_batches,
-        )
-        .await?;
+        self.create_or_alter_table_on_demand(catalog_name, schema_name, table_name, columns)
+            .await?;
+
+        insert_expr.region_number = 0;
+
         self.database(schema_name)
-            .insert(InsertExpr {
-                schema_name: schema_name.to_string(),
-                table_name: table_name.to_string(),
-                region_number,
-                options: Default::default(),
-                expr: Some(insert_expr::Expr::Values(values.clone())),
-            })
+            .insert(insert_expr)
             .await
             .and_then(Output::try_from)
             .context(InsertSnafu)
@@ -379,7 +329,7 @@ impl Instance {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        insert_batches: &[InsertBatch],
+        columns: &[Column],
     ) -> Result<()> {
         match self
             .catalog_manager
@@ -401,13 +351,8 @@ impl Instance {
                     "Table {}.{}.{} does not exist, try create table",
                     catalog_name, schema_name, table_name,
                 );
-                self.create_table_by_insert_batches(
-                    catalog_name,
-                    schema_name,
-                    table_name,
-                    insert_batches,
-                )
-                .await?;
+                self.create_table_by_columns(catalog_name, schema_name, table_name, columns)
+                    .await?;
                 info!(
                     "Successfully created table on insertion: {}.{}.{}",
                     catalog_name, schema_name, table_name
@@ -415,9 +360,9 @@ impl Instance {
             }
             Some(table) => {
                 let schema = table.schema();
-                if let Some(add_columns) =
-                    common_grpc_expr::find_new_columns(&schema, insert_batches)
-                        .context(FindNewColumnsOnInsertionSnafu)?
+
+                if let Some(add_columns) = common_grpc_expr::find_new_columns(&schema, columns)
+                    .context(FindNewColumnsOnInsertionSnafu)?
                 {
                     info!(
                         "Find new columns {:?} on insertion, try to alter table: {}.{}.{}",
@@ -441,17 +386,17 @@ impl Instance {
     }
 
     /// Infer create table expr from inserting data
-    async fn create_table_by_insert_batches(
+    async fn create_table_by_columns(
         &self,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        insert_batches: &[InsertBatch],
+        columns: &[Column],
     ) -> Result<Output> {
         // Create table automatically, build schema from data.
         let create_expr = self
             .create_expr_factory
-            .create_expr_by_insert_batch(catalog_name, schema_name, table_name, insert_batches)
+            .create_expr_by_columns(catalog_name, schema_name, table_name, columns)
             .await?;
 
         info!(
@@ -512,9 +457,10 @@ impl Instance {
 
         let insert_request = insert_to_request(&schema_provider, *insert)?;
 
-        let batch = crate::table::insert::insert_request_to_insert_batch(&insert_request)?;
+        let (columns, _row_count) =
+            crate::table::insert::insert_request_to_insert_batch(&insert_request)?;
 
-        self.create_or_alter_table_on_demand(&catalog, &schema, &table, &[batch])
+        self.create_or_alter_table_on_demand(&catalog, &schema, &table, &columns)
             .await?;
 
         let table = schema_provider
@@ -526,6 +472,19 @@ impl Instance {
             .insert(insert_request)
             .await
             .context(error::TableSnafu)
+    }
+
+    fn stmt_to_insert_batch(
+        &self,
+        catalog: &str,
+        schema: &str,
+        insert: Box<Insert>,
+    ) -> Result<(Vec<Column>, u32)> {
+        let catalog_provider = self.get_catalog(catalog)?;
+        let schema_provider = Self::get_schema(catalog_provider, schema)?;
+
+        let insert_request = insert_to_request(&schema_provider, *insert)?;
+        insert_request_to_insert_batch(&insert_request)
     }
 }
 
@@ -580,7 +539,7 @@ impl SqlQueryHandler for Instance {
                 .context(server_error::ExecuteQuerySnafu { query }),
             Statement::Insert(insert) => match self.mode {
                 Mode::Standalone => {
-                    let (_, schema_name, table_name) = insert
+                    let (catalog_name, schema_name, table_name) = insert
                         .full_table_name()
                         .context(error::ParseSqlSnafu)
                         .map_err(BoxedError::new)
@@ -588,14 +547,19 @@ impl SqlQueryHandler for Instance {
                             msg: "Failed to get table name",
                         })?;
 
+                    let (columns, row_count) = self
+                        .stmt_to_insert_batch(&catalog_name, &schema_name, insert)
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteQuerySnafu { query })?;
+
                     let expr = InsertExpr {
                         schema_name,
                         table_name,
-                        expr: Some(insert_expr::Expr::Sql(query.to_string())),
                         region_number: 0,
-                        options: HashMap::default(),
+                        columns,
+                        row_count,
                     };
-                    self.handle_insert(&expr)
+                    self.handle_insert(expr)
                         .await
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteQuerySnafu { query })
@@ -694,7 +658,8 @@ impl GrpcQueryHandler for Instance {
         if let Some(expr) = &query.expr {
             match expr {
                 Expr::Insert(insert) => {
-                    let result = self.handle_insert(insert).await;
+                    // TODO(fys): refactor, avoid clone
+                    let result = self.handle_insert(insert.clone()).await;
                     result
                         .map(|o| match o {
                             Output::AffectedRows(rows) => ObjectResultBuilder::new()
@@ -785,7 +750,7 @@ impl GrpcAdminHandler for Instance {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::codec::{InsertBatch, SelectResult};
+    use api::v1::codec::SelectResult;
     use api::v1::column::SemanticType;
     use api::v1::{
         admin_expr, admin_result, column, object_expr, object_result, select_expr, Column,
@@ -944,22 +909,19 @@ mod tests {
         );
 
         // insert
-        let values = vec![InsertBatch {
-            columns: vec![
-                expected_host_col.clone(),
-                expected_cpu_col.clone(),
-                expected_mem_col.clone(),
-                expected_ts_col.clone(),
-            ],
-            row_count: 4,
-        }
-        .into()];
+        let columns = vec![
+            expected_host_col.clone(),
+            expected_cpu_col.clone(),
+            expected_mem_col.clone(),
+            expected_ts_col.clone(),
+        ];
+        let row_count = 4;
         let insert_expr = InsertExpr {
             schema_name: "public".to_string(),
             table_name: "demo".to_string(),
-            expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
-            options: HashMap::default(),
             region_number: 0,
+            columns,
+            row_count,
         };
         let object_expr = ObjectExpr {
             header: Some(ExprHeader::default()),

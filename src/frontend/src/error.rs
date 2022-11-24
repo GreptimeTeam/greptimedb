@@ -436,6 +436,9 @@ pub enum Error {
 
     #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
     LeaderNotFound { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Table already exists: `{}`", table))]
+    TableAlreadyExist { table: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -525,6 +528,7 @@ impl ErrorExt for Error {
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
+            Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
         }
     }
 

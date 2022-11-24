@@ -23,7 +23,7 @@ use client::admin::{admin_result_to_output, Admin};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use common_query::Output;
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
@@ -243,17 +243,32 @@ impl DistInstance {
             catalog_name: table_name.catalog_name.clone(),
             schema_name: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
-        };
+        }
+        .to_string();
 
         let value = create_table_global_value(create_table, table_route)?
             .as_bytes()
             .context(error::CatalogEntrySerdeSnafu)?;
 
-        self.catalog_manager
+        if let Err(existing) = self
+            .catalog_manager
             .backend()
-            .set(key.to_string().as_bytes(), &value)
+            .compare_and_set(key.as_bytes(), &[], &value)
             .await
-            .context(error::CatalogSnafu)
+            .context(CatalogSnafu)?
+        {
+            let existing_bytes = existing.unwrap(); //this unwrap is safe since we compare with empty bytes and failed
+            let existing_value =
+                TableGlobalValue::from_bytes(&existing_bytes).context(CatalogEntrySerdeSnafu)?;
+            if existing_value.table_info.ident.table_id != create_table.table_id.unwrap() {
+                error!(
+                    "Table with name {} already exists, value in catalog: {:?}",
+                    key, existing_bytes
+                );
+                return error::TableAlreadyExistSnafu { table: key }.fail();
+            }
+        }
+        Ok(())
     }
 }
 

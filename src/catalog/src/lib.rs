@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 
 use std::any::Any;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use common_telemetry::info;
@@ -83,12 +84,17 @@ pub trait CatalogManager: CatalogList {
     /// Starts a catalog manager.
     async fn start(&self) -> Result<()>;
 
-    /// Registers a table given given catalog/schema to catalog manager,
-    /// returns table registered.
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize>;
+    /// Registers a table within given catalog/schema to catalog manager,
+    /// returns whether the table registered.
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool>;
 
-    /// Register a schema with catalog name and schema name.
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize>;
+    /// Deregisters a table within given catalog/schema to catalog manager,
+    /// returns whether the table deregistered.
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool>;
+
+    /// Register a schema with catalog name and schema name. Retuens whether the
+    /// schema registered.
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
 
     /// Register a system table, should be called before starting the manager.
     async fn register_system_table(&self, request: RegisterSystemTableRequest)
@@ -121,6 +127,26 @@ pub struct RegisterTableRequest {
     pub table_name: String,
     pub table_id: TableId,
     pub table: TableRef,
+}
+
+impl Debug for RegisterTableRequest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisterTableRequest")
+            .field("catalog", &self.catalog)
+            .field("schema", &self.schema)
+            .field("table_name", &self.table_name)
+            .field("table_id", &self.table_id)
+            .field("table", &self.table.table_info())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct DeregisterTableRequest {
+    pub catalog: String,
+    pub schema: String,
+    pub table_name: String,
+    pub table_id: TableId,
 }
 
 #[derive(Debug, Clone)]

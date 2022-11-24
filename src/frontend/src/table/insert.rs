@@ -16,10 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::codec::InsertBatch;
 use api::v1::column::SemanticType;
-use api::v1::insert_expr::Expr;
-use api::v1::{codec, insert_expr, Column, InsertExpr, MutateResult};
+use api::v1::{Column, InsertExpr, MutateResult};
 use client::{Database, ObjectResult};
 use datatypes::prelude::ConcreteDataType;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -84,7 +82,7 @@ impl DistTable {
     }
 }
 
-pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<InsertBatch> {
+pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<(Vec<Column>, u32)> {
     let mut row_count = None;
 
     let columns = insert
@@ -127,24 +125,20 @@ pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<InsertBa
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let insert_batch = codec::InsertBatch {
-        columns,
-        row_count: row_count.map(|rows| rows as u32).unwrap_or(0),
-    };
-    Ok(insert_batch)
+    let row_count = row_count.unwrap_or(0) as u32;
+
+    Ok((columns, row_count))
 }
 
 fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<InsertExpr> {
     let table_name = insert.table_name.clone();
-    let insert_batch = insert_request_to_insert_batch(&insert)?;
+    let (columns, row_count) = insert_request_to_insert_batch(&insert)?;
     Ok(InsertExpr {
         schema_name: insert.schema_name,
         table_name,
-        expr: Some(Expr::Values(insert_expr::Values {
-            values: vec![insert_batch.into()],
-        })),
         region_number,
-        options: Default::default(),
+        columns,
+        row_count,
     })
 }
 
@@ -152,8 +146,6 @@ fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<
 mod tests {
     use std::collections::HashMap;
 
-    use api::v1::codec::InsertBatch;
-    use api::v1::insert_expr::Expr;
     use api::v1::{ColumnDataType, InsertExpr};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ConcreteDataType;
@@ -199,16 +191,7 @@ mod tests {
         let table_name = insert_expr.table_name;
         assert_eq!("demo", table_name);
 
-        let expr = insert_expr.expr.as_ref().unwrap();
-        let vals = match expr {
-            Expr::Values(vals) => vals,
-            Expr::Sql(_) => unreachable!(),
-        };
-
-        let batch: &[u8] = vals.values[0].as_ref();
-        let vals: InsertBatch = batch.try_into().unwrap();
-
-        for column in vals.columns {
+        for column in insert_expr.columns {
             let name = column.column_name;
             if name == "id" {
                 assert_eq!(0, column.null_mask[0]);

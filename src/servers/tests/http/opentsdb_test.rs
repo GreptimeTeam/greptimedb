@@ -19,7 +19,7 @@ use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
 use servers::error::{self, Result};
-use servers::http::HttpServer;
+use servers::http::{HttpOptions, HttpServer};
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::{OpentsdbProtocolHandler, SqlQueryHandler};
 use tokio::sync::mpsc;
@@ -51,7 +51,7 @@ impl SqlQueryHandler for DummyInstance {
 
 fn make_test_app(tx: mpsc::Sender<String>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone());
+    let mut server = HttpServer::new(instance.clone(), HttpOptions::default());
     server.set_opentsdb_handler(instance);
     server.make_app()
 }

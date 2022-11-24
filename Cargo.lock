@@ -1250,6 +1250,7 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-error",
+ "common-grpc",
  "common-query",
  "common-telemetry",
  "common-time",
@@ -2611,6 +2612,16 @@ name = "humantime"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
+
+[[package]]
+name = "humantime-serde"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57a3db5ea5923d99402c94e9feb261dc5ee9b4efa158b0315f788cf549cc200c"
+dependencies = [
+ "humantime",
+ "serde",
+]
 
 [[package]]
 name = "hyper"
@@ -5419,6 +5430,7 @@ dependencies = [
  "datatypes",
  "futures",
  "hex",
+ "humantime-serde",
  "hyper",
  "influxdb_line_protocol",
  "metrics",
@@ -6635,7 +6647,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
- "rand 0.4.6",
+ "rand 0.8.5",
  "static_assertions",
 ]
 
