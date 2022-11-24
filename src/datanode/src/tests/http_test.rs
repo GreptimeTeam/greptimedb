@@ -21,7 +21,7 @@ use datatypes::prelude::ConcreteDataType;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use serde_json::json;
-use servers::http::{ColumnSchema, HttpServer, JsonOutput, JsonResponse, Schema};
+use servers::http::{ColumnSchema, HttpOptions, HttpServer, JsonOutput, JsonResponse, Schema};
 use test_util::TestGuard;
 
 use crate::instance::{Instance, InstanceRef};
@@ -46,7 +46,7 @@ async fn make_test_app(name: &str) -> (Router, TestGuard) {
     )
     .await
     .unwrap();
-    let http_server = HttpServer::new(instance);
+    let http_server = HttpServer::new(instance, HttpOptions::default());
     (http_server.make_app(), guard)
 }
 
@@ -63,7 +63,7 @@ async fn make_test_app_with_frontend(name: &str) -> (Router, TestGuard) {
     .await
     .unwrap();
     frontend.start().await.unwrap();
-    let mut http_server = HttpServer::new(Arc::new(frontend));
+    let mut http_server = HttpServer::new(Arc::new(frontend), HttpOptions::default());
     http_server.set_script_handler(instance.clone());
     let app = http_server.make_app();
     (app, guard)
