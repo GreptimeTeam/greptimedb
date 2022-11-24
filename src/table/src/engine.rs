@@ -74,8 +74,8 @@ pub trait TableEngine: Send + Sync {
     /// Returns true when the given table is exists.
     fn table_exists<'a>(&self, ctx: &EngineContext, table_ref: &'a TableReference) -> bool;
 
-    /// Drops the given table.
-    async fn drop_table(&self, ctx: &EngineContext, request: DropTableRequest) -> Result<()>;
+    /// Drops the given table. Return true if the table is dropped, or false if the table doesn't exist.
+    async fn drop_table(&self, ctx: &EngineContext, request: DropTableRequest) -> Result<bool>;
 }
 
 pub type TableEngineRef = Arc<dyn TableEngine>;

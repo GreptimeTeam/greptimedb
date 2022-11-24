@@ -27,7 +27,8 @@ use api::v1::codec::InsertBatch;
 use api::v1::object_expr::Expr;
 use api::v1::{
     admin_expr, insert_expr, select_expr, AddColumns, AdminExpr, AdminResult, AlterExpr,
-    CreateDatabaseExpr, CreateExpr, InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
+    CreateDatabaseExpr, CreateExpr, DropTableExpr, InsertExpr, ObjectExpr,
+    ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
@@ -60,9 +61,9 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterTableOnInsertionSnafu, AlterTableSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    CreateDatabaseSnafu, CreateTableSnafu, DeserializeInsertBatchSnafu,
+    CreateDatabaseSnafu, CreateTableSnafu, DeserializeInsertBatchSnafu, DropTableSnafu,
     FindNewColumnsOnInsertionSnafu, InsertSnafu, MissingMetasrvOptsSnafu, Result,
-    SchemaNotFoundSnafu, SelectSnafu,
+    SchemaNotFoundSnafu, SelectSnafu, UnsupportedExprSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
@@ -277,6 +278,22 @@ impl Instance {
                 .await
                 .and_then(admin_result_to_output)
                 .context(AlterTableSnafu),
+        }
+    }
+
+    /// Handle drop table expr
+    pub async fn handle_drop_table(&self, expr: DropTableExpr) -> Result<Output> {
+        match self.mode {
+            Mode::Standalone => self
+                .admin(&expr.schema_name)
+                .drop_table(expr)
+                .await
+                .and_then(admin_result_to_output)
+                .context(DropTableSnafu),
+            Mode::Distributed => UnsupportedExprSnafu {
+                name: "Distributed DROP TABLE",
+            }
+            .fail(),
         }
     }
 
@@ -651,6 +668,17 @@ impl SqlQueryHandler for Instance {
                 .await
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
+            Statement::DropTable(drop_stmt) => {
+                let expr = DropTableExpr {
+                    catalog_name: drop_stmt.catalog_name,
+                    schema_name: drop_stmt.schema_name,
+                    table_name: drop_stmt.table_name,
+                };
+                self.handle_drop_table(expr)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(server_error::ExecuteQuerySnafu { query })
+            }
             Statement::Explain(explain_stmt) => self
                 .handle_explain(query, explain_stmt)
                 .await
@@ -761,6 +789,7 @@ fn get_schema_name(expr: &AdminExpr) -> &str {
         Some(admin_expr::Expr::Create(expr)) => expr.schema_name.as_deref(),
         Some(admin_expr::Expr::Alter(expr)) => expr.schema_name.as_deref(),
         Some(admin_expr::Expr::CreateDatabase(_)) | None => Some(DEFAULT_SCHEMA_NAME),
+        Some(admin_expr::Expr::DropTable(expr)) => Some(expr.schema_name.as_ref()),
     };
     schema_name.unwrap_or(DEFAULT_SCHEMA_NAME)
 }

@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use api::result::AdminResultBuilder;
-use api::v1::{AdminResult, AlterExpr, CreateExpr};
+use api::v1::{AdminResult, AlterExpr, CreateExpr, DropTableExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
 use common_telemetry::{error, info};
 use futures::TryFutureExt;
 use snafu::prelude::*;
+use table::requests::DropTableRequest;
 
 use crate::error::{AlterExprToRequestSnafu, BumpTableIdSnafu, CreateExprToRequestSnafu};
 use crate::instance::Instance;
@@ -108,6 +109,26 @@ impl Instance {
             Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
                 .status_code(StatusCode::Success as u32)
                 .mutate_result(rows as u32, 0)
+                .build(),
+            Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => unreachable!(),
+            Err(err) => AdminResultBuilder::default()
+                .status_code(err.status_code() as u32)
+                .err_msg(err.to_string())
+                .build(),
+        }
+    }
+
+    pub(crate) async fn handle_drop_table(&self, expr: DropTableExpr) -> AdminResult {
+        let req = DropTableRequest {
+            catalog_name: expr.catalog_name,
+            schema_name: expr.schema_name,
+            table_name: expr.table_name,
+        };
+        let result = self.sql_handler().execute(SqlRequest::DropTable(req)).await;
+        match result {
+            Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
+                .status_code(StatusCode::Success as u32)
+                .mutate_result(rows as _, 0)
                 .build(),
             Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => unreachable!(),
             Err(err) => AdminResultBuilder::default()

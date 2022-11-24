@@ -393,7 +393,6 @@ mod tests {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "numbers".to_string(),
-            table_id: 2333,
         };
         catalog
             .deregister_table(deregister_table_req)

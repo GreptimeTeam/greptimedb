@@ -211,6 +211,9 @@ impl GrpcAdminHandler for Instance {
             Some(admin_expr::Expr::CreateDatabase(create_database_expr)) => {
                 self.execute_create_database(create_database_expr).await
             }
+            Some(admin_expr::Expr::DropTable(drop_table_expr)) => {
+                self.handle_drop_table(drop_table_expr).await
+            }
             other => {
                 return servers::error::NotSupportedSnafu {
                     feat: format!("{:?}", other),
