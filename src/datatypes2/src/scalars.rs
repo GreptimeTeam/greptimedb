@@ -35,7 +35,7 @@ where
     for<'a> Self::VectorType: ScalarVector<RefItem<'a> = Self::RefType<'a>>,
 {
     type VectorType: ScalarVector<OwnedItem = Self>;
-    type RefType<'a>: ScalarRef<'a, ScalarType = Self, VectorType = Self::VectorType>
+    type RefType<'a>: ScalarRef<'a, ScalarType = Self>
     where
         Self: 'a;
     /// Get a reference of the current value.
@@ -46,7 +46,6 @@ where
 }
 
 pub trait ScalarRef<'a>: std::fmt::Debug + Clone + Copy + Send + 'a {
-    type VectorType: ScalarVector<RefItem<'a> = Self>;
     /// The corresponding [`Scalar`] type.
     type ScalarType: Scalar<RefType<'a> = Self>;
 
@@ -63,7 +62,7 @@ where
 {
     type OwnedItem: Scalar<VectorType = Self>;
     /// The reference item of this vector.
-    type RefItem<'a>: ScalarRef<'a, ScalarType = Self::OwnedItem, VectorType = Self>
+    type RefItem<'a>: ScalarRef<'a, ScalarType = Self::OwnedItem>
     where
         Self: 'a;
 
@@ -157,7 +156,6 @@ macro_rules! impl_scalar_for_native {
 
         /// Implement [`ScalarRef`] for primitive types. Note that primitive types are both [`Scalar`] and [`ScalarRef`].
         impl<'a> ScalarRef<'a> for $Native {
-            type VectorType = PrimitiveVector<$DataType>;
             type ScalarType = $Native;
 
             #[inline]
@@ -196,7 +194,6 @@ impl Scalar for bool {
 }
 
 impl<'a> ScalarRef<'a> for bool {
-    type VectorType = BooleanVector;
     type ScalarType = bool;
 
     #[inline]
@@ -246,7 +243,6 @@ impl Scalar for Vec<u8> {
 }
 
 impl<'a> ScalarRef<'a> for &'a [u8] {
-    type VectorType = BinaryVector;
     type ScalarType = Vec<u8>;
 
     #[inline]

@@ -84,7 +84,7 @@ pub trait LogicalPrimitiveType: 'static + Sized {
     type Native: NativeType;
     type Wrapper: WrapperType<LogicalType = Self, Native = Self::Native>
         + for<'a> Scalar<VectorType = PrimitiveVector<Self>, RefType<'a> = Self::Wrapper>
-        + for<'a> ScalarRef<'a, ScalarType = Self::Wrapper, VectorType = PrimitiveVector<Self>>;
+        + for<'a> ScalarRef<'a, ScalarType = Self::Wrapper>;
 
     /// Construct the data type struct.
     fn build_data_type() -> ConcreteDataType;

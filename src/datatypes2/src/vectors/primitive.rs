@@ -264,7 +264,7 @@ impl<T> ScalarVectorBuilder for PrimitiveVectorBuilder<T>
 where
     T: LogicalPrimitiveType,
     T::Wrapper: Scalar<VectorType = PrimitiveVector<T>>,
-    for<'a> T::Wrapper: ScalarRef<'a, ScalarType = T::Wrapper, VectorType = PrimitiveVector<T>>,
+    for<'a> T::Wrapper: ScalarRef<'a, ScalarType = T::Wrapper>,
     for<'a> T::Wrapper: Scalar<RefType<'a> = T::Wrapper>,
 {
     type VectorType = PrimitiveVector<T>;
