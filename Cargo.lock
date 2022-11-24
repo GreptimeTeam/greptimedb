@@ -1250,6 +1250,7 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-error",
+ "common-grpc",
  "common-query",
  "common-telemetry",
  "common-time",
