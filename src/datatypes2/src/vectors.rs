@@ -15,9 +15,11 @@ use crate::vectors::operations::VectorOp;
 pub mod binary;
 pub mod boolean;
 pub mod operations;
+pub mod primitive;
 
 pub use binary::{BinaryVector, BinaryVectorBuilder};
 pub use boolean::{BooleanVector, BooleanVectorBuilder};
+pub use primitive::{PrimitiveVector, PrimitiveVectorBuilder};
 
 // TODO(yingwen): We need to reimplement Validity as arrow's Bitmap doesn't support null_count().
 #[derive(Debug, PartialEq)]

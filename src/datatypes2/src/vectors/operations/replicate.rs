@@ -17,7 +17,7 @@ use crate::prelude::*;
 // pub(crate) use crate::vectors::date::replicate_date;
 // pub(crate) use crate::vectors::datetime::replicate_datetime;
 // pub(crate) use crate::vectors::null::replicate_null;
-// pub(crate) use crate::vectors::primitive::replicate_primitive;
+pub(crate) use crate::vectors::primitive::replicate_primitive;
 // pub(crate) use crate::vectors::timestamp::replicate_timestamp;
 
 pub(crate) fn replicate_scalar<C: ScalarVector>(c: &C, offsets: &[usize]) -> VectorRef {

@@ -5,8 +5,9 @@ mod replicate;
 use common_base::BitVec;
 
 use crate::error::Result;
+use crate::types::LogicalPrimitiveType;
 // use crate::types::PrimitiveElement;
-use crate::vectors::{BinaryVector, BooleanVector, Vector, VectorRef};
+use crate::vectors::{BinaryVector, BooleanVector, PrimitiveVector, Vector, VectorRef};
 
 /// Vector compute operations.
 pub trait VectorOp {
@@ -69,3 +70,19 @@ impl_scalar_vector_op!(
     // { DateTimeVector, replicate_datetime },
     // { TimestampVector, replicate_timestamp }
 );
+
+impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        std::sync::Arc::new(replicate::replicate_primitive(self, offsets))
+    }
+
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
+        let prev_vector =
+            prev_vector.and_then(|pv| pv.as_any().downcast_ref::<PrimitiveVector<T>>());
+        find_unique::find_unique_scalar(self, selected, prev_vector);
+    }
+
+    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+        filter::filter_non_constant!(self, PrimitiveVector<T>, filter)
+    }
+}
