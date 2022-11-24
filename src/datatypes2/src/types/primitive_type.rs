@@ -21,7 +21,7 @@ pub trait NativeType:
 }
 
 macro_rules! impl_native_type {
-    ($Type:ident, $LargestType: ident) => {
+    ($Type: ident, $LargestType: ident) => {
         impl NativeType for $Type {
             type LargestType = $LargestType;
         }
@@ -39,14 +39,52 @@ impl_native_type!(i64, i64);
 impl_native_type!(f32, f64);
 impl_native_type!(f64, f64);
 
+pub trait WrapperType: Copy + Scalar + PartialEq {
+    type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
+    type Native;
+
+    fn from_native(value: Self::Native) -> Self;
+
+    fn into_native(self) -> Self::Native;
+}
+
+macro_rules! impl_wrapper {
+    ($Type: ident, $LogicalType: ident) => {
+        impl WrapperType for $Type {
+            type LogicalType = $LogicalType;
+            type Native = $Type;
+
+            fn from_native(value: Self::Native) -> Self {
+                value
+            }
+
+            fn into_native(self) -> Self::Native {
+                self
+            }
+        }
+    };
+}
+
+impl_wrapper!(u8, UInt8Type);
+impl_wrapper!(u16, UInt16Type);
+impl_wrapper!(u32, UInt32Type);
+impl_wrapper!(u64, UInt64Type);
+impl_wrapper!(i8, Int8Type);
+impl_wrapper!(i16, Int16Type);
+impl_wrapper!(i32, Int32Type);
+impl_wrapper!(i64, Int64Type);
+impl_wrapper!(f32, Float32Type);
+impl_wrapper!(f64, Float64Type);
+
 /// Trait bridging the logcial primitive type with [ArrowPrimitiveType].
 pub trait LogicalPrimitiveType: 'static + Sized {
     /// Arrow primitive type of this logical type.
     type ArrowPrimitive: ArrowPrimitiveType<Native = Self::Native>;
     /// Native (physical) type of this logical type.
-    type Native: NativeType
-        + for<'a> Scalar<VectorType = PrimitiveVector<Self>, RefType<'a> = Self::Native>
-        + for<'a> ScalarRef<'a, ScalarType = Self::Native, VectorType = PrimitiveVector<Self>>;
+    type Native: NativeType;
+    type Wrapper: WrapperType<LogicalType = Self, Native = Self::Native>
+        + for<'a> Scalar<VectorType = PrimitiveVector<Self>, RefType<'a> = Self::Wrapper>
+        + for<'a> ScalarRef<'a, ScalarType = Self::Wrapper, VectorType = PrimitiveVector<Self>>;
 
     /// Construct the data type struct.
     fn build_data_type() -> ConcreteDataType;
@@ -58,7 +96,7 @@ pub trait LogicalPrimitiveType: 'static + Sized {
     fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveVector<Self>>;
 
     /// Cast value ref to the primitive type.
-    fn cast_value_ref(value: ValueRef) -> Result<Option<Self::Native>>;
+    fn cast_value_ref(value: ValueRef) -> Result<Option<Self::Wrapper>>;
 }
 
 macro_rules! define_logical_primitive_type {
@@ -69,6 +107,7 @@ macro_rules! define_logical_primitive_type {
         impl LogicalPrimitiveType for $DataType {
             type ArrowPrimitive = arrow::datatypes::$DataType;
             type Native = $Native;
+            type Wrapper = $Native;
 
             fn build_data_type() -> ConcreteDataType {
                 ConcreteDataType::$TypeId($DataType::default())

@@ -20,5 +20,5 @@ pub use binary_type::BinaryType;
 pub use boolean_type::BooleanType;
 pub use primitive_type::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, LogicalPrimitiveType,
-    NativeType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    NativeType, UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
 };

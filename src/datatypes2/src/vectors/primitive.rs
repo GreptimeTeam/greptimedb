@@ -12,7 +12,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::types::LogicalPrimitiveType;
+use crate::types::{LogicalPrimitiveType, WrapperType};
 use crate::value::{IntoValueRef, Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
@@ -167,25 +167,40 @@ impl<T: LogicalPrimitiveType> fmt::Debug for PrimitiveVector<T> {
 //     }
 // }
 
-impl<T> ScalarVector for PrimitiveVector<T>
-where
-    T: LogicalPrimitiveType,
-{
-    type OwnedItem = T::Native;
-    type RefItem<'a> = T::Native;
-    type Iter<'a> = ArrayIter<&'a PrimitiveArray<T::ArrowPrimitive>>;
+pub struct PrimitiveIter<'a, T: LogicalPrimitiveType> {
+    iter: ArrayIter<&'a PrimitiveArray<T::ArrowPrimitive>>,
+}
+
+impl<'a, T: LogicalPrimitiveType> Iterator for PrimitiveIter<'a, T> {
+    type Item = Option<T::Wrapper>;
+
+    fn next(&mut self) -> Option<Option<T::Wrapper>> {
+        self.iter
+            .next()
+            .map(|item| item.map(|v| T::Wrapper::from_native(v)))
+    }
+
+    // TODO(yingwen): Other methods like size_hint.
+}
+
+impl<T: LogicalPrimitiveType> ScalarVector for PrimitiveVector<T> {
+    type OwnedItem = T::Wrapper;
+    type RefItem<'a> = T::Wrapper;
+    type Iter<'a> = PrimitiveIter<'a, T>;
     type Builder = PrimitiveVectorBuilder<T>;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
         if self.array.is_valid(idx) {
-            Some(self.array.value(idx))
+            Some(T::Wrapper::from_native(self.array.value(idx)))
         } else {
             None
         }
     }
 
     fn iter_data(&self) -> Self::Iter<'_> {
-        self.array.iter()
+        PrimitiveIter {
+            iter: self.array.iter(),
+        }
     }
 }
 
@@ -228,7 +243,7 @@ impl<T: LogicalPrimitiveType> MutableVector for PrimitiveVectorBuilder<T> {
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         let primitive = T::cast_value_ref(value)?;
         match primitive {
-            Some(v) => self.mutable_array.append_value(v),
+            Some(v) => self.mutable_array.append_value(v.into_native()),
             None => self.mutable_array.append_null(),
         }
         Ok(())
@@ -248,9 +263,9 @@ impl<T: LogicalPrimitiveType> MutableVector for PrimitiveVectorBuilder<T> {
 impl<T> ScalarVectorBuilder for PrimitiveVectorBuilder<T>
 where
     T: LogicalPrimitiveType,
-    T::Native: Scalar<VectorType = PrimitiveVector<T>>,
-    for<'a> T::Native: ScalarRef<'a, ScalarType = T::Native, VectorType = PrimitiveVector<T>>,
-    for<'a> T::Native: Scalar<RefType<'a> = T::Native>,
+    T::Wrapper: Scalar<VectorType = PrimitiveVector<T>>,
+    for<'a> T::Wrapper: ScalarRef<'a, ScalarType = T::Wrapper, VectorType = PrimitiveVector<T>>,
+    for<'a> T::Wrapper: Scalar<RefType<'a> = T::Wrapper>,
 {
     type VectorType = PrimitiveVector<T>;
 
@@ -261,7 +276,8 @@ where
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        self.mutable_array.append_option(value);
+        self.mutable_array
+            .append_option(value.map(|v| v.into_native()));
     }
 
     fn finish(&mut self) -> Self::VectorType {
