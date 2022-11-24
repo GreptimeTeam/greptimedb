@@ -66,6 +66,17 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Invalid column proto definition, column: {}, source: {}",
+        column,
+        source
+    ))]
+    InvalidColumnDef {
+        column: String,
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
+
+    #[snafu(display(
         "Failed to convert column default constraint, column: {}, source: {}",
         column_name,
         source
@@ -266,25 +277,25 @@ pub enum Error {
     #[snafu(display("Failed to build CreateExpr on insertion: {}", source))]
     BuildCreateExprOnInsertion {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to find new columns on insertion: {}", source))]
     FindNewColumnsOnInsertion {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to deserialize insert batching: {}", source))]
     DeserializeInsertBatch {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to deserialize insert batching: {}", source))]
     InsertBatchToRequest {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
@@ -416,6 +427,15 @@ pub enum Error {
 
     #[snafu(display("Missing meta_client_opts section in config"))]
     MissingMetasrvOpts { backtrace: Backtrace },
+
+    #[snafu(display("Failed to convert AlterExpr to AlterRequest, source: {}", source))]
+    AlterExprToRequest {
+        #[snafu(backtrace)]
+        source: common_grpc_expr::error::Error,
+    },
+
+    #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
+    LeaderNotFound { table: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -452,8 +472,11 @@ impl ErrorExt for Error {
             | Error::RequestDatanode { source }
             | Error::InvalidAdminResult { source } => source.status_code(),
 
-            Error::ColumnDataType { .. }
-            | Error::FindDatanode { .. }
+            Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
+                source.status_code()
+            }
+
+            Error::FindDatanode { .. }
             | Error::GetCache { .. }
             | Error::FindTableRoutes { .. }
             | Error::SerializeJson { .. }
@@ -500,6 +523,8 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
+            Error::AlterExprToRequest { source, .. } => source.status_code(),
+            Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
         }
     }
 

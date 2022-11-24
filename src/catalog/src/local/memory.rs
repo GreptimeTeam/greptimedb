@@ -27,8 +27,8 @@ use table::TableRef;
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::schema::SchemaProvider;
 use crate::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, SchemaProviderRef,
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProviderRef,
 };
 
 /// Simple in-memory list of catalogs
@@ -69,7 +69,7 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(())
     }
 
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let catalogs = self.catalogs.write().unwrap();
         let catalog = catalogs
             .get(&request.catalog)
@@ -84,10 +84,28 @@ impl CatalogManager for MemoryCatalogManager {
             })?;
         schema
             .register_table(request.table_name, request.table)
-            .map(|v| if v.is_some() { 0 } else { 1 })
+            .map(|v| v.is_none())
     }
 
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
+        let catalogs = self.catalogs.write().unwrap();
+        let catalog = catalogs
+            .get(&request.catalog)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?
+            .clone();
+        let schema = catalog
+            .schema(&request.schema)?
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", &request.catalog, &request.schema),
+            })?;
+        schema
+            .deregister_table(&request.table_name)
+            .map(|v| v.is_some())
+    }
+
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let catalogs = self.catalogs.write().unwrap();
         let catalog = catalogs
             .get(&request.catalog)
@@ -95,11 +113,12 @@ impl CatalogManager for MemoryCatalogManager {
                 catalog_name: &request.catalog,
             })?;
         catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
-        Ok(1)
+        Ok(true)
     }
 
     async fn register_system_table(&self, _request: RegisterSystemTableRequest) -> Result<()> {
-        unimplemented!()
+        // TODO(ruihang): support register system table request
+        Ok(())
     }
 
     fn schema(&self, catalog: &str, schema: &str) -> Result<Option<SchemaProviderRef>> {
@@ -339,5 +358,36 @@ mod tests {
         list.as_any()
             .downcast_ref::<MemoryCatalogManager>()
             .unwrap();
+    }
+
+    #[tokio::test]
+    pub async fn test_catalog_deregister_table() {
+        let catalog = MemoryCatalogManager::default();
+        let schema = catalog
+            .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .unwrap()
+            .unwrap();
+
+        let register_table_req = RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers".to_string(),
+            table_id: 2333,
+            table: Arc::new(NumbersTable::default()),
+        };
+        catalog.register_table(register_table_req).await.unwrap();
+        assert!(schema.table_exist("numbers").unwrap());
+
+        let deregister_table_req = DeregisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers".to_string(),
+            table_id: 2333,
+        };
+        catalog
+            .deregister_table(deregister_table_req)
+            .await
+            .unwrap();
+        assert!(!schema.table_exist("numbers").unwrap());
     }
 }

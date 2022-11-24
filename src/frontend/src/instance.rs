@@ -50,6 +50,7 @@ use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::create::Partitions;
+use sql::statements::explain::Explain;
 use sql::statements::insert::Insert;
 use sql::statements::statement::Statement;
 
@@ -266,11 +267,26 @@ impl Instance {
 
     /// Handle alter expr
     pub async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
-        self.admin(expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME))
-            .alter(expr)
-            .await
-            .and_then(admin_result_to_output)
-            .context(AlterTableSnafu)
+        match &self.dist_instance {
+            Some(dist_instance) => dist_instance.handle_alter_table(expr).await,
+            None => self
+                .admin(expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME))
+                .alter(expr)
+                .await
+                .and_then(admin_result_to_output)
+                .context(AlterTableSnafu),
+        }
+    }
+
+    /// Handle explain expr
+    pub async fn handle_explain(&self, sql: &str, explain_stmt: Explain) -> Result<Output> {
+        if let Some(dist_instance) = &self.dist_instance {
+            dist_instance
+                .handle_sql(sql, Statement::Explain(explain_stmt))
+                .await
+        } else {
+            Ok(Output::AffectedRows(0))
+        }
     }
 
     /// Handle batch inserts
@@ -286,7 +302,7 @@ impl Instance {
     }
 
     /// Handle insert. for 'values' insertion, create/alter the destination table on demand.
-    pub async fn handle_insert(&self, insert_expr: InsertExpr) -> Result<Output> {
+    pub async fn handle_insert(&self, mut insert_expr: InsertExpr) -> Result<Output> {
         let table_name = &insert_expr.table_name;
         let catalog_name = DEFAULT_CATALOG_NAME;
         let schema_name = &insert_expr.schema_name;
@@ -295,6 +311,8 @@ impl Instance {
 
         self.create_or_alter_table_on_demand(catalog_name, schema_name, table_name, columns)
             .await?;
+
+        insert_expr.region_number = 0;
 
         self.database(schema_name)
             .insert(insert_expr)
@@ -342,7 +360,8 @@ impl Instance {
             }
             Some(table) => {
                 let schema = table.schema();
-                if let Some(add_columns) = common_insert::find_new_columns(&schema, columns)
+
+                if let Some(add_columns) = common_grpc_expr::find_new_columns(&schema, columns)
                     .context(FindNewColumnsOnInsertionSnafu)?
                 {
                     info!(
@@ -596,8 +615,13 @@ impl SqlQueryHandler for Instance {
                 .await
                 .map_err(BoxedError::new)
                 .context(server_error::ExecuteQuerySnafu { query }),
+            Statement::Explain(explain_stmt) => self
+                .handle_explain(query, explain_stmt)
+                .await
+                .map_err(BoxedError::new)
+                .context(server_error::ExecuteQuerySnafu { query }),
             Statement::ShowCreateTable(_) => {
-                return server_error::NotSupportedSnafu { feat: query }.fail()
+                return server_error::NotSupportedSnafu { feat: query }.fail();
             }
         }
         .map_err(BoxedError::new)

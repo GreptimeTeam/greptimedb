@@ -71,6 +71,7 @@ pub struct StandaloneOptions {
     pub mode: Mode,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
+    pub enable_memory_catalog: bool,
 }
 
 impl Default for StandaloneOptions {
@@ -86,6 +87,7 @@ impl Default for StandaloneOptions {
             mode: Mode::Standalone,
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
+            enable_memory_catalog: false,
         }
     }
 }
@@ -110,6 +112,7 @@ impl StandaloneOptions {
         DatanodeOptions {
             wal_dir: self.wal_dir,
             storage: self.storage,
+            enable_memory_catalog: self.enable_memory_catalog,
             ..Default::default()
         }
     }
@@ -131,18 +134,22 @@ struct StartCommand {
     influxdb_enable: bool,
     #[clap(short, long)]
     config_file: Option<String>,
+    #[clap(short = 'm', long = "memory-catalog")]
+    enable_memory_catalog: bool,
 }
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
+        let enable_memory_catalog = self.enable_memory_catalog;
         let config_file = self.config_file.clone();
         let fe_opts = FrontendOptions::try_from(self)?;
         let dn_opts: DatanodeOptions = {
-            let opts: StandaloneOptions = if let Some(path) = config_file {
+            let mut opts: StandaloneOptions = if let Some(path) = config_file {
                 toml_loader::from_file!(&path)?
             } else {
                 StandaloneOptions::default()
             };
+            opts.enable_memory_catalog = enable_memory_catalog;
             opts.datanode_options()
         };
 
@@ -264,6 +271,7 @@ mod tests {
                 std::env::current_dir().unwrap().as_path().to_str().unwrap()
             )),
             influxdb_enable: false,
+            enable_memory_catalog: false,
         };
 
         let fe_opts = FrontendOptions::try_from(cmd).unwrap();

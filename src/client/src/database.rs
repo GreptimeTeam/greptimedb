@@ -23,7 +23,7 @@ use api::v1::{
 };
 use common_error::status_code::StatusCode;
 use common_grpc::{AsExecutionPlan, DefaultAsPlanImpl};
-use common_insert::column_to_vector;
+use common_grpc_expr::column_to_vector;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datafusion::physical_plan::ExecutionPlan;

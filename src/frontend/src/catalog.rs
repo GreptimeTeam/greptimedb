@@ -19,8 +19,9 @@ use std::sync::Arc;
 use catalog::error::{self as catalog_err, InvalidCatalogValueSnafu};
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider,
+    SchemaProviderRef,
 };
 use common_catalog::{CatalogKey, SchemaKey, TableGlobalKey, TableGlobalValue};
 use futures::StreamExt;
@@ -65,17 +66,21 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(())
     }
 
-    async fn register_table(
+    async fn register_table(&self, _request: RegisterTableRequest) -> catalog::error::Result<bool> {
+        unimplemented!()
+    }
+
+    async fn deregister_table(
         &self,
-        _request: RegisterTableRequest,
-    ) -> catalog::error::Result<usize> {
+        _request: DeregisterTableRequest,
+    ) -> catalog::error::Result<bool> {
         unimplemented!()
     }
 
     async fn register_schema(
         &self,
         _request: RegisterSchemaRequest,
-    ) -> catalog::error::Result<usize> {
+    ) -> catalog::error::Result<bool> {
         unimplemented!()
     }
 

@@ -404,7 +404,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
             let table_id = request.table_id;
             // TODO(dennis): supports multi regions;
-            let region_number = 0;
+            assert_eq!(request.region_numbers.len(), 1);
+            let region_number = request.region_numbers[0];
             let region_name = region_name(table_id, region_number);
 
             let region = match self
@@ -804,6 +805,7 @@ mod tests {
             table_name: test_util::TABLE_NAME.to_string(),
             // the test table id is 1
             table_id: 1,
+            region_numbers: vec![0],
         };
 
         let (engine, table, object_store, _dir) = {

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{fs, path};
 
+use backon::ExponentialBackoff;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -26,7 +27,7 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
-use object_store::layers::LoggingLayer;
+use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::fs::Builder;
 use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
@@ -99,17 +100,29 @@ impl Instance {
         // create remote catalog manager
         let (catalog_manager, factory, table_id_provider) = match opts.mode {
             Mode::Standalone => {
-                let catalog = Arc::new(
-                    catalog::local::LocalCatalogManager::try_new(table_engine.clone())
-                        .await
-                        .context(CatalogSnafu)?,
-                );
-                let factory = QueryEngineFactory::new(catalog.clone());
-                (
-                    catalog.clone() as CatalogManagerRef,
-                    factory,
-                    Some(catalog as TableIdProviderRef),
-                )
+                if opts.enable_memory_catalog {
+                    let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
+                    let factory = QueryEngineFactory::new(catalog.clone());
+
+                    (
+                        catalog.clone() as CatalogManagerRef,
+                        factory,
+                        Some(catalog as TableIdProviderRef),
+                    )
+                } else {
+                    let catalog = Arc::new(
+                        catalog::local::LocalCatalogManager::try_new(table_engine.clone())
+                            .await
+                            .context(CatalogSnafu)?,
+                    );
+                    let factory = QueryEngineFactory::new(catalog.clone());
+
+                    (
+                        catalog.clone() as CatalogManagerRef,
+                        factory,
+                        Some(catalog as TableIdProviderRef),
+                    )
+                }
             }
 
             Mode::Distributed => {
@@ -139,7 +152,11 @@ impl Instance {
         };
         Ok(Self {
             query_engine: query_engine.clone(),
-            sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
+            sql_handler: SqlHandler::new(
+                table_engine,
+                catalog_manager.clone(),
+                query_engine.clone(),
+            ),
             catalog_manager,
             physical_planner: PhysicalPlanner::new(query_engine),
             script_executor,
@@ -185,7 +202,15 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         .build()
         .context(error::InitBackendSnafu { dir: &data_dir })?;
 
-    let object_store = ObjectStore::new(accessor).layer(LoggingLayer); // Add logging
+    let object_store = ObjectStore::new(accessor)
+        // Add retry
+        .layer(RetryLayer::new(ExponentialBackoff::default().with_jitter()))
+        // Add metrics
+        .layer(MetricsLayer)
+        // Add logging
+        .layer(LoggingLayer)
+        // Add tracing
+        .layer(TracingLayer);
 
     Ok(object_store)
 }

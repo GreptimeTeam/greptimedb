@@ -22,7 +22,7 @@ use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_grpc::select::to_object_result;
-use common_insert::insertion_expr_to_request;
+use common_grpc_expr::insertion_expr_to_request;
 use common_query::Output;
 use query::plan::LogicalPlan;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
@@ -54,6 +54,7 @@ impl Instance {
             .schema(schema_name)
             .context(CatalogSnafu)?
             .context(SchemaNotFoundSnafu { name: schema_name })?;
+
         ensure!(!insert_batches.is_empty(), EmptyInsertBatchSnafu);
         let table = schema_provider
             .table(table_name)

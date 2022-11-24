@@ -36,7 +36,7 @@ use table::TableRef;
 use crate::error::{
     CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, Result,
     SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu,
-    TableExistsSnafu, TableNotFoundSnafu,
+    TableExistsSnafu, TableNotFoundSnafu, UnimplementedSnafu,
 };
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
@@ -46,8 +46,8 @@ use crate::system::{
 use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
-    CatalogProvider, CatalogProviderRef, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
+    CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest,
+    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -241,6 +241,7 @@ impl LocalCatalogManager {
             schema_name: t.schema_name.clone(),
             table_name: t.table_name.clone(),
             table_id: t.table_id,
+            region_numbers: vec![0],
         };
 
         let option = self
@@ -308,7 +309,7 @@ impl CatalogManager for LocalCatalogManager {
         self.init().await
     }
 
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let started = self.init_lock.lock().await;
 
         ensure!(
@@ -348,10 +349,17 @@ impl CatalogManager for LocalCatalogManager {
             .await?;
 
         schema.register_table(request.table_name, request.table)?;
-        Ok(1)
+        Ok(true)
     }
 
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {
+        UnimplementedSnafu {
+            operation: "deregister table",
+        }
+        .fail()
+    }
+
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let started = self.init_lock.lock().await;
         ensure!(
             *started,
@@ -376,7 +384,7 @@ impl CatalogManager for LocalCatalogManager {
             .register_schema(request.catalog, schema_name.clone())
             .await?;
         catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
-        Ok(1)
+        Ok(true)
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {

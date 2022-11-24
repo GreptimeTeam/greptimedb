@@ -18,7 +18,7 @@ use api::v1::{Column, InsertExpr};
 use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
-use common_insert::column_to_vector;
+use common_grpc_expr::column_to_vector;
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::InfluxdbLineProtocolHandler;
 use servers::{error as server_error, Mode};

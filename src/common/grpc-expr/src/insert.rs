@@ -227,7 +227,10 @@ pub fn build_create_expr_from_insertion(
         }
     }
 
-    ensure!(timestamp_index != usize::MAX, MissingTimestampColumnSnafu);
+    ensure!(
+        timestamp_index != usize::MAX,
+        MissingTimestampColumnSnafu { msg: table_name }
+    );
     let timestamp_field_name = columns[timestamp_index].column_name.clone();
 
     let primary_keys = primary_key_indices
@@ -246,7 +249,7 @@ pub fn build_create_expr_from_insertion(
         create_if_not_exists: true,
         table_options: Default::default(),
         table_id,
-        region_ids: vec![0],
+        region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
     };
 
     Ok(expr)

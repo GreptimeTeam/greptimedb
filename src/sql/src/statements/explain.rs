@@ -12,8 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use bitvec::prelude as bv;
+use sqlparser::ast::Statement as SpStatement;
 
-// `Lsb0` provides the best codegen for bit manipulation,
-// see https://github.com/bitvecto-rs/bitvec/blob/main/doc/order/Lsb0.md
-pub type BitVec = bv::BitVec<u8, bv::Lsb0>;
+use crate::error::Error;
+
+/// Explain statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Explain {
+    pub inner: SpStatement,
+}
+
+impl TryFrom<SpStatement> for Explain {
+    type Error = Error;
+
+    fn try_from(value: SpStatement) -> Result<Self, Self::Error> {
+        Ok(Explain { inner: value })
+    }
+}
+
+impl ToString for Explain {
+    fn to_string(&self) -> String {
+        self.inner.to_string()
+    }
+}

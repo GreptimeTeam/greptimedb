@@ -21,4 +21,5 @@ pub mod codec {
     tonic::include_proto!("greptime.v1.codec");
 }
 
+mod column_def;
 pub mod meta;

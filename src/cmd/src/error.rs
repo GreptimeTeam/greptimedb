@@ -97,10 +97,7 @@ mod tests {
     #[test]
     fn test_start_node_error() {
         fn throw_datanode_error() -> StdResult<datanode::error::Error> {
-            datanode::error::MissingFieldSnafu {
-                field: "test_field",
-            }
-            .fail()
+            datanode::error::MissingNodeIdSnafu {}.fail()
         }
 
         let e = throw_datanode_error()

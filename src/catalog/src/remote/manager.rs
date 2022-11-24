@@ -37,13 +37,13 @@ use tokio::sync::Mutex;
 
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu,
-    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu,
+    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
-    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider,
-    SchemaProviderRef,
+    DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
+    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
 };
 
 /// Catalog manager based on metasrv.
@@ -316,11 +316,15 @@ impl RemoteCatalogManager {
             ..
         } = table_value;
 
+        // unwrap safety: checked in yielding this table when `iter_remote_tables`
+        let region_numbers = regions_id_map.get(&self.node_id).unwrap();
+
         let request = OpenTableRequest {
             catalog_name: catalog_name.clone(),
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
             table_id,
+            region_numbers: region_numbers.clone(),
         };
         match self
             .engine
@@ -361,7 +365,7 @@ impl RemoteCatalogManager {
                     table_name: table_name.clone(),
                     desc: None,
                     schema: Arc::new(schema),
-                    region_numbers: regions_id_map.get(&self.node_id).unwrap().clone(), // this unwrap is safe because region_id_map is checked in `iter_remote_tables`
+                    region_numbers: region_numbers.clone(),
                     primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,
                     table_options: meta.options.clone(),
@@ -407,7 +411,7 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
@@ -426,10 +430,17 @@ impl CatalogManager for RemoteCatalogManager {
             .fail();
         }
         schema_provider.register_table(request.table_name, request.table)?;
-        Ok(1)
+        Ok(true)
     }
 
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {
+        UnimplementedSnafu {
+            operation: "deregister table",
+        }
+        .fail()
+    }
+
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
@@ -437,7 +448,7 @@ impl CatalogManager for RemoteCatalogManager {
         })?;
         let schema_provider = self.new_schema_provider(&catalog_name, &schema_name);
         catalog_provider.register_schema(schema_name, schema_provider)?;
-        Ok(1)
+        Ok(true)
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {

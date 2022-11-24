@@ -33,6 +33,28 @@ pub enum Error {
         from: ConcreteDataType,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Failed to convert column default constraint, column: {}, source: {}",
+        column,
+        source
+    ))]
+    ConvertColumnDefaultConstraint {
+        column: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "Invalid column default constraint, column: {}, source: {}",
+        column,
+        source
+    ))]
+    InvalidColumnDefaultConstraint {
+        column: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -40,6 +62,8 @@ impl ErrorExt for Error {
         match self {
             Error::UnknownColumnDataType { .. } => StatusCode::InvalidArguments,
             Error::IntoColumnDataType { .. } => StatusCode::Unexpected,
+            Error::ConvertColumnDefaultConstraint { source, .. }
+            | Error::InvalidColumnDefaultConstraint { source, .. } => source.status_code(),
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {
