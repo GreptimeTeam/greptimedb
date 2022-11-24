@@ -278,8 +278,7 @@ impl SchemaProvider for FrontendSchemaProvider {
                     }
                     Some(r) => r,
                 };
-                let val = TableGlobalValue::parse(String::from_utf8_lossy(&res.1))
-                    .context(InvalidCatalogValueSnafu)?;
+                let val = TableGlobalValue::from_bytes(&res.1).context(InvalidCatalogValueSnafu)?;
 
                 let table = Arc::new(DistTable::new(
                     table_name,

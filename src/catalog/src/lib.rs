@@ -15,6 +15,7 @@
 #![feature(assert_matches)]
 
 use std::any::Any;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use common_telemetry::info;
@@ -126,6 +127,18 @@ pub struct RegisterTableRequest {
     pub table_name: String,
     pub table_id: TableId,
     pub table: TableRef,
+}
+
+impl Debug for RegisterTableRequest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisterTableRequest")
+            .field("catalog", &self.catalog)
+            .field("schema", &self.schema)
+            .field("table_name", &self.table_name)
+            .field("table_id", &self.table_id)
+            .field("table", &self.table.table_info())
+            .finish()
+    }
 }
 
 #[derive(Clone)]

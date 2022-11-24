@@ -94,7 +94,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Table {} already exists", table))]
+    #[snafu(display("Table `{}` already exists", table))]
     TableExists { table: String, backtrace: Backtrace },
 
     #[snafu(display("Schema {} already exists", schema))]
