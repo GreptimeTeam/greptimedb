@@ -88,9 +88,18 @@ impl Datanode {
 
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting datanode instance...");
-        self.instance.start().await?;
-        self.services.start(&self.opts).await?;
-        Ok(())
+        self.start_instance().await?;
+        self.start_services().await
+    }
+
+    /// Start only the internal component of datanode.
+    pub async fn start_instance(&mut self) -> Result<()> {
+        self.instance.start().await
+    }
+
+    /// Start services of datanode. This method call will block until services are shutdown.
+    pub async fn start_services(&mut self) -> Result<()> {
+        self.services.start(&self.opts).await
     }
 
     pub fn get_instance(&self) -> InstanceRef {
