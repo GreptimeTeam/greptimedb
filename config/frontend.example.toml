@@ -1,6 +1,9 @@
 mode = 'distributed'
 datanode_rpc_addr = '127.0.0.1:3001'
-http_addr = '127.0.0.1:4000'
+
+[http_options]
+addr = '127.0.0.1:4000'
+timeout = "30s"
 
 [meta_client_opts]
 metasrv_addrs = ['127.0.0.1:3002']
