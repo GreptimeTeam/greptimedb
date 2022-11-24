@@ -353,7 +353,7 @@ impl CatalogManager for LocalCatalogManager {
                     .fail();
                 }
                 // Try to register table with same table id, just ignore.
-                Ok(0)
+                Ok(false)
             } else {
                 // table does not exist
                 self.system

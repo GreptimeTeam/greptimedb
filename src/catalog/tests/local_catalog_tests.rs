@@ -48,16 +48,13 @@ mod tests {
             table_id: 42,
             table: Arc::new(NumbersTable::new(42)),
         };
-        assert_eq!(
-            1,
-            catalog_manager
-                .register_table(request.clone())
-                .await
-                .unwrap()
-        );
+        assert!(catalog_manager
+            .register_table(request.clone())
+            .await
+            .unwrap());
 
         // register table with same table id will succeed with 0 as return val.
-        assert_eq!(0, catalog_manager.register_table(request).await.unwrap());
+        assert!(!catalog_manager.register_table(request).await.unwrap());
 
         let err = catalog_manager
             .register_table(RegisterTableRequest {
@@ -102,7 +99,7 @@ mod tests {
                 };
                 match catalog.register_table(req).await {
                     Ok(res) => {
-                        if res == 1 {
+                        if res {
                             let mut succeed = succeed.lock().await;
                             info!("Successfully registered table: {}", table_id);
                             *succeed = Some(table);
