@@ -116,10 +116,10 @@ impl Services {
             None
         };
 
-        let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
-            let http_addr = parse_addr(http_addr)?;
+        let http_server_and_addr = if let Some(http_options) = &opts.http_options {
+            let http_addr = parse_addr(&http_options.addr)?;
 
-            let mut http_server = HttpServer::new(instance.clone());
+            let mut http_server = HttpServer::new(instance.clone(), http_options.clone());
             if opentsdb_server_and_addr.is_some() {
                 http_server.set_opentsdb_handler(instance.clone());
             }

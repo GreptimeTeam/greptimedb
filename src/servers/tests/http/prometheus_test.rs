@@ -23,7 +23,7 @@ use axum_test_helper::TestClient;
 use common_query::Output;
 use prost::Message;
 use servers::error::Result;
-use servers::http::HttpServer;
+use servers::http::{HttpOptions, HttpServer};
 use servers::prometheus;
 use servers::prometheus::{snappy_compress, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse, SqlQueryHandler};
@@ -76,7 +76,7 @@ impl SqlQueryHandler for DummyInstance {
 
 fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone());
+    let mut server = HttpServer::new(instance.clone(), HttpOptions::default());
     server.set_prom_handler(instance);
     server.make_app()
 }

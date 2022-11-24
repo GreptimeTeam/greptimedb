@@ -25,6 +25,7 @@ use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
 use serde::{Deserialize, Serialize};
+use servers::http::HttpOptions;
 use servers::Mode;
 use snafu::ResultExt;
 use tokio::try_join;
@@ -61,7 +62,7 @@ impl SubCommand {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StandaloneOptions {
-    pub http_addr: Option<String>,
+    pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
     pub postgres_options: Option<PostgresOptions>,
@@ -77,7 +78,7 @@ pub struct StandaloneOptions {
 impl Default for StandaloneOptions {
     fn default() -> Self {
         Self {
-            http_addr: Some("127.0.0.1:4000".to_string()),
+            http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
             postgres_options: Some(PostgresOptions::default()),
@@ -95,7 +96,7 @@ impl Default for StandaloneOptions {
 impl StandaloneOptions {
     fn frontend_options(self) -> FrontendOptions {
         FrontendOptions {
-            http_addr: self.http_addr,
+            http_options: self.http_options,
             grpc_options: self.grpc_options,
             mysql_options: self.mysql_options,
             postgres_options: self.postgres_options,
@@ -206,7 +207,10 @@ impl TryFrom<StartCommand> for FrontendOptions {
         opts.mode = Mode::Standalone;
 
         if let Some(addr) = cmd.http_addr {
-            opts.http_addr = Some(addr);
+            opts.http_options = Some(HttpOptions {
+                addr,
+                ..Default::default()
+            });
         }
         if let Some(addr) = cmd.rpc_addr {
             // frontend grpc addr conflict with datanode default grpc addr
@@ -256,6 +260,8 @@ impl TryFrom<StartCommand> for FrontendOptions {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -277,7 +283,14 @@ mod tests {
         let fe_opts = FrontendOptions::try_from(cmd).unwrap();
         assert_eq!(Mode::Standalone, fe_opts.mode);
         assert_eq!("127.0.0.1:3001".to_string(), fe_opts.datanode_rpc_addr);
-        assert_eq!(Some("127.0.0.1:4000".to_string()), fe_opts.http_addr);
+        assert_eq!(
+            "127.0.0.1:4000".to_string(),
+            fe_opts.http_options.as_ref().unwrap().addr
+        );
+        assert_eq!(
+            Duration::from_secs(30),
+            fe_opts.http_options.as_ref().unwrap().timeout
+        );
         assert_eq!(
             "127.0.0.1:4001".to_string(),
             fe_opts.grpc_options.unwrap().addr
