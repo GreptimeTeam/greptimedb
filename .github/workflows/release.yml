@@ -3,9 +3,8 @@ on:
     tags:
       - "v*.*.*"
   schedule:
-    # At 00:00 Everyday
-    # https://crontab.guru/every-day-at-midnight
-    - cron: '0 0 * * *'
+    # At 00:00 on Monday.
+    - cron: '0 0 * * 1'
   workflow_dispatch:
 
 name: Release
@@ -14,7 +13,10 @@ env:
   RUST_TOOLCHAIN: nightly-2022-07-14
 
   # FIXME(zyy17): Would be better to use `gh release list -L 1 | cut -f 3` to get the latest release version tag, but for a long time, we will stay at 'v0.1.0-alpha-*'.
-  NIGHTLY_BUILD_VERSION_PREFIX: v0.1.0-alpha
+  SCHEDULED_BUILD_VERSION_PREFIX: v0.1.0-alpha
+
+  # In the future, we can change SCHEDULED_PERIOD to nightly.
+  SCHEDULED_PERIOD: weekly
 
 jobs:
   build:
@@ -113,25 +115,25 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v3
 
-      - name: Configure nightly build version # the version would be ${NIGHTLY_BUILD_VERSION_PREFIX}-YYYYMMDD-nightly, like v0.1.0-alpha-20221119-nightly.
+      - name: Configure scheduled build version # the version would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}, like v0.1.0-alpha-20221119-weekly.
         shell: bash
         if: github.event_name == 'schedule'
         run: |
           buildTime=`date "+%Y%m%d"`
-          NIGHTLY_VERSION=${{ env.NIGHTLY_BUILD_VERSION_PREFIX }}-$buildTime-nightly
-          echo "NIGHTLY_VERSION=${NIGHTLY_VERSION}" >> $GITHUB_ENV
+          SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
+          echo "SCHEDULED_BUILD_VERSION=${SCHEDULED_BUILD_VERSION}" >> $GITHUB_ENV
 
-      - name: Create nightly git tag
+      - name: Create scheduled build git tag
         if: github.event_name == 'schedule'
         run: |
-          git tag ${{ env.NIGHTLY_VERSION }}
+          git tag ${{ env.SCHEDULED_BUILD_VERSION }}
 
-      - name: Publish nightly release # configure the different release title and tags.
+      - name: Publish scheduled release # configure the different release title and tags.
         uses: softprops/action-gh-release@v1
         if: github.event_name == 'schedule'
         with:
-          name: "Release ${{ env.NIGHTLY_VERSION }}"
-          tag_name: ${{ env.NIGHTLY_VERSION }}
+          name: "Release ${{ env.SCHEDULED_BUILD_VERSION }}"
+          tag_name: ${{ env.SCHEDULED_BUILD_VERSION }}
           generate_release_notes: true
           files: |
             **/greptime-*
@@ -189,13 +191,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Configure nightly build image tag # the tag would be ${NIGHTLY_BUILD_VERSION_PREFIX}-YYYYMMDD-nightly
+      - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
         shell: bash
         if: github.event_name == 'schedule'
         run: |
           buildTime=`date "+%Y%m%d"`
-          NIGHTLY_VERSION=${{ env.NIGHTLY_BUILD_VERSION_PREFIX }}-$buildTime-nightly
-          echo "IMAGE_TAG=${NIGHTLY_VERSION:1}" >> $GITHUB_ENV
+          SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
+          echo "IMAGE_TAG=${SCHEDULED_BUILD_VERSION:1}" >> $GITHUB_ENV
 
       - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
         shell: bash
