@@ -12,11 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
-use api::v1::codec::InsertBatch;
 use api::v1::column::SemanticType;
-use api::v1::{column, insert_expr, Column, ColumnDataType, InsertExpr};
+use api::v1::{column, Column, ColumnDataType, InsertExpr};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision;
 use table::requests::InsertRequest;
@@ -189,18 +186,12 @@ impl DataPoint {
             });
         }
 
-        let batch = InsertBatch {
-            columns,
-            row_count: 1,
-        };
         InsertExpr {
             schema_name,
             table_name: self.metric.clone(),
-            expr: Some(insert_expr::Expr::Values(insert_expr::Values {
-                values: vec![batch.into()],
-            })),
-            options: HashMap::default(),
             region_number: 0,
+            columns,
+            row_count: 1,
         }
     }
 
@@ -337,36 +328,31 @@ mod test {
         let grpc_insert = data_point.as_grpc_insert();
         assert_eq!(grpc_insert.table_name, "my_metric_1");
 
-        match grpc_insert.expr {
-            Some(insert_expr::Expr::Values(insert_expr::Values { values })) => {
-                assert_eq!(values.len(), 1);
-                let insert_batch = InsertBatch::try_from(values[0].as_slice()).unwrap();
-                assert_eq!(insert_batch.row_count, 1);
-                let columns = insert_batch.columns;
-                assert_eq!(columns.len(), 4);
+        let columns = &grpc_insert.columns;
+        let row_count = grpc_insert.row_count;
 
-                assert_eq!(columns[0].column_name, OPENTSDB_TIMESTAMP_COLUMN_NAME);
-                assert_eq!(
-                    columns[0].values.as_ref().unwrap().ts_millis_values,
-                    vec![1000]
-                );
+        assert_eq!(row_count, 1);
+        assert_eq!(columns.len(), 4);
 
-                assert_eq!(columns[1].column_name, OPENTSDB_VALUE_COLUMN_NAME);
-                assert_eq!(columns[1].values.as_ref().unwrap().f64_values, vec![1.0]);
+        assert_eq!(columns[0].column_name, OPENTSDB_TIMESTAMP_COLUMN_NAME);
+        assert_eq!(
+            columns[0].values.as_ref().unwrap().ts_millis_values,
+            vec![1000]
+        );
 
-                assert_eq!(columns[2].column_name, "tagk1");
-                assert_eq!(
-                    columns[2].values.as_ref().unwrap().string_values,
-                    vec!["tagv1"]
-                );
+        assert_eq!(columns[1].column_name, OPENTSDB_VALUE_COLUMN_NAME);
+        assert_eq!(columns[1].values.as_ref().unwrap().f64_values, vec![1.0]);
 
-                assert_eq!(columns[3].column_name, "tagk2");
-                assert_eq!(
-                    columns[3].values.as_ref().unwrap().string_values,
-                    vec!["tagv2"]
-                );
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(columns[2].column_name, "tagk1");
+        assert_eq!(
+            columns[2].values.as_ref().unwrap().string_values,
+            vec!["tagv1"]
+        );
+
+        assert_eq!(columns[3].column_name, "tagk2");
+        assert_eq!(
+            columns[3].values.as_ref().unwrap().string_values,
+            vec!["tagv2"]
+        );
     }
 }
