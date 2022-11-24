@@ -28,9 +28,8 @@ use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
 use clap::Parser;
 use client::admin::Admin;
-use client::api::v1::codec::InsertBatch;
 use client::api::v1::column::Values;
-use client::api::v1::{insert_expr, Column, ColumnDataType, ColumnDef, CreateExpr, InsertExpr};
+use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateExpr, InsertExpr};
 use client::{Client, Database, Select};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::{ArrowReader, ParquetFileArrowReader};
@@ -100,16 +99,13 @@ async fn write_data(
 
     for record_batch in record_batch_reader {
         let record_batch = record_batch.unwrap();
-        let row_count = record_batch.num_rows();
-        let insert_batch = convert_record_batch(record_batch).into();
+        let (columns, row_count) = convert_record_batch(record_batch);
         let insert_expr = InsertExpr {
             schema_name: "public".to_string(),
             table_name: TABLE_NAME.to_string(),
-            expr: Some(insert_expr::Expr::Values(insert_expr::Values {
-                values: vec![insert_batch],
-            })),
-            options: HashMap::default(),
             region_number: 0,
+            columns,
+            row_count,
         };
         let now = Instant::now();
         db.insert(insert_expr).await.unwrap();
@@ -125,7 +121,7 @@ async fn write_data(
     total_rpc_elapsed_ms
 }
 
-fn convert_record_batch(record_batch: RecordBatch) -> InsertBatch {
+fn convert_record_batch(record_batch: RecordBatch) -> (Vec<Column>, u32) {
     let schema = record_batch.schema();
     let fields = schema.fields();
     let row_count = record_batch.num_rows();
@@ -143,10 +139,7 @@ fn convert_record_batch(record_batch: RecordBatch) -> InsertBatch {
         columns.push(column);
     }
 
-    InsertBatch {
-        columns,
-        row_count: row_count as _,
-    }
+    (columns, row_count as _)
 }
 
 fn build_values(column: &ArrayRef) -> Values {

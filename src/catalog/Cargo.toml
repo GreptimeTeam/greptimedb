@@ -42,6 +42,6 @@ log-store = { path = "../log-store" }
 object-store = { path = "../object-store" }
 opendal = "0.20"
 storage = { path = "../storage" }
-mito = { path = "../mito" }
+mito = { path = "../mito", features = ["test"] }
 tempdir = "0.3"
 tokio = { version = "1.0", features = ["full"] }

@@ -37,13 +37,13 @@ use tokio::sync::Mutex;
 
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu,
-    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu,
+    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
-    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider,
-    SchemaProviderRef,
+    DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
+    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
 };
 
 /// Catalog manager based on metasrv.
@@ -154,8 +154,8 @@ impl RemoteCatalogManager {
                 }
                 let table_key = TableGlobalKey::parse(&String::from_utf8_lossy(&k))
                     .context(InvalidCatalogValueSnafu)?;
-                let table_value = TableGlobalValue::parse(&String::from_utf8_lossy(&v))
-                    .context(InvalidCatalogValueSnafu)?;
+                let table_value =
+                    TableGlobalValue::from_bytes(&v).context(InvalidCatalogValueSnafu)?;
 
                 info!(
                     "Found catalog table entry, key: {}, value: {:?}",
@@ -411,7 +411,7 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
@@ -430,10 +430,17 @@ impl CatalogManager for RemoteCatalogManager {
             .fail();
         }
         schema_provider.register_table(request.table_name, request.table)?;
-        Ok(1)
+        Ok(true)
     }
 
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {
+        UnimplementedSnafu {
+            operation: "deregister table",
+        }
+        .fail()
+    }
+
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
@@ -441,7 +448,7 @@ impl CatalogManager for RemoteCatalogManager {
         })?;
         let schema_provider = self.new_schema_provider(&catalog_name, &schema_name);
         catalog_provider.register_schema(schema_name, schema_provider)?;
-        Ok(1)
+        Ok(true)
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {

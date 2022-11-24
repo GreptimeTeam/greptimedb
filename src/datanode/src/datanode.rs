@@ -47,6 +47,7 @@ pub struct DatanodeOptions {
     pub meta_client_opts: Option<MetaClientOpts>,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
+    pub enable_memory_catalog: bool,
     pub mode: Mode,
 }
 
@@ -61,6 +62,7 @@ impl Default for DatanodeOptions {
             meta_client_opts: None,
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
+            enable_memory_catalog: false,
             mode: Mode::Standalone,
         }
     }
