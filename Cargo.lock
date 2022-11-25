@@ -1291,7 +1291,7 @@ dependencies = [
  "common-function-macro",
  "common-query",
  "common-time",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datatypes",
  "libc",
  "num",
@@ -1366,7 +1366,7 @@ dependencies = [
  "common-recordbatch",
  "common-time",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datafusion-expr",
  "datatypes",
  "snafu",
@@ -1380,7 +1380,7 @@ version = "0.1.0"
 dependencies = [
  "common-error",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datatypes",
  "futures",
  "paste",
@@ -1834,7 +1834,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "comfy-table 5.0.1",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datafusion-expr",
  "datafusion-physical-expr",
  "futures",
@@ -1849,7 +1849,7 @@ dependencies = [
  "pin-project-lite",
  "rand 0.8.5",
  "smallvec",
- "sqlparser",
+ "sqlparser 0.15.0",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -1863,7 +1863,19 @@ dependencies = [
  "arrow2",
  "ordered-float 2.10.0",
  "parquet2",
- "sqlparser",
+ "sqlparser 0.15.0",
+]
+
+[[package]]
+name = "datafusion-common"
+version = "14.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15f1ffcbc1f040c9ab99f41db1c743d95aff267bb2e7286aaa010738b7402251"
+dependencies = [
+ "arrow 26.0.0",
+ "chrono",
+ "ordered-float 3.1.0",
+ "sqlparser 0.26.0",
 ]
 
 [[package]]
@@ -1873,8 +1885,8 @@ source = "git+https://github.com/apache/arrow-datafusion.git?branch=arrow2#744b2
 dependencies = [
  "ahash 0.7.6",
  "arrow2",
- "datafusion-common",
- "sqlparser",
+ "datafusion-common 7.0.0",
+ "sqlparser 0.15.0",
 ]
 
 [[package]]
@@ -1887,7 +1899,7 @@ dependencies = [
  "blake2",
  "blake3",
  "chrono",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datafusion-expr",
  "hashbrown",
  "lazy_static",
@@ -1923,7 +1935,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datatypes",
  "frontend",
  "futures",
@@ -1961,7 +1973,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-time",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "enum_dispatch",
  "num",
  "num-traits",
@@ -1980,7 +1992,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-time",
- "datafusion-common",
+ "datafusion-common 14.0.0",
  "enum_dispatch",
  "num",
  "num-traits",
@@ -2342,7 +2354,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datafusion-expr",
  "datanode",
  "datatypes",
@@ -2360,7 +2372,7 @@ dependencies = [
  "servers",
  "snafu",
  "sql",
- "sqlparser",
+ "sqlparser 0.15.0",
  "store-api",
  "table",
  "tempdir",
@@ -3449,7 +3461,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datatypes",
  "futures",
  "log-store",
@@ -4626,7 +4638,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datafusion-physical-expr",
  "datatypes",
  "format_num",
@@ -5420,7 +5432,7 @@ dependencies = [
  "common-time",
  "console",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datafusion-expr",
  "datafusion-physical-expr",
  "datatypes",
@@ -5828,7 +5840,7 @@ dependencies = [
  "mito",
  "once_cell",
  "snafu",
- "sqlparser",
+ "sqlparser 0.15.0",
 ]
 
 [[package]]
@@ -5862,6 +5874,15 @@ name = "sqlparser"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adbbea2526ad0d02ad9414a07c396078a5b944bbf9ca4fbab8f01bb4cb579081"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "sqlparser"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86be66ea0b2b22749cfa157d16e2e84bf793e626a3375f4d378dc289fa03affb"
 dependencies = [
  "log",
 ]
@@ -6169,7 +6190,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "datafusion",
- "datafusion-common",
+ "datafusion-common 7.0.0",
  "datafusion-expr",
  "datatypes",
  "derive_builder",

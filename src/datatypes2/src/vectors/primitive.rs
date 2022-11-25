@@ -360,3 +360,142 @@ pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
     }
     builder.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use arrow::array::Int32Array;
+    use arrow::datatypes::DataType as ArrowDataType;
+    use serde_json;
+
+    use super::*;
+    use crate::data_type::DataType;
+    use crate::serialize::Serializable;
+    use crate::types::Int64Type;
+
+    fn check_vec(v: Int32Vector) {
+        assert_eq!(4, v.len());
+        assert_eq!("Int32Vector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert_eq!(Validity::AllValid, v.validity());
+        assert!(!v.only_null());
+
+        for i in 0..4 {
+            assert!(!v.is_null(i));
+            assert_eq!(Value::Int32(i as i32 + 1), v.get(i));
+            assert_eq!(ValueRef::Int32(i as i32 + 1), v.get_ref(i));
+        }
+
+        let json_value = v.serialize_to_json().unwrap();
+        assert_eq!("[1,2,3,4]", serde_json::to_string(&json_value).unwrap(),);
+
+        let arrow_arr = v.to_arrow_array();
+        assert_eq!(4, arrow_arr.len());
+        assert_eq!(&ArrowDataType::Int32, arrow_arr.data_type());
+    }
+
+    #[test]
+    fn test_from_values() {
+        let v = Int32Vector::from_values(vec![1, 2, 3, 4]);
+        check_vec(v);
+    }
+
+    #[test]
+    fn test_from_vec() {
+        let v = Int32Vector::from_vec(vec![1, 2, 3, 4]);
+        check_vec(v);
+    }
+
+    #[test]
+    fn test_from_slice() {
+        let v = Int32Vector::from_slice(vec![1, 2, 3, 4]);
+        check_vec(v);
+    }
+
+    #[test]
+    fn test_serialize_primitive_vector_with_null_to_json() {
+        let input = [Some(1i32), Some(2i32), None, Some(4i32), None];
+        let mut builder = Int32VectorBuilder::with_capacity(input.len());
+        for v in input {
+            builder.push(v);
+        }
+        let vector = builder.finish();
+
+        let json_value = vector.serialize_to_json().unwrap();
+        assert_eq!(
+            "[1,2,null,4,null]",
+            serde_json::to_string(&json_value).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_from_arrow_array() {
+        let arrow_array = Int32Array::from(vec![1, 2, 3, 4]);
+        let v = Int32Vector::from(arrow_array);
+        check_vec(v);
+    }
+
+    #[test]
+    fn test_primitive_vector_build_get() {
+        let input = [Some(1i32), Some(2i32), None, Some(4i32), None];
+        let mut builder = Int32VectorBuilder::with_capacity(input.len());
+        for v in input {
+            builder.push(v);
+        }
+        let vector = builder.finish();
+        assert_eq!(input.len(), vector.len());
+
+        for (i, v) in input.into_iter().enumerate() {
+            assert_eq!(v, vector.get_data(i));
+            assert_eq!(Value::from(v), vector.get(i));
+        }
+
+        let res: Vec<_> = vector.iter_data().collect();
+        assert_eq!(input, &res[..]);
+    }
+
+    // TODO(yingwen): Make this compile.
+    // #[test]
+    // fn test_primitive_vector_validity() {
+    //     let input = [Some(1i32), Some(2i32), None, None];
+    //     let mut builder = Int32VectorBuilder::with_capacity(input.len());
+    //     for v in input {
+    //         builder.push(v);
+    //     }
+    //     let vector = builder.finish();
+    //     assert_eq!(2, vector.null_count());
+    //     let validity = vector.validity();
+    //     let slots = validity.slots().unwrap();
+    //     assert_eq!(2, slots.null_count());
+    //     assert!(!slots.get_bit(2));
+    //     assert!(!slots.get_bit(3));
+
+    //     let vector = Int32Vector::from_slice(vec![1, 2, 3, 4]);
+    //     assert_eq!(0, vector.null_count());
+    //     assert_eq!(Validity::AllValid, vector.validity());
+    // }
+
+    #[test]
+    fn test_memory_size() {
+        let v = Int32Vector::from_slice((0..5).collect::<Vec<i32>>());
+        assert_eq!(64, v.memory_size());
+        let v = Int64Vector::from(vec![Some(0i64), Some(1i64), Some(2i64), None, None]);
+        assert_eq!(128, v.memory_size());
+    }
+
+    #[test]
+    fn test_primitive_vector_builder() {
+        let mut builder = Int64Type::default().create_mutable_vector(3);
+        builder.push_value_ref(ValueRef::Int64(123)).unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+
+        let input = Int64Vector::from_slice(&[7, 8, 9]);
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
+
+        let expect: VectorRef = Arc::new(Int64Vector::from_slice(&[123, 8, 9]));
+        assert_eq!(expect, vector);
+    }
+}
