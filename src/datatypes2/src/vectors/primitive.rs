@@ -12,9 +12,25 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{Result, SerializeSnafu};
 use crate::scalars::{Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::types::{LogicalPrimitiveType, WrapperType};
+use crate::types::{
+    Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, LogicalPrimitiveType,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
+};
 use crate::value::{IntoValueRef, Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
+
+pub type UInt8Vector = PrimitiveVector<UInt8Type>;
+pub type UInt16Vector = PrimitiveVector<UInt16Type>;
+pub type UInt32Vector = PrimitiveVector<UInt32Type>;
+pub type UInt64Vector = PrimitiveVector<UInt64Type>;
+
+pub type Int8Vector = PrimitiveVector<Int8Type>;
+pub type Int16Vector = PrimitiveVector<Int16Type>;
+pub type Int32Vector = PrimitiveVector<Int32Type>;
+pub type Int64Vector = PrimitiveVector<Int64Type>;
+
+pub type Float32Vector = PrimitiveVector<Float32Type>;
+pub type Float64Vector = PrimitiveVector<Float64Type>;
 
 /// Vector for primitive data types.
 #[derive(PartialEq)]
@@ -158,21 +174,13 @@ impl<T: LogicalPrimitiveType> From<PrimitiveArray<T::ArrowPrimitive>> for Primit
     }
 }
 
-// impl<T: Primitive> From<Vec<Option<T>>> for PrimitiveVector<T> {
-//     fn from(v: Vec<Option<T>>) -> Self {
-//         Self {
-//             array: PrimitiveArray::<T>::from(v),
-//         }
-//     }
-// }
-
-// impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for PrimitiveVector<T> {
-//     fn from_iter<I: IntoIterator<Item = Ptr>>(iter: I) -> Self {
-//         Self {
-//             array: MutablePrimitiveArray::<T>::from_iter(iter).into(),
-//         }
-//     }
-// }
+impl<T: LogicalPrimitiveType> From<Vec<Option<T::Native>>> for PrimitiveVector<T> {
+    fn from(v: Vec<Option<T::Native>>) -> Self {
+        Self {
+            array: PrimitiveArray::from_iter(v),
+        }
+    }
+}
 
 pub struct PrimitiveIter<'a, T: LogicalPrimitiveType> {
     iter: ArrayIter<&'a PrimitiveArray<T::ArrowPrimitive>>,
@@ -221,6 +229,19 @@ impl<T: LogicalPrimitiveType> Serializable for PrimitiveVector<T> {
             .context(SerializeSnafu)
     }
 }
+
+pub type UInt8VectorBuilder = PrimitiveVectorBuilder<UInt8Type>;
+pub type UInt16VectorBuilder = PrimitiveVectorBuilder<UInt16Type>;
+pub type UInt32VectorBuilder = PrimitiveVectorBuilder<UInt32Type>;
+pub type UInt64VectorBuilder = PrimitiveVectorBuilder<UInt64Type>;
+
+pub type Int8VectorBuilder = PrimitiveVectorBuilder<Int8Type>;
+pub type Int16VectorBuilder = PrimitiveVectorBuilder<Int16Type>;
+pub type Int32VectorBuilder = PrimitiveVectorBuilder<Int32Type>;
+pub type Int64VectorBuilder = PrimitiveVectorBuilder<Int64Type>;
+
+pub type Float32VectorBuilder = PrimitiveVectorBuilder<Float32Type>;
+pub type Float64VectorBuilder = PrimitiveVectorBuilder<Float64Type>;
 
 /// Builder to build a primitive vector.
 pub struct PrimitiveVectorBuilder<T: LogicalPrimitiveType> {
@@ -294,17 +315,6 @@ where
         }
     }
 }
-
-// impl<T: PrimitiveElement> PrimitiveVectorBuilder<T> {
-//     fn with_type_capacity(data_type: ConcreteDataType, capacity: usize) -> Self {
-//         Self {
-//             mutable_array: MutablePrimitiveArray::with_capacity_from(
-//                 capacity,
-//                 data_type.as_arrow_type(),
-//             ),
-//         }
-//     }
-// }
 
 pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
     vector: &PrimitiveVector<T>,
