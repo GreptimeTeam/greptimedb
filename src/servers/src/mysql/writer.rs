@@ -149,7 +149,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         error: Error,
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        error!("Failed to execute query '{}', error:{:?}", query, error);
+        error!(error; "Failed to execute query '{}'", query);
 
         let kind = ErrorKind::ER_INTERNAL_ERROR;
         w.error(kind, error.to_string().as_bytes()).await?;

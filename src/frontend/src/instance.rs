@@ -289,6 +289,7 @@ impl Instance {
                 .await
                 .and_then(admin_result_to_output)
                 .context(DropTableSnafu),
+            // TODO(ruihang): support drop table in distributed mode
             Mode::Distributed => UnsupportedExprSnafu {
                 name: "Distributed DROP TABLE",
             }

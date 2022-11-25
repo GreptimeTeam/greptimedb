@@ -579,6 +579,30 @@ mod tests {
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name: "foo".to_string()
             })
+        );
+
+        let sql = "DROP TABLE my_schema.foo";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropTable(DropTable {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: "my_schema".to_string(),
+                table_name: "foo".to_string()
+            })
+        );
+
+        let sql = "DROP TABLE my_catalog.my_schema.foo";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropTable(DropTable {
+                catalog_name: "my_catalog".to_string(),
+                schema_name: "my_schema".to_string(),
+                table_name: "foo".to_string()
+            })
         )
     }
 }
