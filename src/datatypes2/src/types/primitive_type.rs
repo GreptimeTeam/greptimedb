@@ -51,7 +51,9 @@ impl_native_type!(i64, i64);
 impl_native_type!(f32, f64);
 impl_native_type!(f64, f64);
 
-/// Type that wraps a native type.
+/// Represents the wrapper type that wraps a native type using the `newtype pattern`,
+/// such as [Date](`common_time::Date`) is a wrapper type for the underlying native
+/// type `i32`.
 pub trait WrapperType:
     Copy + Scalar + PartialEq + Into<Value> + Into<ValueRef<'static>> + Serialize
 {
