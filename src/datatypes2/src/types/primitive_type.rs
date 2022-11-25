@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::cmp::Ordering;
 
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
@@ -13,7 +27,9 @@ use crate::value::{IntoValueRef, Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
 /// Data types that can be used as arrow's native type.
-pub trait NativeType: ArrowNativeType + NumCast {
+pub trait NativeType:
+    ArrowNativeType + NumCast
+{
     /// Largest numeric type this primitive type can be cast to.
     type LargestType: NativeType;
 }
@@ -38,9 +54,7 @@ impl_native_type!(f32, f64);
 impl_native_type!(f64, f64);
 
 /// Type that wraps a native type.
-pub trait WrapperType:
-    Copy + Scalar + PartialEq + Into<Value> + IntoValueRef<'static> + Serialize
-{
+pub trait WrapperType: Copy + Scalar + PartialEq + Into<Value> + IntoValueRef<'static> + Serialize {
     /// Logical primitive type that this wrapper type belongs to.
     type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
     /// The underying native type.
