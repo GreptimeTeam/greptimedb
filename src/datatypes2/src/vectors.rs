@@ -29,11 +29,13 @@ use crate::vectors::operations::VectorOp;
 pub mod binary;
 pub mod boolean;
 mod eq;
+mod helper;
 pub mod operations;
 pub mod primitive;
 
 pub use binary::*;
 pub use boolean::*;
+pub use helper::Helper;
 pub use primitive::*;
 
 // TODO(yingwen): We need to reimplement Validity as arrow's Bitmap doesn't support null_count().
