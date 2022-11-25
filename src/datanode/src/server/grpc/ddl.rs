@@ -122,7 +122,7 @@ impl Instance {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::ColumnDef;
+    use api::v1::{ColumnDataType, ColumnDef};
     use common_catalog::consts::MIN_USER_TABLE_ID;
     use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
@@ -173,6 +173,7 @@ mod tests {
     }
 
     #[test]
+
     fn test_create_column_schema() {
         let column_def = ColumnDef {
             name: "a".to_string(),
@@ -188,7 +189,7 @@ mod tests {
 
         let column_def = ColumnDef {
             name: "a".to_string(),
-            datatype: 12, // string
+            datatype: ColumnDataType::String as i32,
             is_nullable: true,
             default_constraint: None,
         };
@@ -200,7 +201,7 @@ mod tests {
         let default_constraint = ColumnDefaultConstraint::Value(Value::from("default value"));
         let column_def = ColumnDef {
             name: "a".to_string(),
-            datatype: 12, // string
+            datatype: ColumnDataType::String as i32,
             is_nullable: true,
             default_constraint: Some(default_constraint.clone().try_into().unwrap()),
         };
@@ -218,25 +219,25 @@ mod tests {
         let column_defs = vec![
             ColumnDef {
                 name: "host".to_string(),
-                datatype: 12, // string
+                datatype: ColumnDataType::String as i32,
                 is_nullable: false,
                 default_constraint: None,
             },
             ColumnDef {
                 name: "ts".to_string(),
-                datatype: 15, // timestamp
+                datatype: ColumnDataType::Timestamp as i32,
                 is_nullable: false,
                 default_constraint: None,
             },
             ColumnDef {
                 name: "cpu".to_string(),
-                datatype: 9, // float32
+                datatype: ColumnDataType::Float32 as i32,
                 is_nullable: true,
                 default_constraint: None,
             },
             ColumnDef {
                 name: "memory".to_string(),
-                datatype: 10, // float64
+                datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
                 default_constraint: None,
             },
