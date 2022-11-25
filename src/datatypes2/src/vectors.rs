@@ -178,22 +178,20 @@ macro_rules! impl_try_from_arrow_array_for_vector {
             pub fn try_from_arrow_array(
                 array: impl AsRef<dyn arrow::array::Array>,
             ) -> crate::error::Result<$Vector> {
-                let data = array.as_ref().data().clone();
-                // TODO(yingwen): Should we check the array type?
+                use snafu::OptionExt;
+
+                let data = array
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<$Array>()
+                    .with_context(|| crate::error::ConversionSnafu {
+                        from: std::format!("{:?}", array.as_ref().data_type()),
+                    })?
+                    .data()
+                    .clone();
+
                 let concrete_array = $Array::from(data);
                 Ok($Vector::from(concrete_array))
-
-                // The original implementation using arrow2 checks array type:
-                // Ok($Vector::from(
-                //     array
-                //         .as_ref()
-                //         .as_any()
-                //         .downcast_ref::<$Array>()
-                //         .with_context(|| crate::error::ConversionSnafu {
-                //             from: std::format!("{:?}", array.as_ref().data_type()),
-                //         })?
-                //         .clone(),
-                // ))
             }
         }
     };

@@ -6,10 +6,10 @@ use arrow::array::{
     Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef, PrimitiveArray, PrimitiveBuilder,
 };
 use serde_json::Value as JsonValue;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{Result, SerializeSnafu};
+use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::{
@@ -35,8 +35,7 @@ pub type Float64Vector = PrimitiveVector<Float64Type>;
 /// Vector for primitive data types.
 #[derive(PartialEq)]
 pub struct PrimitiveVector<T: LogicalPrimitiveType> {
-    // TODO(yingwen): Maybe we don't need to pub this field.
-    pub(crate) array: PrimitiveArray<T::ArrowPrimitive>,
+    array: PrimitiveArray<T::ArrowPrimitive>,
 }
 
 impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
@@ -45,8 +44,15 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
     }
 
     pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> Result<Self> {
-        let data = array.as_ref().data().clone();
-        // TODO(yingwen): Should we check the array type?
+        let data = array
+            .as_ref()
+            .as_any()
+            .downcast_ref::<PrimitiveArray<T::ArrowPrimitive>>()
+            .with_context(|| error::ConversionSnafu {
+                from: format!("{:?}", array.as_ref().data_type()),
+            })?
+            .data()
+            .clone();
         let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(data);
         Ok(Self::new(concrete_array))
     }
@@ -226,7 +232,7 @@ impl<T: LogicalPrimitiveType> Serializable for PrimitiveVector<T> {
         self.iter_data()
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()
-            .context(SerializeSnafu)
+            .context(error::SerializeSnafu)
     }
 }
 
