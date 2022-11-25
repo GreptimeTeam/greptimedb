@@ -5,10 +5,13 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
+api = { path = "../src/api" }
 axum = "0.6.0-rc.2"
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 catalog = { path = "../src/catalog" }
+client = { path = "../src/client" }
 common-catalog = { path = "../src/common/catalog" }
+common-runtime = { path = "../src/common/runtime" }
 common-telemetry = { path = "../src/common/telemetry" }
 datanode = { path = "../src/datanode" }
 datatypes = { path = "../src/datatypes" }

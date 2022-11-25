@@ -6107,10 +6107,13 @@ dependencies = [
 name = "tests-integration"
 version = "0.1.0"
 dependencies = [
+ "api",
  "axum 0.6.0-rc.2",
  "axum-test-helper",
  "catalog",
+ "client",
  "common-catalog",
+ "common-runtime",
  "common-telemetry",
  "datanode",
  "datatypes",

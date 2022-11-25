@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#![feature(assert_matches)]
 
 use std::assert_matches::assert_matches;
 use std::net::SocketAddr;
@@ -27,14 +28,13 @@ use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_runtime::Builder as RuntimeBuilder;
+use datanode::instance::Instance;
 use frontend::frontend::FrontendOptions;
 use frontend::grpc::GrpcOptions;
 use servers::grpc::GrpcServer;
 use servers::server::Server;
 use servers::Mode;
-
-use crate::instance::Instance;
-use crate::tests::test_util::{self, TestGuard};
+use tests_integration::test_util::{self, TestGuard};
 
 async fn setup_grpc_server(
     name: &str,
@@ -78,7 +78,7 @@ async fn setup_grpc_server(
     let mut fe_instance = frontend::instance::Instance::try_new(&fe_opts)
         .await
         .unwrap();
-    fe_instance.set_catalog_manager(instance.catalog_manager.clone());
+    fe_instance.set_catalog_manager(instance.catalog_manager().clone());
 
     let fe_instance_ref = Arc::new(fe_instance);
     let fe_grpc_server = Arc::new(GrpcServer::new(
