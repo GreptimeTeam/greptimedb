@@ -251,7 +251,7 @@ mod tests {
         assert!(!v.is_const());
         assert_eq!(Validity::AllValid, v.validity());
         assert!(!v.only_null());
-        assert_eq!(2, v.memory_size());
+        assert_eq!(64, v.memory_size());
 
         for (i, b) in bools.iter().enumerate() {
             assert!(!v.is_null(i));

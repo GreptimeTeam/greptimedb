@@ -27,9 +27,7 @@ use crate::value::{IntoValueRef, Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
 /// Data types that can be used as arrow's native type.
-pub trait NativeType:
-    ArrowNativeType + NumCast
-{
+pub trait NativeType: ArrowNativeType + NumCast {
     /// Largest numeric type this primitive type can be cast to.
     type LargestType: NativeType;
 }
@@ -54,7 +52,9 @@ impl_native_type!(f32, f64);
 impl_native_type!(f64, f64);
 
 /// Type that wraps a native type.
-pub trait WrapperType: Copy + Scalar + PartialEq + Into<Value> + IntoValueRef<'static> + Serialize {
+pub trait WrapperType:
+    Copy + Scalar + PartialEq + Into<Value> + IntoValueRef<'static> + Serialize
+{
     /// Logical primitive type that this wrapper type belongs to.
     type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
     /// The underying native type.
