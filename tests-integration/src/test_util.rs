@@ -22,7 +22,7 @@ use datanode::error::{CreateTableSnafu, Result};
 use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
-use frontend::frontend::Mode;
+use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::CreateTableRequest;
