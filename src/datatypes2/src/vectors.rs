@@ -272,44 +272,43 @@ pub(crate) use {
     impl_try_from_arrow_array_for_vector, impl_validity_for_vector,
 };
 
-// TODO(yingwen): Make this compile.
-// #[cfg(test)]
-// pub mod tests {
-//     use arrow::array::{Array, PrimitiveArray};
-//     use serde_json;
+#[cfg(test)]
+pub mod tests {
+    use arrow::array::{Array, Int32Array, UInt8Array};
+    use serde_json;
 
-//     use super::helper::Helper;
-//     use super::*;
-//     use crate::data_type::DataType;
-//     use crate::types::PrimitiveElement;
+    use super::*;
+    use crate::data_type::DataType;
+    use crate::types::{Int32Type, LogicalPrimitiveType};
+    use crate::vectors::helper::Helper;
 
-//     #[test]
-//     fn test_df_columns_to_vector() {
-//         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1, 2, 3]));
-//         let vector = Helper::try_into_vector(df_column).unwrap();
-//         assert_eq!(
-//             i32::build_data_type().as_arrow_type(),
-//             vector.data_type().as_arrow_type()
-//         );
-//     }
+    #[test]
+    fn test_df_columns_to_vector() {
+        let df_column: Arc<dyn Array> = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        let vector = Helper::try_into_vector(df_column).unwrap();
+        assert_eq!(
+            Int32Type::build_data_type().as_arrow_type(),
+            vector.data_type().as_arrow_type()
+        );
+    }
 
-//     #[test]
-//     fn test_serialize_i32_vector() {
-//         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::<i32>::from_slice(vec![1, 2, 3]));
-//         let json_value = Helper::try_into_vector(df_column)
-//             .unwrap()
-//             .serialize_to_json()
-//             .unwrap();
-//         assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
-//     }
+    #[test]
+    fn test_serialize_i32_vector() {
+        let df_column: Arc<dyn Array> = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        let json_value = Helper::try_into_vector(df_column)
+            .unwrap()
+            .serialize_to_json()
+            .unwrap();
+        assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
+    }
 
-//     #[test]
-//     fn test_serialize_i8_vector() {
-//         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1u8, 2u8, 3u8]));
-//         let json_value = Helper::try_into_vector(df_column)
-//             .unwrap()
-//             .serialize_to_json()
-//             .unwrap();
-//         assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
-//     }
-// }
+    #[test]
+    fn test_serialize_i8_vector() {
+        let df_column: Arc<dyn Array> = Arc::new(UInt8Array::from(vec![1, 2, 3]));
+        let json_value = Helper::try_into_vector(df_column)
+            .unwrap()
+            .serialize_to_json()
+            .unwrap();
+        assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
+    }
+}

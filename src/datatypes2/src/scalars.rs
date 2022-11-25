@@ -353,7 +353,7 @@ impl<'a> ScalarRef<'a> for &'a [u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vectors::binary::BinaryVector;
+    use crate::vectors::{BinaryVector, Int32Vector};
 
     fn build_vector_from_slice<T: ScalarVector>(items: &[Option<T::RefItem<'_>>]) -> T {
         let mut builder = T::Builder::with_capacity(items.len());
@@ -372,12 +372,12 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn test_build_i32_vector() {
-    //     let expect = vec![Some(1), Some(2), Some(3), None, Some(5)];
-    //     let vector: Int32Vector = build_vector_from_slice(&expect);
-    //     assert_vector_eq(&expect, &vector);
-    // }
+    #[test]
+    fn test_build_i32_vector() {
+        let expect = vec![Some(1), Some(2), Some(3), None, Some(5)];
+        let vector: Int32Vector = build_vector_from_slice(&expect);
+        assert_vector_eq(&expect, &vector);
+    }
 
     #[test]
     fn test_build_binary_vector() {
