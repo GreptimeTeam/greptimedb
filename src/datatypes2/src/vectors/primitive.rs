@@ -124,13 +124,20 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
     }
 
     fn get(&self, index: usize) -> Value {
-        vectors::impl_get_for_vector!(self.array, index)
+        if self.array.is_valid(index) {
+            // Safety: The index have been checked by `is_valid()`.
+            let wrapper = unsafe { T::Wrapper::from_native(self.array.value_unchecked(index)) };
+            wrapper.into()
+        } else {
+            Value::Null
+        }
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
         if self.array.is_valid(index) {
             // Safety: The index have been checked by `is_valid()`.
-            unsafe { self.array.value_unchecked(index).into_value_ref() }
+            let wrapper = unsafe { T::Wrapper::from_native(self.array.value_unchecked(index)) };
+            wrapper.into_value_ref()
         } else {
             ValueRef::Null
         }
@@ -145,11 +152,11 @@ impl<T: LogicalPrimitiveType> fmt::Debug for PrimitiveVector<T> {
     }
 }
 
-// impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
-//     fn from(array: PrimitiveArray<T>) -> Self {
-//         Self { array }
-//     }
-// }
+impl<T: LogicalPrimitiveType> From<PrimitiveArray<T::ArrowPrimitive>> for PrimitiveVector<T> {
+    fn from(array: PrimitiveArray<T::ArrowPrimitive>) -> Self {
+        Self { array }
+    }
+}
 
 // impl<T: Primitive> From<Vec<Option<T>>> for PrimitiveVector<T> {
 //     fn from(v: Vec<Option<T>>) -> Self {
@@ -180,7 +187,9 @@ impl<'a, T: LogicalPrimitiveType> Iterator for PrimitiveIter<'a, T> {
             .map(|item| item.map(|v| T::Wrapper::from_native(v)))
     }
 
-    // TODO(yingwen): Other methods like size_hint.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
 }
 
 impl<T: LogicalPrimitiveType> ScalarVector for PrimitiveVector<T> {
@@ -206,8 +215,7 @@ impl<T: LogicalPrimitiveType> ScalarVector for PrimitiveVector<T> {
 
 impl<T: LogicalPrimitiveType> Serializable for PrimitiveVector<T> {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
-        self.array
-            .iter()
+        self.iter_data()
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()
             .context(SerializeSnafu)

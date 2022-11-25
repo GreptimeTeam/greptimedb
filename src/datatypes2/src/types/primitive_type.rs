@@ -13,9 +13,7 @@ use crate::value::{IntoValueRef, Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
 /// Data types that can be used as arrow's native type.
-pub trait NativeType:
-    ArrowNativeType + Into<Value> + IntoValueRef<'static> + Serialize + NumCast + Scalar
-{
+pub trait NativeType: ArrowNativeType + NumCast {
     /// Largest numeric type this primitive type can be cast to.
     type LargestType: NativeType;
 }
@@ -39,12 +37,19 @@ impl_native_type!(i64, i64);
 impl_native_type!(f32, f64);
 impl_native_type!(f64, f64);
 
-pub trait WrapperType: Copy + Scalar + PartialEq {
+/// Type that wraps a native type.
+pub trait WrapperType:
+    Copy + Scalar + PartialEq + Into<Value> + IntoValueRef<'static> + Serialize
+{
+    /// Logical primitive type that this wrapper type belongs to.
     type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
+    /// The underying native type.
     type Native;
 
+    /// Convert native type into this wrapper type.
     fn from_native(value: Self::Native) -> Self;
 
+    /// Convert this wrapper type into native type.
     fn into_native(self) -> Self::Native;
 }
 
@@ -82,6 +87,7 @@ pub trait LogicalPrimitiveType: 'static + Sized {
     type ArrowPrimitive: ArrowPrimitiveType<Native = Self::Native>;
     /// Native (physical) type of this logical type.
     type Native: NativeType;
+    /// Wrapper type that the vector returns.
     type Wrapper: WrapperType<LogicalType = Self, Native = Self::Native>
         + for<'a> Scalar<VectorType = PrimitiveVector<Self>, RefType<'a> = Self::Wrapper>
         + for<'a> ScalarRef<'a, ScalarType = Self::Wrapper>;
@@ -181,34 +187,33 @@ define_logical_primitive_type!(i64, Int64, Int64Type);
 define_logical_primitive_type!(f32, Float32, Float32Type);
 define_logical_primitive_type!(f64, Float64, Float64Type);
 
-// TODO(yingwen): Should we rename it to OrdNativeType?
-/// A new type for [NativeType], complement the `Ord` feature for it. Wrapping non ordered
+/// A new type for [WrapperType], complement the `Ord` feature for it. Wrapping non ordered
 /// primitive types like `f32` and `f64` in `OrdPrimitive` can make them be used in places that
 /// require `Ord`. For example, in `Median` or `Percentile` UDAFs.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct OrdPrimitive<T: NativeType>(pub T);
+pub struct OrdPrimitive<T: WrapperType>(pub T);
 
-impl<T: NativeType> OrdPrimitive<T> {
+impl<T: WrapperType> OrdPrimitive<T> {
     pub fn as_primitive(&self) -> T {
         self.0
     }
 }
 
-impl<T: NativeType> Eq for OrdPrimitive<T> {}
+impl<T: WrapperType> Eq for OrdPrimitive<T> {}
 
-impl<T: NativeType> PartialOrd for OrdPrimitive<T> {
+impl<T: WrapperType> PartialOrd for OrdPrimitive<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<T: NativeType> Ord for OrdPrimitive<T> {
+impl<T: WrapperType> Ord for OrdPrimitive<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.into().cmp(&other.0.into())
     }
 }
 
-impl<T: NativeType> From<OrdPrimitive<T>> for Value {
+impl<T: WrapperType> From<OrdPrimitive<T>> for Value {
     fn from(p: OrdPrimitive<T>) -> Self {
         p.0.into()
     }
@@ -224,14 +229,14 @@ mod tests {
     fn test_ord_primitive() {
         struct Foo<T>
         where
-            T: NativeType,
+            T: WrapperType,
         {
             heap: BinaryHeap<OrdPrimitive<T>>,
         }
 
         impl<T> Foo<T>
         where
-            T: NativeType,
+            T: WrapperType,
         {
             fn push(&mut self, value: T) {
                 let value = OrdPrimitive::<T>(value);
