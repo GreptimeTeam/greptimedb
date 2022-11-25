@@ -58,7 +58,7 @@ pub trait WrapperType:
     /// Logical primitive type that this wrapper type belongs to.
     type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
     /// The underying native type.
-    type Native;
+    type Native: NativeType;
 
     /// Convert native type into this wrapper type.
     fn from_native(value: Self::Native) -> Self;
