@@ -217,7 +217,7 @@ impl TableEngine for MockTableEngine {
         &self,
         _ctx: &EngineContext,
         _request: DropTableRequest,
-    ) -> table::Result<()> {
+    ) -> table::Result<bool> {
         unimplemented!()
     }
 }

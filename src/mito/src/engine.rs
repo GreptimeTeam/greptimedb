@@ -123,14 +123,14 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     async fn drop_table(
         &self,
         _ctx: &EngineContext,
-        _request: DropTableRequest,
-    ) -> TableResult<()> {
-        unimplemented!();
+        request: DropTableRequest,
+    ) -> TableResult<bool> {
+        Ok(self.inner.drop_table(request).await?)
     }
 }
 
 struct MitoEngineInner<S: StorageEngine> {
-    /// All tables opened by the engine.
+    /// All tables opened by the engine. Map key is formatted [TableReference].
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
     tables: RwLock<HashMap<String, TableRef>>,
@@ -463,6 +463,22 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .await
             .context(error::AlterTableSnafu { table_name })?;
         Ok(table)
+    }
+
+    /// Drop table. Returns whether a table is dropped (true) or not exist (false).
+    async fn drop_table(&self, req: DropTableRequest) -> Result<bool> {
+        let table_reference = TableReference {
+            catalog: &req.catalog_name,
+            schema: &req.schema_name,
+            table: &req.table_name,
+        };
+        // todo(ruihang): reclaim persisted data
+        Ok(self
+            .tables
+            .write()
+            .unwrap()
+            .remove(&table_reference.to_string())
+            .is_some())
     }
 }
 
@@ -960,5 +976,70 @@ mod tests {
         assert_eq!(&[1, 2], &new_meta.value_indices[..]);
         assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
         assert_eq!(new_schema.version(), old_schema.version() + 1);
+    }
+
+    #[tokio::test]
+    async fn test_drop_table() {
+        common_telemetry::init_default_ut_logging();
+        let ctx = EngineContext::default();
+
+        let (_engine, table_engine, table, _object_store, _dir) =
+            test_util::setup_mock_engine_and_table().await;
+        let engine_ctx = EngineContext {};
+
+        let table_info = table.table_info();
+        let table_reference = TableReference {
+            catalog: DEFAULT_CATALOG_NAME,
+            schema: DEFAULT_SCHEMA_NAME,
+            table: &table_info.name,
+        };
+
+        let create_table_request = CreateTableRequest {
+            id: 1,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_info.name.to_string(),
+            schema: table_info.meta.schema.clone(),
+            create_if_not_exists: true,
+            desc: None,
+            primary_key_indices: Vec::default(),
+            table_options: HashMap::new(),
+            region_numbers: vec![0],
+        };
+
+        let created_table = table_engine
+            .create_table(&ctx, create_table_request)
+            .await
+            .unwrap();
+        assert_eq!(table_info, created_table.table_info());
+        assert!(table_engine.table_exists(&engine_ctx, &table_reference));
+
+        let drop_table_request = DropTableRequest {
+            catalog_name: table_reference.catalog.to_string(),
+            schema_name: table_reference.schema.to_string(),
+            table_name: table_reference.table.to_string(),
+        };
+        let table_dropped = table_engine
+            .drop_table(&engine_ctx, drop_table_request)
+            .await
+            .unwrap();
+        assert!(table_dropped);
+        assert!(!table_engine.table_exists(&engine_ctx, &table_reference));
+
+        // should be able to re-create
+        let request = CreateTableRequest {
+            id: 2,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_info.name.to_string(),
+            schema: table_info.meta.schema.clone(),
+            create_if_not_exists: false,
+            desc: None,
+            primary_key_indices: Vec::default(),
+            table_options: HashMap::new(),
+            region_numbers: vec![0],
+        };
+        table_engine.create_table(&ctx, request).await.unwrap();
+        assert!(table_engine.table_exists(&engine_ctx, &table_reference));
     }
 }

@@ -146,7 +146,6 @@ pub struct DeregisterTableRequest {
     pub catalog: String,
     pub schema: String,
     pub table_name: String,
-    pub table_id: TableId,
 }
 
 #[derive(Debug, Clone)]

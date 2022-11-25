@@ -51,13 +51,13 @@ impl Env {
     pub async fn start_standalone() -> GreptimeDB {
         let server_process = Command::new("cargo")
             .current_dir("../")
-            .args(["run", "--", "standalone", "start"])
+            .args(["run", "--", "standalone", "start", "-m"])
             .spawn()
             .unwrap_or_else(|_| panic!("Failed to start GreptimeDB"));
 
         time::sleep(Duration::from_secs(3)).await;
 
-        let client = Client::with_urls(vec!["127.0.0.1:3001"]);
+        let client = Client::with_urls(vec!["127.0.0.1:4001"]);
         let db = DB::new("greptime", client.clone());
 
         GreptimeDB {

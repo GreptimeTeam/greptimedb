@@ -107,6 +107,10 @@ impl Instance {
                 let req = self.sql_handler.alter_to_request(alter_table)?;
                 self.sql_handler.execute(SqlRequest::Alter(req)).await
             }
+            Statement::DropTable(drop_table) => {
+                let req = self.sql_handler.drop_table_to_request(drop_table);
+                self.sql_handler.execute(SqlRequest::DropTable(req)).await
+            }
             Statement::ShowDatabases(stmt) => {
                 self.sql_handler
                     .execute(SqlRequest::ShowDatabases(stmt))
