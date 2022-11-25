@@ -164,8 +164,15 @@ impl StartCommand {
             .context(StartDatanodeSnafu)?;
         let mut frontend = build_frontend(fe_opts, &dn_opts, datanode.get_instance()).await?;
 
+        // Start datanode instance before starting services, to avoid requests come in before internal components are started.
+        datanode
+            .start_instance()
+            .await
+            .context(StartDatanodeSnafu)?;
+        info!("Datanode instance started");
+
         try_join!(
-            async { datanode.start().await.context(StartDatanodeSnafu) },
+            async { datanode.start_services().await.context(StartDatanodeSnafu) },
             async { frontend.start().await.context(StartFrontendSnafu) }
         )?;
 
