@@ -23,7 +23,7 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
 use crate::type_id::LogicalTypeId;
-use crate::value::{IntoValueRef, Value, ValueRef};
+use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
 /// Data types that can be used as arrow's native type.
@@ -53,7 +53,7 @@ impl_native_type!(f64, f64);
 
 /// Type that wraps a native type.
 pub trait WrapperType:
-    Copy + Scalar + PartialEq + Into<Value> + IntoValueRef<'static> + Serialize
+    Copy + Scalar + PartialEq + Into<Value> + Into<ValueRef<'static>> + Serialize
 {
     /// Logical primitive type that this wrapper type belongs to.
     type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
@@ -223,7 +223,7 @@ impl<T: WrapperType> PartialOrd for OrdPrimitive<T> {
 
 impl<T: WrapperType> Ord for OrdPrimitive<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.into().cmp(&other.0.into())
+        Into::<Value>::into(self.0).cmp(&Into::<Value>::into(other.0))
     }
 }
 

@@ -30,7 +30,7 @@ use crate::types::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, LogicalPrimitiveType,
     UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
 };
-use crate::value::{IntoValueRef, Value, ValueRef};
+use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
 pub type UInt8Vector = PrimitiveVector<UInt8Type>;
@@ -172,7 +172,7 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
         if self.array.is_valid(index) {
             // Safety: The index have been checked by `is_valid()`.
             let wrapper = unsafe { T::Wrapper::from_native(self.array.value_unchecked(index)) };
-            wrapper.into_value_ref()
+            wrapper.into()
         } else {
             ValueRef::Null
         }
