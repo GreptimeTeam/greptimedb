@@ -197,7 +197,7 @@ impl<'a, T: LogicalPrimitiveType> Iterator for PrimitiveIter<'a, T> {
     fn next(&mut self) -> Option<Option<T::Wrapper>> {
         self.iter
             .next()
-            .map(|item| item.map(|v| T::Wrapper::from_native(v)))
+            .map(|item| item.map(T::Wrapper::from_native))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

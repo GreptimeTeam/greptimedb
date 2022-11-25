@@ -121,7 +121,7 @@ pub trait LogicalPrimitiveType: 'static + Sized {
 
 macro_rules! define_logical_primitive_type {
     ($Native: ident, $TypeId: ident, $DataType: ident) => {
-        #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
         pub struct $DataType {}
 
         impl LogicalPrimitiveType for $DataType {
