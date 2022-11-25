@@ -33,7 +33,6 @@ pub type Float32Vector = PrimitiveVector<Float32Type>;
 pub type Float64Vector = PrimitiveVector<Float64Type>;
 
 /// Vector for primitive data types.
-#[derive(PartialEq)]
 pub struct PrimitiveVector<T: LogicalPrimitiveType> {
     array: PrimitiveArray<T::ArrowPrimitive>,
 }
@@ -233,6 +232,12 @@ impl<T: LogicalPrimitiveType> Serializable for PrimitiveVector<T> {
             .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()
             .context(error::SerializeSnafu)
+    }
+}
+
+impl<T: LogicalPrimitiveType> PartialEq for PrimitiveVector<T> {
+    fn eq(&self, other: &PrimitiveVector<T>) -> bool {
+        self.array == other.array
     }
 }
 

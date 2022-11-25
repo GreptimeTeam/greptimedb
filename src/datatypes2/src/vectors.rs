@@ -14,6 +14,7 @@ use crate::vectors::operations::VectorOp;
 
 pub mod binary;
 pub mod boolean;
+mod eq;
 pub mod operations;
 pub mod primitive;
 
