@@ -105,18 +105,3 @@ pub async fn create_test_table(
         .unwrap();
     Ok(())
 }
-
-// pub async fn create_mock_sql_handler() -> SqlHandler {
-//     let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
-//     let mock_engine = Arc::new(MockMitoEngine::new(
-//         EngineConfig::default(),
-//         MockEngine::default(),
-//         object_store,
-//     ));
-//     let catalog_manager = Arc::new(
-//         catalog::local::LocalCatalogManager::try_new(mock_engine.clone())
-//             .await
-//             .unwrap(),
-//     );
-//     SqlHandler::new(mock_engine, catalog_manager)
-// }
