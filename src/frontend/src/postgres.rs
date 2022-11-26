@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use common_base::tls::TlsOption;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -19,6 +22,7 @@ pub struct PostgresOptions {
     pub addr: String,
     pub runtime_size: usize,
     pub check_pwd: bool,
+    pub tls: Option<Arc<TlsOption>>,
 }
 
 impl Default for PostgresOptions {
@@ -27,6 +31,7 @@ impl Default for PostgresOptions {
             addr: "127.0.0.1:4003".to_string(),
             runtime_size: 2,
             check_pwd: false,
+            tls: None,
         }
     }
 }

@@ -39,7 +39,7 @@ fn create_mysql_server(table: MemTable) -> Result<Box<dyn Server>> {
             .build()
             .unwrap(),
     );
-    Ok(MysqlServer::create_server(query_handler, io_runtime))
+    Ok(MysqlServer::create_server(query_handler, io_runtime, None))
 }
 
 #[tokio::test]

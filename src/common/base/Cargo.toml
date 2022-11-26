@@ -11,3 +11,5 @@ common-error = { path = "../error" }
 paste = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 snafu = { version = "0.7", features = ["backtraces"] }
+rustls = "0.20"
+rustls-pemfile = "1.0"

@@ -17,13 +17,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_base::tls::TlsOption;
 use common_runtime::Runtime;
 use common_telemetry::logging::{error, info};
 use futures::StreamExt;
-use opensrv_mysql::AsyncMysqlIntermediary;
+use opensrv_mysql::{
+    plain_run_with_options, secure_run_with_options, AsyncMysqlIntermediary, IntermediaryOptions,
+};
 use tokio;
 use tokio::io::BufWriter;
 use tokio::net::TcpStream;
+use tokio_rustls::rustls::ServerConfig;
 
 use crate::error::Result;
 use crate::mysql::handler::MysqlInstanceShim;
@@ -36,16 +40,19 @@ const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;
 pub struct MysqlServer {
     base_server: BaseTcpServer,
     query_handler: SqlQueryHandlerRef,
+    tls: Option<Arc<TlsOption>>,
 }
 
 impl MysqlServer {
     pub fn create_server(
         query_handler: SqlQueryHandlerRef,
         io_runtime: Arc<Runtime>,
+        tls: Option<Arc<TlsOption>>,
     ) -> Box<dyn Server> {
         Box::new(MysqlServer {
             base_server: BaseTcpServer::create_server("MySQL", io_runtime),
             query_handler,
+            tls,
         })
     }
 
@@ -53,16 +60,20 @@ impl MysqlServer {
         &self,
         io_runtime: Arc<Runtime>,
         stream: AbortableStream,
+        tls_conf: Option<Arc<ServerConfig>>,
     ) -> impl Future<Output = ()> {
         let query_handler = self.query_handler.clone();
+
         stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
             let query_handler = query_handler.clone();
+            let tls_conf = tls_conf.clone();
             async move {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
-                        if let Err(error) = Self::handle(io_stream, io_runtime, query_handler).await
+                        if let Err(error) =
+                            Self::handle(io_stream, io_runtime, query_handler, tls_conf).await
                         {
                             error!(error; "Unexpected error when handling TcpStream");
                         };
@@ -76,20 +87,30 @@ impl MysqlServer {
         stream: TcpStream,
         io_runtime: Arc<Runtime>,
         query_handler: SqlQueryHandlerRef,
+        tls_conf: Option<Arc<ServerConfig>>,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
-        let shim = MysqlInstanceShim::create(query_handler, stream.peer_addr()?.to_string());
+        let mut shim = MysqlInstanceShim::create(query_handler, stream.peer_addr()?.to_string());
 
-        let (r, w) = stream.into_split();
-        let w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
-        io_runtime.spawn(async move {
-            // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
-            if let Err(e) = AsyncMysqlIntermediary::run_on(shim, r, w).await {
-                    // TODO(LFC): Write this error to client as well, in MySQL text protocol.
-                    // Looks like we have to expose opensrv-mysql's `PacketWriter`?
-                    error!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time.")
+        let (mut r, w) = stream.into_split();
+        let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
+        io_runtime
+            .spawn(async move {
+                // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
+                let ops = IntermediaryOptions::default();
+                let (is_ssl, init_params) =
+                    AsyncMysqlIntermediary::init_before_ssl(&mut shim, &mut r, &mut w, &tls_conf)
+                        .await?;
+
+                match tls_conf {
+                    Some(tls_conf) if is_ssl => {
+                        secure_run_with_options(shim, w, ops, tls_conf, init_params).await
+                    }
+                    _ => plain_run_with_options(shim, w, ops, init_params).await,
                 }
-            });
+            })
+            .await;
+
         Ok(())
     }
 }
@@ -104,7 +125,14 @@ impl Server for MysqlServer {
         let (stream, addr) = self.base_server.bind(listening).await?;
 
         let io_runtime = self.base_server.io_runtime();
-        let join_handle = tokio::spawn(self.accept(io_runtime, stream));
+        let tls_conf = match &self.tls {
+            Some(tls) => {
+                let server_conf = tls.setup()?;
+                Some(Arc::new(server_conf))
+            }
+            None => None,
+        };
+        let join_handle = tokio::spawn(self.accept(io_runtime, stream, tls_conf));
         self.base_server.start_with(join_handle).await?;
         Ok(addr)
     }

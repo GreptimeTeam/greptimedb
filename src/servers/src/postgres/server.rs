@@ -17,11 +17,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_base::tls::TlsOption;
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
 use futures::StreamExt;
 use pgwire::tokio::process_socket;
 use tokio;
+use tokio_rustls::TlsAcceptor;
 
 use crate::error::Result;
 use crate::postgres::auth_handler::PgAuthStartupHandler;
@@ -33,6 +35,7 @@ pub struct PostgresServer {
     base_server: BaseTcpServer,
     auth_handler: Arc<PgAuthStartupHandler>,
     query_handler: Arc<PostgresServerHandler>,
+    tls: Option<Arc<TlsOption>>,
 }
 
 impl PostgresServer {
@@ -40,6 +43,7 @@ impl PostgresServer {
     pub fn new(
         query_handler: SqlQueryHandlerRef,
         check_pwd: bool,
+        tls: Option<Arc<TlsOption>>,
         io_runtime: Arc<Runtime>,
     ) -> PostgresServer {
         let postgres_handler = Arc::new(PostgresServerHandler::new(query_handler));
@@ -48,6 +52,7 @@ impl PostgresServer {
             base_server: BaseTcpServer::create_server("Postgres", io_runtime),
             auth_handler: startup_handler,
             query_handler: postgres_handler,
+            tls,
         }
     }
 
@@ -55,6 +60,7 @@ impl PostgresServer {
         &self,
         io_runtime: Arc<Runtime>,
         accepting_stream: AbortableStream,
+        tls_acceptor: Option<Arc<TlsAcceptor>>,
     ) -> impl Future<Output = ()> {
         let auth_handler = self.auth_handler.clone();
         let query_handler = self.query_handler.clone();
@@ -63,6 +69,7 @@ impl PostgresServer {
             let io_runtime = io_runtime.clone();
             let auth_handler = auth_handler.clone();
             let query_handler = query_handler.clone();
+            let tls_acceptor = tls_acceptor.clone();
 
             async move {
                 match tcp_stream {
@@ -70,7 +77,7 @@ impl PostgresServer {
                     Ok(io_stream) => {
                         io_runtime.spawn(process_socket(
                             io_stream,
-                            None,
+                            tls_acceptor.clone(),
                             auth_handler.clone(),
                             query_handler.clone(),
                             query_handler.clone(),
@@ -91,8 +98,17 @@ impl Server for PostgresServer {
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let (stream, addr) = self.base_server.bind(listening).await?;
 
+        let tls_acceptor = match &self.tls {
+            Some(tls) => {
+                let server_conf = tls.setup()?;
+                Some(Arc::new(TlsAcceptor::from(Arc::new(server_conf))))
+            }
+            None => None,
+        };
+
         let io_runtime = self.base_server.io_runtime();
-        let join_handle = tokio::spawn(self.accept(io_runtime, stream));
+        let join_handle = tokio::spawn(self.accept(io_runtime, stream, tls_acceptor));
+
         self.base_server.start_with(join_handle).await?;
         Ok(addr)
     }

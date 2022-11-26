@@ -15,5 +15,6 @@
 pub mod bit_vec;
 pub mod buffer;
 pub mod bytes;
+pub mod tls;
 
 pub use bit_vec::BitVec;

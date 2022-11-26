@@ -1164,6 +1164,8 @@ dependencies = [
  "bytes",
  "common-error",
  "paste",
+ "rustls",
+ "rustls-pemfile 1.0.1",
  "serde",
  "snafu",
 ]
@@ -2218,6 +2220,7 @@ dependencies = [
  "openmetrics-parser",
  "prost 0.11.0",
  "query",
+ "rustls",
  "serde",
  "serde_json",
  "servers",
@@ -3717,16 +3720,17 @@ dependencies = [
 
 [[package]]
 name = "opensrv-mysql"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4c24c12fd688cb5aa5b1a54c6ccb2e30fb9b5132debb0e89fcb432b3f73db8f"
+version = "0.3.0"
+source = "git+https://github.com/SSebo/opensrv.git#aa9beefdeef075c6b2da85766ad4d20bb585e694"
 dependencies = [
  "async-trait",
  "byteorder",
  "chrono",
  "mysql_common",
  "nom",
+ "pin-project-lite",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -5516,6 +5520,7 @@ dependencies = [
  "table",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-test",
  "tonic",
