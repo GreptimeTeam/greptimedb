@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{util, ObjectEntry, ObjectStore};
+use object_store::{util, Object, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -63,7 +63,7 @@ pub fn is_delta_file(file_name: &str) -> bool {
 }
 
 pub struct ObjectStoreLogIterator {
-    iter: Box<dyn Iterator<Item = (ManifestVersion, ObjectEntry)> + Send + Sync>,
+    iter: Box<dyn Iterator<Item = (ManifestVersion, Object)> + Send + Sync>,
 }
 
 #[async_trait]
@@ -72,8 +72,7 @@ impl LogIterator for ObjectStoreLogIterator {
 
     async fn next_log(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         match self.iter.next() {
-            Some((v, e)) => {
-                let object = e.into_object();
+            Some((v, object)) => {
                 let bytes = object.read().await.context(ReadObjectSnafu {
                     path: object.path(),
                 })?;
@@ -156,7 +155,7 @@ impl ManifestLogStorage for ManifestObjectStore {
             .await
             .context(ListObjectsSnafu { path: &self.path })?;
 
-        let mut entries: Vec<(ManifestVersion, ObjectEntry)> = streamer
+        let mut entries: Vec<(ManifestVersion, Object)> = streamer
             .try_filter_map(|e| async move {
                 let file_name = e.name();
                 if is_delta_file(file_name) {

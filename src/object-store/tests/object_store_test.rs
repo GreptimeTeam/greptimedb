@@ -17,7 +17,7 @@ use std::env;
 use anyhow::Result;
 use common_telemetry::logging;
 use object_store::backend::{fs, s3};
-use object_store::{util, Object, ObjectMode, ObjectStore, ObjectStreamer};
+use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore};
 use tempdir::TempDir;
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
@@ -61,7 +61,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 
     // List objects
     let o: Object = store.object("/");
-    let obs: ObjectStreamer = o.list().await?;
+    let obs: ObjectLister = o.list().await?;
     let objects = util::collect(obs).await?;
     assert_eq!(3, objects.len());
 
@@ -74,7 +74,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     assert_eq!(1, objects.len());
 
     // Only o2 is exists
-    let o2 = &objects[0].clone().into_object();
+    let o2 = &objects[0].clone();
     let bs = o2.read().await?;
     assert_eq!("Hello, object2!", String::from_utf8(bs)?);
     // Delete o2
