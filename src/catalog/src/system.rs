@@ -456,7 +456,7 @@ mod tests {
     pub async fn prepare_table_engine() -> (TempDir, TableEngineRef) {
         let dir = TempDir::new("system-table-test").unwrap();
         let store_dir = dir.path().to_string_lossy();
-        let accessor = opendal::services::fs::Builder::default()
+        let accessor = object_store::backend::fs::Builder::default()
             .root(&store_dir)
             .build()
             .unwrap();

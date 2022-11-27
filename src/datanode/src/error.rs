@@ -145,7 +145,7 @@ pub enum Error {
     #[snafu(display("Failed to init backend, dir: {}, source: {}", dir, source))]
     InitBackend {
         dir: String,
-        source: std::io::Error,
+        source: object_store::Error,
         backtrace: Backtrace,
     },
 
