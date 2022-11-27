@@ -1164,10 +1164,7 @@ dependencies = [
  "bytes",
  "common-error",
  "paste",
- "rustls",
- "rustls-pemfile 1.0.1",
  "serde",
- "serde_json",
  "snafu",
 ]
 
@@ -5513,6 +5510,8 @@ dependencies = [
  "query",
  "rand 0.8.5",
  "regex",
+ "rustls",
+ "rustls-pemfile 1.0.1",
  "schemars",
  "script",
  "serde",

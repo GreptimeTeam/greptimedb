@@ -17,7 +17,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_base::tls::TlsOption;
 use common_runtime::Runtime;
 use common_telemetry::logging::{error, info};
 use futures::StreamExt;
@@ -33,6 +32,7 @@ use crate::error::{Error, Result};
 use crate::mysql::handler::MysqlInstanceShim;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
+use crate::tls::TlsOption;
 
 // Default size of ResultSet write buffer: 100KB
 const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;

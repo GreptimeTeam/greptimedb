@@ -17,7 +17,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_base::tls::TlsOption;
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
 use futures::StreamExt;
@@ -30,6 +29,7 @@ use crate::postgres::auth_handler::PgAuthStartupHandler;
 use crate::postgres::handler::PostgresServerHandler;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
+use crate::tls::TlsOption;
 
 pub struct PostgresServer {
     base_server: BaseTcpServer,

@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use common_base::tls::TlsOption;
 use serde::{Deserialize, Serialize};
+use servers::tls::TlsOption;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PostgresOptions {
