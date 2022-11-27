@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 pub struct MysqlOptions {
     pub addr: String,
     pub runtime_size: usize,
-    pub tls: Option<Arc<TlsOption>>,
+    #[serde(default = "Default::default")]
+    pub tls: Arc<TlsOption>,
 }
 
 impl Default for MysqlOptions {
@@ -29,7 +30,7 @@ impl Default for MysqlOptions {
         Self {
             addr: "127.0.0.1:4002".to_string(),
             runtime_size: 2,
-            tls: None,
+            tls: Arc::new(TlsOption::default()),
         }
     }
 }

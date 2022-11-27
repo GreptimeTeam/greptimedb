@@ -20,13 +20,30 @@ use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsMode {
+    #[default]
+    Disabled,
+    Prefered,
+    Required,
+    Verified,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "lowercase")]
 pub struct TlsOption {
+    pub mode: TlsMode,
+    #[serde(default)]
     pub cert_path: String,
+    #[serde(default)]
     pub key_path: String,
 }
 
 impl TlsOption {
-    pub fn setup(&self) -> Result<ServerConfig, std::io::Error> {
+    pub fn setup(&self) -> Result<Option<ServerConfig>, std::io::Error> {
+        if let TlsMode::Disabled = self.mode {
+            return Ok(None);
+        }
         let cert = certs(&mut BufReader::new(File::open(&self.key_path)?))
             .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "invalid cert"))
             .map(|mut certs| certs.drain(..).map(Certificate).collect())?;
@@ -40,6 +57,78 @@ impl TlsOption {
             .with_single_cert(cert, key)
             .map_err(|err| std::io::Error::new(ErrorKind::InvalidInput, err))?;
 
-        Ok(config)
+        Ok(Some(config))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tls_option_disable() {
+        let s = r#"
+        {
+            "mode": "disabled"
+        }
+        "#;
+
+        let t: TlsOption = serde_json::from_str(s).unwrap();
+        assert!(matches!(t.mode, TlsMode::Disabled));
+        assert!(t.key_path.is_empty());
+        assert!(t.cert_path.is_empty());
+
+        let setup = t.setup();
+        assert!(setup.is_ok());
+        let setup = setup.unwrap();
+        assert!(setup.is_none());
+    }
+
+    #[test]
+    fn test_tls_option_prefered() {
+        let s = r#"
+        {
+            "mode": "prefered",
+            "cert_path": "/some_dir/some.crt",
+            "key_path": "/some_dir/some.key"
+        }
+        "#;
+
+        let t: TlsOption = serde_json::from_str(s).unwrap();
+        assert!(matches!(t.mode, TlsMode::Prefered));
+        assert!(!t.key_path.is_empty());
+        assert!(!t.cert_path.is_empty());
+    }
+
+    #[test]
+    fn test_tls_option_required() {
+        let s = r#"
+        {
+            "mode": "required",
+            "cert_path": "/some_dir/some.crt",
+            "key_path": "/some_dir/some.key"
+        }
+        "#;
+
+        let t: TlsOption = serde_json::from_str(s).unwrap();
+        assert!(matches!(t.mode, TlsMode::Required));
+        assert!(!t.key_path.is_empty());
+        assert!(!t.cert_path.is_empty());
+    }
+
+    #[test]
+    fn test_tls_option_verified() {
+        let s = r#"
+        {
+            "mode": "required",
+            "cert_path": "/some_dir/some.crt",
+            "key_path": "/some_dir/some.key"
+        }
+        "#;
+
+        let t: TlsOption = serde_json::from_str(s).unwrap();
+        assert!(matches!(t.mode, TlsMode::Required));
+        assert!(!t.key_path.is_empty());
+        assert!(!t.cert_path.is_empty());
     }
 }

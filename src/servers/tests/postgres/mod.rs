@@ -39,7 +39,7 @@ fn create_postgres_server(table: MemTable, check_pwd: bool) -> Result<Box<dyn Se
     Ok(Box::new(PostgresServer::new(
         query_handler,
         check_pwd,
-        None,
+        Default::default(),
         io_runtime,
     )))
 }

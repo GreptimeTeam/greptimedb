@@ -62,7 +62,7 @@ impl Services {
                 Some(MysqlServer::create_server(
                     instance.clone(),
                     mysql_io_runtime,
-                    None,
+                    Default::default(),
                 ))
             }
         };

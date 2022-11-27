@@ -13,3 +13,6 @@ serde = { version = "1.0", features = ["derive"] }
 snafu = { version = "0.7", features = ["backtraces"] }
 rustls = "0.20"
 rustls-pemfile = "1.0"
+
+[dev-dependencies]
+serde_json = "1.0"

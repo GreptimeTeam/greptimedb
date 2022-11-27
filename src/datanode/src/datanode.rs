@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use common_base::tls::TlsOption;
 use common_telemetry::info;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
@@ -50,7 +49,6 @@ pub struct DatanodeOptions {
     pub storage: ObjectStoreConfig,
     pub enable_memory_catalog: bool,
     pub mode: Mode,
-    pub tls: Option<Arc<TlsOption>>,
 }
 
 impl Default for DatanodeOptions {
@@ -66,7 +64,6 @@ impl Default for DatanodeOptions {
             storage: ObjectStoreConfig::default(),
             enable_memory_catalog: false,
             mode: Mode::Standalone,
-            tls: None,
         }
     }
 }

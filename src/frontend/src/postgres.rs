@@ -22,7 +22,8 @@ pub struct PostgresOptions {
     pub addr: String,
     pub runtime_size: usize,
     pub check_pwd: bool,
-    pub tls: Option<Arc<TlsOption>>,
+    #[serde(default = "Default::default")]
+    pub tls: Arc<TlsOption>,
 }
 
 impl Default for PostgresOptions {
@@ -31,7 +32,7 @@ impl Default for PostgresOptions {
             addr: "127.0.0.1:4003".to_string(),
             runtime_size: 2,
             check_pwd: false,
-            tls: None,
+            tls: Default::default(),
         }
     }
 }
