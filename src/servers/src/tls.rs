@@ -27,8 +27,8 @@ pub enum TlsMode {
     Disable,
     Prefer,
     Require,
-    VerifyCa,
-    VerifyFull,
+    VerifyCa,   // TODO:
+    VerifyFull, // TODO:
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -46,7 +46,7 @@ impl TlsOption {
         if let TlsMode::Disable = self.mode {
             return Ok(None);
         }
-        let cert = certs(&mut BufReader::new(File::open(&self.key_path)?))
+        let cert = certs(&mut BufReader::new(File::open(&self.cert_path)?))
             .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "invalid cert"))
             .map(|mut certs| certs.drain(..).map(Certificate).collect())?;
         let key = pkcs8_private_keys(&mut BufReader::new(File::open(&self.key_path)?))

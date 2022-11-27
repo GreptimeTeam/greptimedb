@@ -93,34 +93,44 @@ impl MysqlServer {
         force_tls: bool,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
-        let mut shim = MysqlInstanceShim::create(query_handler, stream.peer_addr()?.to_string());
-
-        let (mut r, w) = stream.into_split();
-        let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
-        io_runtime
-            .spawn(async move {
-                // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
-                let ops = IntermediaryOptions::default();
-                let (client_tls, init_params) =
-                    AsyncMysqlIntermediary::init_before_ssl(&mut shim, &mut r, &mut w, &tls_conf)
-                        .await?;
-
-                if force_tls && !client_tls {
-                    return Err(Error::Internal {
-                        err_msg: "Tls is required for mysql client".to_owned(),
-                    });
-                }
-
-                match tls_conf {
-                    Some(tls_conf) if client_tls => {
-                        secure_run_with_options(shim, w, ops, tls_conf, init_params).await
-                    }
-                    _ => plain_run_with_options(shim, w, ops, init_params).await,
-                }
-            })
-            .await;
+        io_runtime .spawn(async move { 
+            // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
+            if let Err(e)  = Self::do_handle(stream, query_handler, tls_conf, force_tls).await {
+                // TODO(LFC): Write this error to client as well, in MySQL text protocol.
+                // Looks like we have to expose opensrv-mysql's `PacketWriter`?
+                error!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time.")
+            }
+        });
 
         Ok(())
+    }
+
+    async fn do_handle(
+        stream: TcpStream,
+        query_handler: SqlQueryHandlerRef,
+        tls_conf: Option<Arc<ServerConfig>>,
+        force_tls: bool,
+    ) -> Result<()> {
+        let mut shim = MysqlInstanceShim::create(query_handler, stream.peer_addr()?.to_string());
+        let (mut r, w) = stream.into_split();
+        let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
+        let ops = IntermediaryOptions::default();
+
+        let (client_tls, init_params) =
+            AsyncMysqlIntermediary::init_before_ssl(&mut shim, &mut r, &mut w, &tls_conf).await?;
+
+        if force_tls && !client_tls {
+            return Err(Error::Internal {
+                err_msg: "Tls is required for mysql client".to_owned(),
+            });
+        }
+
+        match tls_conf {
+            Some(tls_conf) if client_tls => {
+                secure_run_with_options(shim, w, ops, tls_conf, init_params).await
+            }
+            _ => plain_run_with_options(shim, w, ops, init_params).await,
+        }
     }
 }
 
