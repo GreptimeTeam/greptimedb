@@ -29,7 +29,7 @@ use tokio::io::BufWriter;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::ServerConfig;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::mysql::handler::MysqlInstanceShim;
 use crate::query_handler::SqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
@@ -63,6 +63,7 @@ impl MysqlServer {
         tls_conf: Option<Arc<ServerConfig>>,
     ) -> impl Future<Output = ()> {
         let query_handler = self.query_handler.clone();
+        let force_tls = self.tls.should_force_tls();
 
         stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
@@ -73,7 +74,8 @@ impl MysqlServer {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
                         if let Err(error) =
-                            Self::handle(io_stream, io_runtime, query_handler, tls_conf).await
+                            Self::handle(io_stream, io_runtime, query_handler, tls_conf, force_tls)
+                                .await
                         {
                             error!(error; "Unexpected error when handling TcpStream");
                         };
@@ -88,6 +90,7 @@ impl MysqlServer {
         io_runtime: Arc<Runtime>,
         query_handler: SqlQueryHandlerRef,
         tls_conf: Option<Arc<ServerConfig>>,
+        force_tls: bool,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
         let mut shim = MysqlInstanceShim::create(query_handler, stream.peer_addr()?.to_string());
@@ -98,12 +101,18 @@ impl MysqlServer {
             .spawn(async move {
                 // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
                 let ops = IntermediaryOptions::default();
-                let (is_ssl, init_params) =
+                let (client_tls, init_params) =
                     AsyncMysqlIntermediary::init_before_ssl(&mut shim, &mut r, &mut w, &tls_conf)
                         .await?;
 
+                if force_tls && !client_tls {
+                    return Err(Error::Internal {
+                        err_msg: "Tls is required for mysql client".to_owned(),
+                    });
+                }
+
                 match tls_conf {
-                    Some(tls_conf) if is_ssl => {
+                    Some(tls_conf) if client_tls => {
                         secure_run_with_options(shim, w, ops, tls_conf, init_params).await
                     }
                     _ => plain_run_with_options(shim, w, ops, init_params).await,

@@ -19,18 +19,20 @@ use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde::{Deserialize, Serialize};
 
+// https://www.postgresql.org/docs/current/libpq-ssl.html
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum TlsMode {
     #[default]
-    Disabled,
-    Prefered,
-    Required,
-    Verified,
+    Disable,
+    Prefer,
+    Require,
+    VerifyCa,
+    VerifyFull,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub struct TlsOption {
     pub mode: TlsMode,
     #[serde(default)]
@@ -41,7 +43,7 @@ pub struct TlsOption {
 
 impl TlsOption {
     pub fn setup(&self) -> Result<Option<ServerConfig>, std::io::Error> {
-        if let TlsMode::Disabled = self.mode {
+        if let TlsMode::Disable = self.mode {
             return Ok(None);
         }
         let cert = certs(&mut BufReader::new(File::open(&self.key_path)?))
@@ -51,6 +53,7 @@ impl TlsOption {
             .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "invalid key"))
             .map(|mut keys| keys.drain(..).map(PrivateKey).next().unwrap())?;
 
+        // TODO: with_client_cert_verifier if TlsMode is Required.
         let config = ServerConfig::builder()
             .with_safe_defaults()
             .with_no_client_auth()
@@ -58,6 +61,10 @@ impl TlsOption {
             .map_err(|err| std::io::Error::new(ErrorKind::InvalidInput, err))?;
 
         Ok(Some(config))
+    }
+
+    pub fn should_force_tls(&self) -> bool {
+        !matches!(self.mode, TlsMode::Disable | TlsMode::Prefer)
     }
 }
 
@@ -69,12 +76,15 @@ mod tests {
     fn test_tls_option_disable() {
         let s = r#"
         {
-            "mode": "disabled"
+            "mode": "disable"
         }
         "#;
 
         let t: TlsOption = serde_json::from_str(s).unwrap();
-        assert!(matches!(t.mode, TlsMode::Disabled));
+
+        assert!(!t.should_force_tls());
+
+        assert!(matches!(t.mode, TlsMode::Disable));
         assert!(t.key_path.is_empty());
         assert!(t.cert_path.is_empty());
 
@@ -85,49 +95,77 @@ mod tests {
     }
 
     #[test]
-    fn test_tls_option_prefered() {
+    fn test_tls_option_prefer() {
         let s = r#"
         {
-            "mode": "prefered",
+            "mode": "prefer",
             "cert_path": "/some_dir/some.crt",
             "key_path": "/some_dir/some.key"
         }
         "#;
 
         let t: TlsOption = serde_json::from_str(s).unwrap();
-        assert!(matches!(t.mode, TlsMode::Prefered));
+
+        assert!(!t.should_force_tls());
+
+        assert!(matches!(t.mode, TlsMode::Prefer));
         assert!(!t.key_path.is_empty());
         assert!(!t.cert_path.is_empty());
     }
 
     #[test]
-    fn test_tls_option_required() {
+    fn test_tls_option_require() {
         let s = r#"
         {
-            "mode": "required",
+            "mode": "require",
             "cert_path": "/some_dir/some.crt",
             "key_path": "/some_dir/some.key"
         }
         "#;
 
         let t: TlsOption = serde_json::from_str(s).unwrap();
-        assert!(matches!(t.mode, TlsMode::Required));
+
+        assert!(t.should_force_tls());
+
+        assert!(matches!(t.mode, TlsMode::Require));
         assert!(!t.key_path.is_empty());
         assert!(!t.cert_path.is_empty());
     }
 
     #[test]
-    fn test_tls_option_verified() {
+    fn test_tls_option_verifiy_ca() {
         let s = r#"
         {
-            "mode": "required",
+            "mode": "verify_ca",
             "cert_path": "/some_dir/some.crt",
             "key_path": "/some_dir/some.key"
         }
         "#;
 
         let t: TlsOption = serde_json::from_str(s).unwrap();
-        assert!(matches!(t.mode, TlsMode::Required));
+
+        assert!(t.should_force_tls());
+
+        assert!(matches!(t.mode, TlsMode::VerifyCa));
+        assert!(!t.key_path.is_empty());
+        assert!(!t.cert_path.is_empty());
+    }
+
+    #[test]
+    fn test_tls_option_verifiy_full() {
+        let s = r#"
+        {
+            "mode": "verify_full",
+            "cert_path": "/some_dir/some.crt",
+            "key_path": "/some_dir/some.key"
+        }
+        "#;
+
+        let t: TlsOption = serde_json::from_str(s).unwrap();
+
+        assert!(t.should_force_tls());
+
+        assert!(matches!(t.mode, TlsMode::VerifyFull));
         assert!(!t.key_path.is_empty());
         assert!(!t.cert_path.is_empty());
     }
