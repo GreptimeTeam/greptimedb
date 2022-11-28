@@ -71,14 +71,13 @@ impl fmt::Display for SubCommand {
 }
 
 fn print_version() -> &'static str {
-    Box::leak(
-        format!(
-            "\nbranch: {}\ncommit: {}\ndirty: {}",
-            env!("GIT_BRANCH"),
-            env!("GIT_COMMIT"),
-            env!("GIT_DIRTY")
-        )
-        .into(),
+    concat!(
+        "\nbranch: ",
+        env!("GIT_BRANCH"),
+        "\ncommit: ",
+        env!("GIT_COMMIT"),
+        "\ndirty: ",
+        env!("GIT_DIRTY")
     )
 }
 
