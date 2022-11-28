@@ -12,8 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::Duration;
+
 use client::api::v1::column::Values;
 use client::api::v1::ColumnDataType;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpSocket;
+use tokio::time;
+
+/// Check port every 0.1 second.
+const PORT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 pub fn values_to_string(data_type: ColumnDataType, values: Values) -> Vec<String> {
     match data_type {
@@ -93,5 +103,56 @@ pub fn values_to_string(data_type: ColumnDataType, values: Values) -> Vec<String
             .into_iter()
             .map(|v| v.to_string())
             .collect(),
+    }
+}
+
+/// Get the dir of test cases. This function only works when the runner is run
+/// under the project's dir because it depends on some envs set by cargo.
+pub fn get_case_dir() -> String {
+    // retrieve the manifest runner (./tests/runner)
+    let mut runner_crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    // change directory to cases' dir from runner's (should be runner/../cases)
+    runner_crate_path.pop();
+    runner_crate_path.push("cases");
+
+    runner_crate_path.into_os_string().into_string().unwrap()
+}
+
+/// Get the dir that contains workspace manifest (the top-level Cargo.toml).
+pub fn get_workspace_root() -> String {
+    // retrieve the manifest runner (./tests/runner)
+    let mut runner_crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    // change directory to workspace's root (runner/../..)
+    runner_crate_path.pop();
+    runner_crate_path.pop();
+
+    runner_crate_path.into_os_string().into_string().unwrap()
+}
+
+/// Spin-waiting a socket address is avaliable, or timeout.
+/// Returns whether the addr is up.
+pub async fn check_port(ip_addr: SocketAddr, timeout: Duration) -> bool {
+    let check_task = async {
+        loop {
+            let socket = TcpSocket::new_v4().expect("Cannot create v4 socket");
+            match socket.connect(ip_addr).await {
+                Ok(mut stream) => {
+                    let _ = stream.shutdown().await;
+                    break;
+                }
+                Err(_) => time::sleep(PORT_CHECK_INTERVAL).await,
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = check_task => {
+            true
+        },
+        _ = time::sleep(timeout) => {
+            false
+        }
     }
 }

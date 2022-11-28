@@ -23,9 +23,10 @@ use client::{Client, Database as DB, Error as ClientError, ObjectResult, Select}
 use comfy_table::{Cell, Table};
 use sqlness::{Database, Environment};
 use tokio::process::{Child, Command};
-use tokio::time;
 
 use crate::util;
+
+const SERVER_ADDR: &str = "127.0.0.1:4001";
 
 pub struct Env {}
 
@@ -49,15 +50,31 @@ impl Environment for Env {
 
 impl Env {
     pub async fn start_standalone() -> GreptimeDB {
+        // Build the DB with `cargo build --bin greptime`
+        let cargo_build_result = Command::new("cargo")
+            .current_dir(util::get_workspace_root())
+            .args(["build", "--bin", "greptime"])
+            .output()
+            .await
+            .expect("Failed to start GreptimeDB")
+            .status;
+        if !cargo_build_result.success() {
+            panic!("Failed to build GreptimeDB (`cargo build` fails)");
+        }
+
+        // Start the DB
         let server_process = Command::new("cargo")
-            .current_dir("../")
+            .current_dir(util::get_workspace_root())
             .args(["run", "--", "standalone", "start", "-m"])
             .spawn()
-            .unwrap_or_else(|_| panic!("Failed to start GreptimeDB"));
+            .expect("Failed to start the DB");
 
-        time::sleep(Duration::from_secs(3)).await;
+        let is_up = util::check_port(SERVER_ADDR.parse().unwrap(), Duration::from_secs(10)).await;
+        if !is_up {
+            panic!("Server doesn't up in 10 seconds, quit.")
+        }
 
-        let client = Client::with_urls(vec!["127.0.0.1:4001"]);
+        let client = Client::with_urls(vec![SERVER_ADDR]);
         let db = DB::new("greptime", client.clone());
 
         GreptimeDB {

@@ -21,7 +21,7 @@ mod util;
 #[tokio::main]
 async fn main() {
     let config = ConfigBuilder::default()
-        .case_dir("../cases".to_string())
+        .case_dir(util::get_case_dir())
         .build()
         .unwrap();
     let runner = Runner::new_with_config(config, Env {}).await.unwrap();
