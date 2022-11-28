@@ -47,7 +47,8 @@ impl PostgresServer {
         io_runtime: Arc<Runtime>,
     ) -> PostgresServer {
         let postgres_handler = Arc::new(PostgresServerHandler::new(query_handler));
-        let startup_handler = Arc::new(PgAuthStartupHandler::new(check_pwd));
+        let startup_handler =
+            Arc::new(PgAuthStartupHandler::new(check_pwd, tls.should_force_tls()));
         PostgresServer {
             base_server: BaseTcpServer::create_server("Postgres", io_runtime),
             auth_handler: startup_handler,
@@ -61,13 +62,9 @@ impl PostgresServer {
         io_runtime: Arc<Runtime>,
         accepting_stream: AbortableStream,
         tls_acceptor: Option<Arc<TlsAcceptor>>,
-        force_tls: bool,
     ) -> impl Future<Output = ()> {
         let auth_handler = self.auth_handler.clone();
         let query_handler = self.query_handler.clone();
-
-        // TODO: pgwire support force tls
-        let _force_tls = force_tls;
 
         accepting_stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
@@ -107,9 +104,8 @@ impl Server for PostgresServer {
             .setup()?
             .map(|server_conf| Arc::new(TlsAcceptor::from(Arc::new(server_conf))));
 
-        let force_tls = self.tls.should_force_tls();
         let io_runtime = self.base_server.io_runtime();
-        let join_handle = tokio::spawn(self.accept(io_runtime, stream, tls_acceptor, force_tls));
+        let join_handle = tokio::spawn(self.accept(io_runtime, stream, tls_acceptor));
 
         self.base_server.start_with(join_handle).await?;
         Ok(addr)

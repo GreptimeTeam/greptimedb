@@ -5521,6 +5521,7 @@ dependencies = [
  "table",
  "tokio",
  "tokio-postgres",
+ "tokio-postgres-rustls",
  "tokio-rustls",
  "tokio-stream",
  "tokio-test",
@@ -6422,6 +6423,20 @@ dependencies = [
  "socket2",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "tokio-postgres-rustls"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "606f2b73660439474394432239c82249c0d45eb5f23d91f401be1e33590444a7"
+dependencies = [
+ "futures",
+ "ring",
+ "rustls",
+ "tokio",
+ "tokio-postgres",
+ "tokio-rustls",
 ]
 
 [[package]]

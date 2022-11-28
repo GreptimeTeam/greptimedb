@@ -124,7 +124,7 @@ async fn test_query_all_datatypes() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_query_server_prefer_secure_client_plain() -> Result<()> {
+async fn test_server_prefer_secure_client_plain() -> Result<()> {
     let server_tls = Arc::new(TlsOption {
         mode: servers::tls::TlsMode::Prefer,
         cert_path: "tests/ssl/server.crt".to_owned(),
@@ -137,7 +137,7 @@ async fn test_query_server_prefer_secure_client_plain() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_query_server_prefer_secure_client_secure() -> Result<()> {
+async fn test_server_prefer_secure_client_secure() -> Result<()> {
     let server_tls = Arc::new(TlsOption {
         mode: servers::tls::TlsMode::Prefer,
         cert_path: "tests/ssl/server.crt".to_owned(),
@@ -150,7 +150,7 @@ async fn test_query_server_prefer_secure_client_secure() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_query_server_require_secure_client_secure() -> Result<()> {
+async fn test_server_require_secure_client_secure() -> Result<()> {
     let server_tls = Arc::new(TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
@@ -163,7 +163,7 @@ async fn test_query_server_require_secure_client_secure() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_query_server_required_secure_client_plain() -> Result<()> {
+async fn test_server_required_secure_client_plain() -> Result<()> {
     let server_tls = Arc::new(TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
