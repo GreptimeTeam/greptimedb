@@ -10,6 +10,7 @@ api = { path = "../api" }
 async-trait = "0.1"
 axum = "0.6.0-rc.2"
 axum-macros = "0.3.0-rc.1"
+# axum-streams = { version = "0.8", features=["json", "csv"] }
 bytes = "1.2"
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
@@ -20,6 +21,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
+csv = "1.1"
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 hex = { version = "0.4" }

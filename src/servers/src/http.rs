@@ -28,14 +28,14 @@ use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
 use axum::error_handling::HandleErrorLayer;
 use axum::middleware::{self};
-use axum::response::{Html, Json};
-use axum::{routing, BoxError, Extension, Router};
+use axum::response::{Html, IntoResponse, Json};
+use axum::{http, routing, BoxError, Extension, Router};
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
-use datatypes::data_type::DataType;
+use datatypes::data_type::{self, DataType};
 use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -185,6 +185,90 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
     }
 }
 
+#[derive(Debug)]
+pub struct CsvRecordsOutput {
+    schema: Option<Schema>,
+    rows: Vec<Vec<datatypes::value::Value>>,
+}
+
+impl CsvRecordsOutput {
+    pub fn try_into_response(self) -> std::result::Result<axum::response::Response, String> {
+        if self.schema.is_none() {
+            return Ok(([(http::header::CONTENT_TYPE, "text/csv")]).into_response());
+        }
+
+        let mut wtr = csv::WriterBuilder::new()
+            .has_headers(false)
+            .quote_style(csv::QuoteStyle::NonNumeric)
+            .from_writer(vec![]);
+
+        let schema_record: Vec<String> = self
+            .schema
+            .unwrap()
+            .column_schemas
+            .into_iter()
+            .map(|cs| cs.name)
+            .collect();
+
+        wtr.write_record(&schema_record)
+            .map_err(|e| e.to_string())?;
+        self.rows
+            .into_iter()
+            .try_for_each(|row| -> std::result::Result<(), csv::Error> {
+                wtr.serialize(&row)?;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?;
+        let output = wtr.into_inner().map_err(|e| e.to_string())?;
+
+        Ok(([(http::header::CONTENT_TYPE, "text/csv")], output).into_response())
+    }
+}
+
+impl TryFrom<Vec<RecordBatch>> for CsvRecordsOutput {
+    type Error = String;
+
+    fn try_from(
+        recordbatches: Vec<RecordBatch>,
+    ) -> std::result::Result<CsvRecordsOutput, Self::Error> {
+        if recordbatches.is_empty() {
+            Ok(CsvRecordsOutput {
+                schema: None,
+                rows: vec![],
+            })
+        } else {
+            // safety ensured by previous empty check
+            let first = &recordbatches[0];
+            let schema = Schema {
+                column_schemas: first
+                    .schema
+                    .column_schemas()
+                    .iter()
+                    .map(|cs| ColumnSchema {
+                        name: cs.name.clone(),
+                        data_type: cs.data_type.name().to_owned(),
+                    })
+                    .collect(),
+            };
+
+            let mut rows =
+                Vec::with_capacity(recordbatches.iter().map(|r| r.num_rows()).sum::<usize>());
+
+            for recordbatch in recordbatches {
+                for row in recordbatch.rows() {
+                    let row = row.map_err(|e| e.to_string())?;
+                    rows.push(row);
+                }
+            }
+
+            Ok(CsvRecordsOutput {
+                schema: Some(schema),
+                rows,
+            })
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum JsonOutput {
@@ -270,6 +354,56 @@ impl JsonResponse {
 
     pub fn execution_time_ms(&self) -> Option<u128> {
         self.execution_time_ms
+    }
+}
+
+impl IntoResponse for JsonResponse {
+    fn into_response(self) -> axum::response::Response {
+        Json(self).into_response()
+    }
+}
+
+pub async fn handle_sql_output(output: Result<Output>, format: &str) -> axum::response::Response {
+    match output {
+        Ok(Output::AffectedRows(rows)) => {
+            JsonResponse::with_output(Some(vec![JsonOutput::AffectedRows(rows)])).into_response()
+        }
+        Ok(Output::Stream(stream)) => match util::collect(stream).await {
+            Ok(rows) => match HttpRecordsOutput::try_from(rows) {
+                Ok(rows) => {
+                    JsonResponse::with_output(Some(vec![JsonOutput::Records(rows)])).into_response()
+                }
+                Err(err) => JsonResponse::with_error(err, StatusCode::Internal).into_response(),
+            },
+            Err(e) => {
+                JsonResponse::with_error(format!("Recordbatch error: {}", e), e.status_code())
+                    .into_response()
+            }
+        },
+        Ok(Output::RecordBatches(recordbatches)) => {
+            let recordbatches = recordbatches.take();
+            if format == "json" {
+                match HttpRecordsOutput::try_from(recordbatches) {
+                    Ok(rows) => JsonResponse::with_output(Some(vec![JsonOutput::Records(rows)]))
+                        .into_response(),
+                    Err(err) => JsonResponse::with_error(err, StatusCode::Internal).into_response(),
+                }
+            } else {
+                match CsvRecordsOutput::try_from(recordbatches) {
+                    Ok(rows) => match rows.try_into_response() {
+                        Ok(resp) => resp,
+                        Err(err) => {
+                            JsonResponse::with_error(err, StatusCode::Internal).into_response()
+                        }
+                    },
+                    Err(err) => JsonResponse::with_error(err, StatusCode::Internal).into_response(),
+                }
+            }
+        }
+        Err(e) => {
+            JsonResponse::with_error(format!("Query engine output error: {}", e), e.status_code())
+                .into_response()
+        }
     }
 }
 
@@ -559,5 +693,45 @@ mod test {
         } else {
             panic!("invalid output type");
         }
+    }
+
+    #[tokio::test]
+    async fn test_csv_recordbatches_conversion() {
+        let column_schemas = vec![
+            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(column_schemas));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(vec![1, 2, 3, 4])),
+            Arc::new(StringVector::from(vec![
+                None,
+                Some("hello"),
+                Some("greptime"),
+                None,
+            ])),
+        ];
+        let batch = RecordBatch::new(schema.clone(), columns).unwrap();
+
+        let mut wtr = csv::WriterBuilder::new()
+            .has_headers(false)
+            // .quote_style(csv::QuoteStyle::NonNumeric)
+            .from_writer(vec![]);
+
+        let schema_record: Vec<String> = schema
+            .column_schemas()
+            .iter()
+            .map(|cs| cs.name.clone())
+            .collect();
+
+        wtr.write_record(&schema_record).unwrap();
+        batch.rows().for_each(|row| {
+            let row = row.unwrap();
+            wtr.serialize(&row).unwrap();
+        });
+        let output = String::from_utf8(wtr.into_inner().unwrap()).unwrap();
+        println!("{}", output);
+
+        // let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch]).unwrap();
     }
 }
