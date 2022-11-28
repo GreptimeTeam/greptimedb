@@ -197,8 +197,11 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
 
     info!("The storage directory is: {}", &data_dir);
 
+    let atomic_write_dir = format!("{}/.tmp/", data_dir);
+
     let accessor = Builder::default()
         .root(&data_dir)
+        .atomic_write_dir(&atomic_write_dir)
         .build()
         .context(error::InitBackendSnafu { dir: &data_dir })?;
 

@@ -88,10 +88,12 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 
 #[tokio::test]
 async fn test_fs_backend() -> Result<()> {
+    let data_dir = TempDir::new("test_fs_backend")?;
     let tmp_dir = TempDir::new("test_fs_backend")?;
     let store = ObjectStore::new(
         fs::Builder::default()
-            .root(&tmp_dir.path().to_string_lossy())
+            .root(&data_dir.path().to_string_lossy())
+            .atomic_write_dir(&tmp_dir.path().to_string_lossy())
             .build()?,
     );
 
