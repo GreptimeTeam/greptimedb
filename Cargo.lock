@@ -845,7 +845,6 @@ dependencies = [
  "meta-client",
  "mito",
  "object-store",
- "opendal",
  "regex",
  "serde",
  "serde_json",
