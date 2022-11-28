@@ -131,6 +131,17 @@ pub fn get_workspace_root() -> String {
     runner_crate_path.into_os_string().into_string().unwrap()
 }
 
+pub fn get_binary_dir(mode: &str) -> String {
+    // first go to the workspace root.
+    let mut workspace_root = PathBuf::from(get_workspace_root());
+
+    // change directory to target dir (workspace/target/<build mode>/)
+    workspace_root.push("target");
+    workspace_root.push(mode);
+
+    workspace_root.into_os_string().into_string().unwrap()
+}
+
 /// Spin-waiting a socket address is avaliable, or timeout.
 /// Returns whether the addr is up.
 pub async fn check_port(ip_addr: SocketAddr, timeout: Duration) -> bool {

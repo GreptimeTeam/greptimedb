@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::fmt::Display;
+use std::fs::OpenOptions;
+use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,6 +29,7 @@ use tokio::process::{Child, Command};
 use crate::util;
 
 const SERVER_ADDR: &str = "127.0.0.1:4001";
+const SERVER_LOG_FILE: &str = "/tmp/greptime-sqlness.log";
 
 pub struct Env {}
 
@@ -49,11 +52,14 @@ impl Environment for Env {
 }
 
 impl Env {
+    #[allow(clippy::print_stdout)]
     pub async fn start_standalone() -> GreptimeDB {
         // Build the DB with `cargo build --bin greptime`
+        println!("Going to build the DB...");
         let cargo_build_result = Command::new("cargo")
             .current_dir(util::get_workspace_root())
             .args(["build", "--bin", "greptime"])
+            .stdout(Stdio::null())
             .output()
             .await
             .expect("Failed to start GreptimeDB")
@@ -61,11 +67,20 @@ impl Env {
         if !cargo_build_result.success() {
             panic!("Failed to build GreptimeDB (`cargo build` fails)");
         }
+        println!("Build finished, starting...");
 
+        // Open log file (build logs will be truncated).
+        let log_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(SERVER_LOG_FILE)
+            .unwrap_or_else(|_| panic!("Cannot open log file at {}", SERVER_LOG_FILE));
         // Start the DB
-        let server_process = Command::new("cargo")
-            .current_dir(util::get_workspace_root())
-            .args(["run", "--", "standalone", "start", "-m"])
+        let server_process = Command::new("./greptime")
+            .current_dir(util::get_binary_dir("debug"))
+            .args(["standalone", "start", "-m"])
+            .stdout(log_file)
             .spawn()
             .expect("Failed to start the DB");
 
@@ -73,6 +88,10 @@ impl Env {
         if !is_up {
             panic!("Server doesn't up in 10 seconds, quit.")
         }
+        println!(
+            "Started, going to test. Log will be write to {}",
+            SERVER_LOG_FILE
+        );
 
         let client = Client::with_urls(vec![SERVER_ADDR]);
         let db = DB::new("greptime", client.clone());
