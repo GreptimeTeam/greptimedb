@@ -41,6 +41,7 @@ macro_rules! is_vector_eq {
     }};
 }
 
+// TODO(yingwen): Impl eq for other vectors.
 fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
     if lhs.data_type() != rhs.data_type() || lhs.len() != rhs.len() {
         return false;

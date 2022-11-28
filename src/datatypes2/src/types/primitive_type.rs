@@ -59,7 +59,7 @@ pub trait WrapperType:
 {
     /// Logical primitive type that this wrapper type belongs to.
     type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
-    /// The underying native type.
+    /// The underlying native type.
     type Native: NativeType;
 
     /// Convert native type into this wrapper type.
@@ -97,7 +97,7 @@ impl_wrapper!(i64, Int64Type);
 impl_wrapper!(f32, Float32Type);
 impl_wrapper!(f64, Float64Type);
 
-/// Trait bridging the logcial primitive type with [ArrowPrimitiveType].
+/// Trait bridging the logical primitive type with [ArrowPrimitiveType].
 pub trait LogicalPrimitiveType: 'static + Sized {
     /// Arrow primitive type of this logical type.
     type ArrowPrimitive: ArrowPrimitiveType<Native = Self::Native>;
@@ -111,7 +111,7 @@ pub trait LogicalPrimitiveType: 'static + Sized {
     /// Construct the data type struct.
     fn build_data_type() -> ConcreteDataType;
 
-    /// Returns the name of the type.
+    /// Return the name of the type.
     fn type_name() -> String;
 
     /// Dynamic cast the vector to the concrete vector type.
