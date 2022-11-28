@@ -112,7 +112,7 @@ pub trait LogicalPrimitiveType: 'static + Sized {
     fn build_data_type() -> ConcreteDataType;
 
     /// Return the name of the type.
-    fn type_name() -> String;
+    fn type_name() -> &'static str;
 
     /// Dynamic cast the vector to the concrete vector type.
     fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveVector<Self>>;
@@ -135,8 +135,8 @@ macro_rules! define_logical_primitive_type {
                 ConcreteDataType::$TypeId($DataType::default())
             }
 
-            fn type_name() -> String {
-                stringify!($TypeId).to_string()
+            fn type_name() -> &'static str {
+                stringify!($TypeId)
             }
 
             fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveVector<$DataType>> {
