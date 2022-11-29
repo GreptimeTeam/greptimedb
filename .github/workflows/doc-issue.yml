@@ -1,0 +1,22 @@
+name: Create Issue in docs repo on doc related changes
+
+on:
+  issues:
+    types:
+      - labeled
+
+jobs:
+  doc_issue:
+    if: github.event.label.name == 'doc update required'
+    runs-on: ubuntu-latest
+    steps:
+      - name: create an issue in doc repo
+        uses: dacbd/create-issue-action@main
+        with:
+          owner: GreptimeTeam
+          repo: docs
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          title: Update docs for {{ github.event.issue.title }}
+          body: |
+            A document change request is generated from ${{ github.event.issue.html_url }}
+          assignees: ${{ github.event.issue.user.login }}
