@@ -16,6 +16,7 @@
 pub mod test_util;
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -27,17 +28,21 @@ use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream};
 use common_telemetry::logging;
+use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::vectors::VectorRef;
 use futures::task::{Context, Poll};
 use futures::Stream;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ChunkReader, ReadContext, Region, RegionMeta,
-    ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, ChunkReader, PutOperation, ReadContext, Region,
+    RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error as table_error;
-use table::error::Result as TableResult;
+use table::error::{
+    Error as TableError, MissingColumnSnafu, RegionSchemaMismatchSnafu, Result as TableResult,
+};
 use table::metadata::{
     FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType,
 };
@@ -49,8 +54,10 @@ use table::table::{AlterContext, Table};
 use tokio::sync::Mutex;
 
 use crate::error::{
-    self, ProjectedColumnNotFoundSnafu, Result, ScanTableManifestSnafu, TableInfoNotFoundSnafu,
-    UpdateTableManifestSnafu,
+    self, self, ColumnsNotExistSnafu, ProjectedColumnNotFoundSnafu, ProjectedColumnNotFoundSnafu,
+    RegionNotFoundSnafu, Result, Result, ScanTableManifestSnafu, ScanTableManifestSnafu,
+    TableInfoNotFoundSnafu, TableInfoNotFoundSnafu, UnsupportedDefaultConstraintSnafu,
+    UpdateTableManifestSnafu, UpdateTableManifestSnafu,
 };
 use crate::manifest::action::*;
 use crate::manifest::TableManifest;
@@ -66,7 +73,7 @@ pub struct MitoTable<R: Region> {
     // guarded by `self.alter_lock`
     table_info: ArcSwap<TableInfo>,
     // TODO(dennis): a table contains multi regions
-    region: R,
+    regions: HashMap<RegionNumber, R>,
     alter_lock: Mutex<()>,
 }
 
@@ -85,7 +92,17 @@ impl<R: Region> Table for MitoTable<R> {
             return Ok(0);
         }
 
-        let mut write_request = self.region.write_request();
+        let region =
+            self.regions
+                .get(&request.region_number)
+                .with_context(|| RegionNotFoundSnafu {
+                    table: format!(
+                        "{}.{}.{}",
+                        request.catalog_name, request.schema_name, request.table_name
+                    ),
+                    region: request.region_number,
+                })?;
+        let mut write_request = region.write_request();
 
         let columns_values = request.columns_values;
         // columns_values is not empty, it's safe to unwrap
@@ -102,8 +119,7 @@ impl<R: Region> Table for MitoTable<R> {
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
 
-        let _resp = self
-            .region
+        let _resp = region
             .write(&WriteContext::default(), write_request)
             .await
             .map_err(BoxedError::new)
@@ -132,30 +148,57 @@ impl<R: Region> Table for MitoTable<R> {
             .snapshot(&read_ctx)
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
+        let mut readers = Vec::with_capacity(self.regions.len());
+        let mut first_schema: Option<Arc<Schema>> = None;
 
-        let projection = self
-            .transform_projection(&self.region, projection.cloned())
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
-        let filters = filters.into();
-        let scan_request = ScanRequest {
-            projection,
-            filters,
-            ..Default::default()
-        };
-        let mut reader = snapshot
-            .scan(&read_ctx, scan_request)
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?
-            .reader;
+        // TODO(hl): Currently the API between frontend and datanode is under refactoring in
+        // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
+        // can carry filtered region info to avoid scanning all regions on datanode.
+        for region in self.regions.values() {
+            let snapshot = region.snapshot(&read_ctx).map_err(TableError::new)?;
+            let projection = self
+                .transform_projection(region, projection.cloned())
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+            let filters = filters.into();
+            let scan_request = ScanRequest {
+                projection,
+                filters,
+                ..Default::default()
+            };
+            let reader = snapshot
+                .scan(&read_ctx, scan_request)
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?
+                .reader;
 
-        let schema = reader.schema().clone();
-        let stream_schema = schema.clone();
+            let schema = reader.schema().clone();
+            if let Some(first_schema) = &first_schema {
+                ensure!(
+                    first_schema.version() == schema.version(),
+                    RegionSchemaMismatchSnafu {
+                        table: format!(
+                            "{}.{}.{}",
+                            self.table_info.load().catalog_name,
+                            self.table_info.load().schema_name,
+                            self.table_info.load().name
+                        )
+                    }
+                );
+            } else {
+                first_schema = Some(schema);
+            }
+            readers.push(reader);
+        }
 
+        let stream_schema = first_schema.unwrap();
+        let schema = stream_schema.clone();
         let stream = Box::pin(async_stream::try_stream! {
-            while let Some(chunk) = reader.next_chunk().await.map_err(BoxedError::new).context(ExternalSnafu)? {
-                yield RecordBatch::new(stream_schema.clone(), chunk.columns)?
+            for mut reader in readers {
+                while let Some(chunk) = reader.next_chunk().await.map_err(BoxedError::new).context(ExternalSnafu)? {
+                    yield RecordBatch::new(stream_schema.clone(), chunk.columns)?
+                }
             }
         });
 
@@ -218,24 +261,22 @@ impl<R: Region> Table for MitoTable<R> {
         {
             // TODO(yingwen): Error handling. Maybe the region need to provide a method to
             // validate the request first.
-            let region = self.region();
-            let region_meta = region.in_memory_metadata();
-            let alter_req = AlterRequest {
-                operation: alter_op,
-                version: region_meta.version(),
-            };
-            // Alter the region.
-            logging::debug!(
-                "start altering region {} of table {}, with request {:?}",
-                region.name(),
-                table_name,
-                alter_req,
-            );
-            region
-                .alter(alter_req)
-                .await
-                .map_err(BoxedError::new)
-                .context(table_error::TableOperationSnafu)?;
+            let regions = self.regions();
+            for region in regions.values() {
+                let region_meta = region.in_memory_metadata();
+                let alter_req = AlterRequest {
+                    operation: alter_op.clone(),
+                    version: region_meta.version(),
+                };
+                // Alter the region.
+                logging::debug!(
+                    "start altering region {} of table {}, with request {:?}",
+                    region.name(),
+                    table_name,
+                    alter_req,
+                );
+                region.alter(alter_req).await.map_err(TableError::new)?;
+            }
         }
         // Update in memory metadata of the table.
         self.set_table_info(new_info);
@@ -299,10 +340,14 @@ fn column_qualified_name(table_name: &str, region_name: &str, column_name: &str)
 }
 
 impl<R: Region> MitoTable<R> {
-    fn new(table_info: TableInfo, region: R, manifest: TableManifest) -> Self {
+    fn new(
+        table_info: TableInfo,
+        regions: HashMap<RegionNumber, R>,
+        manifest: TableManifest,
+    ) -> Self {
         Self {
             table_info: ArcSwap::new(Arc::new(table_info)),
-            region,
+            regions,
             manifest,
             alter_lock: Mutex::new(()),
         }
@@ -368,7 +413,7 @@ impl<R: Region> MitoTable<R> {
         table_name: &str,
         table_dir: &str,
         table_info: TableInfo,
-        region: R,
+        regions: HashMap<RegionNumber, R>,
         object_store: ObjectStore,
     ) -> Result<MitoTable<R>> {
         let manifest = TableManifest::new(&table_manifest_dir(table_dir), object_store);
@@ -383,13 +428,13 @@ impl<R: Region> MitoTable<R> {
             .await
             .context(UpdateTableManifestSnafu { table_name })?;
 
-        Ok(MitoTable::new(table_info, region, manifest))
+        Ok(MitoTable::new(table_info, regions, manifest))
     }
 
     pub async fn open(
         table_name: &str,
         table_dir: &str,
-        region: R,
+        regions: HashMap<RegionNumber, R>,
         object_store: ObjectStore,
     ) -> Result<MitoTable<R>> {
         let manifest = TableManifest::new(&table_manifest_dir(table_dir), object_store);
@@ -397,8 +442,8 @@ impl<R: Region> MitoTable<R> {
         let mut table_info = Self::recover_table_info(table_name, &manifest)
             .await?
             .context(TableInfoNotFoundSnafu { table_name })?;
-        table_info.meta.region_numbers = vec![(region.id() & 0xFFFFFFFF) as u32];
-        Ok(MitoTable::new(table_info, region, manifest))
+        table_info.meta.region_numbers = regions.keys().cloned().collect::<Vec<_>>();
+        Ok(MitoTable::new(table_info, regions, manifest))
     }
 
     async fn recover_table_info(
@@ -449,8 +494,8 @@ impl<R: Region> MitoTable<R> {
     }
 
     #[inline]
-    pub fn region(&self) -> &R {
-        &self.region
+    pub fn regions(&self) -> &HashMap<RegionNumber, R> {
+        &self.regions
     }
 
     pub fn set_table_info(&self, table_info: TableInfo) {

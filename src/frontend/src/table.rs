@@ -123,7 +123,6 @@ impl Table for DistTable {
             let db = Database::new(&self.table_name.schema_name, client);
             let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 
-            // TODO(LFC): Pass in "regions" when Datanode supports multi regions for a table.
             partition_execs.push(Arc::new(PartitionExec {
                 table_name: self.table_name.clone(),
                 datanode_instance,
@@ -629,6 +628,7 @@ mod test {
         // select a, row_id from numbers
         let projection = Some(vec![1, 2]);
         let filters = vec![];
+        exec_table_scan(table.clone(), projection, filters, None).await;
         let expected_output = vec![
             "+-----+--------+",
             "| a   | row_id |",
@@ -704,6 +704,7 @@ mod test {
             binary_expr(col("a"), Operator::GtEq, lit(10)),
         )
         .into()];
+        exec_table_scan(table.clone(), projection, filters, None).await;
         let expected_output = vec![
             "+----+--------+",
             "| a  | row_id |",
@@ -853,14 +854,21 @@ mod test {
             (2, (30..35).collect::<Vec<i32>>()),
             (3, (100..105).collect::<Vec<i32>>()),
         ];
-        for (region_id, numbers) in regional_numbers {
-            let datanode_id = *region_to_datanode_mapping.get(&region_id).unwrap();
+        for (region_number, numbers) in regional_numbers {
+            let datanode_id = *region_to_datanode_mapping.get(&region_number).unwrap();
             let instance = datanode_instances.get(&datanode_id).unwrap().clone();
 
             let start_ts = global_start_ts;
             global_start_ts += numbers.len() as i64;
 
-            insert_testing_data(&table_name, instance.clone(), numbers, start_ts).await;
+            insert_testing_data(
+                &table_name,
+                instance.clone(),
+                numbers,
+                start_ts,
+                region_number,
+            )
+            .await;
         }
 
         let meta = TableMetaBuilder::default()
@@ -888,6 +896,7 @@ mod test {
         dn_instance: Arc<Instance>,
         data: Vec<i32>,
         start_ts: i64,
+        region_number: RegionNumber,
     ) {
         let row_count = data.len() as u32;
         let columns = vec![
@@ -925,7 +934,7 @@ mod test {
             table_name: table_name.table_name.clone(),
             columns,
             row_count,
-            region_number: 0,
+            region_number,
         };
         dn_instance.handle_insert(request).await.unwrap();
     }

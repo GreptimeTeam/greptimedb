@@ -47,6 +47,7 @@ pub fn new_insert_request(
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name,
         columns_values,
+        region_number: 0,
     }
 }
 

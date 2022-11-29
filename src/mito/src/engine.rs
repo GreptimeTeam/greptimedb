@@ -332,51 +332,53 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         )?;
 
         let table_id = request.id;
-        // TODO(dennis): supports multi regions;
-        assert_eq!(1, request.region_numbers.len());
-        let region_number = request.region_numbers[0];
-        let region_id = region_id(table_id, region_number);
+        let mut regions = HashMap::with_capacity(request.region_numbers.len());
 
-        let region_name = region_name(table_id, region_number);
-        let region_descriptor = RegionDescriptorBuilder::default()
-            .id(region_id)
-            .name(&region_name)
-            .row_key(row_key)
-            .default_cf(default_cf)
-            .build()
-            .context(BuildRegionDescriptorSnafu {
-                table_name,
-                region_name,
-            })?;
+        for region_number in &request.region_numbers {
+            let region_id = region_id(table_id, *region_number);
 
-        let _lock = self.table_mutex.lock().await;
-        // Checks again, read lock should be enough since we are guarded by the mutex.
-        if let Some(table) = self.get_table(&table_ref) {
-            if request.create_if_not_exists {
-                return Ok(table);
-            } else {
-                return TableExistsSnafu { table_name }.fail();
+            let region_name = region_name(table_id, *region_number);
+            let region_descriptor = RegionDescriptorBuilder::default()
+                .id(region_id)
+                .name(&region_name)
+                .row_key(row_key.clone())
+                .default_cf(default_cf.clone())
+                .build()
+                .context(BuildRegionDescriptorSnafu {
+                    table_name,
+                    region_name,
+                })?;
+
+            let _lock = self.table_mutex.lock().await;
+            // Checks again, read lock should be enough since we are guarded by the mutex.
+            if let Some(table) = self.get_table(&table_ref) {
+                if request.create_if_not_exists {
+                    return Ok(table);
+                } else {
+                    return TableExistsSnafu { table_name }.fail();
+                }
             }
+
+            let table_dir = table_dir(schema_name, table_id);
+            let opts = CreateOptions {
+                parent_dir: table_dir.clone(),
+            };
+
+            let region = self
+                .storage_engine
+                .create_region(&StorageEngineContext::default(), region_descriptor, &opts)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::CreateRegionSnafu)?;
+            regions.insert(*region_number, region);
         }
-
-        let table_dir = table_dir(schema_name, table_id);
-        let opts = CreateOptions {
-            parent_dir: table_dir.clone(),
-        };
-
-        let region = self
-            .storage_engine
-            .create_region(&StorageEngineContext::default(), region_descriptor, &opts)
-            .await
-            .map_err(BoxedError::new)
-            .context(error::CreateRegionSnafu)?;
 
         let table_meta = TableMetaBuilder::default()
             .schema(request.schema)
             .engine(MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(request.primary_key_indices.clone())
-            .region_numbers(vec![region_number])
+            .region_numbers(request.region_numbers)
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
 
@@ -395,7 +397,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 table_name,
                 &table_dir,
                 table_info,
-                region,
+                regions,
                 self.object_store.clone(),
             )
             .await?,
@@ -445,24 +447,27 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 parent_dir: table_dir.to_string(),
             };
 
-            // TODO(dennis): supports multi regions;
-            assert_eq!(request.region_numbers.len(), 1);
-            let region_number = request.region_numbers[0];
-            let region_name = region_name(table_id, region_number);
+            let mut regions = HashMap::with_capacity(request.region_numbers.len());
 
-            let region = match self
-                .storage_engine
-                .open_region(&engine_ctx, &region_name, &opts)
-                .await
-                .map_err(BoxedError::new)
-                .context(table_error::TableOperationSnafu)?
-            {
-                None => return Ok(None),
-                Some(region) => region,
-            };
+            for region_number in &request.region_numbers {
+                let region_name = region_name(table_id, *region_number);
+
+                let region = match self
+                    .storage_engine
+                    .open_region(&engine_ctx, &region_name, &opts)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?
+                {
+                    None => return Ok(None), // TODO(hl): Maybe we should return an error if specified region cannot be opened?
+                    Some(region) => region,
+                };
+
+                regions.insert(*region_number, region);
+            }
 
             let table = Arc::new(
-                MitoTable::open(table_name, &table_dir, region, self.object_store.clone())
+                MitoTable::open(table_name, &table_dir, regions, self.object_store.clone())
                     .await
                     .map_err(BoxedError::new)
                     .context(table_error::TableOperationSnafu)?,

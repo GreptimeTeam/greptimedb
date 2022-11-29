@@ -120,6 +120,7 @@ impl SqlHandler {
                 .into_iter()
                 .map(|(cs, mut b)| (cs.name.to_string(), b.to_vector()))
                 .collect(),
+            region_number: 0,
         }))
     }
 }

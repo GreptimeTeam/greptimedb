@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
+use store_api::storage::RegionNumber;
 use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
 
 #[derive(Debug, Snafu)]
@@ -154,7 +155,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Projected columnd not found in region, column: {}",
+        "Projected column not found in region, column: {}",
         column_qualified_name
     ))]
     ProjectedColumnNotFound {
@@ -169,6 +170,13 @@ pub enum Error {
     ConvertRaw {
         #[snafu(backtrace)]
         source: table::metadata::ConvertError,
+    },
+
+    #[snafu(display("Cannot find region, table: {}, region: {}", table, region))]
+    RegionNotFound {
+        table: String,
+        region: RegionNumber,
+        backtrace: Backtrace,
     },
 }
 
@@ -198,6 +206,7 @@ impl ErrorExt for Error {
             TableInfoNotFound { .. } | ConvertRaw { .. } => StatusCode::Unexpected,
 
             ScanTableManifest { .. } | UpdateTableManifest { .. } => StatusCode::StorageUnavailable,
+            RegionNotFound { .. } => StatusCode::Internal,
         }
     }
 

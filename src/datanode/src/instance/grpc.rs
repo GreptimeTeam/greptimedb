@@ -24,6 +24,7 @@ use query::plan::LogicalPlan;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContext;
 use snafu::prelude::*;
+use store_api::storage::RegionNumber;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::CreateDatabaseRequest;
 

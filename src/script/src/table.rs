@@ -131,6 +131,7 @@ impl ScriptsTable {
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name: SCRIPTS_TABLE_NAME.to_string(),
                 columns_values,
+                region_number: 0,
             })
             .await
             .context(InsertScriptSnafu { name })?;

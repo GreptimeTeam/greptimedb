@@ -185,6 +185,7 @@ mod tests {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
+            region_number: 0,
         }
     }
 

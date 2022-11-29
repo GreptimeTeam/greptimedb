@@ -99,6 +99,8 @@ pub enum Error {
         column_name: String,
         backtrace: Backtrace,
     },
+    #[snafu(display("Regions schemas mismatch in table: {}", table))]
+    RegionSchemaMismatch { table: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to operate table, source: {}", source))]
     TableOperation { source: BoxedError },
@@ -117,11 +119,12 @@ impl ErrorExt for Error {
             Error::RemoveColumnInIndex { .. } | Error::BuildColumnDescriptor { .. } => {
                 StatusCode::InvalidArguments
             }
-            Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
-            Error::ColumnExists { .. } => StatusCode::TableColumnExists,
-            Error::SchemaBuild { source, .. } => source.status_code(),
+            InnerError::TablesRecordBatch { .. } => StatusCode::Unexpected,
+            InnerError::ColumnExists { .. } => StatusCode::TableColumnExists,
+            InnerError::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
+            InnerError::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
         }
     }

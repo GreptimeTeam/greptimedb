@@ -55,7 +55,7 @@ pub struct ScanRequest {
 pub struct GetRequest {}
 
 /// Operation to add a column.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AddColumn {
     /// Descriptor of the column to add.
     pub desc: ColumnDescriptor,
@@ -64,7 +64,7 @@ pub struct AddColumn {
 }
 
 /// Operation to alter a region.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AlterOperation {
     /// Add columns to the region.
     AddColumns {

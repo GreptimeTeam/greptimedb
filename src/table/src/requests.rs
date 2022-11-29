@@ -28,6 +28,7 @@ pub struct InsertRequest {
     pub schema_name: String,
     pub table_name: String,
     pub columns_values: HashMap<String, VectorRef>,
+    pub region_number: RegionNumber,
 }
 
 #[derive(Debug, Clone)]
