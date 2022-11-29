@@ -118,30 +118,30 @@ mod tests {
     //     assert_eq!(5, v.len());
     // }
 
-    // macro_rules! impl_replicate_date_like_test {
-    //     ($VectorType: ident, $ValueType: ident, $method: ident) => {{
-    //         use common_time::$ValueType;
-    //         use $crate::vectors::$VectorType;
+    macro_rules! impl_replicate_date_like_test {
+        ($VectorType: ident, $ValueType: ident, $method: ident) => {{
+            use common_time::$ValueType;
+            use $crate::vectors::$VectorType;
 
-    //         let v = $VectorType::from_iterator((0..5).map($ValueType::$method));
-    //         let offsets = [0, 1, 2, 3, 4];
+            let v = $VectorType::from_iterator((0..5).map($ValueType::$method));
+            let offsets = [0, 1, 2, 3, 4];
 
-    //         let v = v.replicate(&offsets);
-    //         assert_eq!(4, v.len());
+            let v = v.replicate(&offsets);
+            assert_eq!(4, v.len());
 
-    //         for i in 0..4 {
-    //             assert_eq!(
-    //                 Value::$ValueType($ValueType::$method((i as i32 + 1).into())),
-    //                 v.get(i)
-    //             );
-    //         }
-    //     }};
-    // }
+            for i in 0..4 {
+                assert_eq!(
+                    Value::$ValueType($ValueType::$method((i as i32 + 1).into())),
+                    v.get(i)
+                );
+            }
+        }};
+    }
 
-    // #[test]
-    // fn test_replicate_date_like() {
-    //     impl_replicate_date_like_test!(DateVector, Date, new);
-    //     impl_replicate_date_like_test!(DateTimeVector, DateTime, new);
-    //     impl_replicate_date_like_test!(TimestampVector, Timestamp, from_millis);
-    // }
+    #[test]
+    fn test_replicate_date_like() {
+        impl_replicate_date_like_test!(DateVector, Date, new);
+        // impl_replicate_date_like_test!(DateTimeVector, DateTime, new);
+        // impl_replicate_date_like_test!(TimestampVector, Timestamp, from_millis);
+    }
 }

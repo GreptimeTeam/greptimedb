@@ -393,24 +393,24 @@ mod tests {
         assert_vector_eq(&expect, &vector);
     }
 
-    // #[test]
-    // fn test_build_date_vector() {
-    //     let expect: Vec<Option<Date>> = vec![
-    //         Some(Date::new(0)),
-    //         Some(Date::new(-1)),
-    //         None,
-    //         Some(Date::new(1)),
-    //     ];
-    //     let vector: DateVector = build_vector_from_slice(&expect);
-    //     assert_vector_eq(&expect, &vector);
-    // }
+    #[test]
+    fn test_build_date_vector() {
+        let expect: Vec<Option<Date>> = vec![
+            Some(Date::new(0)),
+            Some(Date::new(-1)),
+            None,
+            Some(Date::new(1)),
+        ];
+        let vector: DateVector = build_vector_from_slice(&expect);
+        assert_vector_eq(&expect, &vector);
+    }
 
-    // #[test]
-    // fn test_date_scalar() {
-    //     let date = Date::new(1);
-    //     assert_eq!(date, date.as_scalar_ref());
-    //     assert_eq!(date, date.to_owned_scalar());
-    // }
+    #[test]
+    fn test_date_scalar() {
+        let date = Date::new(1);
+        assert_eq!(date, date.as_scalar_ref());
+        assert_eq!(date, date.to_owned_scalar());
+    }
 
     // #[test]
     // fn test_datetime_scalar() {

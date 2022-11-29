@@ -336,23 +336,23 @@ mod tests {
     //     check_bitmap(&expect, &selected);
     // }
 
-    // macro_rules! impl_find_unique_date_like_test {
-    //     ($VectorType: ident, $ValueType: ident, $method: ident) => {{
-    //         use common_time::$ValueType;
-    //         use $crate::vectors::$VectorType;
+    macro_rules! impl_find_unique_date_like_test {
+        ($VectorType: ident, $ValueType: ident, $method: ident) => {{
+            use common_time::$ValueType;
+            use $crate::vectors::$VectorType;
 
-    //         let v = $VectorType::from_iterator([8, 8, 9, 10].into_iter().map($ValueType::$method));
-    //         let mut selected = BitVec::repeat(false, 4);
-    //         v.find_unique(&mut selected, None);
-    //         let expect = vec![true, false, true, true];
-    //         check_bitmap(&expect, &selected);
-    //     }};
-    // }
+            let v = $VectorType::from_iterator([8, 8, 9, 10].into_iter().map($ValueType::$method));
+            let mut selected = BitVec::repeat(false, 4);
+            v.find_unique(&mut selected, None);
+            let expect = vec![true, false, true, true];
+            check_bitmap(&expect, &selected);
+        }};
+    }
 
-    // #[test]
-    // fn test_find_unique_date_like() {
-    //     impl_find_unique_date_like_test!(DateVector, Date, new);
-    //     impl_find_unique_date_like_test!(DateTimeVector, DateTime, new);
-    //     impl_find_unique_date_like_test!(TimestampVector, Timestamp, from_millis);
-    // }
+    #[test]
+    fn test_find_unique_date_like() {
+        impl_find_unique_date_like_test!(DateVector, Date, new);
+        // impl_find_unique_date_like_test!(DateTimeVector, DateTime, new);
+        // impl_find_unique_date_like_test!(TimestampVector, Timestamp, from_millis);
+    }
 }

@@ -112,31 +112,26 @@ impl Value {
     pub fn data_type(&self) -> ConcreteDataType {
         // TODO(yingwen): Implement this once all data types are implemented.
         match self {
+            // Value::Null => ConcreteDataType::null_datatype(),
             Value::Boolean(_) => ConcreteDataType::boolean_datatype(),
+            Value::UInt8(_) => ConcreteDataType::uint8_datatype(),
+            Value::UInt16(_) => ConcreteDataType::uint16_datatype(),
+            Value::UInt32(_) => ConcreteDataType::uint32_datatype(),
+            Value::UInt64(_) => ConcreteDataType::uint64_datatype(),
+            Value::Int8(_) => ConcreteDataType::int8_datatype(),
+            Value::Int16(_) => ConcreteDataType::int16_datatype(),
+            Value::Int32(_) => ConcreteDataType::int32_datatype(),
+            Value::Int64(_) => ConcreteDataType::int64_datatype(),
+            Value::Float32(_) => ConcreteDataType::float32_datatype(),
+            Value::Float64(_) => ConcreteDataType::float64_datatype(),
+            // Value::String(_) => ConcreteDataType::string_datatype(),
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
-            _ => unimplemented!(),
+            // Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
+            Value::Date(_) => ConcreteDataType::date_datatype(),
+            // Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
+            // Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
+            _ => todo!(),
         }
-
-        // match self {
-        //     Value::Null => ConcreteDataType::null_datatype(),
-        //     Value::Boolean(_) => ConcreteDataType::boolean_datatype(),
-        //     Value::UInt8(_) => ConcreteDataType::uint8_datatype(),
-        //     Value::UInt16(_) => ConcreteDataType::uint16_datatype(),
-        //     Value::UInt32(_) => ConcreteDataType::uint32_datatype(),
-        //     Value::UInt64(_) => ConcreteDataType::uint64_datatype(),
-        //     Value::Int8(_) => ConcreteDataType::int8_datatype(),
-        //     Value::Int16(_) => ConcreteDataType::int16_datatype(),
-        //     Value::Int32(_) => ConcreteDataType::int32_datatype(),
-        //     Value::Int64(_) => ConcreteDataType::int64_datatype(),
-        //     Value::Float32(_) => ConcreteDataType::float32_datatype(),
-        //     Value::Float64(_) => ConcreteDataType::float64_datatype(),
-        //     Value::String(_) => ConcreteDataType::string_datatype(),
-        //     Value::Binary(_) => ConcreteDataType::binary_datatype(),
-        //     Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
-        //     Value::Date(_) => ConcreteDataType::date_datatype(),
-        //     Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
-        //     Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
-        // }
     }
 
     /// Returns true if this is a null value.
@@ -341,6 +336,7 @@ impl TryFrom<Value> for serde_json::Value {
     }
 }
 
+// TODO(yingwen): Consider removing the `datatype` field from `ListValue`.
 /// List value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListValue {
@@ -394,61 +390,61 @@ impl Ord for ListValue {
 impl TryFrom<ScalarValue> for Value {
     type Error = error::Error;
 
-    fn try_from(_v: ScalarValue) -> Result<Self> {
-        // let v = match v {
-        //     ScalarValue::Boolean(b) => Value::from(b),
-        //     ScalarValue::Float32(f) => Value::from(f),
-        //     ScalarValue::Float64(f) => Value::from(f),
-        //     ScalarValue::Int8(i) => Value::from(i),
-        //     ScalarValue::Int16(i) => Value::from(i),
-        //     ScalarValue::Int32(i) => Value::from(i),
-        //     ScalarValue::Int64(i) => Value::from(i),
-        //     ScalarValue::UInt8(u) => Value::from(u),
-        //     ScalarValue::UInt16(u) => Value::from(u),
-        //     ScalarValue::UInt32(u) => Value::from(u),
-        //     ScalarValue::UInt64(u) => Value::from(u),
-        //     ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
-        //         Value::from(s.map(StringBytes::from))
-        //     }
-        //     ScalarValue::Binary(b) | ScalarValue::LargeBinary(b) => Value::from(b.map(Bytes::from)),
-        //     ScalarValue::List(vs, t) => {
-        //         let items = if let Some(vs) = vs {
-        //             let vs = vs
-        //                 .into_iter()
-        //                 .map(ScalarValue::try_into)
-        //                 .collect::<Result<_>>()?;
-        //             Some(Box::new(vs))
-        //         } else {
-        //             None
-        //         };
-        //         let datatype = t.as_ref().try_into()?;
-        //         Value::List(ListValue::new(items, datatype))
-        //     }
-        //     ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
-        //     ScalarValue::Date64(d) => d
-        //         .map(|x| Value::DateTime(DateTime::new(x)))
-        //         .unwrap_or(Value::Null),
-        //     ScalarValue::TimestampSecond(t, _) => t
-        //         .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Second)))
-        //         .unwrap_or(Value::Null),
-        //     ScalarValue::TimestampMillisecond(t, _) => t
-        //         .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Millisecond)))
-        //         .unwrap_or(Value::Null),
-        //     ScalarValue::TimestampMicrosecond(t, _) => t
-        //         .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Microsecond)))
-        //         .unwrap_or(Value::Null),
-        //     ScalarValue::TimestampNanosecond(t, _) => t
-        //         .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
-        //         .unwrap_or(Value::Null),
-        //     _ => {
-        //         return error::UnsupportedArrowTypeSnafu {
-        //             arrow_type: v.get_datatype(),
-        //         }
-        //         .fail()
-        //     }
-        // };
-        // Ok(v)
-        unimplemented!()
+    // TODO(yingwen): Implement it.
+    fn try_from(v: ScalarValue) -> Result<Self> {
+        let v = match v {
+            ScalarValue::Boolean(b) => Value::from(b),
+            ScalarValue::Float32(f) => Value::from(f),
+            ScalarValue::Float64(f) => Value::from(f),
+            ScalarValue::Int8(i) => Value::from(i),
+            ScalarValue::Int16(i) => Value::from(i),
+            ScalarValue::Int32(i) => Value::from(i),
+            ScalarValue::Int64(i) => Value::from(i),
+            ScalarValue::UInt8(u) => Value::from(u),
+            ScalarValue::UInt16(u) => Value::from(u),
+            ScalarValue::UInt32(u) => Value::from(u),
+            ScalarValue::UInt64(u) => Value::from(u),
+            // ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
+            //     Value::from(s.map(StringBytes::from))
+            // }
+            ScalarValue::Binary(b) | ScalarValue::LargeBinary(b) => Value::from(b.map(Bytes::from)),
+            // ScalarValue::List(vs, t) => {
+            //     let items = if let Some(vs) = vs {
+            //         let vs = vs
+            //             .into_iter()
+            //             .map(ScalarValue::try_into)
+            //             .collect::<Result<_>>()?;
+            //         Some(Box::new(vs))
+            //     } else {
+            //         None
+            //     };
+            //     let datatype = t.as_ref().try_into()?;
+            //     Value::List(ListValue::new(items, datatype))
+            // }
+            ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
+            // ScalarValue::Date64(d) => d
+            //     .map(|x| Value::DateTime(DateTime::new(x)))
+            //     .unwrap_or(Value::Null),
+            // ScalarValue::TimestampSecond(t, _) => t
+            //     .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Second)))
+            //     .unwrap_or(Value::Null),
+            // ScalarValue::TimestampMillisecond(t, _) => t
+            //     .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Millisecond)))
+            //     .unwrap_or(Value::Null),
+            // ScalarValue::TimestampMicrosecond(t, _) => t
+            //     .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Microsecond)))
+            //     .unwrap_or(Value::Null),
+            // ScalarValue::TimestampNanosecond(t, _) => t
+            //     .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
+            //     .unwrap_or(Value::Null),
+            _ => {
+                return error::UnsupportedArrowTypeSnafu {
+                    arrow_type: v.get_datatype(),
+                }
+                .fail()
+            }
+        };
+        Ok(v)
     }
 }
 
@@ -648,648 +644,595 @@ impl<'a> PartialOrd for ListValueRef<'a> {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use arrow::datatypes::DataType as ArrowDataType;
-//     use num_traits::Float;
-
-//     use super::*;
-
-//     #[test]
-//     fn test_try_from_scalar_value() {
-//         assert_eq!(
-//             Value::Boolean(true),
-//             ScalarValue::Boolean(Some(true)).try_into().unwrap()
-//         );
-//         assert_eq!(
-//             Value::Boolean(false),
-//             ScalarValue::Boolean(Some(false)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Boolean(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::Float32(1.0f32.into()),
-//             ScalarValue::Float32(Some(1.0f32)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Float32(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::Float64(2.0f64.into()),
-//             ScalarValue::Float64(Some(2.0f64)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Float64(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::Int8(i8::MAX),
-//             ScalarValue::Int8(Some(i8::MAX)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Int8(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::Int16(i16::MAX),
-//             ScalarValue::Int16(Some(i16::MAX)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Int16(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::Int32(i32::MAX),
-//             ScalarValue::Int32(Some(i32::MAX)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Int32(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::Int64(i64::MAX),
-//             ScalarValue::Int64(Some(i64::MAX)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Int64(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::UInt8(u8::MAX),
-//             ScalarValue::UInt8(Some(u8::MAX)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::UInt8(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::UInt16(u16::MAX),
-//             ScalarValue::UInt16(Some(u16::MAX)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::UInt16(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::UInt32(u32::MAX),
-//             ScalarValue::UInt32(Some(u32::MAX)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::UInt32(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::UInt64(u64::MAX),
-//             ScalarValue::UInt64(Some(u64::MAX)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::UInt64(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::from("hello"),
-//             ScalarValue::Utf8(Some("hello".to_string()))
-//                 .try_into()
-//                 .unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Utf8(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::from("large_hello"),
-//             ScalarValue::LargeUtf8(Some("large_hello".to_string()))
-//                 .try_into()
-//                 .unwrap()
-//         );
-//         assert_eq!(
-//             Value::Null,
-//             ScalarValue::LargeUtf8(None).try_into().unwrap()
-//         );
-
-//         assert_eq!(
-//             Value::from("world".as_bytes()),
-//             ScalarValue::Binary(Some("world".as_bytes().to_vec()))
-//                 .try_into()
-//                 .unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Binary(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::from("large_world".as_bytes()),
-//             ScalarValue::LargeBinary(Some("large_world".as_bytes().to_vec()))
-//                 .try_into()
-//                 .unwrap()
-//         );
-//         assert_eq!(
-//             Value::Null,
-//             ScalarValue::LargeBinary(None).try_into().unwrap()
-//         );
-
-//         assert_eq!(
-//             Value::List(ListValue::new(
-//                 Some(Box::new(vec![Value::Int32(1), Value::Null])),
-//                 ConcreteDataType::int32_datatype()
-//             )),
-//             ScalarValue::List(
-//                 Some(Box::new(vec![
-//                     ScalarValue::Int32(Some(1)),
-//                     ScalarValue::Int32(None)
-//                 ])),
-//                 Box::new(ArrowDataType::Int32)
-//             )
-//             .try_into()
-//             .unwrap()
-//         );
-//         assert_eq!(
-//             Value::List(ListValue::new(None, ConcreteDataType::uint32_datatype())),
-//             ScalarValue::List(None, Box::new(ArrowDataType::UInt32))
-//                 .try_into()
-//                 .unwrap()
-//         );
-
-//         assert_eq!(
-//             Value::Date(Date::new(123)),
-//             ScalarValue::Date32(Some(123)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Date32(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::DateTime(DateTime::new(456)),
-//             ScalarValue::Date64(Some(456)).try_into().unwrap()
-//         );
-//         assert_eq!(Value::Null, ScalarValue::Date64(None).try_into().unwrap());
-
-//         assert_eq!(
-//             Value::Timestamp(Timestamp::new(1, TimeUnit::Second)),
-//             ScalarValue::TimestampSecond(Some(1), None)
-//                 .try_into()
-//                 .unwrap()
-//         );
-//         assert_eq!(
-//             Value::Null,
-//             ScalarValue::TimestampSecond(None, None).try_into().unwrap()
-//         );
-
-//         assert_eq!(
-//             Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)),
-//             ScalarValue::TimestampMillisecond(Some(1), None)
-//                 .try_into()
-//                 .unwrap()
-//         );
-//         assert_eq!(
-//             Value::Null,
-//             ScalarValue::TimestampMillisecond(None, None)
-//                 .try_into()
-//                 .unwrap()
-//         );
-
-//         assert_eq!(
-//             Value::Timestamp(Timestamp::new(1, TimeUnit::Microsecond)),
-//             ScalarValue::TimestampMicrosecond(Some(1), None)
-//                 .try_into()
-//                 .unwrap()
-//         );
-//         assert_eq!(
-//             Value::Null,
-//             ScalarValue::TimestampMicrosecond(None, None)
-//                 .try_into()
-//                 .unwrap()
-//         );
-
-//         assert_eq!(
-//             Value::Timestamp(Timestamp::new(1, TimeUnit::Nanosecond)),
-//             ScalarValue::TimestampNanosecond(Some(1), None)
-//                 .try_into()
-//                 .unwrap()
-//         );
-//         assert_eq!(
-//             Value::Null,
-//             ScalarValue::TimestampNanosecond(None, None)
-//                 .try_into()
-//                 .unwrap()
-//         );
-
-//         let result: Result<Value> = ScalarValue::Decimal128(Some(1), 0, 0).try_into();
-//         result
-//             .unwrap_err()
-//             .to_string()
-//             .contains("Unsupported arrow data type, type: Decimal(0, 0)");
-//     }
-
-//     #[test]
-//     fn test_value_from_inner() {
-//         assert_eq!(Value::Boolean(true), Value::from(true));
-//         assert_eq!(Value::Boolean(false), Value::from(false));
-
-//         assert_eq!(Value::UInt8(u8::MIN), Value::from(u8::MIN));
-//         assert_eq!(Value::UInt8(u8::MAX), Value::from(u8::MAX));
-
-//         assert_eq!(Value::UInt16(u16::MIN), Value::from(u16::MIN));
-//         assert_eq!(Value::UInt16(u16::MAX), Value::from(u16::MAX));
-
-//         assert_eq!(Value::UInt32(u32::MIN), Value::from(u32::MIN));
-//         assert_eq!(Value::UInt32(u32::MAX), Value::from(u32::MAX));
-
-//         assert_eq!(Value::UInt64(u64::MIN), Value::from(u64::MIN));
-//         assert_eq!(Value::UInt64(u64::MAX), Value::from(u64::MAX));
-
-//         assert_eq!(Value::Int8(i8::MIN), Value::from(i8::MIN));
-//         assert_eq!(Value::Int8(i8::MAX), Value::from(i8::MAX));
-
-//         assert_eq!(Value::Int16(i16::MIN), Value::from(i16::MIN));
-//         assert_eq!(Value::Int16(i16::MAX), Value::from(i16::MAX));
-
-//         assert_eq!(Value::Int32(i32::MIN), Value::from(i32::MIN));
-//         assert_eq!(Value::Int32(i32::MAX), Value::from(i32::MAX));
-
-//         assert_eq!(Value::Int64(i64::MIN), Value::from(i64::MIN));
-//         assert_eq!(Value::Int64(i64::MAX), Value::from(i64::MAX));
-
-//         assert_eq!(
-//             Value::Float32(OrderedFloat(f32::MIN)),
-//             Value::from(f32::MIN)
-//         );
-//         assert_eq!(
-//             Value::Float32(OrderedFloat(f32::MAX)),
-//             Value::from(f32::MAX)
-//         );
-
-//         assert_eq!(
-//             Value::Float64(OrderedFloat(f64::MIN)),
-//             Value::from(f64::MIN)
-//         );
-//         assert_eq!(
-//             Value::Float64(OrderedFloat(f64::MAX)),
-//             Value::from(f64::MAX)
-//         );
-
-//         let string_bytes = StringBytes::from("hello");
-//         assert_eq!(
-//             Value::String(string_bytes.clone()),
-//             Value::from(string_bytes)
-//         );
-
-//         let bytes = Bytes::from(b"world".as_slice());
-//         assert_eq!(Value::Binary(bytes.clone()), Value::from(bytes));
-//     }
-
-//     fn check_type_and_value(data_type: &ConcreteDataType, value: &Value) {
-//         assert_eq!(*data_type, value.data_type());
-//         assert_eq!(data_type.logical_type_id(), value.logical_type_id());
-//     }
-
-//     #[test]
-//     fn test_value_datatype() {
-//         check_type_and_value(&ConcreteDataType::boolean_datatype(), &Value::Boolean(true));
-//         check_type_and_value(&ConcreteDataType::uint8_datatype(), &Value::UInt8(u8::MIN));
-//         check_type_and_value(
-//             &ConcreteDataType::uint16_datatype(),
-//             &Value::UInt16(u16::MIN),
-//         );
-//         check_type_and_value(
-//             &ConcreteDataType::uint16_datatype(),
-//             &Value::UInt16(u16::MAX),
-//         );
-//         check_type_and_value(
-//             &ConcreteDataType::uint32_datatype(),
-//             &Value::UInt32(u32::MIN),
-//         );
-//         check_type_and_value(
-//             &ConcreteDataType::uint64_datatype(),
-//             &Value::UInt64(u64::MIN),
-//         );
-//         check_type_and_value(&ConcreteDataType::int8_datatype(), &Value::Int8(i8::MIN));
-//         check_type_and_value(&ConcreteDataType::int16_datatype(), &Value::Int16(i16::MIN));
-//         check_type_and_value(&ConcreteDataType::int32_datatype(), &Value::Int32(i32::MIN));
-//         check_type_and_value(&ConcreteDataType::int64_datatype(), &Value::Int64(i64::MIN));
-//         check_type_and_value(
-//             &ConcreteDataType::float32_datatype(),
-//             &Value::Float32(OrderedFloat(f32::MIN)),
-//         );
-//         check_type_and_value(
-//             &ConcreteDataType::float64_datatype(),
-//             &Value::Float64(OrderedFloat(f64::MIN)),
-//         );
-//         check_type_and_value(
-//             &ConcreteDataType::string_datatype(),
-//             &Value::String(StringBytes::from("hello")),
-//         );
-//         check_type_and_value(
-//             &ConcreteDataType::binary_datatype(),
-//             &Value::Binary(Bytes::from(b"world".as_slice())),
-//         );
-//         check_type_and_value(
-//             &ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
-//             &Value::List(ListValue::new(
-//                 Some(Box::new(vec![Value::Int32(10)])),
-//                 ConcreteDataType::int32_datatype(),
-//             )),
-//         );
-//         check_type_and_value(
-//             &ConcreteDataType::date_datatype(),
-//             &Value::Date(Date::new(1)),
-//         );
-//         check_type_and_value(
-//             &ConcreteDataType::datetime_datatype(),
-//             &Value::DateTime(DateTime::new(1)),
-//         );
-//         check_type_and_value(
-//             &ConcreteDataType::timestamp_millis_datatype(),
-//             &Value::Timestamp(Timestamp::from_millis(1)),
-//         );
-//     }
-
-//     #[test]
-//     fn test_value_from_string() {
-//         let hello = "hello".to_string();
-//         assert_eq!(
-//             Value::String(StringBytes::from(hello.clone())),
-//             Value::from(hello)
-//         );
-
-//         let world = "world";
-//         assert_eq!(Value::String(StringBytes::from(world)), Value::from(world));
-//     }
-
-//     #[test]
-//     fn test_value_from_bytes() {
-//         let hello = b"hello".to_vec();
-//         assert_eq!(
-//             Value::Binary(Bytes::from(hello.clone())),
-//             Value::from(hello)
-//         );
-
-//         let world: &[u8] = b"world";
-//         assert_eq!(Value::Binary(Bytes::from(world)), Value::from(world));
-//     }
-
-//     fn to_json(value: Value) -> serde_json::Value {
-//         value.try_into().unwrap()
-//     }
-
-//     #[test]
-//     fn test_to_json_value() {
-//         assert_eq!(serde_json::Value::Null, to_json(Value::Null));
-//         assert_eq!(serde_json::Value::Bool(true), to_json(Value::Boolean(true)));
-//         assert_eq!(
-//             serde_json::Value::Number(20u8.into()),
-//             to_json(Value::UInt8(20))
-//         );
-//         assert_eq!(
-//             serde_json::Value::Number(20i8.into()),
-//             to_json(Value::Int8(20))
-//         );
-//         assert_eq!(
-//             serde_json::Value::Number(2000u16.into()),
-//             to_json(Value::UInt16(2000))
-//         );
-//         assert_eq!(
-//             serde_json::Value::Number(2000i16.into()),
-//             to_json(Value::Int16(2000))
-//         );
-//         assert_eq!(
-//             serde_json::Value::Number(3000u32.into()),
-//             to_json(Value::UInt32(3000))
-//         );
-//         assert_eq!(
-//             serde_json::Value::Number(3000i32.into()),
-//             to_json(Value::Int32(3000))
-//         );
-//         assert_eq!(
-//             serde_json::Value::Number(4000u64.into()),
-//             to_json(Value::UInt64(4000))
-//         );
-//         assert_eq!(
-//             serde_json::Value::Number(4000i64.into()),
-//             to_json(Value::Int64(4000))
-//         );
-//         assert_eq!(
-//             serde_json::Value::from(125.0f32),
-//             to_json(Value::Float32(125.0.into()))
-//         );
-//         assert_eq!(
-//             serde_json::Value::from(125.0f64),
-//             to_json(Value::Float64(125.0.into()))
-//         );
-//         assert_eq!(
-//             serde_json::Value::String(String::from("hello")),
-//             to_json(Value::String(StringBytes::from("hello")))
-//         );
-//         assert_eq!(
-//             serde_json::Value::from(b"world".as_slice()),
-//             to_json(Value::Binary(Bytes::from(b"world".as_slice())))
-//         );
-//         assert_eq!(
-//             serde_json::Value::Number(5000i32.into()),
-//             to_json(Value::Date(Date::new(5000)))
-//         );
-//         assert_eq!(
-//             serde_json::Value::Number(5000i64.into()),
-//             to_json(Value::DateTime(DateTime::new(5000)))
-//         );
-
-//         assert_eq!(
-//             serde_json::Value::Number(1.into()),
-//             to_json(Value::Timestamp(Timestamp::from_millis(1)))
-//         );
-
-//         let json_value: serde_json::Value =
-//             serde_json::from_str(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#).unwrap();
-//         assert_eq!(
-//             json_value,
-//             to_json(Value::List(ListValue {
-//                 items: Some(Box::new(vec![Value::Int32(123)])),
-//                 datatype: ConcreteDataType::int32_datatype(),
-//             }))
-//         );
-//     }
-
-//     #[test]
-//     fn test_null_value() {
-//         assert!(Value::Null.is_null());
-//         assert!(!Value::Boolean(true).is_null());
-//         assert!(Value::Null < Value::Boolean(false));
-//         assert!(Value::Boolean(true) > Value::Null);
-//         assert!(Value::Null < Value::Int32(10));
-//         assert!(Value::Int32(10) > Value::Null);
-//     }
-
-//     #[test]
-//     fn test_null_value_ref() {
-//         assert!(ValueRef::Null.is_null());
-//         assert!(!ValueRef::Boolean(true).is_null());
-//         assert!(ValueRef::Null < ValueRef::Boolean(false));
-//         assert!(ValueRef::Boolean(true) > ValueRef::Null);
-//         assert!(ValueRef::Null < ValueRef::Int32(10));
-//         assert!(ValueRef::Int32(10) > ValueRef::Null);
-//     }
-
-//     #[test]
-//     fn test_as_value_ref() {
-//         macro_rules! check_as_value_ref {
-//             ($Variant: ident, $data: expr) => {
-//                 let value = Value::$Variant($data);
-//                 let value_ref = value.as_value_ref();
-//                 let expect_ref = ValueRef::$Variant($data);
-
-//                 assert_eq!(expect_ref, value_ref);
-//             };
-//         }
-
-//         assert_eq!(ValueRef::Null, Value::Null.as_value_ref());
-//         check_as_value_ref!(Boolean, true);
-//         check_as_value_ref!(UInt8, 123);
-//         check_as_value_ref!(UInt16, 123);
-//         check_as_value_ref!(UInt32, 123);
-//         check_as_value_ref!(UInt64, 123);
-//         check_as_value_ref!(Int8, -12);
-//         check_as_value_ref!(Int16, -12);
-//         check_as_value_ref!(Int32, -12);
-//         check_as_value_ref!(Int64, -12);
-//         check_as_value_ref!(Float32, OrderedF32::from(16.0));
-//         check_as_value_ref!(Float64, OrderedF64::from(16.0));
-//         check_as_value_ref!(Timestamp, Timestamp::from_millis(1));
-
-//         assert_eq!(
-//             ValueRef::String("hello"),
-//             Value::String("hello".into()).as_value_ref()
-//         );
-//         assert_eq!(
-//             ValueRef::Binary(b"hello"),
-//             Value::Binary("hello".as_bytes().into()).as_value_ref()
-//         );
-
-//         check_as_value_ref!(Date, Date::new(103));
-//         check_as_value_ref!(DateTime, DateTime::new(1034));
-
-//         let list = ListValue {
-//             items: None,
-//             datatype: ConcreteDataType::int32_datatype(),
-//         };
-//         assert_eq!(
-//             ValueRef::List(ListValueRef::Ref { val: &list }),
-//             Value::List(list.clone()).as_value_ref()
-//         );
-//     }
-
-//     #[test]
-//     fn test_value_ref_as() {
-//         macro_rules! check_as_null {
-//             ($method: ident) => {
-//                 assert_eq!(None, ValueRef::Null.$method().unwrap());
-//             };
-//         }
-
-//         check_as_null!(as_binary);
-//         check_as_null!(as_string);
-//         check_as_null!(as_boolean);
-//         check_as_null!(as_date);
-//         check_as_null!(as_datetime);
-//         check_as_null!(as_list);
-
-//         macro_rules! check_as_correct {
-//             ($data: expr, $Variant: ident, $method: ident) => {
-//                 assert_eq!(Some($data), ValueRef::$Variant($data).$method().unwrap());
-//             };
-//         }
-
-//         check_as_correct!("hello", String, as_string);
-//         check_as_correct!("hello".as_bytes(), Binary, as_binary);
-//         check_as_correct!(true, Boolean, as_boolean);
-//         check_as_correct!(Date::new(123), Date, as_date);
-//         check_as_correct!(DateTime::new(12), DateTime, as_datetime);
-//         let list = ListValue {
-//             items: None,
-//             datatype: ConcreteDataType::int32_datatype(),
-//         };
-//         check_as_correct!(ListValueRef::Ref { val: &list }, List, as_list);
-
-//         let wrong_value = ValueRef::Int32(12345);
-//         assert!(wrong_value.as_binary().is_err());
-//         assert!(wrong_value.as_string().is_err());
-//         assert!(wrong_value.as_boolean().is_err());
-//         assert!(wrong_value.as_date().is_err());
-//         assert!(wrong_value.as_datetime().is_err());
-//         assert!(wrong_value.as_list().is_err());
-//     }
-
-//     #[test]
-//     fn test_into_value_ref() {
-//         macro_rules! check_into_value_ref {
-//             ($Variant: ident, $data: expr, $PrimitiveType: ident, $Wrapper: ident) => {
-//                 let data: $PrimitiveType = $data;
-//                 assert_eq!(
-//                     ValueRef::$Variant($Wrapper::from(data)),
-//                     data.into_value_ref()
-//                 );
-//                 assert_eq!(
-//                     ValueRef::$Variant($Wrapper::from(data)),
-//                     ValueRef::from(data)
-//                 );
-//                 assert_eq!(
-//                     ValueRef::$Variant($Wrapper::from(data)),
-//                     Some(data).into_value_ref()
-//                 );
-//                 assert_eq!(
-//                     ValueRef::$Variant($Wrapper::from(data)),
-//                     ValueRef::from(Some(data))
-//                 );
-//                 let x: Option<$PrimitiveType> = None;
-//                 assert_eq!(ValueRef::Null, x.into_value_ref());
-//                 assert_eq!(ValueRef::Null, x.into());
-//             };
-//         }
-
-//         macro_rules! check_primitive_into_value_ref {
-//             ($Variant: ident, $data: expr, $PrimitiveType: ident) => {
-//                 check_into_value_ref!($Variant, $data, $PrimitiveType, $PrimitiveType)
-//             };
-//         }
-
-//         check_primitive_into_value_ref!(Boolean, true, bool);
-//         check_primitive_into_value_ref!(UInt8, 10, u8);
-//         check_primitive_into_value_ref!(UInt16, 20, u16);
-//         check_primitive_into_value_ref!(UInt32, 30, u32);
-//         check_primitive_into_value_ref!(UInt64, 40, u64);
-//         check_primitive_into_value_ref!(Int8, -10, i8);
-//         check_primitive_into_value_ref!(Int16, -20, i16);
-//         check_primitive_into_value_ref!(Int32, -30, i32);
-//         check_primitive_into_value_ref!(Int64, -40, i64);
-//         check_into_value_ref!(Float32, 10.0, f32, OrderedF32);
-//         check_into_value_ref!(Float64, 10.0, f64, OrderedF64);
-
-//         let hello = "hello";
-//         assert_eq!(
-//             ValueRef::Binary(hello.as_bytes()),
-//             ValueRef::from(hello.as_bytes())
-//         );
-//         assert_eq!(ValueRef::String(hello), ValueRef::from(hello));
-//     }
-
-//     #[test]
-//     fn test_display() {
-//         assert_eq!(Value::Null.to_string(), "Null");
-//         assert_eq!(Value::UInt8(8).to_string(), "8");
-//         assert_eq!(Value::UInt16(16).to_string(), "16");
-//         assert_eq!(Value::UInt32(32).to_string(), "32");
-//         assert_eq!(Value::UInt64(64).to_string(), "64");
-//         assert_eq!(Value::Int8(-8).to_string(), "-8");
-//         assert_eq!(Value::Int16(-16).to_string(), "-16");
-//         assert_eq!(Value::Int32(-32).to_string(), "-32");
-//         assert_eq!(Value::Int64(-64).to_string(), "-64");
-//         assert_eq!(Value::Float32((-32.123).into()).to_string(), "-32.123");
-//         assert_eq!(Value::Float64((-64.123).into()).to_string(), "-64.123");
-//         assert_eq!(Value::Float64(OrderedF64::infinity()).to_string(), "inf");
-//         assert_eq!(Value::Float64(OrderedF64::nan()).to_string(), "NaN");
-//         assert_eq!(Value::String(StringBytes::from("123")).to_string(), "123");
-//         assert_eq!(
-//             Value::Binary(Bytes::from(vec![1, 2, 3])).to_string(),
-//             "010203"
-//         );
-//         assert_eq!(Value::Date(Date::new(0)).to_string(), "1970-01-01");
-//         assert_eq!(
-//             Value::DateTime(DateTime::new(0)).to_string(),
-//             "1970-01-01 00:00:00"
-//         );
-//         assert_eq!(
-//             Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
-//             "1970-01-01 00:00:01+0000"
-//         );
-//         assert_eq!(
-//             Value::List(ListValue::new(
-//                 Some(Box::new(vec![Value::Int8(1), Value::Int8(2)])),
-//                 ConcreteDataType::int8_datatype(),
-//             ))
-//             .to_string(),
-//             "Int8[1, 2]"
-//         );
-//         assert_eq!(
-//             Value::List(ListValue::new(
-//                 Some(Box::new(vec![])),
-//                 ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
-//             ))
-//             .to_string(),
-//             "Timestamp[]"
-//         );
-//     }
-// }
+// TODO(yingwen): Pass all tests.
+#[cfg(test)]
+mod tests {
+    use num_traits::Float;
+
+    use super::*;
+
+    #[test]
+    fn test_try_from_scalar_value() {
+        assert_eq!(
+            Value::Boolean(true),
+            ScalarValue::Boolean(Some(true)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Boolean(false),
+            ScalarValue::Boolean(Some(false)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Boolean(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Float32(1.0f32.into()),
+            ScalarValue::Float32(Some(1.0f32)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Float32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Float64(2.0f64.into()),
+            ScalarValue::Float64(Some(2.0f64)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Float64(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int8(i8::MAX),
+            ScalarValue::Int8(Some(i8::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int16(i16::MAX),
+            ScalarValue::Int16(Some(i16::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int16(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int32(i32::MAX),
+            ScalarValue::Int32(Some(i32::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int64(i64::MAX),
+            ScalarValue::Int64(Some(i64::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int64(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt8(u8::MAX),
+            ScalarValue::UInt8(Some(u8::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt16(u16::MAX),
+            ScalarValue::UInt16(Some(u16::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt16(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt32(u32::MAX),
+            ScalarValue::UInt32(Some(u32::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt64(u64::MAX),
+            ScalarValue::UInt64(Some(u64::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt64(None).try_into().unwrap());
+
+        // assert_eq!(
+        //     Value::from("hello"),
+        //     ScalarValue::Utf8(Some("hello".to_string()))
+        //         .try_into()
+        //         .unwrap()
+        // );
+        // assert_eq!(Value::Null, ScalarValue::Utf8(None).try_into().unwrap());
+
+        // assert_eq!(
+        //     Value::from("large_hello"),
+        //     ScalarValue::LargeUtf8(Some("large_hello".to_string()))
+        //         .try_into()
+        //         .unwrap()
+        // );
+        // assert_eq!(
+        //     Value::Null,
+        //     ScalarValue::LargeUtf8(None).try_into().unwrap()
+        // );
+
+        assert_eq!(
+            Value::from("world".as_bytes()),
+            ScalarValue::Binary(Some("world".as_bytes().to_vec()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Binary(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::from("large_world".as_bytes()),
+            ScalarValue::LargeBinary(Some("large_world".as_bytes().to_vec()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::LargeBinary(None).try_into().unwrap()
+        );
+
+        // assert_eq!(
+        //     Value::List(ListValue::new(
+        //         Some(Box::new(vec![Value::Int32(1), Value::Null])),
+        //         ConcreteDataType::int32_datatype()
+        //     )),
+        //     ScalarValue::List(
+        //         Some(Box::new(vec![
+        //             ScalarValue::Int32(Some(1)),
+        //             ScalarValue::Int32(None)
+        //         ])),
+        //         Box::new(ArrowDataType::Int32)
+        //     )
+        //     .try_into()
+        //     .unwrap()
+        // );
+        // assert_eq!(
+        //     Value::List(ListValue::new(None, ConcreteDataType::uint32_datatype())),
+        //     ScalarValue::List(None, Box::new(ArrowDataType::UInt32))
+        //         .try_into()
+        //         .unwrap()
+        // );
+
+        assert_eq!(
+            Value::Date(Date::new(123)),
+            ScalarValue::Date32(Some(123)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Date32(None).try_into().unwrap());
+
+        // assert_eq!(
+        //     Value::DateTime(DateTime::new(456)),
+        //     ScalarValue::Date64(Some(456)).try_into().unwrap()
+        // );
+        // assert_eq!(Value::Null, ScalarValue::Date64(None).try_into().unwrap());
+
+        // assert_eq!(
+        //     Value::Timestamp(Timestamp::new(1, TimeUnit::Second)),
+        //     ScalarValue::TimestampSecond(Some(1), None)
+        //         .try_into()
+        //         .unwrap()
+        // );
+        // assert_eq!(
+        //     Value::Null,
+        //     ScalarValue::TimestampSecond(None, None).try_into().unwrap()
+        // );
+
+        // assert_eq!(
+        //     Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)),
+        //     ScalarValue::TimestampMillisecond(Some(1), None)
+        //         .try_into()
+        //         .unwrap()
+        // );
+        // assert_eq!(
+        //     Value::Null,
+        //     ScalarValue::TimestampMillisecond(None, None)
+        //         .try_into()
+        //         .unwrap()
+        // );
+
+        // assert_eq!(
+        //     Value::Timestamp(Timestamp::new(1, TimeUnit::Microsecond)),
+        //     ScalarValue::TimestampMicrosecond(Some(1), None)
+        //         .try_into()
+        //         .unwrap()
+        // );
+        // assert_eq!(
+        //     Value::Null,
+        //     ScalarValue::TimestampMicrosecond(None, None)
+        //         .try_into()
+        //         .unwrap()
+        // );
+
+        // assert_eq!(
+        //     Value::Timestamp(Timestamp::new(1, TimeUnit::Nanosecond)),
+        //     ScalarValue::TimestampNanosecond(Some(1), None)
+        //         .try_into()
+        //         .unwrap()
+        // );
+        // assert_eq!(
+        //     Value::Null,
+        //     ScalarValue::TimestampNanosecond(None, None)
+        //         .try_into()
+        //         .unwrap()
+        // );
+
+        let result: Result<Value> = ScalarValue::Decimal128(Some(1), 0, 0).try_into();
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported arrow data type, type: Decimal(0, 0)");
+    }
+
+    #[test]
+    fn test_value_from_inner() {
+        assert_eq!(Value::Boolean(true), Value::from(true));
+        assert_eq!(Value::Boolean(false), Value::from(false));
+
+        assert_eq!(Value::UInt8(u8::MIN), Value::from(u8::MIN));
+        assert_eq!(Value::UInt8(u8::MAX), Value::from(u8::MAX));
+
+        assert_eq!(Value::UInt16(u16::MIN), Value::from(u16::MIN));
+        assert_eq!(Value::UInt16(u16::MAX), Value::from(u16::MAX));
+
+        assert_eq!(Value::UInt32(u32::MIN), Value::from(u32::MIN));
+        assert_eq!(Value::UInt32(u32::MAX), Value::from(u32::MAX));
+
+        assert_eq!(Value::UInt64(u64::MIN), Value::from(u64::MIN));
+        assert_eq!(Value::UInt64(u64::MAX), Value::from(u64::MAX));
+
+        assert_eq!(Value::Int8(i8::MIN), Value::from(i8::MIN));
+        assert_eq!(Value::Int8(i8::MAX), Value::from(i8::MAX));
+
+        assert_eq!(Value::Int16(i16::MIN), Value::from(i16::MIN));
+        assert_eq!(Value::Int16(i16::MAX), Value::from(i16::MAX));
+
+        assert_eq!(Value::Int32(i32::MIN), Value::from(i32::MIN));
+        assert_eq!(Value::Int32(i32::MAX), Value::from(i32::MAX));
+
+        assert_eq!(Value::Int64(i64::MIN), Value::from(i64::MIN));
+        assert_eq!(Value::Int64(i64::MAX), Value::from(i64::MAX));
+
+        assert_eq!(
+            Value::Float32(OrderedFloat(f32::MIN)),
+            Value::from(f32::MIN)
+        );
+        assert_eq!(
+            Value::Float32(OrderedFloat(f32::MAX)),
+            Value::from(f32::MAX)
+        );
+
+        assert_eq!(
+            Value::Float64(OrderedFloat(f64::MIN)),
+            Value::from(f64::MIN)
+        );
+        assert_eq!(
+            Value::Float64(OrderedFloat(f64::MAX)),
+            Value::from(f64::MAX)
+        );
+
+        let string_bytes = StringBytes::from("hello");
+        assert_eq!(
+            Value::String(string_bytes.clone()),
+            Value::from(string_bytes)
+        );
+
+        let bytes = Bytes::from(b"world".as_slice());
+        assert_eq!(Value::Binary(bytes.clone()), Value::from(bytes));
+    }
+
+    fn check_type_and_value(data_type: &ConcreteDataType, value: &Value) {
+        assert_eq!(*data_type, value.data_type());
+        assert_eq!(data_type.logical_type_id(), value.logical_type_id());
+    }
+
+    #[test]
+    fn test_value_datatype() {
+        check_type_and_value(&ConcreteDataType::boolean_datatype(), &Value::Boolean(true));
+        check_type_and_value(&ConcreteDataType::uint8_datatype(), &Value::UInt8(u8::MIN));
+        check_type_and_value(
+            &ConcreteDataType::uint16_datatype(),
+            &Value::UInt16(u16::MIN),
+        );
+        check_type_and_value(
+            &ConcreteDataType::uint16_datatype(),
+            &Value::UInt16(u16::MAX),
+        );
+        check_type_and_value(
+            &ConcreteDataType::uint32_datatype(),
+            &Value::UInt32(u32::MIN),
+        );
+        check_type_and_value(
+            &ConcreteDataType::uint64_datatype(),
+            &Value::UInt64(u64::MIN),
+        );
+        check_type_and_value(&ConcreteDataType::int8_datatype(), &Value::Int8(i8::MIN));
+        check_type_and_value(&ConcreteDataType::int16_datatype(), &Value::Int16(i16::MIN));
+        check_type_and_value(&ConcreteDataType::int32_datatype(), &Value::Int32(i32::MIN));
+        check_type_and_value(&ConcreteDataType::int64_datatype(), &Value::Int64(i64::MIN));
+        check_type_and_value(
+            &ConcreteDataType::float32_datatype(),
+            &Value::Float32(OrderedFloat(f32::MIN)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::float64_datatype(),
+            &Value::Float64(OrderedFloat(f64::MIN)),
+        );
+        // check_type_and_value(
+        //     &ConcreteDataType::string_datatype(),
+        //     &Value::String(StringBytes::from("hello")),
+        // );
+        check_type_and_value(
+            &ConcreteDataType::binary_datatype(),
+            &Value::Binary(Bytes::from(b"world".as_slice())),
+        );
+        // check_type_and_value(
+        //     &ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
+        //     &Value::List(ListValue::new(
+        //         Some(Box::new(vec![Value::Int32(10)])),
+        //         ConcreteDataType::int32_datatype(),
+        //     )),
+        // );
+        check_type_and_value(
+            &ConcreteDataType::date_datatype(),
+            &Value::Date(Date::new(1)),
+        );
+        // check_type_and_value(
+        //     &ConcreteDataType::datetime_datatype(),
+        //     &Value::DateTime(DateTime::new(1)),
+        // );
+        // check_type_and_value(
+        //     &ConcreteDataType::timestamp_millis_datatype(),
+        //     &Value::Timestamp(Timestamp::from_millis(1)),
+        // );
+    }
+
+    #[test]
+    fn test_value_from_string() {
+        let hello = "hello".to_string();
+        assert_eq!(
+            Value::String(StringBytes::from(hello.clone())),
+            Value::from(hello)
+        );
+
+        let world = "world";
+        assert_eq!(Value::String(StringBytes::from(world)), Value::from(world));
+    }
+
+    #[test]
+    fn test_value_from_bytes() {
+        let hello = b"hello".to_vec();
+        assert_eq!(
+            Value::Binary(Bytes::from(hello.clone())),
+            Value::from(hello)
+        );
+
+        let world: &[u8] = b"world";
+        assert_eq!(Value::Binary(Bytes::from(world)), Value::from(world));
+    }
+
+    fn to_json(value: Value) -> serde_json::Value {
+        value.try_into().unwrap()
+    }
+
+    #[test]
+    fn test_to_json_value() {
+        assert_eq!(serde_json::Value::Null, to_json(Value::Null));
+        assert_eq!(serde_json::Value::Bool(true), to_json(Value::Boolean(true)));
+        assert_eq!(
+            serde_json::Value::Number(20u8.into()),
+            to_json(Value::UInt8(20))
+        );
+        assert_eq!(
+            serde_json::Value::Number(20i8.into()),
+            to_json(Value::Int8(20))
+        );
+        assert_eq!(
+            serde_json::Value::Number(2000u16.into()),
+            to_json(Value::UInt16(2000))
+        );
+        assert_eq!(
+            serde_json::Value::Number(2000i16.into()),
+            to_json(Value::Int16(2000))
+        );
+        assert_eq!(
+            serde_json::Value::Number(3000u32.into()),
+            to_json(Value::UInt32(3000))
+        );
+        assert_eq!(
+            serde_json::Value::Number(3000i32.into()),
+            to_json(Value::Int32(3000))
+        );
+        assert_eq!(
+            serde_json::Value::Number(4000u64.into()),
+            to_json(Value::UInt64(4000))
+        );
+        assert_eq!(
+            serde_json::Value::Number(4000i64.into()),
+            to_json(Value::Int64(4000))
+        );
+        assert_eq!(
+            serde_json::Value::from(125.0f32),
+            to_json(Value::Float32(125.0.into()))
+        );
+        assert_eq!(
+            serde_json::Value::from(125.0f64),
+            to_json(Value::Float64(125.0.into()))
+        );
+        assert_eq!(
+            serde_json::Value::String(String::from("hello")),
+            to_json(Value::String(StringBytes::from("hello")))
+        );
+        assert_eq!(
+            serde_json::Value::from(b"world".as_slice()),
+            to_json(Value::Binary(Bytes::from(b"world".as_slice())))
+        );
+        assert_eq!(
+            serde_json::Value::Number(5000i32.into()),
+            to_json(Value::Date(Date::new(5000)))
+        );
+        assert_eq!(
+            serde_json::Value::Number(5000i64.into()),
+            to_json(Value::DateTime(DateTime::new(5000)))
+        );
+
+        assert_eq!(
+            serde_json::Value::Number(1.into()),
+            to_json(Value::Timestamp(Timestamp::from_millis(1)))
+        );
+
+        let json_value: serde_json::Value =
+            serde_json::from_str(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#).unwrap();
+        assert_eq!(
+            json_value,
+            to_json(Value::List(ListValue {
+                items: Some(Box::new(vec![Value::Int32(123)])),
+                datatype: ConcreteDataType::int32_datatype(),
+            }))
+        );
+    }
+
+    #[test]
+    fn test_null_value() {
+        assert!(Value::Null.is_null());
+        assert!(!Value::Boolean(true).is_null());
+        assert!(Value::Null < Value::Boolean(false));
+        assert!(Value::Boolean(true) > Value::Null);
+        assert!(Value::Null < Value::Int32(10));
+        assert!(Value::Int32(10) > Value::Null);
+    }
+
+    #[test]
+    fn test_null_value_ref() {
+        assert!(ValueRef::Null.is_null());
+        assert!(!ValueRef::Boolean(true).is_null());
+        assert!(ValueRef::Null < ValueRef::Boolean(false));
+        assert!(ValueRef::Boolean(true) > ValueRef::Null);
+        assert!(ValueRef::Null < ValueRef::Int32(10));
+        assert!(ValueRef::Int32(10) > ValueRef::Null);
+    }
+
+    #[test]
+    fn test_as_value_ref() {
+        macro_rules! check_as_value_ref {
+            ($Variant: ident, $data: expr) => {
+                let value = Value::$Variant($data);
+                let value_ref = value.as_value_ref();
+                let expect_ref = ValueRef::$Variant($data);
+
+                assert_eq!(expect_ref, value_ref);
+            };
+        }
+
+        assert_eq!(ValueRef::Null, Value::Null.as_value_ref());
+        check_as_value_ref!(Boolean, true);
+        check_as_value_ref!(UInt8, 123);
+        check_as_value_ref!(UInt16, 123);
+        check_as_value_ref!(UInt32, 123);
+        check_as_value_ref!(UInt64, 123);
+        check_as_value_ref!(Int8, -12);
+        check_as_value_ref!(Int16, -12);
+        check_as_value_ref!(Int32, -12);
+        check_as_value_ref!(Int64, -12);
+        check_as_value_ref!(Float32, OrderedF32::from(16.0));
+        check_as_value_ref!(Float64, OrderedF64::from(16.0));
+        check_as_value_ref!(Timestamp, Timestamp::from_millis(1));
+
+        assert_eq!(
+            ValueRef::String("hello"),
+            Value::String("hello".into()).as_value_ref()
+        );
+        assert_eq!(
+            ValueRef::Binary(b"hello"),
+            Value::Binary("hello".as_bytes().into()).as_value_ref()
+        );
+
+        check_as_value_ref!(Date, Date::new(103));
+        check_as_value_ref!(DateTime, DateTime::new(1034));
+
+        let list = ListValue {
+            items: None,
+            datatype: ConcreteDataType::int32_datatype(),
+        };
+        assert_eq!(
+            ValueRef::List(ListValueRef::Ref { val: &list }),
+            Value::List(list.clone()).as_value_ref()
+        );
+    }
+
+    #[test]
+    fn test_value_ref_as() {
+        macro_rules! check_as_null {
+            ($method: ident) => {
+                assert_eq!(None, ValueRef::Null.$method().unwrap());
+            };
+        }
+
+        check_as_null!(as_binary);
+        check_as_null!(as_string);
+        check_as_null!(as_boolean);
+        check_as_null!(as_date);
+        check_as_null!(as_datetime);
+        check_as_null!(as_list);
+
+        macro_rules! check_as_correct {
+            ($data: expr, $Variant: ident, $method: ident) => {
+                assert_eq!(Some($data), ValueRef::$Variant($data).$method().unwrap());
+            };
+        }
+
+        check_as_correct!("hello", String, as_string);
+        check_as_correct!("hello".as_bytes(), Binary, as_binary);
+        check_as_correct!(true, Boolean, as_boolean);
+        check_as_correct!(Date::new(123), Date, as_date);
+        check_as_correct!(DateTime::new(12), DateTime, as_datetime);
+        let list = ListValue {
+            items: None,
+            datatype: ConcreteDataType::int32_datatype(),
+        };
+        check_as_correct!(ListValueRef::Ref { val: &list }, List, as_list);
+
+        let wrong_value = ValueRef::Int32(12345);
+        assert!(wrong_value.as_binary().is_err());
+        assert!(wrong_value.as_string().is_err());
+        assert!(wrong_value.as_boolean().is_err());
+        assert!(wrong_value.as_date().is_err());
+        assert!(wrong_value.as_datetime().is_err());
+        assert!(wrong_value.as_list().is_err());
+    }
+
+    #[test]
+    fn test_display() {
+        // assert_eq!(Value::Null.to_string(), "Null");
+        assert_eq!(Value::UInt8(8).to_string(), "8");
+        assert_eq!(Value::UInt16(16).to_string(), "16");
+        assert_eq!(Value::UInt32(32).to_string(), "32");
+        assert_eq!(Value::UInt64(64).to_string(), "64");
+        assert_eq!(Value::Int8(-8).to_string(), "-8");
+        assert_eq!(Value::Int16(-16).to_string(), "-16");
+        assert_eq!(Value::Int32(-32).to_string(), "-32");
+        assert_eq!(Value::Int64(-64).to_string(), "-64");
+        assert_eq!(Value::Float32((-32.123).into()).to_string(), "-32.123");
+        assert_eq!(Value::Float64((-64.123).into()).to_string(), "-64.123");
+        assert_eq!(Value::Float64(OrderedF64::infinity()).to_string(), "inf");
+        assert_eq!(Value::Float64(OrderedF64::nan()).to_string(), "NaN");
+        assert_eq!(Value::String(StringBytes::from("123")).to_string(), "123");
+        assert_eq!(
+            Value::Binary(Bytes::from(vec![1, 2, 3])).to_string(),
+            "010203"
+        );
+        assert_eq!(Value::Date(Date::new(0)).to_string(), "1970-01-01");
+        assert_eq!(
+            Value::DateTime(DateTime::new(0)).to_string(),
+            "1970-01-01 00:00:00"
+        );
+        // assert_eq!(
+        //     Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
+        //     "1970-01-01 00:00:01+0000"
+        // );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![Value::Int8(1), Value::Int8(2)])),
+                ConcreteDataType::int8_datatype(),
+            ))
+            .to_string(),
+            "Int8[1, 2]"
+        );
+        // assert_eq!(
+        //     Value::List(ListValue::new(
+        //         Some(Box::new(vec![])),
+        //         ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+        //     ))
+        //     .to_string(),
+        //     "Timestamp[]"
+        // );
+    }
+}
