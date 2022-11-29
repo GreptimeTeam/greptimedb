@@ -16,7 +16,7 @@ use crate::prelude::*;
 // pub(crate) use crate::vectors::constant::replicate_constant;
 // pub(crate) use crate::vectors::date::replicate_date;
 // pub(crate) use crate::vectors::datetime::replicate_datetime;
-// pub(crate) use crate::vectors::null::replicate_null;
+pub(crate) use crate::vectors::null::replicate_null;
 pub(crate) use crate::vectors::primitive::replicate_primitive;
 // pub(crate) use crate::vectors::timestamp::replicate_timestamp;
 

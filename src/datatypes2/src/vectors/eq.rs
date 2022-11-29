@@ -70,7 +70,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
 
     let lhs_type = lhs.data_type();
     match lhs.data_type() {
-        // Null(_) => true,
+        Null(_) => true,
         Boolean(_) => is_vector_eq!(BooleanVector, lhs, rhs),
         Binary(_) => is_vector_eq!(BinaryVector, lhs, rhs),
         // String(_) => is_vector_eq!(StringVector, lhs, rhs),

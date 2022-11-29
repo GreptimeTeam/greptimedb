@@ -35,7 +35,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::scalars::ScalarVector;
-    use crate::vectors::{BooleanVector, Int32Vector, VectorOp, VectorRef};
+    use crate::vectors::{BooleanVector, Int32Vector, NullVector, VectorOp, VectorRef};
 
     fn check_filter_primitive(expect: &[i32], input: &[i32], filter: &[bool]) {
         let v = Int32Vector::from_slice(&input);
@@ -90,15 +90,15 @@ mod tests {
     //     assert_eq!(expect, out);
     // }
 
-    // #[test]
-    // fn test_filter_null() {
-    //     let v = NullVector::new(5);
-    //     let filter = BooleanVector::from_slice(&[false, true, false, true, true]);
-    //     let out = v.filter(&filter).unwrap();
+    #[test]
+    fn test_filter_null() {
+        let v = NullVector::new(5);
+        let filter = BooleanVector::from_slice(&[false, true, false, true, true]);
+        let out = v.filter(&filter).unwrap();
 
-    //     let expect: VectorRef = Arc::new(NullVector::new(3));
-    //     assert_eq!(expect, out);
-    // }
+        let expect: VectorRef = Arc::new(NullVector::new(3));
+        assert_eq!(expect, out);
+    }
 
     macro_rules! impl_filter_date_like_test {
         ($VectorType: ident, $ValueType: ident, $method: ident) => {{
