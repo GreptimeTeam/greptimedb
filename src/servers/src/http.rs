@@ -185,7 +185,7 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum JsonOutput {
     AffectedRows(usize),
