@@ -15,6 +15,7 @@
 use std::cmp::Ordering;
 
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
+use common_time::Date;
 use num::NumCast;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -23,6 +24,7 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
 use crate::type_id::LogicalTypeId;
+use crate::types::DateType;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
@@ -69,6 +71,62 @@ pub trait WrapperType:
     fn into_native(self) -> Self::Native;
 }
 
+/// Trait bridging the logical primitive type with [ArrowPrimitiveType].
+pub trait LogicalPrimitiveType: 'static + Sized {
+    /// Arrow primitive type of this logical type.
+    type ArrowPrimitive: ArrowPrimitiveType<Native = Self::Native>;
+    /// Native (physical) type of this logical type.
+    type Native: NativeType;
+    /// Wrapper type that the vector returns.
+    type Wrapper: WrapperType<LogicalType = Self, Native = Self::Native>
+        + for<'a> Scalar<VectorType = PrimitiveVector<Self>, RefType<'a> = Self::Wrapper>
+        + for<'a> ScalarRef<'a, ScalarType = Self::Wrapper>;
+
+    /// Construct the data type struct.
+    fn build_data_type() -> ConcreteDataType;
+
+    /// Return the name of the type.
+    fn type_name() -> &'static str;
+
+    /// Dynamic cast the vector to the concrete vector type.
+    fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveVector<Self>>;
+
+    /// Cast value ref to the primitive type.
+    fn cast_value_ref(value: ValueRef) -> Result<Option<Self::Wrapper>>;
+}
+
+/// A new type for [WrapperType], complement the `Ord` feature for it. Wrapping non ordered
+/// primitive types like `f32` and `f64` in `OrdPrimitive` can make them be used in places that
+/// require `Ord`. For example, in `Median` or `Percentile` UDAFs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrdPrimitive<T: WrapperType>(pub T);
+
+impl<T: WrapperType> OrdPrimitive<T> {
+    pub fn as_primitive(&self) -> T {
+        self.0
+    }
+}
+
+impl<T: WrapperType> Eq for OrdPrimitive<T> {}
+
+impl<T: WrapperType> PartialOrd for OrdPrimitive<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: WrapperType> Ord for OrdPrimitive<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        Into::<Value>::into(self.0).cmp(&Into::<Value>::into(other.0))
+    }
+}
+
+impl<T: WrapperType> From<OrdPrimitive<T>> for Value {
+    fn from(p: OrdPrimitive<T>) -> Self {
+        p.0.into()
+    }
+}
+
 macro_rules! impl_wrapper {
     ($Type: ident, $LogicalType: ident) => {
         impl WrapperType for $Type {
@@ -97,34 +155,23 @@ impl_wrapper!(i64, Int64Type);
 impl_wrapper!(f32, Float32Type);
 impl_wrapper!(f64, Float64Type);
 
-/// Trait bridging the logical primitive type with [ArrowPrimitiveType].
-pub trait LogicalPrimitiveType: 'static + Sized {
-    /// Arrow primitive type of this logical type.
-    type ArrowPrimitive: ArrowPrimitiveType<Native = Self::Native>;
-    /// Native (physical) type of this logical type.
-    type Native: NativeType;
-    /// Wrapper type that the vector returns.
-    type Wrapper: WrapperType<LogicalType = Self, Native = Self::Native>
-        + for<'a> Scalar<VectorType = PrimitiveVector<Self>, RefType<'a> = Self::Wrapper>
-        + for<'a> ScalarRef<'a, ScalarType = Self::Wrapper>;
+impl WrapperType for Date {
+    type LogicalType = DateType;
+    type Native = i32;
 
-    /// Construct the data type struct.
-    fn build_data_type() -> ConcreteDataType;
+    fn from_native(value: i32) -> Self {
+        Date::new(value)
+    }
 
-    /// Return the name of the type.
-    fn type_name() -> &'static str;
-
-    /// Dynamic cast the vector to the concrete vector type.
-    fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveVector<Self>>;
-
-    /// Cast value ref to the primitive type.
-    fn cast_value_ref(value: ValueRef) -> Result<Option<Self::Wrapper>>;
+    fn into_native(self) -> i32 {
+        self.val()
+    }
 }
 
 macro_rules! define_logical_primitive_type {
     ($Native: ident, $TypeId: ident, $DataType: ident) => {
         #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-        pub struct $DataType {}
+        pub struct $DataType;
 
         impl LogicalPrimitiveType for $DataType {
             type ArrowPrimitive = arrow::datatypes::$DataType;
@@ -202,38 +249,6 @@ define_logical_primitive_type!(i32, Int32, Int32Type);
 define_logical_primitive_type!(i64, Int64, Int64Type);
 define_logical_primitive_type!(f32, Float32, Float32Type);
 define_logical_primitive_type!(f64, Float64, Float64Type);
-
-/// A new type for [WrapperType], complement the `Ord` feature for it. Wrapping non ordered
-/// primitive types like `f32` and `f64` in `OrdPrimitive` can make them be used in places that
-/// require `Ord`. For example, in `Median` or `Percentile` UDAFs.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct OrdPrimitive<T: WrapperType>(pub T);
-
-impl<T: WrapperType> OrdPrimitive<T> {
-    pub fn as_primitive(&self) -> T {
-        self.0
-    }
-}
-
-impl<T: WrapperType> Eq for OrdPrimitive<T> {}
-
-impl<T: WrapperType> PartialOrd for OrdPrimitive<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<T: WrapperType> Ord for OrdPrimitive<T> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        Into::<Value>::into(self.0).cmp(&Into::<Value>::into(other.0))
-    }
-}
-
-impl<T: WrapperType> From<OrdPrimitive<T>> for Value {
-    fn from(p: OrdPrimitive<T>) -> Self {
-        p.0.into()
-    }
-}
 
 #[cfg(test)]
 mod tests {

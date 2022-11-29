@@ -20,7 +20,6 @@ use common_base::BitVec;
 
 use crate::error::Result;
 use crate::types::LogicalPrimitiveType;
-// use crate::types::PrimitiveElement;
 use crate::vectors::{BinaryVector, BooleanVector, PrimitiveVector, Vector, VectorRef};
 
 /// Vector compute operations.

@@ -100,28 +100,28 @@ mod tests {
     //     assert_eq!(expect, out);
     // }
 
-    // macro_rules! impl_filter_date_like_test {
-    //     ($VectorType: ident, $ValueType: ident, $method: ident) => {{
-    //         use std::sync::Arc;
+    macro_rules! impl_filter_date_like_test {
+        ($VectorType: ident, $ValueType: ident, $method: ident) => {{
+            use std::sync::Arc;
 
-    //         use common_time::$ValueType;
-    //         use $crate::vectors::{$VectorType, VectorRef};
+            use common_time::$ValueType;
+            use $crate::vectors::{$VectorType, VectorRef};
 
-    //         let v = $VectorType::from_iterator((0..5).map($ValueType::$method));
-    //         let filter = BooleanVector::from_slice(&[false, true, false, true, true]);
-    //         let out = v.filter(&filter).unwrap();
+            let v = $VectorType::from_iterator((0..5).map($ValueType::$method));
+            let filter = BooleanVector::from_slice(&[false, true, false, true, true]);
+            let out = v.filter(&filter).unwrap();
 
-    //         let expect: VectorRef = Arc::new($VectorType::from_iterator(
-    //             [1, 3, 4].into_iter().map($ValueType::$method),
-    //         ));
-    //         assert_eq!(expect, out);
-    //     }};
-    // }
+            let expect: VectorRef = Arc::new($VectorType::from_iterator(
+                [1, 3, 4].into_iter().map($ValueType::$method),
+            ));
+            assert_eq!(expect, out);
+        }};
+    }
 
-    // #[test]
-    // fn test_filter_date_like() {
-    //     impl_filter_date_like_test!(DateVector, Date, new);
-    //     impl_filter_date_like_test!(DateTimeVector, DateTime, new);
-    //     impl_filter_date_like_test!(TimestampVector, Timestamp, from_millis);
-    // }
+    #[test]
+    fn test_filter_date_like() {
+        impl_filter_date_like_test!(DateVector, Date, new);
+        // impl_filter_date_like_test!(DateTimeVector, DateTime, new);
+        // impl_filter_date_like_test!(TimestampVector, Timestamp, from_millis);
+    }
 }

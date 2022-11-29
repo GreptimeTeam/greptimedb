@@ -28,6 +28,7 @@ use crate::vectors::operations::VectorOp;
 
 pub mod binary;
 pub mod boolean;
+pub mod date;
 mod eq;
 mod helper;
 pub mod operations;
@@ -35,6 +36,7 @@ pub mod primitive;
 
 pub use binary::*;
 pub use boolean::*;
+pub use date::*;
 pub use helper::Helper;
 pub use primitive::*;
 
