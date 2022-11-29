@@ -428,21 +428,16 @@ pub(crate) fn exec_with_cached_vm(
 /// init interpreter with type PyVector and Module: greptime
 pub(crate) fn init_interpreter() -> Arc<Interpreter> {
     INTERPRETER.with(|i| {
-        let mut interpreter = i.borrow_mut();
-
-        if interpreter.is_none() {
-            *interpreter = Some(Arc::new(vm::Interpreter::with_init(
-                Default::default(),
-                |vm| {
+        i.borrow_mut()
+            .get_or_insert_with(|| {
+                let interpreter = Arc::new(vm::Interpreter::with_init(Default::default(), |vm| {
                     PyVector::make_class(&vm.ctx);
                     vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
-                },
-            )));
-            info!("Initialized Python interpreter.");
-        }
-
-        // It's safe to unwrap here, the interpreter should be initialzied
-        interpreter.as_ref().unwrap().clone()
+                }));
+                info!("Initialized Python interpreter.");
+                interpreter
+            })
+            .clone()
     })
 }
 
