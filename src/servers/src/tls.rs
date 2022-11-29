@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use std::fs::File;
-use std::io::{BufReader, ErrorKind};
+use std::io::{BufReader, Error, ErrorKind};
 
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde::{Deserialize, Serialize};
 
-// https://www.postgresql.org/docs/current/libpq-ssl.html
+/// TlsMode is used for Mysql and Postgres server start up.
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsMode {
@@ -27,8 +27,10 @@ pub enum TlsMode {
     Disable,
     Prefer,
     Require,
-    VerifyCa,   // TODO:
-    VerifyFull, // TODO:
+    // TODO(SSebo): Implement the following 2 TSL mode described in
+    // ["34.19.3. Protection Provided in Different Modes"](https://www.postgresql.org/docs/current/libpq-ssl.html)
+    VerifyCa,
+    VerifyFull,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -42,18 +44,19 @@ pub struct TlsOption {
 }
 
 impl TlsOption {
-    pub fn setup(&self) -> Result<Option<ServerConfig>, std::io::Error> {
+    pub fn setup(&self) -> Result<Option<ServerConfig>, Error> {
         if let TlsMode::Disable = self.mode {
             return Ok(None);
         }
         let cert = certs(&mut BufReader::new(File::open(&self.cert_path)?))
-            .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "invalid cert"))
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid cert"))
             .map(|mut certs| certs.drain(..).map(Certificate).collect())?;
         let key = pkcs8_private_keys(&mut BufReader::new(File::open(&self.key_path)?))
-            .map_err(|_| std::io::Error::new(ErrorKind::InvalidInput, "invalid key"))
-            .map(|mut keys| keys.drain(..).map(PrivateKey).next().unwrap())?;
+            .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid key"))
+            .map(|mut keys| keys.drain(..).map(PrivateKey).next())?
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "invalid key"))?;
 
-        // TODO: with_client_cert_verifier if TlsMode is Required.
+        // TODO(SSebo): with_client_cert_verifier if TlsMode is Required.
         let config = ServerConfig::builder()
             .with_safe_defaults()
             .with_no_client_auth()

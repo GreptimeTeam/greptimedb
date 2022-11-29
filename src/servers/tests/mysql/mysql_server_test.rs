@@ -119,7 +119,7 @@ async fn test_query_all_datatypes() -> Result<()> {
     let server_tls = Arc::new(TlsOption::default());
     let client_tls = false;
 
-    _test_query_all_datatypes(server_tls, client_tls, false).await?;
+    do_test_query_all_datatypes(server_tls, client_tls, false).await?;
     Ok(())
 }
 
@@ -132,7 +132,7 @@ async fn test_server_prefer_secure_client_plain() -> Result<()> {
     });
 
     let client_tls = false;
-    _test_query_all_datatypes(server_tls, client_tls, false).await?;
+    do_test_query_all_datatypes(server_tls, client_tls, false).await?;
     Ok(())
 }
 
@@ -145,7 +145,7 @@ async fn test_server_prefer_secure_client_secure() -> Result<()> {
     });
 
     let client_tls = true;
-    _test_query_all_datatypes(server_tls, client_tls, false).await?;
+    do_test_query_all_datatypes(server_tls, client_tls, false).await?;
     Ok(())
 }
 
@@ -158,7 +158,7 @@ async fn test_server_require_secure_client_secure() -> Result<()> {
     });
 
     let client_tls = true;
-    _test_query_all_datatypes(server_tls, client_tls, false).await?;
+    do_test_query_all_datatypes(server_tls, client_tls, false).await?;
     Ok(())
 }
 
@@ -193,7 +193,7 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     Ok(())
 }
 
-async fn _test_query_all_datatypes(
+async fn do_test_query_all_datatypes(
     server_tls: Arc<TlsOption>,
     with_pwd: bool,
     client_tls: bool,

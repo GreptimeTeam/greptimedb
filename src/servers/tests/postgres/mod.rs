@@ -281,7 +281,7 @@ async fn create_secure_connection(
 
     let tls = tokio_postgres_rustls::MakeRustlsConnect::new(config);
     let (client, conn) = tokio_postgres::connect(&url, tls).await.expect("connect");
-    // let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
+
     tokio::spawn(conn);
     Ok(client)
 }

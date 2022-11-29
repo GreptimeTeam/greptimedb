@@ -93,7 +93,7 @@ impl MysqlServer {
         force_tls: bool,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
-        io_runtime .spawn(async move { 
+        io_runtime .spawn(async move {
             // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
             if let Err(e)  = Self::do_handle(stream, query_handler, tls_conf, force_tls).await {
                 // TODO(LFC): Write this error to client as well, in MySQL text protocol.
@@ -120,8 +120,8 @@ impl MysqlServer {
             AsyncMysqlIntermediary::init_before_ssl(&mut shim, &mut r, &mut w, &tls_conf).await?;
 
         if force_tls && !client_tls {
-            return Err(Error::Internal {
-                err_msg: "Tls is required for mysql client".to_owned(),
+            return Err(Error::TlsRequired {
+                server: "mysql".to_owned(),
             });
         }
 

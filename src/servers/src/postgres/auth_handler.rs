@@ -103,6 +103,7 @@ impl StartupHandler for PgAuthStartupHandler {
                         .feed(PgWireBackendMessage::ErrorResponse(error))
                         .await?;
                     client.close().await?;
+                    return Ok(());
                 }
                 auth::save_startup_parameters_to_metadata(client, startup);
                 if self.with_pwd {
