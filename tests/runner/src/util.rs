@@ -158,12 +158,5 @@ pub async fn check_port(ip_addr: SocketAddr, timeout: Duration) -> bool {
         }
     };
 
-    tokio::select! {
-        _ = check_task => {
-            true
-        },
-        _ = time::sleep(timeout) => {
-            false
-        }
-    }
+    tokio::time::timeout(timeout, check_task).await.is_ok()
 }
