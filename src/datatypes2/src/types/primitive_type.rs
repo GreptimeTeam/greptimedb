@@ -15,7 +15,7 @@
 use std::cmp::Ordering;
 
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
-use common_time::Date;
+use common_time::{Date, DateTime};
 use num::NumCast;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -24,7 +24,7 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
 use crate::type_id::LogicalTypeId;
-use crate::types::DateType;
+use crate::types::{DateTimeType, DateType};
 use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
@@ -164,6 +164,19 @@ impl WrapperType for Date {
     }
 
     fn into_native(self) -> i32 {
+        self.val()
+    }
+}
+
+impl WrapperType for DateTime {
+    type LogicalType = DateTimeType;
+    type Native = i64;
+
+    fn from_native(value: Self::Native) -> Self {
+        DateTime::new(value)
+    }
+
+    fn into_native(self) -> Self::Native {
         self.val()
     }
 }

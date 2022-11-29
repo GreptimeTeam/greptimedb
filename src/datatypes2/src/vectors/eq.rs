@@ -15,7 +15,9 @@
 use std::sync::Arc;
 
 use crate::data_type::DataType;
-use crate::vectors::{BinaryVector, BooleanVector, DateVector, PrimitiveVector, Vector};
+use crate::vectors::{
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, PrimitiveVector, Vector,
+};
 use crate::with_match_primitive_type_id;
 
 impl Eq for dyn Vector + '_ {}
@@ -73,7 +75,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
         Binary(_) => is_vector_eq!(BinaryVector, lhs, rhs),
         // String(_) => is_vector_eq!(StringVector, lhs, rhs),
         Date(_) => is_vector_eq!(DateVector, lhs, rhs),
-        // DateTime(_) => is_vector_eq!(DateTimeVector, lhs, rhs),
+        DateTime(_) => is_vector_eq!(DateTimeVector, lhs, rhs),
         // Timestamp(_) => is_vector_eq!(TimestampVector, lhs, rhs),
         // List(_) => is_vector_eq!(ListVector, lhs, rhs),
         UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
@@ -125,8 +127,8 @@ mod tests {
         //     5,
         // )));
         assert_vector_ref_eq(Arc::new(BooleanVector::from(vec![true, false])));
-        // assert_vector_ref_eq(Arc::new(DateVector::from(vec![Some(100), Some(120)])));
-        // assert_vector_ref_eq(Arc::new(DateTimeVector::from(vec![Some(100), Some(120)])));
+        assert_vector_ref_eq(Arc::new(DateVector::from(vec![Some(100), Some(120)])));
+        assert_vector_ref_eq(Arc::new(DateTimeVector::from(vec![Some(100), Some(120)])));
         // assert_vector_ref_eq(Arc::new(TimestampVector::from_values([100, 120])));
 
         // let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i64>>::new();

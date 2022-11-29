@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
-    BinaryType, BooleanType, DateType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
-    Int8Type, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    BinaryType, BooleanType, DateTimeType, DateType, Float32Type, Float64Type, Int16Type,
+    Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -51,7 +51,7 @@ pub enum ConcreteDataType {
 
     // Date types:
     Date(DateType),
-    // DateTime(DateTimeType),
+    DateTime(DateTimeType),
     // Timestamp(TimestampType),
 
     // List(ListType),
@@ -191,7 +191,7 @@ macro_rules! impl_new_concrete_type_functions {
 
 impl_new_concrete_type_functions!(
     Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64, Binary,
-    Date
+    Date, DateTime
 );
 
 // impl ConcreteDataType {

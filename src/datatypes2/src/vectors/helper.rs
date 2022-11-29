@@ -24,9 +24,9 @@ use snafu::OptionExt;
 use crate::error::{self, Result};
 use crate::scalars::Scalar;
 use crate::vectors::{
-    BinaryVector, BooleanVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector,
-    Int64Vector, Int8Vector, MutableVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector,
-    Vector, VectorRef,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
+    Int16Vector, Int32Vector, Int64Vector, Int8Vector, MutableVector, UInt16Vector, UInt32Vector,
+    UInt64Vector, UInt8Vector, Vector, VectorRef,
 };
 
 pub struct Helper;
@@ -195,8 +195,8 @@ impl Helper {
             // ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
             //     Arc::new(StringVector::try_from_arrow_array(array)?)
             // }
-            // ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
-            // ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
+            ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
+            ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
             // ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             // ArrowDataType::Timestamp(_, _) => {
             //     Arc::new(TimestampVector::try_from_arrow_array(array)?)
