@@ -15,7 +15,9 @@
 use std::sync::Arc;
 
 use crate::data_type::DataType;
-use crate::vectors::{BinaryVector, BooleanVector, DateVector, PrimitiveVector, Vector};
+use crate::vectors::{
+    BinaryVector, BooleanVector, DateVector, PrimitiveVector, StringVector, Vector,
+};
 use crate::with_match_primitive_type_id;
 
 impl Eq for dyn Vector + '_ {}
@@ -71,7 +73,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
         // Null(_) => true,
         Boolean(_) => is_vector_eq!(BooleanVector, lhs, rhs),
         Binary(_) => is_vector_eq!(BinaryVector, lhs, rhs),
-        // String(_) => is_vector_eq!(StringVector, lhs, rhs),
+        String(_) => is_vector_eq!(StringVector, lhs, rhs),
         Date(_) => is_vector_eq!(DateVector, lhs, rhs),
         // DateTime(_) => is_vector_eq!(DateTimeVector, lhs, rhs),
         // Timestamp(_) => is_vector_eq!(TimestampVector, lhs, rhs),

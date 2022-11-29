@@ -102,7 +102,7 @@ pub(crate) fn find_unique_scalar<'a, T: ScalarVector>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vectors::{Int32Vector, Vector, VectorOp};
+    use crate::vectors::{Int32Vector, StringVector, Vector, VectorOp};
 
     fn check_bitmap(expect: &[bool], selected: &BitVec) {
         let actual = selected.iter().collect::<Vec<_>>();
@@ -327,14 +327,14 @@ mod tests {
     //     check_bitmap(&[true, false, true, false], &selected);
     // }
 
-    // #[test]
-    // fn test_find_unique_string() {
-    //     let input = StringVector::from_slice(&["a", "a", "b", "c"]);
-    //     let mut selected = BitVec::repeat(false, 4);
-    //     input.find_unique(&mut selected, None);
-    //     let expect = vec![true, false, true, true];
-    //     check_bitmap(&expect, &selected);
-    // }
+    #[test]
+    fn test_find_unique_string() {
+        let input = StringVector::from_slice(&["a", "a", "b", "c"]);
+        let mut selected = BitVec::repeat(false, 4);
+        input.find_unique(&mut selected, None);
+        let expect = vec![true, false, true, true];
+        check_bitmap(&expect, &selected);
+    }
 
     macro_rules! impl_find_unique_date_like_test {
         ($VectorType: ident, $ValueType: ident, $method: ident) => {{

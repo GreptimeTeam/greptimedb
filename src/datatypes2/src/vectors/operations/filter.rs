@@ -35,7 +35,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::scalars::ScalarVector;
-    use crate::vectors::{BooleanVector, Int32Vector, VectorOp, VectorRef};
+    use crate::vectors::{BooleanVector, Int32Vector, StringVector, VectorOp, VectorRef};
 
     fn check_filter_primitive(expect: &[i32], input: &[i32], filter: &[bool]) {
         let v = Int32Vector::from_slice(&input);
@@ -80,15 +80,15 @@ mod tests {
     //     check_filter_constant(2, 4, &[false, true, false, true]);
     // }
 
-    // #[test]
-    // fn test_filter_scalar() {
-    //     let v = StringVector::from_slice(&["0", "1", "2", "3"]);
-    //     let filter = BooleanVector::from_slice(&[false, true, false, true]);
-    //     let out = v.filter(&filter).unwrap();
+    #[test]
+    fn test_filter_scalar() {
+        let v = StringVector::from_slice(&["0", "1", "2", "3"]);
+        let filter = BooleanVector::from_slice(&[false, true, false, true]);
+        let out = v.filter(&filter).unwrap();
 
-    //     let expect: VectorRef = Arc::new(StringVector::from_slice(&["1", "3"]));
-    //     assert_eq!(expect, out);
-    // }
+        let expect: VectorRef = Arc::new(StringVector::from_slice(&["1", "3"]));
+        assert_eq!(expect, out);
+    }
 
     // #[test]
     // fn test_filter_null() {

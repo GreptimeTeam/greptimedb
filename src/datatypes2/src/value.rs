@@ -124,7 +124,7 @@ impl Value {
             Value::Int64(_) => ConcreteDataType::int64_datatype(),
             Value::Float32(_) => ConcreteDataType::float32_datatype(),
             Value::Float64(_) => ConcreteDataType::float64_datatype(),
-            // Value::String(_) => ConcreteDataType::string_datatype(),
+            Value::String(_) => ConcreteDataType::string_datatype(),
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
             // Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
             Value::Date(_) => ConcreteDataType::date_datatype(),
@@ -404,9 +404,9 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::UInt16(u) => Value::from(u),
             ScalarValue::UInt32(u) => Value::from(u),
             ScalarValue::UInt64(u) => Value::from(u),
-            // ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
-            //     Value::from(s.map(StringBytes::from))
-            // }
+            ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
+                Value::from(s.map(StringBytes::from))
+            }
             ScalarValue::Binary(b) | ScalarValue::LargeBinary(b) => Value::from(b.map(Bytes::from)),
             // ScalarValue::List(vs, t) => {
             //     let items = if let Some(vs) = vs {
@@ -723,24 +723,24 @@ mod tests {
         );
         assert_eq!(Value::Null, ScalarValue::UInt64(None).try_into().unwrap());
 
-        // assert_eq!(
-        //     Value::from("hello"),
-        //     ScalarValue::Utf8(Some("hello".to_string()))
-        //         .try_into()
-        //         .unwrap()
-        // );
-        // assert_eq!(Value::Null, ScalarValue::Utf8(None).try_into().unwrap());
+        assert_eq!(
+            Value::from("hello"),
+            ScalarValue::Utf8(Some("hello".to_string()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Utf8(None).try_into().unwrap());
 
-        // assert_eq!(
-        //     Value::from("large_hello"),
-        //     ScalarValue::LargeUtf8(Some("large_hello".to_string()))
-        //         .try_into()
-        //         .unwrap()
-        // );
-        // assert_eq!(
-        //     Value::Null,
-        //     ScalarValue::LargeUtf8(None).try_into().unwrap()
-        // );
+        assert_eq!(
+            Value::from("large_hello"),
+            ScalarValue::LargeUtf8(Some("large_hello".to_string()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::LargeUtf8(None).try_into().unwrap()
+        );
 
         assert_eq!(
             Value::from("world".as_bytes()),
@@ -946,10 +946,10 @@ mod tests {
             &ConcreteDataType::float64_datatype(),
             &Value::Float64(OrderedFloat(f64::MIN)),
         );
-        // check_type_and_value(
-        //     &ConcreteDataType::string_datatype(),
-        //     &Value::String(StringBytes::from("hello")),
-        // );
+        check_type_and_value(
+            &ConcreteDataType::string_datatype(),
+            &Value::String(StringBytes::from("hello")),
+        );
         check_type_and_value(
             &ConcreteDataType::binary_datatype(),
             &Value::Binary(Bytes::from(b"world".as_slice())),

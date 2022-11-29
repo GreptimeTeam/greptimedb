@@ -44,7 +44,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::vectors::{Int32Vector, VectorOp};
+    use crate::vectors::{Int32Vector, StringVector, VectorOp};
 
     #[test]
     fn test_replicate_primitive() {
@@ -79,17 +79,17 @@ mod tests {
         assert_eq!(expect, v);
     }
 
-    // #[test]
-    // fn test_replicate_scalar() {
-    //     let v = StringVector::from_slice(&["0", "1", "2", "3"]);
-    //     let offsets = [1, 3, 5, 6];
+    #[test]
+    fn test_replicate_scalar() {
+        let v = StringVector::from_slice(&["0", "1", "2", "3"]);
+        let offsets = [1, 3, 5, 6];
 
-    //     let v = v.replicate(&offsets);
-    //     assert_eq!(6, v.len());
+        let v = v.replicate(&offsets);
+        assert_eq!(6, v.len());
 
-    //     let expect: VectorRef = Arc::new(StringVector::from_slice(&["0", "1", "1", "2", "2", "3"]));
-    //     assert_eq!(expect, v);
-    // }
+        let expect: VectorRef = Arc::new(StringVector::from_slice(&["0", "1", "1", "2", "2", "3"]));
+        assert_eq!(expect, v);
+    }
 
     // #[test]
     // fn test_replicate_constant() {
