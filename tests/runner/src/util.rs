@@ -142,7 +142,7 @@ pub fn get_binary_dir(mode: &str) -> String {
     workspace_root.into_os_string().into_string().unwrap()
 }
 
-/// Spin-waiting a socket address is avaliable, or timeout.
+/// Spin-waiting a socket address is available, or timeout.
 /// Returns whether the addr is up.
 pub async fn check_port(ip_addr: SocketAddr, timeout: Duration) -> bool {
     let check_task = async {
