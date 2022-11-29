@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::time::Instant;
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
@@ -23,8 +22,7 @@ use common_telemetry::metric;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::handle_sql_output;
-use crate::http::{ApiState, JsonResponse};
+use crate::http::{handle_sql_output, ApiState, JsonResponse};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
@@ -38,8 +36,7 @@ pub struct SqlQuery {
 #[axum_macros::debug_handler]
 pub async fn sql(State(state): State<ApiState>, Query(params): Query<SqlQuery>) -> Response {
     let sql_handler = &state.sql_handler;
-    // let start = Instant::now();
-    let format = params.format.unwrap_or("csv".to_string());
+    let format = params.format.unwrap_or_else(|| "csv".to_string());
 
     if let Some(sql) = &params.sql {
         let output = sql_handler.do_query(sql).await;

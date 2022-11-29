@@ -35,7 +35,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
-use datatypes::data_type::{self, DataType};
+use datatypes::data_type::DataType;
 use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -108,10 +108,10 @@ impl Schema {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct HttpRecordsOutput {
     schema: Option<Schema>,
-    rows: Vec<Vec<Value>>,
+    rows: Vec<Vec<datatypes::value::Value>>,
 }
 
 impl HttpRecordsOutput {
@@ -130,7 +130,7 @@ impl HttpRecordsOutput {
         self.schema.as_ref()
     }
 
-    pub fn rows(&self) -> &Vec<Vec<Value>> {
+    pub fn rows(&self) -> &Vec<Vec<datatypes::value::Value>> {
         &self.rows
     }
 }
@@ -168,12 +168,7 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
             for recordbatch in recordbatches {
                 for row in recordbatch.rows() {
                     let row = row.map_err(|e| e.to_string())?;
-                    let value_row = row
-                        .into_iter()
-                        .map(|f| Value::try_from(f).map_err(|err| err.to_string()))
-                        .collect::<std::result::Result<Vec<Value>, _>>()?;
-
-                    rows.push(value_row);
+                    rows.push(row);
                 }
             }
 
@@ -185,16 +180,69 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
     }
 }
 
-#[derive(Debug)]
-pub struct CsvRecordsOutput {
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+pub struct JsonRecordsOutput {
     schema: Option<Schema>,
-    rows: Vec<Vec<datatypes::value::Value>>,
+    rows: Vec<Vec<Value>>,
 }
 
-impl CsvRecordsOutput {
-    pub fn try_into_response(self) -> std::result::Result<axum::response::Response, String> {
-        if self.schema.is_none() {
-            return Ok(([(http::header::CONTENT_TYPE, "text/csv")]).into_response());
+impl JsonRecordsOutput {
+    pub fn num_rows(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn num_cols(&self) -> usize {
+        self.schema
+            .as_ref()
+            .map(|x| x.column_schemas.len())
+            .unwrap_or(0)
+    }
+
+    pub fn schema(&self) -> Option<&Schema> {
+        self.schema.as_ref()
+    }
+
+    pub fn rows(&self) -> &Vec<Vec<Value>> {
+        &self.rows
+    }
+}
+
+impl TryFrom<HttpRecordsOutput> for JsonRecordsOutput {
+    type Error = String;
+
+    fn try_from(output: HttpRecordsOutput) -> std::result::Result<Self, Self::Error> {
+        let mut rows = Vec::with_capacity(output.num_rows());
+        for row in output.rows {
+            let value_row = row
+                .into_iter()
+                .map(|f| Value::try_from(f).map_err(|err| err.to_string()))
+                .collect::<std::result::Result<Vec<Value>, _>>()?;
+            rows.push(value_row);
+        }
+        Ok(JsonRecordsOutput {
+            schema: output.schema,
+            rows,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct CsvRecordsOutput {
+    output: Vec<u8>,
+}
+
+impl IntoResponse for CsvRecordsOutput {
+    fn into_response(self) -> axum::response::Response {
+        ([(http::header::CONTENT_TYPE, "text/csv")], self.output).into_response()
+    }
+}
+
+impl TryFrom<HttpRecordsOutput> for CsvRecordsOutput {
+    type Error = String;
+
+    fn try_from(records: HttpRecordsOutput) -> std::result::Result<Self, Self::Error> {
+        if records.schema.is_none() {
+            return Ok(Self { output: vec![] });
         }
 
         let mut wtr = csv::WriterBuilder::new()
@@ -202,7 +250,7 @@ impl CsvRecordsOutput {
             .quote_style(csv::QuoteStyle::NonNumeric)
             .from_writer(vec![]);
 
-        let schema_record: Vec<String> = self
+        let schema_record: Vec<String> = records
             .schema
             .unwrap()
             .column_schemas
@@ -212,7 +260,8 @@ impl CsvRecordsOutput {
 
         wtr.write_record(&schema_record)
             .map_err(|e| e.to_string())?;
-        self.rows
+        records
+            .rows
             .into_iter()
             .try_for_each(|row| -> std::result::Result<(), csv::Error> {
                 wtr.serialize(&row)?;
@@ -221,51 +270,7 @@ impl CsvRecordsOutput {
             .map_err(|e| e.to_string())?;
         let output = wtr.into_inner().map_err(|e| e.to_string())?;
 
-        Ok(([(http::header::CONTENT_TYPE, "text/csv")], output).into_response())
-    }
-}
-
-impl TryFrom<Vec<RecordBatch>> for CsvRecordsOutput {
-    type Error = String;
-
-    fn try_from(
-        recordbatches: Vec<RecordBatch>,
-    ) -> std::result::Result<CsvRecordsOutput, Self::Error> {
-        if recordbatches.is_empty() {
-            Ok(CsvRecordsOutput {
-                schema: None,
-                rows: vec![],
-            })
-        } else {
-            // safety ensured by previous empty check
-            let first = &recordbatches[0];
-            let schema = Schema {
-                column_schemas: first
-                    .schema
-                    .column_schemas()
-                    .iter()
-                    .map(|cs| ColumnSchema {
-                        name: cs.name.clone(),
-                        data_type: cs.data_type.name().to_owned(),
-                    })
-                    .collect(),
-            };
-
-            let mut rows =
-                Vec::with_capacity(recordbatches.iter().map(|r| r.num_rows()).sum::<usize>());
-
-            for recordbatch in recordbatches {
-                for row in recordbatch.rows() {
-                    let row = row.map_err(|e| e.to_string())?;
-                    rows.push(row);
-                }
-            }
-
-            Ok(CsvRecordsOutput {
-                schema: Some(schema),
-                rows,
-            })
-        }
+        Ok(Self { output })
     }
 }
 
@@ -273,7 +278,7 @@ impl TryFrom<Vec<RecordBatch>> for CsvRecordsOutput {
 #[serde(rename_all = "lowercase")]
 pub enum JsonOutput {
     AffectedRows(usize),
-    Records(HttpRecordsOutput),
+    Records(JsonRecordsOutput),
 }
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
@@ -306,36 +311,6 @@ impl JsonResponse {
         }
     }
 
-    fn with_execution_time(mut self, execution_time: u128) -> Self {
-        self.execution_time_ms = Some(execution_time);
-        self
-    }
-
-    /// Create a json response from query result
-    async fn from_output(output: Result<Output>) -> Self {
-        match output {
-            Ok(Output::AffectedRows(rows)) => {
-                Self::with_output(Some(vec![JsonOutput::AffectedRows(rows)]))
-            }
-            Ok(Output::Stream(stream)) => match util::collect(stream).await {
-                Ok(rows) => match HttpRecordsOutput::try_from(rows) {
-                    Ok(rows) => Self::with_output(Some(vec![JsonOutput::Records(rows)])),
-                    Err(err) => Self::with_error(err, StatusCode::Internal),
-                },
-                Err(e) => Self::with_error(format!("Recordbatch error: {}", e), e.status_code()),
-            },
-            Ok(Output::RecordBatches(recordbatches)) => {
-                match HttpRecordsOutput::try_from(recordbatches.take()) {
-                    Ok(rows) => Self::with_output(Some(vec![JsonOutput::Records(rows)])),
-                    Err(err) => Self::with_error(err, StatusCode::Internal),
-                }
-            }
-            Err(e) => {
-                Self::with_error(format!("Query engine output error: {}", e), e.status_code())
-            }
-        }
-    }
-
     pub fn code(&self) -> u32 {
         self.code
     }
@@ -363,48 +338,67 @@ impl IntoResponse for JsonResponse {
     }
 }
 
-pub async fn handle_sql_output(output: Result<Output>, format: &str) -> axum::response::Response {
-    match output {
-        Ok(Output::AffectedRows(rows)) => {
-            JsonResponse::with_output(Some(vec![JsonOutput::AffectedRows(rows)])).into_response()
-        }
-        Ok(Output::Stream(stream)) => match util::collect(stream).await {
-            Ok(rows) => match HttpRecordsOutput::try_from(rows) {
-                Ok(rows) => {
-                    JsonResponse::with_output(Some(vec![JsonOutput::Records(rows)])).into_response()
-                }
-                Err(err) => JsonResponse::with_error(err, StatusCode::Internal).into_response(),
-            },
-            Err(e) => {
-                JsonResponse::with_error(format!("Recordbatch error: {}", e), e.status_code())
+pub enum SqlResponse {
+    AffectedRows(usize),
+    JsonRecords(JsonRecordsOutput),
+    CsvRecords(CsvRecordsOutput),
+    Err(String, StatusCode),
+}
+
+impl IntoResponse for SqlResponse {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::AffectedRows(rows) => {
+                JsonResponse::with_output(Some(vec![JsonOutput::AffectedRows(rows)]))
                     .into_response()
             }
-        },
-        Ok(Output::RecordBatches(recordbatches)) => {
-            let recordbatches = recordbatches.take();
-            if format == "json" {
-                match HttpRecordsOutput::try_from(recordbatches) {
-                    Ok(rows) => JsonResponse::with_output(Some(vec![JsonOutput::Records(rows)]))
-                        .into_response(),
-                    Err(err) => JsonResponse::with_error(err, StatusCode::Internal).into_response(),
-                }
-            } else {
-                match CsvRecordsOutput::try_from(recordbatches) {
-                    Ok(rows) => match rows.try_into_response() {
-                        Ok(resp) => resp,
-                        Err(err) => {
-                            JsonResponse::with_error(err, StatusCode::Internal).into_response()
-                        }
-                    },
-                    Err(err) => JsonResponse::with_error(err, StatusCode::Internal).into_response(),
-                }
+            Self::JsonRecords(output) => {
+                JsonResponse::with_output(Some(vec![JsonOutput::Records(output)])).into_response()
+            }
+            Self::CsvRecords(output) => output.into_response(),
+            Self::Err(error, error_code) => {
+                JsonResponse::with_error(error, error_code).into_response()
             }
         }
-        Err(e) => {
-            JsonResponse::with_error(format!("Query engine output error: {}", e), e.status_code())
-                .into_response()
+    }
+}
+
+fn handle_format(records: HttpRecordsOutput, format: &str) -> SqlResponse {
+    if format == "json" {
+        match JsonRecordsOutput::try_from(records) {
+            Ok(records) => SqlResponse::JsonRecords(records),
+            Err(err) => SqlResponse::Err(err, StatusCode::Internal),
+        }
+    } else {
+        match CsvRecordsOutput::try_from(records) {
+            Ok(records) => SqlResponse::CsvRecords(records),
+            Err(err) => SqlResponse::Err(err, StatusCode::Internal),
         }
     }
+}
+
+pub async fn handle_sql_output(output: Result<Output>, format: &str) -> axum::response::Response {
+    let sql_resp = match output {
+        Ok(Output::AffectedRows(rows)) => SqlResponse::AffectedRows(rows),
+        Ok(Output::Stream(stream)) => match util::collect(stream).await {
+            Ok(rows) => match HttpRecordsOutput::try_from(rows) {
+                Ok(records) => handle_format(records, format),
+                Err(err) => SqlResponse::Err(err, StatusCode::Internal),
+            },
+            Err(e) => SqlResponse::Err(format!("Recordbatch error: {}", e), e.status_code()),
+        },
+        Ok(Output::RecordBatches(recordbatches)) => {
+            match HttpRecordsOutput::try_from(recordbatches.take()) {
+                Ok(records) => handle_format(records, format),
+                Err(err) => SqlResponse::Err(err, StatusCode::Internal),
+            }
+        }
+        Err(err) => SqlResponse::Err(
+            format!("Query engine output error: {}", err),
+            err.status_code(),
+        ),
+    };
+    sql_resp.into_response()
 }
 
 async fn serve_api(Extension(api): Extension<Arc<OpenApi>>) -> impl IntoApiResponse {
@@ -679,20 +673,17 @@ mod test {
         let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch]).unwrap();
 
-        let json_resp = JsonResponse::from_output(Ok(Output::RecordBatches(recordbatches))).await;
+        let r =
+            JsonRecordsOutput::try_from(HttpRecordsOutput::try_from(recordbatches.take()).unwrap())
+                .unwrap();
 
-        let json_output = &json_resp.output.unwrap()[0];
-        if let JsonOutput::Records(r) = json_output {
-            assert_eq!(r.num_rows(), 4);
-            assert_eq!(r.num_cols(), 2);
-            let schema = r.schema.as_ref().unwrap();
-            assert_eq!(schema.column_schemas[0].name, "numbers");
-            assert_eq!(schema.column_schemas[0].data_type, "UInt32");
-            assert_eq!(r.rows[0][0], serde_json::Value::from(1));
-            assert_eq!(r.rows[0][1], serde_json::Value::Null);
-        } else {
-            panic!("invalid output type");
-        }
+        assert_eq!(r.num_rows(), 4);
+        assert_eq!(r.num_cols(), 2);
+        let schema = r.schema.as_ref().unwrap();
+        assert_eq!(schema.column_schemas[0].name, "numbers");
+        assert_eq!(schema.column_schemas[0].data_type, "UInt32");
+        assert_eq!(r.rows[0][0], serde_json::Value::from(1));
+        assert_eq!(r.rows[0][1], serde_json::Value::Null);
     }
 
     #[tokio::test]

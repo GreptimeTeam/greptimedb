@@ -12,14 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Instant;
-
 use axum::extract::{Json, Query, RawBody, State};
+use axum::response::IntoResponse;
 use common_error::ext::ErrorExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::http::{ApiState, JsonResponse};
+use crate::http::{handle_sql_output, ApiState, JsonResponse};
 
 macro_rules! json_err {
     ($e: expr) => {{
@@ -81,20 +80,25 @@ pub struct ScriptQuery {
 pub async fn run_script(
     State(state): State<ApiState>,
     Query(params): Query<ScriptQuery>,
-) -> Json<JsonResponse> {
+) -> axum::response::Response {
     if let Some(script_handler) = &state.script_handler {
-        let start = Instant::now();
         let name = params.name.as_ref();
 
         if name.is_none() || name.unwrap().is_empty() {
-            json_err!("invalid name");
+            return JsonResponse::with_error(
+                "Invalid argument: invalia name".to_string(),
+                common_error::status_code::StatusCode::InvalidArguments,
+            )
+            .into_response();
         }
 
         let output = script_handler.execute_script(name.unwrap()).await;
-        let resp = JsonResponse::from_output(output).await;
-
-        Json(resp.with_execution_time(start.elapsed().as_millis()))
+        handle_sql_output(output, "json").await
     } else {
-        json_err!("Script execution not supported, missing script handler");
+        JsonResponse::with_error(
+            "Invalid argument: Script execution not supported, missing script handler".to_string(),
+            common_error::status_code::StatusCode::InvalidArguments,
+        )
+        .into_response()
     }
 }
