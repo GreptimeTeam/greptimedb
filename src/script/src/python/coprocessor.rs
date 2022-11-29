@@ -431,6 +431,10 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
         i.borrow_mut()
             .get_or_insert_with(|| {
                 let interpreter = Arc::new(vm::Interpreter::with_init(Default::default(), |vm| {
+                    // We are freezing the stdlib, so according to this issue:
+                    // https://github.com/RustPython/RustPython/issues/4292
+                    // add this line for stdlib
+                    vm.add_frozen(rustpython_pylib::frozen_stdlib());
                     PyVector::make_class(&vm.ctx);
                     vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
                 }));

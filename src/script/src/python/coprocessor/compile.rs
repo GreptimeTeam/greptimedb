@@ -13,9 +13,9 @@
 // limitations under the License.
 
 //! compile script to code object
+use rustpython_codegen::compile::compile_top;
 use rustpython_compiler::{CompileOpts, Mode};
 use rustpython_compiler_core::CodeObject;
-use rustpython_codegen::compile::compile_top;
 use rustpython_parser::ast::{Located, Location};
 use rustpython_parser::{ast, parser};
 use snafu::ResultExt;
