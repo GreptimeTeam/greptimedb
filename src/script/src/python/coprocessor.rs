@@ -15,11 +15,13 @@
 pub mod compile;
 pub mod parse;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
+use common_telemetry::info;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow;
 use datatypes::arrow::array::{Array, ArrayRef};
@@ -45,6 +47,8 @@ use crate::python::error::{
 };
 use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
 use crate::python::PyVector;
+
+thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::new(None));
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,11 +118,12 @@ impl Coprocessor {
                     let AnnotationInfo {
                         datatype: ty,
                         is_nullable,
-                    } = anno[idx].to_owned().unwrap_or_else(||
-                    // default to be not nullable and use DataType inferred by PyVector itself
-                    AnnotationInfo{
-                        datatype: Some(real_ty.to_owned()),
-                        is_nullable: false
+                    } = anno[idx].to_owned().unwrap_or_else(|| {
+                        // default to be not nullable and use DataType inferred by PyVector itself
+                        AnnotationInfo {
+                            datatype: Some(real_ty.to_owned()),
+                            is_nullable: false,
+                        }
                     });
                     Field::new(
                         name,
@@ -282,7 +287,7 @@ fn check_args_anno_real_type(
             anno_ty
                 .to_owned()
                 .map(|v| v.datatype == None // like a vector[_]
-                    || v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
+                     || v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
                 .unwrap_or(true),
             OtherSnafu {
                 reason: format!(
@@ -380,7 +385,7 @@ pub(crate) fn exec_with_cached_vm(
     copr: &Coprocessor,
     rb: &DfRecordBatch,
     args: Vec<PyVector>,
-    vm: &Interpreter,
+    vm: &Arc<Interpreter>,
 ) -> Result<RecordBatch> {
     vm.enter(|vm| -> Result<RecordBatch> {
         PyVector::make_class(&vm.ctx);
@@ -421,10 +426,18 @@ pub(crate) fn exec_with_cached_vm(
 }
 
 /// init interpreter with type PyVector and Module: greptime
-pub(crate) fn init_interpreter() -> Interpreter {
-    vm::Interpreter::with_init(Default::default(), |vm| {
-        PyVector::make_class(&vm.ctx);
-        vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
+pub(crate) fn init_interpreter() -> Arc<Interpreter> {
+    INTERPRETER.with(|i| {
+        i.borrow_mut()
+            .get_or_insert_with(|| {
+                let interpreter = Arc::new(vm::Interpreter::with_init(Default::default(), |vm| {
+                    PyVector::make_class(&vm.ctx);
+                    vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
+                }));
+                info!("Initialized Python interpreter.");
+                interpreter
+            })
+            .clone()
     })
 }
 

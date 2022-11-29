@@ -1115,12 +1115,13 @@ pub mod tests {
     }
 
     pub fn execute_script(
+        interpreter: &rustpython_vm::Interpreter,
         script: &str,
         test_vec: Option<PyVector>,
         predicate: PredicateFn,
     ) -> Result<(PyObjectRef, Option<bool>), PyRef<rustpython_vm::builtins::PyBaseException>> {
         let mut pred_res = None;
-        rustpython_vm::Interpreter::without_stdlib(Default::default())
+        interpreter
             .enter(|vm| {
                 PyVector::make_class(&vm.ctx);
                 let scope = vm.new_scope_with_builtins();
@@ -1208,8 +1209,10 @@ pub mod tests {
                 Some(|v, vm| is_eq(v, 2.0, vm)),
             ),
         ];
+
+        let interpreter = rustpython_vm::Interpreter::without_stdlib(Default::default());
         for (code, pred) in snippet {
-            let result = execute_script(code, None, pred);
+            let result = execute_script(&interpreter, code, None, pred);
 
             println!(
                 "\u{001B}[35m{code}\u{001B}[0m: {:?}{}",
