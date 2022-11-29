@@ -99,7 +99,7 @@ fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
         "_" => Ok(None),
         // note the different between "_" and _
         _ => fail_parse_error!(
-            format!("Unknown datatype: {ty} at {}", loc),
+            format!("Unknown datatype: {ty} at {:?}", loc),
             Some(loc.to_owned())
         ),
     }
@@ -427,7 +427,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
 
 /// parse script and return `Coprocessor` struct with info extract from ast
 pub fn parse_and_compile_copr(script: &str) -> Result<Coprocessor> {
-    let python_ast = parser::parse_program(script).context(PyParseSnafu)?;
+    let python_ast = parser::parse_program(script, "<embedded>").context(PyParseSnafu)?;
 
     let mut coprocessor = None;
 

@@ -7,16 +7,16 @@ license = "Apache-2.0"
 [features]
 default = ["python"]
 python = [
-    "dep:datafusion",
-    "dep:datafusion-expr",
-    "dep:datafusion-physical-expr",
-    "dep:rustpython-vm",
-    "dep:rustpython-parser",
-    "dep:rustpython-compiler",
-    "dep:rustpython-compiler-core",
-    "dep:rustpython-bytecode",
-    "dep:rustpython-ast",
-    "dep:paste",
+  "dep:datafusion",
+  "dep:datafusion-expr",
+  "dep:datafusion-physical-expr",
+  "dep:rustpython-vm",
+  "dep:rustpython-parser",
+  "dep:rustpython-compiler",
+  "dep:rustpython-compiler-core",
+  "dep:rustpython-codegen",
+  "dep:rustpython-ast",
+  "dep:paste",
 ]
 
 [dependencies]
@@ -39,14 +39,16 @@ futures = "0.3"
 futures-util = "0.3"
 paste = { version = "1.0", optional = true }
 query = { path = "../query" }
-rustpython-ast = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
-rustpython-bytecode = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
-rustpython-compiler = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
-rustpython-compiler-core = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
-rustpython-parser = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
-rustpython-vm = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d", features = [
-    "default",
-    "freeze-stdlib",
+rustpython-ast = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "5c29c27b6f" }
+# rustpython-bytecode = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "faace160be" }
+rustpython-compiler = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "5c29c27b6f" }
+rustpython-compiler-core = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "5c29c27b6f" }
+rustpython-codegen = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "5c29c27b6f"}
+rustpython-parser = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "5c29c27b6f" }
+rustpython-vm = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "5c29c27b6f", features = [
+  "default",
+  "freeze-stdlib",
+  "codegen"
 ] }
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }

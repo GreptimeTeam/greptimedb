@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -35,7 +36,7 @@ use rustpython_vm::protocol::{PyMappingMethods, PySequenceMethods};
 use rustpython_vm::sliceable::{SaturatedSlice, SequenceIndex, SequenceIndexOp};
 use rustpython_vm::types::{AsMapping, AsSequence, Comparable, PyComparisonOp};
 use rustpython_vm::{
-    pyclass, pyimpl, AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    pyclass,  AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
 
 use crate::python::utils::{is_instance, PyVectorRef};
@@ -179,7 +180,7 @@ impl AsRef<PyVector> for PyVector {
 }
 
 /// PyVector type wraps a greptime vector, impl multiply/div/add/sub opeerators etc.
-#[pyimpl(with(AsMapping, AsSequence, Comparable))]
+#[pyclass(with(AsMapping, AsSequence, Comparable))]
 impl PyVector {
     pub(crate) fn new(
         iterable: OptionalArg<PyObjectRef>,
@@ -1012,9 +1013,14 @@ impl Comparable for PyVector {
             let ret = ret.into_pyobject(vm);
             Ok(Either::A(ret))
         } else {
+            // Safety: we are manually drop this ref, so no problem here
+            let r = unsafe {
+                let ptr = std::ptr::NonNull::from(zelf);
+                ManuallyDrop::new(PyObjectRef::from_raw(ptr.as_ptr()))
+            };
             Err(vm.new_type_error(format!(
-                "unexpected payload {} for {}",
-                zelf,
+                "unexpected payload {:?} for {}",
+                r,
                 op.method_name(&vm.ctx).as_str()
             )))
         }
@@ -1151,7 +1157,7 @@ pub mod tests {
                 let code_obj = vm
                     .compile(
                         script,
-                        rustpython_vm::compile::Mode::BlockExpr,
+                        rustpython_compiler_core::Mode::BlockExpr,
                         "<embedded>".to_owned(),
                     )
                     .map_err(|err| vm.new_syntax_error(&err))?;

@@ -29,7 +29,7 @@ use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::schema::Schema;
 use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector, VectorRef};
-use rustpython_bytecode::CodeObject;
+use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
 use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::AsObject;
