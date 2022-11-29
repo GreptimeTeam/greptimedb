@@ -26,7 +26,15 @@ use crate::server::Services;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ObjectStoreConfig {
-    File { data_dir: String },
+    File {
+        data_dir: String,
+    },
+    S3 {
+        bucket: String,
+        root: String,
+        access_key_id: String,
+        secret_access_key: String,
+    },
 }
 
 impl Default for ObjectStoreConfig {

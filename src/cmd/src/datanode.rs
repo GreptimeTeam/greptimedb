@@ -170,6 +170,7 @@ mod tests {
             ObjectStoreConfig::File { data_dir } => {
                 assert_eq!("/tmp/greptimedb/data/".to_string(), data_dir)
             }
+            _ => unreachable!(),
         };
     }
 

@@ -28,7 +28,8 @@ use meta_client::MetaClientOpts;
 use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
 use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
-use object_store::services::fs::Builder;
+use object_store::services::fs::Builder as FsBuilder;
+use object_store::services::s3::Builder as S3Builder;
 use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
@@ -187,25 +188,12 @@ impl Instance {
 }
 
 pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
-    // TODO(dennis): supports other backend
-    let data_dir = util::normalize_dir(match store_config {
-        ObjectStoreConfig::File { data_dir } => data_dir,
-    });
+    let object_store = match store_config {
+        ObjectStoreConfig::File { data_dir } => new_fs_object_store(data_dir).await?,
+        ObjectStoreConfig::S3 { .. } => new_s3_object_store(store_config).await?,
+    };
 
-    fs::create_dir_all(path::Path::new(&data_dir))
-        .context(error::CreateDirSnafu { dir: &data_dir })?;
-
-    info!("The storage directory is: {}", &data_dir);
-
-    let atomic_write_dir = format!("{}/.tmp/", data_dir);
-
-    let accessor = Builder::default()
-        .root(&data_dir)
-        .atomic_write_dir(&atomic_write_dir)
-        .build()
-        .context(error::InitBackendSnafu { dir: &data_dir })?;
-
-    let object_store = ObjectStore::new(accessor)
+    Ok(object_store
         // Add retry
         .layer(RetryLayer::new(ExponentialBackoff::default().with_jitter()))
         // Add metrics
@@ -213,9 +201,53 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         // Add logging
         .layer(LoggingLayer)
         // Add tracing
-        .layer(TracingLayer);
+        .layer(TracingLayer))
+}
 
-    Ok(object_store)
+pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
+    let (root, secret_key, key_id, bucket) = match store_config {
+        ObjectStoreConfig::S3 {
+            bucket,
+            root,
+            access_key_id,
+            secret_access_key,
+        } => (root, secret_access_key, access_key_id, bucket),
+        _ => unreachable!(),
+    };
+
+    let root = util::normalize_dir(root);
+    info!("The s3 storage bucket is: {}, root is: {}", bucket, &root);
+
+    let accessor = S3Builder::default()
+        .root(&root)
+        .bucket(bucket)
+        .access_key_id(key_id)
+        .secret_access_key(secret_key)
+        .build()
+        .with_context(|_| error::InitBackendSnafu {
+            config: store_config.clone(),
+        })?;
+
+    Ok(ObjectStore::new(accessor))
+}
+
+pub(crate) async fn new_fs_object_store(data_dir: &str) -> Result<ObjectStore> {
+    let data_dir = util::normalize_dir(data_dir);
+    fs::create_dir_all(path::Path::new(&data_dir))
+        .context(error::CreateDirSnafu { dir: &data_dir })?;
+    info!("The file storage directory is: {}", &data_dir);
+
+    let atomic_write_dir = format!("{}/.tmp/", data_dir);
+
+    let accessor = FsBuilder::default()
+        .root(&data_dir)
+        .atomic_write_dir(&atomic_write_dir)
+        .build()
+        .context(error::InitBackendSnafu {
+            config: ObjectStoreConfig::File { data_dir },
+        })?;
+
+    Ok(ObjectStore::new(accessor))
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.
