@@ -79,7 +79,7 @@ impl_scalar_vector_op!(
     { BooleanVector, replicate_scalar }
     // { ListVector, replicate_scalar },
     // { StringVector, replicate_scalar },
-    // { DateVector, replicate_scalar }
+    // { DateVector, replicate_date },
     // { DateTimeVector, replicate_datetime },
     // { TimestampVector, replicate_timestamp }
 );

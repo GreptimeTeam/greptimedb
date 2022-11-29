@@ -27,7 +27,7 @@ use crate::vectors::{DateVector, DateVectorBuilder, MutableVector, Vector};
 
 /// Data type for Date (YYYY-MM-DD).
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DateType {}
+pub struct DateType;
 
 impl DataType for DateType {
     fn name(&self) -> &str {
@@ -57,7 +57,7 @@ impl LogicalPrimitiveType for DateType {
     type Wrapper = Date;
 
     fn build_data_type() -> ConcreteDataType {
-        ConcreteDataType::Date(DateType::default())
+        ConcreteDataType::date_datatype()
     }
 
     fn type_name() -> &'static str {

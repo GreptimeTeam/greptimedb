@@ -171,7 +171,7 @@ impl WrapperType for Date {
 macro_rules! define_logical_primitive_type {
     ($Native: ident, $TypeId: ident, $DataType: ident) => {
         #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-        pub struct $DataType {}
+        pub struct $DataType;
 
         impl LogicalPrimitiveType for $DataType {
             type ArrowPrimitive = arrow::datatypes::$DataType;

@@ -45,9 +45,11 @@ pub enum ConcreteDataType {
     Float32(Float32Type),
     Float64(Float64Type),
 
-    // String types
+    // String types:
     Binary(BinaryType),
     // String(StringType),
+
+    // Date types:
     Date(DateType),
     // DateTime(DateTimeType),
     // Timestamp(TimestampType),
@@ -192,36 +194,36 @@ impl_new_concrete_type_functions!(
     Date
 );
 
-impl ConcreteDataType {
-    // pub fn list_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
-    //     ConcreteDataType::List(ListType::new(inner_type))
-    // }
+// impl ConcreteDataType {
+//     pub fn list_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
+//         ConcreteDataType::List(ListType::new(inner_type))
+//     }
 
-    // pub fn timestamp_datatype(unit: TimeUnit) -> Self {
-    //     ConcreteDataType::Timestamp(TimestampType::new(unit))
-    // }
+//     pub fn timestamp_datatype(unit: TimeUnit) -> Self {
+//         ConcreteDataType::Timestamp(TimestampType::new(unit))
+//     }
 
-    // pub fn timestamp_millis_datatype() -> Self {
-    //     ConcreteDataType::Timestamp(TimestampType::new(TimeUnit::Millisecond))
-    // }
+//     pub fn timestamp_millis_datatype() -> Self {
+//         ConcreteDataType::Timestamp(TimestampType::new(TimeUnit::Millisecond))
+//     }
 
-    // /// Converts from arrow timestamp unit to
-    // // TODO(hl): maybe impl From<ArrowTimestamp> for our timestamp ?
-    // pub fn from_arrow_time_unit(t: &arrow::datatypes::TimeUnit) -> Self {
-    //     match t {
-    //         arrow::datatypes::TimeUnit::Second => Self::timestamp_datatype(TimeUnit::Second),
-    //         arrow::datatypes::TimeUnit::Millisecond => {
-    //             Self::timestamp_datatype(TimeUnit::Millisecond)
-    //         }
-    //         arrow::datatypes::TimeUnit::Microsecond => {
-    //             Self::timestamp_datatype(TimeUnit::Microsecond)
-    //         }
-    //         arrow::datatypes::TimeUnit::Nanosecond => {
-    //             Self::timestamp_datatype(TimeUnit::Nanosecond)
-    //         }
-    //     }
-    // }
-}
+//     /// Converts from arrow timestamp unit to
+//     // TODO(hl): maybe impl From<ArrowTimestamp> for our timestamp ?
+//     pub fn from_arrow_time_unit(t: &arrow::datatypes::TimeUnit) -> Self {
+//         match t {
+//             arrow::datatypes::TimeUnit::Second => Self::timestamp_datatype(TimeUnit::Second),
+//             arrow::datatypes::TimeUnit::Millisecond => {
+//                 Self::timestamp_datatype(TimeUnit::Millisecond)
+//             }
+//             arrow::datatypes::TimeUnit::Microsecond => {
+//                 Self::timestamp_datatype(TimeUnit::Microsecond)
+//             }
+//             arrow::datatypes::TimeUnit::Nanosecond => {
+//                 Self::timestamp_datatype(TimeUnit::Nanosecond)
+//             }
+//         }
+//     }
+// }
 
 /// Data type abstraction.
 #[enum_dispatch::enum_dispatch]

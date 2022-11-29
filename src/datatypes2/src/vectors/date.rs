@@ -15,7 +15,7 @@
 use crate::types::DateType;
 use crate::vectors::{PrimitiveVector, PrimitiveVectorBuilder};
 
-// Vector for [`Data`](common_time::Date).
+// Vector for [`Date`](common_time::Date).
 pub type DateVector = PrimitiveVector<DateType>;
 // Builder to build DateVector.
 pub type DateVectorBuilder = PrimitiveVectorBuilder<DateType>;
