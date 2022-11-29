@@ -553,15 +553,6 @@ impl<'a> Ord for ValueRef<'a> {
     }
 }
 
-/// A helper trait to convert copyable types to `ValueRef`.
-///
-/// It could replace the usage of `Into<ValueRef<'a>>`, thus avoid confusion between `Into<Value>`
-/// and `Into<ValueRef<'a>>` in generic codes. One typical usage is the [`Primitive`](crate::primitive_traits::Primitive) trait.
-pub trait IntoValueRef<'a> {
-    /// Convert itself to [ValueRef].
-    fn into_value_ref(self) -> ValueRef<'a>;
-}
-
 macro_rules! impl_value_ref_from {
     ($Variant:ident, $Type:ident) => {
         impl From<$Type> for ValueRef<'_> {
@@ -570,24 +561,9 @@ macro_rules! impl_value_ref_from {
             }
         }
 
-        impl<'a> IntoValueRef<'a> for $Type {
-            fn into_value_ref(self) -> ValueRef<'a> {
-                ValueRef::$Variant(self.into())
-            }
-        }
-
         impl From<Option<$Type>> for ValueRef<'_> {
             fn from(value: Option<$Type>) -> Self {
                 match value {
-                    Some(v) => ValueRef::$Variant(v.into()),
-                    None => ValueRef::Null,
-                }
-            }
-        }
-
-        impl<'a> IntoValueRef<'a> for Option<$Type> {
-            fn into_value_ref(self) -> ValueRef<'a> {
-                match self {
                     Some(v) => ValueRef::$Variant(v.into()),
                     None => ValueRef::Null,
                 }

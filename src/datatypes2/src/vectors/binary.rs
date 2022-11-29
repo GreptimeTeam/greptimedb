@@ -221,9 +221,9 @@ mod tests {
 
     use super::*;
     use crate::arrow_array::BinaryArray;
-    // use crate::data_type::DataType;
+    use crate::data_type::DataType;
     use crate::serialize::Serializable;
-    // use crate::types::BinaryType;
+    use crate::types::BinaryType;
 
     #[test]
     fn test_binary_vector_misc() {
@@ -237,7 +237,7 @@ mod tests {
         assert!(!v.is_const());
         assert_eq!(Validity::AllValid, v.validity());
         assert!(!v.only_null());
-        assert_eq!(30, v.memory_size());
+        assert_eq!(128, v.memory_size());
 
         for i in 0..2 {
             assert!(!v.is_null(i));
@@ -278,14 +278,6 @@ mod tests {
             serde_json::to_string(&json_value).unwrap()
         );
     }
-
-    // #[test]
-    // fn test_from_arrow_array() {
-    //     let arrow_array = BinaryArray::from_iter_values(&[vec![1, 2, 3], vec![1, 2, 3]]);
-    //     let original = arrow_array.clone();
-    //     let vector = BinaryVector::from(arrow_array);
-    //     assert_eq!(original, vector.array);
-    // }
 
     #[test]
     fn test_from_arrow_array() {
@@ -342,23 +334,22 @@ mod tests {
         // assert!(!slots.get_bit(1));
     }
 
-    // TODO(yingwen): Impl Int32Vector and create_mutable_vector() of DataType returns vectors::Vector
-    // #[test]
-    // fn test_binary_vector_builder() {
-    //     let input = BinaryVector::from_slice(&[b"world", b"one", b"two"]);
+    #[test]
+    fn test_binary_vector_builder() {
+        let input = BinaryVector::from_slice(&[b"world", b"one", b"two"]);
 
-    //     let mut builder = BinaryType::default().create_mutable_vector(3);
-    //     builder
-    //         .push_value_ref(ValueRef::Binary("hello".as_bytes()))
-    //         .unwrap();
-    //     assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
-    //     builder.extend_slice_of(&input, 1, 2).unwrap();
-    //     assert!(builder
-    //         .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
-    //         .is_err());
-    //     let vector = builder.to_vector();
+        let mut builder = BinaryType::default().create_mutable_vector(3);
+        builder
+            .push_value_ref(ValueRef::Binary("hello".as_bytes()))
+            .unwrap();
+        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.extend_slice_of(&input, 1, 2).unwrap();
+        assert!(builder
+            .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
+            .is_err());
+        let vector = builder.to_vector();
 
-    //     let expect: VectorRef = Arc::new(BinaryVector::from_slice(&[b"hello", b"one", b"two"]));
-    //     assert_eq!(expect, vector);
-    // }
+        let expect: VectorRef = Arc::new(BinaryVector::from_slice(&[b"hello", b"one", b"two"]));
+        assert_eq!(expect, vector);
+    }
 }

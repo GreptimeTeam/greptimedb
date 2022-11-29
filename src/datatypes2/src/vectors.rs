@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -14,10 +28,15 @@ use crate::vectors::operations::VectorOp;
 
 pub mod binary;
 pub mod boolean;
+mod eq;
+mod helper;
 pub mod operations;
+pub mod primitive;
 
-pub use binary::{BinaryVector, BinaryVectorBuilder};
-pub use boolean::{BooleanVector, BooleanVectorBuilder};
+pub use binary::*;
+pub use boolean::*;
+pub use helper::Helper;
+pub use primitive::*;
 
 // TODO(yingwen): We need to reimplement Validity as arrow's Bitmap doesn't support null_count().
 #[derive(Debug, PartialEq)]
@@ -176,22 +195,20 @@ macro_rules! impl_try_from_arrow_array_for_vector {
             pub fn try_from_arrow_array(
                 array: impl AsRef<dyn arrow::array::Array>,
             ) -> crate::error::Result<$Vector> {
-                let data = array.as_ref().data().clone();
-                // TODO(yingwen): Should we check the array type?
+                use snafu::OptionExt;
+
+                let data = array
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<$Array>()
+                    .with_context(|| crate::error::ConversionSnafu {
+                        from: std::format!("{:?}", array.as_ref().data_type()),
+                    })?
+                    .data()
+                    .clone();
+
                 let concrete_array = $Array::from(data);
                 Ok($Vector::from(concrete_array))
-
-                // The original implementation using arrow2 checks array type:
-                // Ok($Vector::from(
-                //     array
-                //         .as_ref()
-                //         .as_any()
-                //         .downcast_ref::<$Array>()
-                //         .with_context(|| crate::error::ConversionSnafu {
-                //             from: std::format!("{:?}", array.as_ref().data_type()),
-                //         })?
-                //         .clone(),
-                // ))
             }
         }
     };
@@ -255,44 +272,43 @@ pub(crate) use {
     impl_try_from_arrow_array_for_vector, impl_validity_for_vector,
 };
 
-// TODO(yingwen): Make this compile.
-// #[cfg(test)]
-// pub mod tests {
-//     use arrow::array::{Array, PrimitiveArray};
-//     use serde_json;
+#[cfg(test)]
+pub mod tests {
+    use arrow::array::{Array, Int32Array, UInt8Array};
+    use serde_json;
 
-//     use super::helper::Helper;
-//     use super::*;
-//     use crate::data_type::DataType;
-//     use crate::types::PrimitiveElement;
+    use super::*;
+    use crate::data_type::DataType;
+    use crate::types::{Int32Type, LogicalPrimitiveType};
+    use crate::vectors::helper::Helper;
 
-//     #[test]
-//     fn test_df_columns_to_vector() {
-//         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1, 2, 3]));
-//         let vector = Helper::try_into_vector(df_column).unwrap();
-//         assert_eq!(
-//             i32::build_data_type().as_arrow_type(),
-//             vector.data_type().as_arrow_type()
-//         );
-//     }
+    #[test]
+    fn test_df_columns_to_vector() {
+        let df_column: Arc<dyn Array> = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        let vector = Helper::try_into_vector(df_column).unwrap();
+        assert_eq!(
+            Int32Type::build_data_type().as_arrow_type(),
+            vector.data_type().as_arrow_type()
+        );
+    }
 
-//     #[test]
-//     fn test_serialize_i32_vector() {
-//         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::<i32>::from_slice(vec![1, 2, 3]));
-//         let json_value = Helper::try_into_vector(df_column)
-//             .unwrap()
-//             .serialize_to_json()
-//             .unwrap();
-//         assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
-//     }
+    #[test]
+    fn test_serialize_i32_vector() {
+        let df_column: Arc<dyn Array> = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        let json_value = Helper::try_into_vector(df_column)
+            .unwrap()
+            .serialize_to_json()
+            .unwrap();
+        assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
+    }
 
-//     #[test]
-//     fn test_serialize_i8_vector() {
-//         let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1u8, 2u8, 3u8]));
-//         let json_value = Helper::try_into_vector(df_column)
-//             .unwrap()
-//             .serialize_to_json()
-//             .unwrap();
-//         assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
-//     }
-// }
+    #[test]
+    fn test_serialize_i8_vector() {
+        let df_column: Arc<dyn Array> = Arc::new(UInt8Array::from(vec![1, 2, 3]));
+        let json_value = Helper::try_into_vector(df_column)
+            .unwrap()
+            .serialize_to_json()
+            .unwrap();
+        assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
+    }
+}

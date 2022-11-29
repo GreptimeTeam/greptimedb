@@ -20,27 +20,30 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
-use crate::types::{BinaryType, BooleanType};
+use crate::types::{
+    BinaryType, BooleanType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+};
 use crate::value::Value;
 use crate::vectors::MutableVector;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[enum_dispatch::enum_dispatch(DataType)]
 pub enum ConcreteDataType {
     // Null(NullType),
     Boolean(BooleanType),
 
     // Numeric types:
-    // Int8(Int8Type),
-    // Int16(Int16Type),
-    // Int32(Int32Type),
-    // Int64(Int64Type),
-    // UInt8(UInt8Type),
-    // UInt16(UInt16Type),
-    // UInt32(UInt32Type),
-    // UInt64(UInt64Type),
-    // Float32(Float32Type),
-    // Float64(Float64Type),
+    Int8(Int8Type),
+    Int16(Int16Type),
+    Int32(Int32Type),
+    Int64(Int64Type),
+    UInt8(UInt8Type),
+    UInt16(UInt16Type),
+    UInt32(UInt32Type),
+    UInt64(UInt64Type),
+    Float32(Float32Type),
+    Float64(Float64Type),
 
     // String types
     Binary(BinaryType),

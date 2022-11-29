@@ -12,7 +12,7 @@ test = []
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+datafusion-common = "14.0"
 enum_dispatch = "0.3"
 num = "0.4"
 num-traits = "0.2"

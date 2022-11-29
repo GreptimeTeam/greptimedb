@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 mod filter;
 mod find_unique;
 mod replicate;
@@ -5,8 +19,9 @@ mod replicate;
 use common_base::BitVec;
 
 use crate::error::Result;
+use crate::types::LogicalPrimitiveType;
 // use crate::types::PrimitiveElement;
-use crate::vectors::{BinaryVector, BooleanVector, Vector, VectorRef};
+use crate::vectors::{BinaryVector, BooleanVector, PrimitiveVector, Vector, VectorRef};
 
 /// Vector compute operations.
 pub trait VectorOp {
@@ -69,3 +84,19 @@ impl_scalar_vector_op!(
     // { DateTimeVector, replicate_datetime },
     // { TimestampVector, replicate_timestamp }
 );
+
+impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        std::sync::Arc::new(replicate::replicate_primitive(self, offsets))
+    }
+
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
+        let prev_vector =
+            prev_vector.and_then(|pv| pv.as_any().downcast_ref::<PrimitiveVector<T>>());
+        find_unique::find_unique_scalar(self, selected, prev_vector);
+    }
+
+    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+        filter::filter_non_constant!(self, PrimitiveVector<T>, filter)
+    }
+}
