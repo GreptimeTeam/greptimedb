@@ -48,7 +48,6 @@ use crate::python::error::{
 use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
 use crate::python::PyVector;
 
-/// Rustpython interpreter TLS cache
 thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::new(None));
 
 #[cfg_attr(test, derive(Deserialize))]
