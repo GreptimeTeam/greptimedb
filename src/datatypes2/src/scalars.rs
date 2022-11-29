@@ -14,11 +14,15 @@
 
 use std::any::Any;
 
+use common_time::Date;
+
 use crate::types::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type,
     UInt64Type, UInt8Type,
 };
-use crate::vectors::{BinaryVector, BooleanVector, MutableVector, PrimitiveVector, Vector};
+use crate::vectors::{
+    BinaryVector, BooleanVector, DateVector, MutableVector, PrimitiveVector, Vector,
+};
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
     match iter.size_hint() {
@@ -251,27 +255,26 @@ impl<'a> ScalarRef<'a> for &'a [u8] {
     }
 }
 
-// impl Scalar for Date {
-//     type VectorType = DateVector;
-//     type RefType<'a> = Date;
+impl Scalar for Date {
+    type VectorType = DateVector;
+    type RefType<'a> = Date;
 
-//     fn as_scalar_ref(&self) -> Self::RefType<'_> {
-//         *self
-//     }
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        *self
+    }
 
-//     fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
-//         long
-//     }
-// }
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
 
-// impl<'a> ScalarRef<'a> for Date {
-//     type VectorType = DateVector;
-//     type ScalarType = Date;
+impl<'a> ScalarRef<'a> for Date {
+    type ScalarType = Date;
 
-//     fn to_owned_scalar(&self) -> Self::ScalarType {
-//         *self
-//     }
-// }
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        *self
+    }
+}
 
 // impl Scalar for DateTime {
 //     type VectorType = DateTimeVector;
@@ -287,7 +290,6 @@ impl<'a> ScalarRef<'a> for &'a [u8] {
 // }
 
 // impl<'a> ScalarRef<'a> for DateTime {
-//     type VectorType = DateTimeVector;
 //     type ScalarType = DateTime;
 
 //     fn to_owned_scalar(&self) -> Self::ScalarType {
@@ -309,7 +311,6 @@ impl<'a> ScalarRef<'a> for &'a [u8] {
 // }
 
 // impl<'a> ScalarRef<'a> for Timestamp {
-//     type VectorType = TimestampVector;
 //     type ScalarType = Timestamp;
 
 //     fn to_owned_scalar(&self) -> Self::ScalarType {
@@ -331,7 +332,6 @@ impl<'a> ScalarRef<'a> for &'a [u8] {
 // }
 
 // impl<'a> ScalarRef<'a> for ListValueRef<'a> {
-//     type VectorType = ListVector;
 //     type ScalarType = ListValue;
 
 //     fn to_owned_scalar(&self) -> Self::ScalarType {

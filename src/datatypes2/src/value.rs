@@ -110,6 +110,7 @@ impl Value {
     /// # Panics
     /// Panics if the data type is not supported.
     pub fn data_type(&self) -> ConcreteDataType {
+        // TODO(yingwen): Implement this once all data types are implemented.
         match self {
             Value::Boolean(_) => ConcreteDataType::boolean_datatype(),
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
@@ -283,6 +284,9 @@ impl_value_from!(Float32, f32);
 impl_value_from!(Float64, f64);
 impl_value_from!(String, StringBytes);
 impl_value_from!(Binary, Bytes);
+impl_value_from!(Date, Date);
+impl_value_from!(DateTime, DateTime);
+impl_value_from!(Timestamp, Timestamp);
 
 impl From<String> for Value {
     fn from(string: String) -> Value {
@@ -299,12 +303,6 @@ impl From<&str> for Value {
 impl From<Vec<u8>> for Value {
     fn from(bytes: Vec<u8>) -> Value {
         Value::Binary(bytes.into())
-    }
-}
-
-impl From<Timestamp> for Value {
-    fn from(v: Timestamp) -> Self {
-        Value::Timestamp(v)
     }
 }
 
@@ -583,6 +581,9 @@ impl_value_ref_from!(Int32, i32);
 impl_value_ref_from!(Int64, i64);
 impl_value_ref_from!(Float32, f32);
 impl_value_ref_from!(Float64, f64);
+impl_value_ref_from!(Date, Date);
+impl_value_ref_from!(DateTime, DateTime);
+impl_value_ref_from!(Timestamp, Timestamp);
 
 impl<'a> From<&'a str> for ValueRef<'a> {
     fn from(string: &'a str) -> ValueRef<'a> {

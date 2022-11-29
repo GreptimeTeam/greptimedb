@@ -20,7 +20,6 @@ use common_base::BitVec;
 
 use crate::error::Result;
 use crate::types::LogicalPrimitiveType;
-// use crate::types::PrimitiveElement;
 use crate::vectors::{BinaryVector, BooleanVector, PrimitiveVector, Vector, VectorRef};
 
 /// Vector compute operations.
@@ -80,7 +79,7 @@ impl_scalar_vector_op!(
     { BooleanVector, replicate_scalar }
     // { ListVector, replicate_scalar },
     // { StringVector, replicate_scalar },
-    // { DateVector, replicate_date },
+    // { DateVector, replicate_scalar }
     // { DateTimeVector, replicate_datetime },
     // { TimestampVector, replicate_timestamp }
 );

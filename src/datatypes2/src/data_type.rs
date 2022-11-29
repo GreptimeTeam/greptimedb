@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
-    BinaryType, BooleanType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
-    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    BinaryType, BooleanType, DateType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
+    Int8Type, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -48,14 +48,14 @@ pub enum ConcreteDataType {
     // String types
     Binary(BinaryType),
     // String(StringType),
-
-    // Date(DateType),
+    Date(DateType),
     // DateTime(DateTimeType),
     // Timestamp(TimestampType),
 
     // List(ListType),
 }
 
+// TODO(yingwen): Consider moving these methods to the DataType trait.
 impl ConcreteDataType {
     // pub fn is_float(&self) -> bool {
     //     matches!(
