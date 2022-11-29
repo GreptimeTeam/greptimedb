@@ -82,20 +82,14 @@ impl MysqlServer {
 
         let (r, w) = stream.into_split();
         let w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
-        // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
-        let spawn_result = io_runtime
-            .spawn(AsyncMysqlIntermediary::run_on(shim, r, w))
-            .await;
-        match spawn_result {
-            Ok(run_result) => {
-                if let Err(e) = run_result {
-                    // TODO(LFC): Write this error and the below one to client as well, in MySQL text protocol.
+        io_runtime.spawn(async move {
+            // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
+            if let Err(e) = AsyncMysqlIntermediary::run_on(shim, r, w).await {
+                    // TODO(LFC): Write this error to client as well, in MySQL text protocol.
                     // Looks like we have to expose opensrv-mysql's `PacketWriter`?
                     error!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time.")
                 }
-            }
-            Err(e) => error!("IO runtime cannot execute task, error: {}", e),
-        }
+            });
         Ok(())
     }
 }
