@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![feature(let_chains)]
+
+mod context;
+mod df_expr;
 mod df_logical;
 pub mod error;
 mod schema;

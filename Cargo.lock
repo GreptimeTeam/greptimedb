@@ -5946,6 +5946,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "datafusion",
+ "datafusion-expr",
  "datatypes",
  "futures",
  "prost 0.9.0",

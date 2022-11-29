@@ -12,6 +12,7 @@ common-error = { path = "../error" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
     "simd",
 ] }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 prost = "0.9"
