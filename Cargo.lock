@@ -3655,7 +3655,6 @@ name = "object-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "common-runtime",
  "common-telemetry",
  "futures",
  "opendal",
@@ -6191,7 +6190,6 @@ dependencies = [
 name = "tests-integration"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "api",
  "axum 0.6.1",
  "axum-test-helper",

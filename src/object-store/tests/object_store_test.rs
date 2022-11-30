@@ -17,7 +17,7 @@ use std::env;
 use anyhow::Result;
 use common_telemetry::logging;
 use object_store::backend::{fs, s3};
-use object_store::test_util::S3TempFolderGuard;
+use object_store::test_util::TempFolder;
 use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore};
 use tempdir::TempDir;
 
@@ -122,7 +122,7 @@ async fn test_s3_backend() -> Result<()> {
 
             let store = ObjectStore::new(accessor);
 
-            let mut guard = S3TempFolderGuard::new(&store, "/");
+            let mut guard = TempFolder::new(&store, "/");
             test_object_crud(&store).await?;
             test_object_list(&store).await?;
             guard.remove_all().await?;

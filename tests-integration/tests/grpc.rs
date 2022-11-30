@@ -33,13 +33,12 @@ macro_rules! grpc_test {
                     $(
                         #[$meta]
                     )*
-                    async fn [< $test >]() -> anyhow::Result<()> {
+                    async fn [< $test >]() {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
                             let _ = $crate::grpc::$test(store_type).await;
                         }
 
-                        Ok(())
                     }
                 )*
             }

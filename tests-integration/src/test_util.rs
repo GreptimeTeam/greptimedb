@@ -32,7 +32,7 @@ use frontend::frontend::FrontendOptions;
 use frontend::grpc::GrpcOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use object_store::backend::s3;
-use object_store::test_util::S3TempFolderGuard;
+use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServer};
@@ -91,10 +91,7 @@ fn get_test_store_config(
 
             let store = ObjectStore::new(accessor);
 
-            (
-                config,
-                Some(TempDirGuard::S3(S3TempFolderGuard::new(&store, "/"))),
-            )
+            (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
         }
         StorageType::File => {
             let data_tmp_dir = TempDir::new(&format!("gt_data_{}", name)).unwrap();
@@ -111,7 +108,7 @@ fn get_test_store_config(
 
 enum TempDirGuard {
     File(TempDir),
-    S3(S3TempFolderGuard),
+    S3(TempFolder),
 }
 
 /// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
