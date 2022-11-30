@@ -22,7 +22,8 @@ use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, Float32Type, Float64Type, Int16Type,
-    Int32Type, Int64Type, Int8Type, NullType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    Int32Type, Int64Type, Int8Type, NullType, StringType, UInt16Type, UInt32Type, UInt64Type,
+    UInt8Type,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -47,7 +48,7 @@ pub enum ConcreteDataType {
 
     // String types:
     Binary(BinaryType),
-    // String(StringType),
+    String(StringType),
 
     // Date types:
     Date(DateType),
@@ -159,7 +160,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             // ArrowDataType::Date64 => Self::datetime_datatype(),
             // ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
-            // ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             // ArrowDataType::List(field) => Self::List(ListType::new(
             //     ConcreteDataType::from_arrow_type(&field.data_type),
             // )),
@@ -191,7 +192,7 @@ macro_rules! impl_new_concrete_type_functions {
 
 impl_new_concrete_type_functions!(
     Null, Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64,
-    Binary, Date, DateTime
+    Binary, Date, DateTime, String
 );
 
 // impl ConcreteDataType {
@@ -319,14 +320,10 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Float64),
             ConcreteDataType::Float64(_)
         ));
-        // assert!(matches!(
-        //     ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
-        //     ConcreteDataType::String(_)
-        // ));
-        // assert!(matches!(
-        //     ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
-        //     ConcreteDataType::String(_)
-        // ));
+        assert!(matches!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
+            ConcreteDataType::String(_)
+        ));
         // assert_eq!(
         //     ConcreteDataType::from_arrow_type(&ArrowDataType::List(Box::new(Field::new(
         //         "item",

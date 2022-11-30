@@ -21,7 +21,8 @@ use crate::types::{
     UInt64Type, UInt8Type,
 };
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, MutableVector, PrimitiveVector, Vector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, MutableVector, PrimitiveVector,
+    StringVector, Vector,
 };
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
@@ -206,30 +207,29 @@ impl<'a> ScalarRef<'a> for bool {
     }
 }
 
-// impl Scalar for String {
-//     type VectorType = StringVector;
-//     type RefType<'a> = &'a str;
+impl Scalar for String {
+    type VectorType = StringVector;
+    type RefType<'a> = &'a str;
 
-//     #[inline]
-//     fn as_scalar_ref(&self) -> &str {
-//         self
-//     }
+    #[inline]
+    fn as_scalar_ref(&self) -> &str {
+        self
+    }
 
-//     #[inline]
-//     fn upcast_gat<'short, 'long: 'short>(long: &'long str) -> &'short str {
-//         long
-//     }
-// }
+    #[inline]
+    fn upcast_gat<'short, 'long: 'short>(long: &'long str) -> &'short str {
+        long
+    }
+}
 
-// impl<'a> ScalarRef<'a> for &'a str {
-//     type VectorType = StringVector;
-//     type ScalarType = String;
+impl<'a> ScalarRef<'a> for &'a str {
+    type ScalarType = String;
 
-//     #[inline]
-//     fn to_owned_scalar(&self) -> String {
-//         self.to_string()
-//     }
-// }
+    #[inline]
+    fn to_owned_scalar(&self) -> String {
+        self.to_string()
+    }
+}
 
 impl Scalar for Vec<u8> {
     type VectorType = BinaryVector;
