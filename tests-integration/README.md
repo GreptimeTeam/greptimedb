@@ -16,7 +16,7 @@ GT_S3_ACCESS_KEY=S3 secret access key
 Execute the following command in the project root folder:
 
 ```
-cargo test tests-integration
+cargo test integration
 ```
 
 Test s3 storage:

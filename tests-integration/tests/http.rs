@@ -22,7 +22,7 @@ use tests_integration::test_util::{setup_test_app, setup_test_app_with_frontend,
 macro_rules! http_test {
     ($service:ident, $($(#[$meta:meta])* $test:ident),*,) => {
         paste::item! {
-            mod [<http_ $service:lower _test>] {
+            mod [<integration_http_ $service:lower _test>] {
                 $(
                     #[tokio::test(flavor = "multi_thread")]
                     $(

@@ -27,7 +27,7 @@ use tests_integration::test_util::{setup_grpc_server, StorageType};
 macro_rules! grpc_test {
     ($service:ident, $($(#[$meta:meta])* $test:ident),*,) => {
         paste::item! {
-            mod [<grpc_ $service:lower _test>] {
+            mod [<integration_grpc_ $service:lower _test>] {
                 $(
                     #[tokio::test(flavor = "multi_thread")]
                     $(
