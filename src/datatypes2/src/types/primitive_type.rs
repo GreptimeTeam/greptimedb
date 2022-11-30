@@ -15,7 +15,7 @@
 use std::cmp::Ordering;
 
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
-use common_time::Date;
+use common_time::{Date, DateTime};
 use num::NumCast;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
@@ -24,7 +24,7 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
 use crate::type_id::LogicalTypeId;
-use crate::types::DateType;
+use crate::types::{DateTimeType, DateType};
 use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
@@ -57,7 +57,13 @@ impl_native_type!(f64, f64);
 /// such as [Date](`common_time::Date`) is a wrapper type for the underlying native
 /// type `i32`.
 pub trait WrapperType:
-    Copy + Scalar + PartialEq + Into<Value> + Into<ValueRef<'static>> + Serialize
+    Copy
+    + Scalar
+    + PartialEq
+    + Into<Value>
+    + Into<ValueRef<'static>>
+    + Serialize
+    + Into<serde_json::Value>
 {
     /// Logical primitive type that this wrapper type belongs to.
     type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
@@ -164,6 +170,19 @@ impl WrapperType for Date {
     }
 
     fn into_native(self) -> i32 {
+        self.val()
+    }
+}
+
+impl WrapperType for DateTime {
+    type LogicalType = DateTimeType;
+    type Native = i64;
+
+    fn from_native(value: Self::Native) -> Self {
+        DateTime::new(value)
+    }
+
+    fn into_native(self) -> Self::Native {
         self.val()
     }
 }
