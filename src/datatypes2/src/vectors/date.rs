@@ -30,6 +30,7 @@ mod tests {
     use super::*;
     use crate::data_type::DataType;
     use crate::scalars::{ScalarVector, ScalarVectorBuilder};
+    use crate::serialize::Serializable;
     use crate::types::DateType;
     use crate::value::{Value, ValueRef};
     use crate::vectors::{Vector, VectorRef};
@@ -88,5 +89,15 @@ mod tests {
         let arrow = vector.as_arrow().slice(0, vector.len());
         let vector2 = DateVector::try_from_arrow_array(&arrow).unwrap();
         assert_eq!(vector, vector2);
+    }
+
+    #[test]
+    fn test_serialize_date_vector() {
+        let vector = DateVector::from_slice(&[-1, 0, 1]);
+        let serialized_json = serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap();
+        assert_eq!(
+            r#"["1969-12-31","1970-01-01","1970-01-02"]"#,
+            serialized_json
+        );
     }
 }

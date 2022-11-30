@@ -20,7 +20,7 @@ use arrow::array::{
     Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef, PrimitiveArray, PrimitiveBuilder,
 };
 use serde_json::Value as JsonValue;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
@@ -249,10 +249,17 @@ impl<T: LogicalPrimitiveType> ScalarVector for PrimitiveVector<T> {
 
 impl<T: LogicalPrimitiveType> Serializable for PrimitiveVector<T> {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
-        self.iter_data()
-            .map(serde_json::to_value)
-            .collect::<serde_json::Result<_>>()
-            .context(error::SerializeSnafu)
+        let res = self
+            .iter_data()
+            .map(|v| match v {
+                None => serde_json::Value::Null,
+                // use WrapperType's Into<serde_json::Value> bound instead of
+                // serde_json::to_value to facilitate customized serialization
+                // for WrapperType
+                Some(v) => v.into(),
+            })
+            .collect::<Vec<_>>();
+        Ok(res)
     }
 }
 

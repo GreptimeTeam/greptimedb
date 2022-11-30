@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde_json::Value;
-use snafu::ResultExt;
-
-use crate::error;
-use crate::prelude::ScalarVector;
-use crate::serialize::Serializable;
 use crate::types::DateTimeType;
 use crate::vectors::{PrimitiveVector, PrimitiveVectorBuilder};
 

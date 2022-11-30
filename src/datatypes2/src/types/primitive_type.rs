@@ -57,7 +57,13 @@ impl_native_type!(f64, f64);
 /// such as [Date](`common_time::Date`) is a wrapper type for the underlying native
 /// type `i32`.
 pub trait WrapperType:
-    Copy + Scalar + PartialEq + Into<Value> + Into<ValueRef<'static>> + Serialize
+    Copy
+    + Scalar
+    + PartialEq
+    + Into<Value>
+    + Into<ValueRef<'static>>
+    + Serialize
+    + Into<serde_json::Value>
 {
     /// Logical primitive type that this wrapper type belongs to.
     type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
