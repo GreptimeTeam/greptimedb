@@ -73,6 +73,13 @@ pub enum Error {
         source: TableError,
     },
 
+    #[snafu(display("Failed to drop table {}, source: {}", table_name, source))]
+    DropTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
 
@@ -138,7 +145,7 @@ pub enum Error {
     #[snafu(display("Failed to init backend, dir: {}, source: {}", dir, source))]
     InitBackend {
         dir: String,
-        source: std::io::Error,
+        source: object_store::Error,
         backtrace: Backtrace,
     },
 
@@ -298,6 +305,7 @@ impl ErrorExt for Error {
             Error::CreateTable { source, .. }
             | Error::GetTable { source, .. }
             | Error::AlterTable { source, .. } => source.status_code(),
+            Error::DropTable { source, .. } => source.status_code(),
 
             Error::Insert { source, .. } => source.status_code(),
 

@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn test_find_unique_date_like() {
         impl_find_unique_date_like_test!(DateVector, Date, new);
-        // impl_find_unique_date_like_test!(DateTimeVector, DateTime, new);
+        impl_find_unique_date_like_test!(DateTimeVector, DateTime, new);
         // impl_find_unique_date_like_test!(TimestampVector, Timestamp, from_millis);
     }
 }

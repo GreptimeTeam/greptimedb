@@ -14,9 +14,9 @@
 
 use futures::TryStreamExt;
 
-use crate::{ObjectEntry, ObjectStreamer};
+use crate::{Object, ObjectLister};
 
-pub async fn collect(stream: ObjectStreamer) -> Result<Vec<ObjectEntry>, std::io::Error> {
+pub async fn collect(stream: ObjectLister) -> Result<Vec<Object>, opendal::Error> {
     stream.try_collect::<Vec<_>>().await
 }
 

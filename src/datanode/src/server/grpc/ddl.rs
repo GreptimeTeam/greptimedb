@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use api::result::AdminResultBuilder;
-use api::v1::{AdminResult, AlterExpr, CreateExpr};
+use api::v1::{AdminResult, AlterExpr, CreateExpr, DropTableExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
 use common_telemetry::{error, info};
 use futures::TryFutureExt;
 use snafu::prelude::*;
+use table::requests::DropTableRequest;
 
 use crate::error::{AlterExprToRequestSnafu, BumpTableIdSnafu, CreateExprToRequestSnafu};
 use crate::instance::Instance;
@@ -116,13 +117,33 @@ impl Instance {
                 .build(),
         }
     }
+
+    pub(crate) async fn handle_drop_table(&self, expr: DropTableExpr) -> AdminResult {
+        let req = DropTableRequest {
+            catalog_name: expr.catalog_name,
+            schema_name: expr.schema_name,
+            table_name: expr.table_name,
+        };
+        let result = self.sql_handler().execute(SqlRequest::DropTable(req)).await;
+        match result {
+            Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
+                .status_code(StatusCode::Success as u32)
+                .mutate_result(rows as _, 0)
+                .build(),
+            Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => unreachable!(),
+            Err(err) => AdminResultBuilder::default()
+                .status_code(err.status_code() as u32)
+                .err_msg(err.to_string())
+                .build(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::ColumnDef;
+    use api::v1::{ColumnDataType, ColumnDef};
     use common_catalog::consts::MIN_USER_TABLE_ID;
     use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
@@ -173,6 +194,7 @@ mod tests {
     }
 
     #[test]
+
     fn test_create_column_schema() {
         let column_def = ColumnDef {
             name: "a".to_string(),
@@ -188,7 +210,7 @@ mod tests {
 
         let column_def = ColumnDef {
             name: "a".to_string(),
-            datatype: 12, // string
+            datatype: ColumnDataType::String as i32,
             is_nullable: true,
             default_constraint: None,
         };
@@ -200,7 +222,7 @@ mod tests {
         let default_constraint = ColumnDefaultConstraint::Value(Value::from("default value"));
         let column_def = ColumnDef {
             name: "a".to_string(),
-            datatype: 12, // string
+            datatype: ColumnDataType::String as i32,
             is_nullable: true,
             default_constraint: Some(default_constraint.clone().try_into().unwrap()),
         };
@@ -218,25 +240,25 @@ mod tests {
         let column_defs = vec![
             ColumnDef {
                 name: "host".to_string(),
-                datatype: 12, // string
+                datatype: ColumnDataType::String as i32,
                 is_nullable: false,
                 default_constraint: None,
             },
             ColumnDef {
                 name: "ts".to_string(),
-                datatype: 15, // timestamp
+                datatype: ColumnDataType::Timestamp as i32,
                 is_nullable: false,
                 default_constraint: None,
             },
             ColumnDef {
                 name: "cpu".to_string(),
-                datatype: 9, // float32
+                datatype: ColumnDataType::Float32 as i32,
                 is_nullable: true,
                 default_constraint: None,
             },
             ColumnDef {
                 name: "memory".to_string(),
-                datatype: 10, // float64
+                datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
                 default_constraint: None,
             },

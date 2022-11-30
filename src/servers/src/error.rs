@@ -192,6 +192,9 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Tls is required for {}, plain connection is rejected", server))]
+    TlsRequired { server: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -234,6 +237,7 @@ impl ErrorExt for Error {
 
             InfluxdbLinesWrite { source, .. } => source.status_code(),
             Hyper { .. } => StatusCode::Unknown,
+            TlsRequired { .. } => StatusCode::Unknown,
             StartFrontend { source, .. } => source.status_code(),
         }
     }

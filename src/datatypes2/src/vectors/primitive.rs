@@ -20,7 +20,7 @@ use arrow::array::{
     Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef, PrimitiveArray, PrimitiveBuilder,
 };
 use serde_json::Value as JsonValue;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
@@ -72,6 +72,13 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
 
     pub fn from_slice<P: AsRef<[T::Native]>>(slice: P) -> Self {
         let iter = slice.as_ref().iter().copied();
+        Self {
+            array: PrimitiveArray::from_iter_values(iter),
+        }
+    }
+
+    pub fn from_wrapper_slice<P: AsRef<[T::Wrapper]>>(slice: P) -> Self {
+        let iter = slice.as_ref().iter().copied().map(WrapperType::into_native);
         Self {
             array: PrimitiveArray::from_iter_values(iter),
         }
@@ -242,10 +249,17 @@ impl<T: LogicalPrimitiveType> ScalarVector for PrimitiveVector<T> {
 
 impl<T: LogicalPrimitiveType> Serializable for PrimitiveVector<T> {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
-        self.iter_data()
-            .map(serde_json::to_value)
-            .collect::<serde_json::Result<_>>()
-            .context(error::SerializeSnafu)
+        let res = self
+            .iter_data()
+            .map(|v| match v {
+                None => serde_json::Value::Null,
+                // use WrapperType's Into<serde_json::Value> bound instead of
+                // serde_json::to_value to facilitate customized serialization
+                // for WrapperType
+                Some(v) => v.into(),
+            })
+            .collect::<Vec<_>>();
+        Ok(res)
     }
 }
 
@@ -511,5 +525,30 @@ mod tests {
 
         let expect: VectorRef = Arc::new(Int64Vector::from_slice(&[123, 8, 9]));
         assert_eq!(expect, vector);
+    }
+
+    #[test]
+    fn test_from_wrapper_slice() {
+        macro_rules! test_from_wrapper_slice {
+            ($vec: ident, $ty: ident) => {
+                let from_wrapper_slice = $vec::from_wrapper_slice(&[
+                    $ty::from_native($ty::MAX),
+                    $ty::from_native($ty::MIN),
+                ]);
+                let from_slice = $vec::from_slice(&[$ty::MAX, $ty::MIN]);
+                assert_eq!(from_wrapper_slice, from_slice);
+            };
+        }
+
+        test_from_wrapper_slice!(UInt8Vector, u8);
+        test_from_wrapper_slice!(Int8Vector, i8);
+        test_from_wrapper_slice!(UInt16Vector, u16);
+        test_from_wrapper_slice!(Int16Vector, i16);
+        test_from_wrapper_slice!(UInt32Vector, u32);
+        test_from_wrapper_slice!(Int32Vector, i32);
+        test_from_wrapper_slice!(UInt64Vector, u64);
+        test_from_wrapper_slice!(Int64Vector, i64);
+        test_from_wrapper_slice!(Float32Vector, f32);
+        test_from_wrapper_slice!(Float64Vector, f64);
     }
 }

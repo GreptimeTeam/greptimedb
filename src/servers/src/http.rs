@@ -59,11 +59,28 @@ const HTTP_API_VERSION: &str = "v1";
 
 pub struct HttpServer {
     sql_handler: SqlQueryHandlerRef,
+    options: HttpOptions,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
     prom_handler: Option<PrometheusProtocolHandlerRef>,
     script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HttpOptions {
+    pub addr: String,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+}
+
+impl Default for HttpOptions {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:4000".to_string(),
+            timeout: Duration::from_secs(30),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
@@ -168,7 +185,7 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum JsonOutput {
     AffectedRows(usize),
@@ -271,9 +288,10 @@ pub struct ApiState {
 }
 
 impl HttpServer {
-    pub fn new(sql_handler: SqlQueryHandlerRef) -> Self {
+    pub fn new(sql_handler: SqlQueryHandlerRef, options: HttpOptions) -> Self {
         Self {
             sql_handler,
+            options,
             opentsdb_handler: None,
             influxdb_handler: None,
             prom_handler: None,
@@ -385,8 +403,7 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
-                    // TODO(LFC): make timeout configurable
-                    .layer(TimeoutLayer::new(Duration::from_secs(30)))
+                    .layer(TimeoutLayer::new(self.options.timeout))
                     // custom layer
                     .layer(middleware::from_fn(context::build_ctx)),
             )
@@ -443,14 +460,71 @@ async fn handle_error(err: BoxError) -> Json<JsonResponse> {
 
 #[cfg(test)]
 mod test {
+    use std::future::pending;
     use std::sync::Arc;
 
+    use axum::handler::Handler;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum_test_helper::TestClient;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
+    use tokio::sync::mpsc;
 
     use super::*;
+    use crate::query_handler::SqlQueryHandler;
+
+    struct DummyInstance {
+        _tx: mpsc::Sender<(String, Vec<u8>)>,
+    }
+
+    #[async_trait]
+    impl SqlQueryHandler for DummyInstance {
+        async fn do_query(&self, _query: &str) -> Result<Output> {
+            unimplemented!()
+        }
+    }
+
+    fn timeout() -> TimeoutLayer {
+        TimeoutLayer::new(Duration::from_millis(10))
+    }
+
+    async fn forever() {
+        pending().await
+    }
+
+    fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
+        let instance = Arc::new(DummyInstance { _tx: tx });
+        let server = HttpServer::new(instance, HttpOptions::default());
+        server.make_app().route(
+            "/test/timeout",
+            get(forever.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(|_: BoxError| async {
+                        StatusCode::REQUEST_TIMEOUT
+                    }))
+                    .layer(timeout()),
+            )),
+        )
+    }
+
+    #[test]
+    fn test_http_options_default() {
+        let default = HttpOptions::default();
+        assert_eq!("127.0.0.1:4000".to_string(), default.addr);
+        assert_eq!(Duration::from_secs(30), default.timeout)
+    }
+
+    #[tokio::test]
+    async fn test_http_server_request_timeout() {
+        let (tx, _rx) = mpsc::channel(100);
+        let app = make_test_app(tx);
+        let client = TestClient::new(app);
+        let res = client.get("/test/timeout").send().await;
+        assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+    }
 
     #[tokio::test]
     async fn test_recordbatches_conversion() {

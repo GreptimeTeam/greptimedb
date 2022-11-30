@@ -14,14 +14,15 @@
 
 use std::any::Any;
 
-use common_time::Date;
+use common_time::{Date, DateTime};
 
 use crate::types::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type,
     UInt64Type, UInt8Type,
 };
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateVector, MutableVector, PrimitiveVector, StringVector, Vector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, MutableVector, PrimitiveVector,
+    StringVector, Vector,
 };
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
@@ -275,26 +276,26 @@ impl<'a> ScalarRef<'a> for Date {
     }
 }
 
-// impl Scalar for DateTime {
-//     type VectorType = DateTimeVector;
-//     type RefType<'a> = DateTime;
+impl Scalar for DateTime {
+    type VectorType = DateTimeVector;
+    type RefType<'a> = DateTime;
 
-//     fn as_scalar_ref(&self) -> Self::RefType<'_> {
-//         *self
-//     }
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        *self
+    }
 
-//     fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
-//         long
-//     }
-// }
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
 
-// impl<'a> ScalarRef<'a> for DateTime {
-//     type ScalarType = DateTime;
+impl<'a> ScalarRef<'a> for DateTime {
+    type ScalarType = DateTime;
 
-//     fn to_owned_scalar(&self) -> Self::ScalarType {
-//         *self
-//     }
-// }
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        *self
+    }
+}
 
 // impl Scalar for Timestamp {
 //     type VectorType = TimestampVector;

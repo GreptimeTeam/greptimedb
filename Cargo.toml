@@ -35,6 +35,7 @@ members = [
     "src/table",
     "src/mito",
     "tests/runner",
+    "tests-integration"
 ]
 
 [profile.release]

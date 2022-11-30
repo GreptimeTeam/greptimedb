@@ -58,7 +58,19 @@ impl Admin {
             header: Some(header),
             expr: Some(admin_expr::Expr::Alter(expr)),
         };
-        Ok(self.do_requests(vec![expr]).await?.remove(0))
+        self.do_request(expr).await
+    }
+
+    pub async fn drop_table(&self, expr: DropTableExpr) -> Result<AdminResult> {
+        let header = ExprHeader {
+            version: PROTOCOL_VERSION,
+        };
+        let expr = AdminExpr {
+            header: Some(header),
+            expr: Some(admin_expr::Expr::DropTable(expr)),
+        };
+
+        self.do_request(expr).await
     }
 
     /// Invariants: the lengths of input vec (`Vec<AdminExpr>`) and output vec (`Vec<AdminResult>`) are equal.

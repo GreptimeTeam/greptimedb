@@ -216,8 +216,7 @@ async fn get_table_global_value(
     let tv = get_from_store(kv_store, tg_key).await?;
     match tv {
         Some(tv) => {
-            let tv = TableGlobalValue::parse(&String::from_utf8_lossy(&tv))
-                .context(error::InvalidCatalogValueSnafu)?;
+            let tv = TableGlobalValue::from_bytes(&tv).context(error::InvalidCatalogValueSnafu)?;
             Ok(Some(tv))
         }
         None => Ok(None),

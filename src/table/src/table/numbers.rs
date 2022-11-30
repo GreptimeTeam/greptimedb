@@ -27,24 +27,26 @@ use futures::task::{Context, Poll};
 use futures::Stream;
 
 use crate::error::Result;
-use crate::metadata::{TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
+use crate::metadata::{TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
 use crate::table::scan::SimpleTableScan;
 use crate::table::{Expr, Table};
 
 /// numbers table for test
 #[derive(Debug, Clone)]
 pub struct NumbersTable {
+    table_id: TableId,
     schema: SchemaRef,
 }
 
-impl Default for NumbersTable {
-    fn default() -> Self {
+impl NumbersTable {
+    pub fn new(table_id: TableId) -> Self {
         let column_schemas = vec![ColumnSchema::new(
             "number",
             ConcreteDataType::uint32_datatype(),
             false,
         )];
         Self {
+            table_id,
             schema: Arc::new(
                 SchemaBuilder::try_from_columns(column_schemas)
                     .unwrap()
@@ -52,6 +54,12 @@ impl Default for NumbersTable {
                     .unwrap(),
             ),
         }
+    }
+}
+
+impl Default for NumbersTable {
+    fn default() -> Self {
+        NumbersTable::new(1)
     }
 }
 
@@ -68,7 +76,7 @@ impl Table for NumbersTable {
     fn table_info(&self) -> TableInfoRef {
         Arc::new(
             TableInfoBuilder::default()
-                .table_id(1)
+                .table_id(self.table_id)
                 .name("numbers")
                 .catalog_name("greptime")
                 .schema_name("public")

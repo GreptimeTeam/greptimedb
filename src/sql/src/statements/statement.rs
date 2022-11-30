@@ -18,6 +18,7 @@ use sqlparser::parser::ParserError;
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
 use crate::statements::describe::DescribeTable;
+use crate::statements::drop::DropTable;
 use crate::statements::explain::Explain;
 use crate::statements::insert::Insert;
 use crate::statements::query::Query;
@@ -33,6 +34,8 @@ pub enum Statement {
     Insert(Box<Insert>),
     /// CREATE TABLE
     CreateTable(CreateTable),
+    // DROP TABLE
+    DropTable(DropTable),
     // CREATE DATABASE
     CreateDatabase(CreateDatabase),
     /// ALTER TABLE
@@ -66,6 +69,9 @@ impl TryFrom<Statement> for SpStatement {
             )),
             Statement::DescribeTable(_) => Err(ParserError::ParserError(
                 "sqlparser does not support DESCRIBE TABLE query.".to_string(),
+            )),
+            Statement::DropTable(_) => Err(ParserError::ParserError(
+                "sqlparser does not support DROP TABLE query.".to_string(),
             )),
             Statement::Query(s) => Ok(SpStatement::Query(Box::new(s.inner))),
             Statement::Insert(i) => Ok(i.inner),

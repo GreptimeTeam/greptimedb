@@ -94,7 +94,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Table {} already exists", table))]
+    #[snafu(display("Table `{}` already exists", table))]
     TableExists { table: String, backtrace: Backtrace },
 
     #[snafu(display("Schema {} already exists", schema))]
@@ -107,6 +107,12 @@ pub enum Error {
     RegisterTable {
         #[snafu(backtrace)]
         source: BoxedError,
+    },
+
+    #[snafu(display("Operation {} not implemented yet", operation))]
+    Unimplemented {
+        operation: String,
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Failed to open table, table info: {}, source: {}", table_info, source))]
@@ -216,11 +222,12 @@ impl ErrorExt for Error {
             | Error::ValueDeserialize { .. }
             | Error::Io { .. } => StatusCode::StorageUnavailable,
 
+            Error::RegisterTable { .. } => StatusCode::Internal,
+
             Error::ReadSystemCatalog { source, .. } => source.status_code(),
             Error::SystemCatalogTypeMismatch { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
 
-            Error::RegisterTable { .. } => StatusCode::Internal,
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
             Error::SchemaExists { .. } => StatusCode::InvalidArguments,
 
@@ -235,6 +242,8 @@ impl ErrorExt for Error {
             Error::InvalidTableSchema { source, .. } => source.status_code(),
             Error::InvalidTableInfoInCatalog { .. } => StatusCode::Unexpected,
             Error::Internal { source, .. } => source.status_code(),
+
+            Error::Unimplemented { .. } => StatusCode::Unsupported,
         }
     }
 

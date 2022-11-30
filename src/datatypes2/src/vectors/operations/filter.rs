@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn test_filter_date_like() {
         impl_filter_date_like_test!(DateVector, Date, new);
-        // impl_filter_date_like_test!(DateTimeVector, DateTime, new);
+        impl_filter_date_like_test!(DateTimeVector, DateTime, new);
         // impl_filter_date_like_test!(TimestampVector, Timestamp, from_millis);
     }
 }

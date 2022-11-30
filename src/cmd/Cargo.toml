@@ -29,3 +29,6 @@ toml = "0.5"
 [dev-dependencies]
 serde = "1.0"
 tempdir = "0.3"
+
+[build-dependencies]
+build-data = "0.1.3"

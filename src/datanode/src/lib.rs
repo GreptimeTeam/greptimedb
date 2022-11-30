@@ -22,6 +22,6 @@ mod metric;
 mod mock;
 mod script;
 pub mod server;
-mod sql;
+pub mod sql;
 #[cfg(test)]
 mod tests;

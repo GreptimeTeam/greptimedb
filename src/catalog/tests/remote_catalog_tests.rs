@@ -202,7 +202,7 @@ mod tests {
             table_id,
             table,
         };
-        assert_eq!(1, catalog_manager.register_table(reg_req).await.unwrap());
+        assert!(catalog_manager.register_table(reg_req).await.unwrap());
         assert_eq!(
             HashSet::from([table_name, "numbers".to_string()]),
             default_schema
@@ -287,7 +287,7 @@ mod tests {
             .register_schema(schema_name.clone(), schema.clone())
             .expect("Register schema should not fail");
         assert!(prev.is_none());
-        assert_eq!(1, catalog_manager.register_table(reg_req).await.unwrap());
+        assert!(catalog_manager.register_table(reg_req).await.unwrap());
 
         assert_eq!(
             HashSet::from([schema_name.clone()]),

@@ -250,6 +250,12 @@ pub enum Error {
         source: client::Error,
     },
 
+    #[snafu(display("Failed to drop table, source: {}", source))]
+    DropTable {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
     #[snafu(display("Failed to insert values to table, source: {}", source))]
     Insert {
         #[snafu(backtrace)]
@@ -436,6 +442,9 @@ pub enum Error {
 
     #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
     LeaderNotFound { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Table already exists: `{}`", table))]
+    TableAlreadyExist { table: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -506,25 +515,27 @@ impl ErrorExt for Error {
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
             Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
-            Error::CreateTable { source, .. } => source.status_code(),
-            Error::AlterTable { source, .. } => source.status_code(),
-            Error::Insert { source, .. } => source.status_code(),
+            Error::CreateTable { source, .. }
+            | Error::AlterTable { source, .. }
+            | Error::DropTable { source }
+            | Error::Select { source, .. }
+            | Error::CreateDatabase { source, .. }
+            | Error::CreateTableOnInsertion { source, .. }
+            | Error::AlterTableOnInsertion { source, .. }
+            | Error::Insert { source, .. } => source.status_code(),
             Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
-            Error::CreateTableOnInsertion { source, .. } => source.status_code(),
-            Error::AlterTableOnInsertion { source, .. } => source.status_code(),
-            Error::Select { source, .. } => source.status_code(),
             Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
             Error::DeserializeInsertBatch { source, .. } => source.status_code(),
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
             Error::InsertBatchToRequest { source, .. } => source.status_code(),
-            Error::CreateDatabase { source, .. } => source.status_code(),
             Error::CollectRecordbatchStream { source } | Error::CreateRecordbatches { source } => {
                 source.status_code()
             }
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
+            Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
         }
     }
 

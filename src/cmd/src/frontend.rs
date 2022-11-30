@@ -21,6 +21,7 @@ use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use meta_client::MetaClientOpts;
+use servers::http::HttpOptions;
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -96,7 +97,10 @@ impl TryFrom<StartCommand> for FrontendOptions {
         };
 
         if let Some(addr) = cmd.http_addr {
-            opts.http_addr = Some(addr);
+            opts.http_options = Some(HttpOptions {
+                addr,
+                ..Default::default()
+            });
         }
         if let Some(addr) = cmd.grpc_addr {
             opts.grpc_options = Some(GrpcOptions {
@@ -141,6 +145,8 @@ impl TryFrom<StartCommand> for FrontendOptions {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -157,7 +163,7 @@ mod tests {
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();
-        assert_eq!(opts.http_addr, Some("127.0.0.1:1234".to_string()));
+        assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
         assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
         assert_eq!(
             opts.postgres_options.as_ref().unwrap().addr,
@@ -187,5 +193,34 @@ mod tests {
         );
 
         assert!(!opts.influxdb_options.unwrap().enable);
+    }
+
+    #[test]
+    fn test_read_from_config_file() {
+        let command = StartCommand {
+            http_addr: None,
+            grpc_addr: None,
+            mysql_addr: None,
+            postgres_addr: None,
+            opentsdb_addr: None,
+            influxdb_enable: None,
+            config_file: Some(format!(
+                "{}/../../config/frontend.example.toml",
+                std::env::current_dir().unwrap().as_path().to_str().unwrap()
+            )),
+            metasrv_addr: None,
+        };
+
+        let fe_opts = FrontendOptions::try_from(command).unwrap();
+        assert_eq!(Mode::Distributed, fe_opts.mode);
+        assert_eq!("127.0.0.1:3001".to_string(), fe_opts.datanode_rpc_addr);
+        assert_eq!(
+            "127.0.0.1:4000".to_string(),
+            fe_opts.http_options.as_ref().unwrap().addr
+        );
+        assert_eq!(
+            Duration::from_secs(30),
+            fe_opts.http_options.as_ref().unwrap().timeout
+        );
     }
 }
