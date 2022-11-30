@@ -16,6 +16,7 @@
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
+use common_telemetry::error;
 use query::query_engine::QueryEngineRef;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use snafu::{OptionExt, ResultExt};
@@ -26,10 +27,11 @@ use table::engine::{EngineContext, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
-use crate::error::{self, GetTableSnafu, Result, TableNotFoundSnafu};
+use crate::error::{ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu};
 
 mod alter;
 mod create;
+mod drop_table;
 mod insert;
 
 #[derive(Debug)]
@@ -38,6 +40,7 @@ pub enum SqlRequest {
     CreateTable(CreateTableRequest),
     CreateDatabase(CreateDatabaseRequest),
     Alter(AlterTableRequest),
+    DropTable(DropTableRequest),
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
@@ -65,24 +68,29 @@ impl SqlHandler {
     }
 
     pub async fn execute(&self, request: SqlRequest) -> Result<Output> {
-        match request {
+        let result = match request {
             SqlRequest::Insert(req) => self.insert(req).await,
             SqlRequest::CreateTable(req) => self.create_table(req).await,
             SqlRequest::CreateDatabase(req) => self.create_database(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
+            SqlRequest::DropTable(req) => self.drop_table(req).await,
             SqlRequest::ShowDatabases(stmt) => {
-                show_databases(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+                show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
             SqlRequest::ShowTables(stmt) => {
-                show_tables(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+                show_tables(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
             SqlRequest::DescribeTable(stmt) => {
-                describe_table(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+                describe_table(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
             SqlRequest::Explain(stmt) => explain(stmt, self.query_engine.clone())
                 .await
-                .context(error::ExecuteSqlSnafu),
+                .context(ExecuteSqlSnafu),
+        };
+        if let Err(e) = &result {
+            error!("Datanode execution error: {:?}", e);
         }
+        result
     }
 
     pub(crate) fn get_table<'a>(&self, table_ref: &'a TableReference) -> Result<TableRef> {

@@ -115,7 +115,7 @@ impl PrometheusProtocolHandler for Instance {
             Mode::Standalone => {
                 let exprs = prometheus::write_request_to_insert_exprs(database, request)?;
                 let futures = exprs
-                    .iter()
+                    .into_iter()
                     .map(|e| self.handle_insert(e))
                     .collect::<Vec<_>>();
                 let res = futures_util::future::join_all(futures)

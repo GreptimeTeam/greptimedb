@@ -84,4 +84,8 @@ pub enum AlterKind {
 
 /// Drop table request
 #[derive(Debug)]
-pub struct DropTableRequest {}
+pub struct DropTableRequest {
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
+}

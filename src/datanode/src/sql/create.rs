@@ -84,7 +84,6 @@ impl SqlHandler {
 
         // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
-        let table_id = req.id;
         let table = self
             .table_engine
             .create_table(&ctx, req)
@@ -97,7 +96,7 @@ impl SqlHandler {
             catalog: table.table_info().catalog_name.clone(),
             schema: table.table_info().schema_name.clone(),
             table_name: table_name.clone(),
-            table_id,
+            table_id: table.table_info().ident.table_id,
             table,
         };
 

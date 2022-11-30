@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
+use servers::http::HttpOptions;
 use servers::Mode;
 use snafu::prelude::*;
 
@@ -31,7 +32,7 @@ use crate::server::Services;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrontendOptions {
-    pub http_addr: Option<String>,
+    pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,
     pub mysql_options: Option<MysqlOptions>,
     pub postgres_options: Option<PostgresOptions>,
@@ -46,7 +47,7 @@ pub struct FrontendOptions {
 impl Default for FrontendOptions {
     fn default() -> Self {
         Self {
-            http_addr: Some("127.0.0.1:4000".to_string()),
+            http_options: Some(HttpOptions::default()),
             grpc_options: Some(GrpcOptions::default()),
             mysql_options: Some(MysqlOptions::default()),
             postgres_options: Some(PostgresOptions::default()),

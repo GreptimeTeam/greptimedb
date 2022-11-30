@@ -48,7 +48,7 @@ pub enum Error {
 
     #[snafu(display("Failed to write columns, source: {}", source))]
     FlushIo {
-        source: std::io::Error,
+        source: object_store::Error,
         backtrace: Backtrace,
     },
 
@@ -62,28 +62,28 @@ pub enum Error {
     ReadObject {
         path: String,
         backtrace: Backtrace,
-        source: IoError,
+        source: object_store::Error,
     },
 
     #[snafu(display("Fail to write object into path: {}, source: {}", path, source))]
     WriteObject {
         path: String,
         backtrace: Backtrace,
-        source: IoError,
+        source: object_store::Error,
     },
 
     #[snafu(display("Fail to delete object from path: {}, source: {}", path, source))]
     DeleteObject {
         path: String,
         backtrace: Backtrace,
-        source: IoError,
+        source: object_store::Error,
     },
 
     #[snafu(display("Fail to list objects in path: {}, source: {}", path, source))]
     ListObjects {
         path: String,
         backtrace: Backtrace,
-        source: IoError,
+        source: object_store::Error,
     },
 
     #[snafu(display("Fail to create str from bytes, source: {}", source))]
@@ -218,7 +218,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Sequence of region should increase monotonically ({} > {})",
+        "Sequence of region should increase monotonically (should be {} < {})",
         prev,
         given
     ))]
@@ -457,7 +457,14 @@ mod tests {
             ))
         }
 
-        let error = throw_io_error().context(FlushIoSnafu).err().unwrap();
+        let error = throw_io_error()
+            .map_err(|err| {
+                object_store::Error::new(object_store::ErrorKind::Unexpected, "writer close failed")
+                    .set_source(err)
+            })
+            .context(FlushIoSnafu)
+            .err()
+            .unwrap();
         assert_eq!(StatusCode::StorageUnavailable, error.status_code());
         assert!(error.backtrace_opt().is_some());
     }

@@ -15,6 +15,7 @@
 pub mod alter;
 pub mod create;
 pub mod describe;
+pub mod drop;
 pub mod explain;
 pub mod insert;
 pub mod query;
@@ -322,11 +323,16 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
+
+    use api::v1::ColumnDataType;
     use common_time::timestamp::TimeUnit;
+    use datatypes::types::BooleanType;
     use datatypes::value::OrderedFloat;
 
     use super::*;
-    use crate::ast::Ident;
+    use crate::ast::{DataType, Ident};
+    use crate::statements::ColumnOption;
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
         assert_eq!(
@@ -530,5 +536,62 @@ mod tests {
             &ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
         )
         .is_err());
+    }
+
+    #[test]
+    pub fn test_parse_column_default_constraint() {
+        let bool_value = sqlparser::ast::Value::Boolean(true);
+
+        let opts = vec![
+            ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Default(Expr::Value(bool_value)),
+            },
+            ColumnOptionDef {
+                name: None,
+                option: ColumnOption::NotNull,
+            },
+        ];
+
+        let constraint =
+            parse_column_default_constraint("coll", &ConcreteDataType::Boolean(BooleanType), &opts)
+                .unwrap();
+
+        assert_matches!(
+            constraint,
+            Some(ColumnDefaultConstraint::Value(Value::Boolean(true)))
+        );
+    }
+
+    #[test]
+    pub fn test_sql_column_def_to_grpc_column_def() {
+        // test basic
+        let column_def = ColumnDef {
+            name: "col".into(),
+            data_type: DataType::Double,
+            collation: None,
+            options: vec![],
+        };
+
+        let grpc_column_def = sql_column_def_to_grpc_column_def(column_def).unwrap();
+
+        assert_eq!("col", grpc_column_def.name);
+        assert!(grpc_column_def.is_nullable); // nullable when options are empty
+        assert_eq!(ColumnDataType::Float64 as i32, grpc_column_def.datatype);
+        assert_eq!(None, grpc_column_def.default_constraint);
+
+        // test not null
+        let column_def = ColumnDef {
+            name: "col".into(),
+            data_type: DataType::Double,
+            collation: None,
+            options: vec![ColumnOptionDef {
+                name: None,
+                option: ColumnOption::NotNull,
+            }],
+        };
+
+        let grpc_column_def = sql_column_def_to_grpc_column_def(column_def).unwrap();
+        assert!(!grpc_column_def.is_nullable);
     }
 }

@@ -511,9 +511,8 @@ impl PartitionExec {
 mod test {
     use std::time::Duration;
 
-    use api::v1::codec::InsertBatch;
     use api::v1::column::SemanticType;
-    use api::v1::{column, insert_expr, Column, ColumnDataType};
+    use api::v1::{column, Column, ColumnDataType};
     use catalog::remote::MetaKvBackend;
     use common_recordbatch::util;
     use datafusion::arrow_print;
@@ -970,8 +969,8 @@ mod test {
         start_ts: i64,
     ) {
         let rows = data.len() as u32;
-        let values = vec![InsertBatch {
-            columns: vec![
+        let values = vec![(
+            vec![
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(column::Values {
@@ -1001,10 +1000,8 @@ mod test {
                     ..Default::default()
                 },
             ],
-            row_count: rows,
-        }
-        .into()];
-        let values = insert_expr::Values { values };
+            rows,
+        )];
         dn_instance
             .execute_grpc_insert(
                 &table_name.catalog_name,

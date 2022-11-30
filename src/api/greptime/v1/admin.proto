@@ -20,6 +20,7 @@ message AdminExpr {
     CreateExpr create = 2;
     AlterExpr alter = 3;
     CreateDatabaseExpr create_database = 4;
+    DropTableExpr drop_table = 5;
   }
 }
 
@@ -53,6 +54,12 @@ message AlterExpr {
     AddColumns add_columns = 4;
     DropColumns drop_columns = 5;
   }
+}
+
+message DropTableExpr {
+  string catalog_name = 1;
+  string schema_name = 2;
+  string table_name = 3;
 }
 
 message AddColumns {

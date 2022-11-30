@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 
-use api::v1::codec::InsertBatch;
 use api::v1::column::{SemanticType, Values};
 use api::v1::{Column, ColumnDataType};
 use common_base::BitVec;
@@ -24,12 +23,14 @@ use crate::error::{Result, TypeMismatchSnafu};
 
 type ColumnName = String;
 
+type RowCount = u32;
+
 // TODO(fys): will remove in the future.
 #[derive(Default)]
 pub struct LinesWriter {
     column_name_index: HashMap<ColumnName, usize>,
     null_masks: Vec<BitVec>,
-    batch: InsertBatch,
+    batch: (Vec<Column>, RowCount),
     lines: usize,
 }
 
@@ -171,20 +172,20 @@ impl LinesWriter {
 
     pub fn commit(&mut self) {
         let batch = &mut self.batch;
-        batch.row_count += 1;
+        batch.1 += 1;
 
-        for i in 0..batch.columns.len() {
+        for i in 0..batch.0.len() {
             let null_mask = &mut self.null_masks[i];
-            if batch.row_count as usize > null_mask.len() {
+            if batch.1 as usize > null_mask.len() {
                 null_mask.push(true);
             }
         }
     }
 
-    pub fn finish(mut self) -> InsertBatch {
+    pub fn finish(mut self) -> (Vec<Column>, RowCount) {
         let null_masks = self.null_masks;
         for (i, null_mask) in null_masks.into_iter().enumerate() {
-            let columns = &mut self.batch.columns;
+            let columns = &mut self.batch.0;
             columns[i].null_mask = null_mask.into_vec();
         }
         self.batch
@@ -204,9 +205,9 @@ impl LinesWriter {
                 let batch = &mut self.batch;
                 let to_insert = self.lines;
                 let mut null_mask = BitVec::with_capacity(to_insert);
-                null_mask.extend(BitVec::repeat(true, batch.row_count as usize));
+                null_mask.extend(BitVec::repeat(true, batch.1 as usize));
                 self.null_masks.push(null_mask);
-                batch.columns.push(Column {
+                batch.0.push(Column {
                     column_name: column_name.to_string(),
                     semantic_type: semantic_type.into(),
                     values: Some(Values::with_capacity(datatype, to_insert)),
@@ -217,7 +218,7 @@ impl LinesWriter {
                 new_idx
             }
         };
-        (column_idx, &mut self.batch.columns[column_idx])
+        (column_idx, &mut self.batch.0[column_idx])
     }
 }
 
@@ -282,9 +283,9 @@ mod tests {
         writer.commit();
 
         let insert_batch = writer.finish();
-        assert_eq!(3, insert_batch.row_count);
+        assert_eq!(3, insert_batch.1);
 
-        let columns = insert_batch.columns;
+        let columns = insert_batch.0;
         assert_eq!(9, columns.len());
 
         let column = &columns[0];

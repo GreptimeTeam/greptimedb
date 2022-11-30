@@ -22,6 +22,7 @@ use crate::error::{
     self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu, TokenizerSnafu,
 };
 use crate::statements::describe::DescribeTable;
+use crate::statements::drop::DropTable;
 use crate::statements::explain::Explain;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
@@ -98,6 +99,8 @@ impl<'a> ParserContext<'a> {
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
 
                     Keyword::ALTER => self.parse_alter(),
+
+                    Keyword::DROP => self.parse_drop(),
 
                     // todo(hl) support more statements.
                     _ => self.unsupported(self.peek_token_as_string()),
@@ -271,6 +274,36 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::Explain(Explain::try_from(explain_statement)?))
     }
 
+    fn parse_drop(&mut self) -> Result<Statement> {
+        self.parser.next_token();
+        if !self.matches_keyword(Keyword::TABLE) {
+            return self.unsupported(self.peek_token_as_string());
+        }
+        self.parser.next_token();
+
+        let table_ident =
+            self.parser
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a table name",
+                    actual: self.peek_token_as_string(),
+                })?;
+        ensure!(
+            !table_ident.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: table_ident.to_string()
+            }
+        );
+
+        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_ident)?;
+        Ok(Statement::DropTable(DropTable {
+            catalog_name,
+            schema_name,
+            table_name,
+        }))
+    }
+
     // Report unexpected token
     pub(crate) fn expected<T>(&self, expected: &str, found: Token) -> Result<T> {
         Err(ParserError::ParserError(format!(
@@ -338,6 +371,7 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use sqlparser::ast::{Query as SpQuery, Statement as SpStatement};
     use sqlparser::dialect::GenericDialect;
 
@@ -531,5 +565,44 @@ mod tests {
         .unwrap();
 
         assert_eq!(stmts[0], Statement::Explain(explain))
+    }
+
+    #[test]
+    pub fn test_drop_table() {
+        let sql = "DROP TABLE foo";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropTable(DropTable {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "foo".to_string()
+            })
+        );
+
+        let sql = "DROP TABLE my_schema.foo";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropTable(DropTable {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: "my_schema".to_string(),
+                table_name: "foo".to_string()
+            })
+        );
+
+        let sql = "DROP TABLE my_catalog.my_schema.foo";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropTable(DropTable {
+                catalog_name: "my_catalog".to_string(),
+                schema_name: "my_schema".to_string(),
+                table_name: "foo".to_string()
+            })
+        )
     }
 }

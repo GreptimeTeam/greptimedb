@@ -100,17 +100,29 @@ impl Instance {
         // create remote catalog manager
         let (catalog_manager, factory, table_id_provider) = match opts.mode {
             Mode::Standalone => {
-                let catalog = Arc::new(
-                    catalog::local::LocalCatalogManager::try_new(table_engine.clone())
-                        .await
-                        .context(CatalogSnafu)?,
-                );
-                let factory = QueryEngineFactory::new(catalog.clone());
-                (
-                    catalog.clone() as CatalogManagerRef,
-                    factory,
-                    Some(catalog as TableIdProviderRef),
-                )
+                if opts.enable_memory_catalog {
+                    let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
+                    let factory = QueryEngineFactory::new(catalog.clone());
+
+                    (
+                        catalog.clone() as CatalogManagerRef,
+                        factory,
+                        Some(catalog as TableIdProviderRef),
+                    )
+                } else {
+                    let catalog = Arc::new(
+                        catalog::local::LocalCatalogManager::try_new(table_engine.clone())
+                            .await
+                            .context(CatalogSnafu)?,
+                    );
+                    let factory = QueryEngineFactory::new(catalog.clone());
+
+                    (
+                        catalog.clone() as CatalogManagerRef,
+                        factory,
+                        Some(catalog as TableIdProviderRef),
+                    )
+                }
             }
 
             Mode::Distributed => {
@@ -185,8 +197,11 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
 
     info!("The storage directory is: {}", &data_dir);
 
+    let atomic_write_dir = format!("{}/.tmp/", data_dir);
+
     let accessor = Builder::default()
         .root(&data_dir)
+        .atomic_write_dir(&atomic_write_dir)
         .build()
         .context(error::InitBackendSnafu { dir: &data_dir })?;
 

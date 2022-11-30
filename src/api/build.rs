@@ -20,7 +20,6 @@ fn main() {
         .file_descriptor_set_path(default_out_dir.join("greptime_fd.bin"))
         .compile(
             &[
-                "greptime/v1/insert.proto",
                 "greptime/v1/select.proto",
                 "greptime/v1/physical_plan.proto",
                 "greptime/v1/greptime.proto",

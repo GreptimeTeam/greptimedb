@@ -261,6 +261,10 @@ macro_rules! define_catalog_value {
                             .context(DeserializeCatalogEntryValueSnafu { raw: s.as_ref() })
                     }
 
+                    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, Error> {
+                         Self::parse(&String::from_utf8_lossy(bytes.as_ref()))
+                    }
+
                     pub fn as_bytes(&self) -> Result<Vec<u8>, Error> {
                         Ok(serde_json::to_string(self)
                             .context(SerializeCatalogEntryValueSnafu)?
