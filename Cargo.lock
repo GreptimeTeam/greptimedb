@@ -2218,6 +2218,7 @@ dependencies = [
  "openmetrics-parser",
  "prost 0.11.0",
  "query",
+ "rustls",
  "serde",
  "serde_json",
  "servers",
@@ -3717,16 +3718,18 @@ dependencies = [
 
 [[package]]
 name = "opensrv-mysql"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4c24c12fd688cb5aa5b1a54c6ccb2e30fb9b5132debb0e89fcb432b3f73db8f"
+checksum = "ac5d68ae914b1317d874ce049e52d386b1209d8835d4e6e094f2e90bfb49eccc"
 dependencies = [
  "async-trait",
  "byteorder",
  "chrono",
  "mysql_common",
  "nom",
+ "pin-project-lite",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -4923,9 +4926,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.20.6"
+version = "0.20.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aab8ee6c7097ed6057f43c187a62418d0c05a4bd5f18b3571db50ee0f9ce033"
+checksum = "539a2bfe908f471bfa933876bd1eb6a19cf2176d375f82ef7f99530a40e48c2c"
 dependencies = [
  "log",
  "ring",
@@ -5507,6 +5510,8 @@ dependencies = [
  "query",
  "rand 0.8.5",
  "regex",
+ "rustls",
+ "rustls-pemfile 1.0.1",
  "schemars",
  "script",
  "serde",
@@ -5516,6 +5521,8 @@ dependencies = [
  "table",
  "tokio",
  "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-test",
  "tonic",
@@ -6416,6 +6423,20 @@ dependencies = [
  "socket2",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "tokio-postgres-rustls"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "606f2b73660439474394432239c82249c0d45eb5f23d91f401be1e33590444a7"
+dependencies = [
+ "futures",
+ "ring",
+ "rustls",
+ "tokio",
+ "tokio-postgres",
+ "tokio-rustls",
 ]
 
 [[package]]

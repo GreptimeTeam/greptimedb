@@ -28,6 +28,8 @@ pub mod postgres;
 pub mod prometheus;
 pub mod query_handler;
 pub mod server;
+pub mod tls;
+
 mod shutdown;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
