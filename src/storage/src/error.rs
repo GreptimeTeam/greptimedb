@@ -218,7 +218,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Sequence of region should increase monotonically ({} > {})",
+        "Sequence of region should increase monotonically (should be {} < {})",
         prev,
         given
     ))]
