@@ -32,6 +32,7 @@ pub mod date;
 pub mod datetime;
 mod eq;
 mod helper;
+pub mod null;
 pub mod operations;
 pub mod primitive;
 pub mod string;
@@ -41,6 +42,7 @@ pub use boolean::*;
 pub use date::*;
 pub use datetime::*;
 pub use helper::Helper;
+pub use null::*;
 pub use primitive::*;
 pub use string::*;
 
@@ -73,6 +75,8 @@ impl<'a> Validity<'a> {
     }
 }
 
+// TODO(yingwen): arrow 28.0 implements Clone for all arrays, we could upgrade to it and simplify
+// some codes in methods such as `to_arrow_array()` and `to_boxed_arrow_array()`.
 /// Vector of data values.
 pub trait Vector: Send + Sync + Serializable + Debug + VectorOp {
     /// Returns the data type of the vector.
