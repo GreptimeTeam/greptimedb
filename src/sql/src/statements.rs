@@ -42,6 +42,8 @@ use crate::error::{
     SerializeColumnDefaultConstraintSnafu, UnsupportedDefaultValueSnafu,
 };
 
+// TODO(LFC): Get rid of this function, use session context aware version of "table_idents_to_full_name" instead.
+// Current obstacles remain in some usage in Frontend, and other SQLs like "describe", "drop" etc.
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when
 /// catalog and schema are default) to tuple.
 pub fn table_idents_to_full_name(obj_name: &ObjectName) -> Result<(String, String, String)> {

@@ -33,6 +33,7 @@ use meta_client::rpc::{
 };
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
+use session::context::SessionContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
@@ -128,29 +129,31 @@ impl DistInstance {
         Ok(Output::AffectedRows(region_routes.len()))
     }
 
-    pub(crate) async fn handle_sql(&self, sql: &str, stmt: Statement) -> Result<Output> {
+    pub(crate) async fn handle_sql(
+        &self,
+        sql: &str,
+        stmt: Statement,
+        session_ctx: Arc<SessionContext>,
+    ) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {
                 let plan = self
                     .query_engine
-                    .statement_to_plan(stmt)
+                    .statement_to_plan(stmt, session_ctx)
                     .context(error::ExecuteSqlSnafu { sql })?;
-                self.query_engine
-                    .execute(&plan)
-                    .await
-                    .context(error::ExecuteSqlSnafu { sql })
+                self.query_engine.execute(&plan).await
             }
-            Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone())
-                .context(error::ExecuteSqlSnafu { sql }),
-            Statement::ShowTables(stmt) => show_tables(stmt, self.catalog_manager.clone())
-                .context(error::ExecuteSqlSnafu { sql }),
-            Statement::DescribeTable(stmt) => describe_table(stmt, self.catalog_manager.clone())
-                .context(error::ExecuteSqlSnafu { sql }),
-            Statement::Explain(stmt) => explain(Box::new(stmt), self.query_engine.clone())
-                .await
-                .context(error::ExecuteSqlSnafu { sql }),
+            Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
+            Statement::ShowTables(stmt) => {
+                show_tables(stmt, self.catalog_manager.clone(), session_ctx)
+            }
+            Statement::DescribeTable(stmt) => describe_table(stmt, self.catalog_manager.clone()),
+            Statement::Explain(stmt) => {
+                explain(Box::new(stmt), self.query_engine.clone(), session_ctx).await
+            }
             _ => unreachable!(),
         }
+        .context(error::ExecuteSqlSnafu { sql })
     }
 
     /// Handles distributed database creation

@@ -37,6 +37,7 @@ use query::plan::LogicalPlan;
 use query::query_engine::QueryEngineFactory;
 use query::QueryEngine;
 use rand::Rng;
+use session::context::SessionContext;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
 use table::test_util::MemTable;
@@ -134,7 +135,10 @@ async fn test_udf() -> Result<()> {
 
     engine.register_udf(udf);
 
-    let plan = engine.sql_to_plan("select pow(number, number) as p from numbers limit 10")?;
+    let plan = engine.sql_to_plan(
+        "select pow(number, number) as p from numbers limit 10",
+        Arc::new(SessionContext::new()),
+    )?;
 
     let output = engine.execute(&plan).await?;
     let recordbatch = match output {
@@ -242,7 +246,9 @@ where
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     let sql = format!("SELECT {} FROM {}", column_name, table_name);
-    let plan = engine.sql_to_plan(&sql).unwrap();
+    let plan = engine
+        .sql_to_plan(&sql, Arc::new(SessionContext::new()))
+        .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
@@ -330,7 +336,9 @@ async fn execute_median<'a>(
         "select MEDIAN({}) as median from {}",
         column_name, table_name
     );
-    let plan = engine.sql_to_plan(&sql).unwrap();
+    let plan = engine
+        .sql_to_plan(&sql, Arc::new(SessionContext::new()))
+        .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {

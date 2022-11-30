@@ -26,6 +26,7 @@ use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
 use query::error::Result;
 use query::QueryEngine;
+use session::context::SessionContext;
 use statrs::distribution::{Continuous, Normal};
 use statrs::statistics::Statistics;
 
@@ -94,7 +95,9 @@ async fn execute_scipy_stats_norm_pdf<'a>(
         "select SCIPYSTATSNORMPDF({},2.0) as scipy_stats_norm_pdf from {}",
         column_name, table_name
     );
-    let plan = engine.sql_to_plan(&sql).unwrap();
+    let plan = engine
+        .sql_to_plan(&sql, Arc::new(SessionContext::new()))
+        .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {

@@ -48,6 +48,7 @@ rustpython-vm = { git = "https://github.com/RustPython/RustPython", optional = t
   "default",
   "freeze-stdlib",
 ] }
+session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
 table = { path = "../table" }

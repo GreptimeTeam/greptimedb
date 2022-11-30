@@ -38,6 +38,7 @@ rand = "0.8"
 schemars = "0.8"
 serde = "1.0"
 serde_json = "1.0"
+session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 snap = "1"
 table = { path = "../table" }

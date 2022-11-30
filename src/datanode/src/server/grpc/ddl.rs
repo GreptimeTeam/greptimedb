@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::result::AdminResultBuilder;
 use api::v1::{AdminResult, AlterExpr, CreateExpr, DropTableExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
@@ -19,6 +21,7 @@ use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
 use common_telemetry::{error, info};
 use futures::TryFutureExt;
+use session::context::SessionContext;
 use snafu::prelude::*;
 use table::requests::DropTableRequest;
 
@@ -72,7 +75,12 @@ impl Instance {
 
         let request = create_expr_to_request(table_id, expr).context(CreateExprToRequestSnafu);
         let result = futures::future::ready(request)
-            .and_then(|request| self.sql_handler().execute(SqlRequest::CreateTable(request)))
+            .and_then(|request| {
+                self.sql_handler().execute(
+                    SqlRequest::CreateTable(request),
+                    Arc::new(SessionContext::new()),
+                )
+            })
             .await;
         match result {
             Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
@@ -103,7 +111,10 @@ impl Instance {
         };
 
         let result = futures::future::ready(request)
-            .and_then(|request| self.sql_handler().execute(SqlRequest::Alter(request)))
+            .and_then(|request| {
+                self.sql_handler()
+                    .execute(SqlRequest::Alter(request), Arc::new(SessionContext::new()))
+            })
             .await;
         match result {
             Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
@@ -124,7 +135,10 @@ impl Instance {
             schema_name: expr.schema_name,
             table_name: expr.table_name,
         };
-        let result = self.sql_handler().execute(SqlRequest::DropTable(req)).await;
+        let result = self
+            .sql_handler()
+            .execute(SqlRequest::DropTable(req), Arc::new(SessionContext::new()))
+            .await;
         match result {
             Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
                 .status_code(StatusCode::Success as u32)

@@ -12,26 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::logging::{error, info};
 use common_telemetry::timer;
 use servers::query_handler::SqlQueryHandler;
+use session::context::SessionContext;
 use snafu::prelude::*;
+use sql::ast::ObjectName;
 use sql::statements::statement::Statement;
+use table::engine::TableReference;
 use table::requests::CreateDatabaseRequest;
 
-use crate::error::{
-    BumpTableIdSnafu, CatalogNotFoundSnafu, CatalogSnafu, ExecuteSqlSnafu, ParseSqlSnafu, Result,
-    SchemaNotFoundSnafu, TableIdProviderNotFoundSnafu,
-};
+use crate::error::{self, BumpTableIdSnafu, ExecuteSqlSnafu, Result, TableIdProviderNotFoundSnafu};
 use crate::instance::Instance;
 use crate::metric;
 use crate::sql::SqlRequest;
 
 impl Instance {
-    pub async fn execute_sql(&self, sql: &str) -> Result<Output> {
+    pub async fn execute_sql(&self, sql: &str, session_ctx: Arc<SessionContext>) -> Result<Output> {
         let stmt = self
             .query_engine
             .sql_to_statement(sql)
@@ -41,7 +44,7 @@ impl Instance {
             Statement::Query(_) => {
                 let logical_plan = self
                     .query_engine
-                    .statement_to_plan(stmt)
+                    .statement_to_plan(stmt, session_ctx)
                     .context(ExecuteSqlSnafu)?;
 
                 self.query_engine
@@ -50,20 +53,15 @@ impl Instance {
                     .context(ExecuteSqlSnafu)
             }
             Statement::Insert(i) => {
-                let (catalog_name, schema_name, _table_name) =
-                    i.full_table_name().context(ParseSqlSnafu)?;
-
-                let schema_provider = self
-                    .catalog_manager
-                    .catalog(&catalog_name)
-                    .context(CatalogSnafu)?
-                    .context(CatalogNotFoundSnafu { name: catalog_name })?
-                    .schema(&schema_name)
-                    .context(CatalogSnafu)?
-                    .context(SchemaNotFoundSnafu { name: schema_name })?;
-
-                let request = self.sql_handler.insert_to_request(schema_provider, *i)?;
-                self.sql_handler.execute(request).await
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(i.table_name(), session_ctx.clone())?;
+                let table_ref = TableReference::full(&catalog, &schema, &table);
+                let request = self.sql_handler.insert_to_request(
+                    self.catalog_manager.clone(),
+                    *i,
+                    table_ref,
+                )?;
+                self.sql_handler.execute(request, session_ctx).await
             }
 
             Statement::CreateDatabase(c) => {
@@ -74,7 +72,7 @@ impl Instance {
                 info!("Creating a new database: {}", request.db_name);
 
                 self.sql_handler
-                    .execute(SqlRequest::CreateDatabase(request))
+                    .execute(SqlRequest::CreateDatabase(request), session_ctx)
                     .await
             }
 
@@ -89,44 +87,55 @@ impl Instance {
                 let _engine_name = c.engine.clone();
                 // TODO(hl): Select table engine by engine_name
 
-                let request = self.sql_handler.create_to_request(table_id, c)?;
-                let catalog_name = &request.catalog_name;
-                let schema_name = &request.schema_name;
-                let table_name = &request.table_name;
+                let name = c.name.clone();
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(&name, session_ctx.clone())?;
+                let table_ref = TableReference::full(&catalog, &schema, &table);
+                let request = self.sql_handler.create_to_request(table_id, c, table_ref)?;
                 let table_id = request.id;
                 info!(
                     "Creating table, catalog: {:?}, schema: {:?}, table name: {:?}, table id: {}",
-                    catalog_name, schema_name, table_name, table_id
+                    catalog, schema, table, table_id
                 );
 
                 self.sql_handler
-                    .execute(SqlRequest::CreateTable(request))
+                    .execute(SqlRequest::CreateTable(request), session_ctx)
                     .await
             }
             Statement::Alter(alter_table) => {
-                let req = self.sql_handler.alter_to_request(alter_table)?;
-                self.sql_handler.execute(SqlRequest::Alter(req)).await
+                let name = alter_table.table_name().clone();
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(&name, session_ctx.clone())?;
+                let table_ref = TableReference::full(&catalog, &schema, &table);
+                let req = self.sql_handler.alter_to_request(alter_table, table_ref)?;
+                self.sql_handler
+                    .execute(SqlRequest::Alter(req), session_ctx)
+                    .await
             }
             Statement::DropTable(drop_table) => {
                 let req = self.sql_handler.drop_table_to_request(drop_table);
-                self.sql_handler.execute(SqlRequest::DropTable(req)).await
+                self.sql_handler
+                    .execute(SqlRequest::DropTable(req), session_ctx)
+                    .await
             }
             Statement::ShowDatabases(stmt) => {
                 self.sql_handler
-                    .execute(SqlRequest::ShowDatabases(stmt))
+                    .execute(SqlRequest::ShowDatabases(stmt), session_ctx)
                     .await
             }
             Statement::ShowTables(stmt) => {
-                self.sql_handler.execute(SqlRequest::ShowTables(stmt)).await
+                self.sql_handler
+                    .execute(SqlRequest::ShowTables(stmt), session_ctx)
+                    .await
             }
             Statement::Explain(stmt) => {
                 self.sql_handler
-                    .execute(SqlRequest::Explain(Box::new(stmt)))
+                    .execute(SqlRequest::Explain(Box::new(stmt)), session_ctx)
                     .await
             }
             Statement::DescribeTable(stmt) => {
                 self.sql_handler
-                    .execute(SqlRequest::DescribeTable(stmt))
+                    .execute(SqlRequest::DescribeTable(stmt), session_ctx)
                     .await
             }
             Statement::ShowCreateTable(_stmt) => {
@@ -136,11 +145,45 @@ impl Instance {
     }
 }
 
+/// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
+fn table_idents_to_full_name(
+    obj_name: &ObjectName,
+    session_ctx: Arc<SessionContext>,
+) -> Result<(String, String, String)> {
+    match &obj_name.0[..] {
+        [table] => Ok((
+            DEFAULT_CATALOG_NAME.to_string(),
+            session_ctx.current_schema().unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
+            table.value.clone(),
+        )),
+        [schema, table] => Ok((
+            DEFAULT_CATALOG_NAME.to_string(),
+            schema.value.clone(),
+            table.value.clone(),
+        )),
+        [catalog, schema, table] => Ok((
+            catalog.value.clone(),
+            schema.value.clone(),
+            table.value.clone(),
+        )),
+        _ => error::InvalidSqlSnafu {
+            msg: format!(
+                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {}",
+                obj_name
+            ),
+        }.fail(),
+    }
+}
+
 #[async_trait]
 impl SqlQueryHandler for Instance {
-    async fn do_query(&self, query: &str) -> servers::error::Result<Output> {
+    async fn do_query(
+        &self,
+        query: &str,
+        session_ctx: Arc<SessionContext>,
+    ) -> servers::error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
-        self.execute_sql(query)
+        self.execute_sql(query, session_ctx)
             .await
             .map_err(|e| {
                 error!(e; "Instance failed to execute sql");

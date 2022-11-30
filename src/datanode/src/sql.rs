@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! sql handler
+use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use common_telemetry::error;
 use query::query_engine::QueryEngineRef;
 use query::sql::{describe_table, explain, show_databases, show_tables};
+use session::context::SessionContext;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
@@ -67,7 +68,15 @@ impl SqlHandler {
         }
     }
 
-    pub async fn execute(&self, request: SqlRequest) -> Result<Output> {
+    // TODO(LFC): Refactor consideration: a context awareness "Planner".
+    // Now we have some query related state (like current using database in session context), maybe
+    // we could create a new struct called `Planner` that stores context and handle these queries
+    // there, instead of executing here in a "static" fashion.
+    pub async fn execute(
+        &self,
+        request: SqlRequest,
+        session_ctx: Arc<SessionContext>,
+    ) -> Result<Output> {
         let result = match request {
             SqlRequest::Insert(req) => self.insert(req).await,
             SqlRequest::CreateTable(req) => self.create_table(req).await,
@@ -78,12 +87,13 @@ impl SqlHandler {
                 show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
             SqlRequest::ShowTables(stmt) => {
-                show_tables(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
+                show_tables(stmt, self.catalog_manager.clone(), session_ctx)
+                    .context(ExecuteSqlSnafu)
             }
             SqlRequest::DescribeTable(stmt) => {
                 describe_table(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
-            SqlRequest::Explain(stmt) => explain(stmt, self.query_engine.clone())
+            SqlRequest::Explain(stmt) => explain(stmt, self.query_engine.clone(), session_ctx)
                 .await
                 .context(ExecuteSqlSnafu),
         };
@@ -114,7 +124,8 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
-    use catalog::SchemaProvider;
+    use catalog::{CatalogList, SchemaProvider};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::logical_plan::Expr;
     use common_query::physical_plan::PhysicalPlanRef;
     use common_time::timestamp::Timestamp;
@@ -234,9 +245,17 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        let catalog_provider = catalog_list.catalog(DEFAULT_CATALOG_NAME).unwrap().unwrap();
+        catalog_provider
+            .register_schema(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                Arc::new(MockSchemaProvider {}),
+            )
+            .unwrap();
+
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine();
-        let sql_handler = SqlHandler::new(table_engine, catalog_list, query_engine.clone());
+        let sql_handler = SqlHandler::new(table_engine, catalog_list.clone(), query_engine.clone());
 
         let stmt = match query_engine.sql_to_statement(sql).unwrap() {
             Statement::Insert(i) => i,
@@ -244,9 +263,8 @@ mod tests {
                 unreachable!()
             }
         };
-        let schema_provider = Arc::new(MockSchemaProvider {});
         let request = sql_handler
-            .insert_to_request(schema_provider, *stmt)
+            .insert_to_request(catalog_list.clone(), *stmt, TableReference::bare("demo"))
             .unwrap();
 
         match request {

@@ -32,6 +32,7 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
+use session::context::SessionContext;
 use snafu::{OptionExt, ResultExt};
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
@@ -61,6 +62,7 @@ impl DatafusionQueryEngine {
     }
 }
 
+// TODO(LFC): Refactor consideration: extract a "Planner" that stores query context and execute queries inside.
 #[async_trait::async_trait]
 impl QueryEngine for DatafusionQueryEngine {
     fn name(&self) -> &str {
@@ -75,17 +77,21 @@ impl QueryEngine for DatafusionQueryEngine {
         Ok(statement.remove(0))
     }
 
-    fn statement_to_plan(&self, stmt: Statement) -> Result<LogicalPlan> {
-        let context_provider = DfContextProviderAdapter::new(self.state.clone());
+    fn statement_to_plan(
+        &self,
+        stmt: Statement,
+        session_ctx: Arc<SessionContext>,
+    ) -> Result<LogicalPlan> {
+        let context_provider = DfContextProviderAdapter::new(self.state.clone(), session_ctx);
         let planner = DfPlanner::new(&context_provider);
 
         planner.statement_to_plan(stmt)
     }
 
-    fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan> {
+    fn sql_to_plan(&self, sql: &str, session_ctx: Arc<SessionContext>) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
         let stmt = self.sql_to_statement(sql)?;
-        self.statement_to_plan(stmt)
+        self.statement_to_plan(stmt, session_ctx)
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
@@ -250,6 +256,7 @@ mod tests {
     use common_recordbatch::util;
     use datafusion::field_util::{FieldExt, SchemaExt};
     use datatypes::arrow::array::UInt64Array;
+    use session::context::SessionContext;
     use table::table::numbers::NumbersTable;
 
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
@@ -277,7 +284,9 @@ mod tests {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
-        let plan = engine.sql_to_plan(sql).unwrap();
+        let plan = engine
+            .sql_to_plan(sql, Arc::new(SessionContext::new()))
+            .unwrap();
 
         assert_eq!(
             format!("{:?}", plan),
@@ -293,7 +302,9 @@ mod tests {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
-        let plan = engine.sql_to_plan(sql).unwrap();
+        let plan = engine
+            .sql_to_plan(sql, Arc::new(SessionContext::new()))
+            .unwrap();
         let output = engine.execute(&plan).await.unwrap();
 
         match output {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::ops::Deref;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::Output;
@@ -26,6 +27,7 @@ use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{text_query_response, FieldInfo, Response, Tag, TextDataRowEncoder};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{PgWireError, PgWireResult};
+use session::context::SessionContext;
 
 use crate::error::{self, Error, Result};
 use crate::query_handler::SqlQueryHandlerRef;
@@ -46,9 +48,11 @@ impl SimpleQueryHandler for PostgresServerHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        // TODO(LFC): Sessions in pg server.
+        let session_ctx = Arc::new(SessionContext::new());
         let output = self
             .query_handler
-            .do_query(query)
+            .do_query(query, session_ctx)
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 

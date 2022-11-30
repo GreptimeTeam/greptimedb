@@ -28,31 +28,42 @@ use crate::error::{
     DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu, SerializeCatalogEntryValueSnafu,
 };
 
+const ALPHANUMERICS_NAME_PATTERN: &str = "[a-zA-Z_][a-zA-Z0-9_]*";
+
 lazy_static! {
-    static ref CATALOG_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{}-([a-zA-Z_]+)$", CATALOG_KEY_PREFIX)).unwrap();
+    static ref CATALOG_KEY_PATTERN: Regex = Regex::new(&format!(
+        "^{}-({})$",
+        CATALOG_KEY_PREFIX, ALPHANUMERICS_NAME_PATTERN
+    ))
+    .unwrap();
 }
 
 lazy_static! {
     static ref SCHEMA_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)$",
-        SCHEMA_KEY_PREFIX
+        "^{}-({})-({})$",
+        SCHEMA_KEY_PREFIX, ALPHANUMERICS_NAME_PATTERN, ALPHANUMERICS_NAME_PATTERN
     ))
     .unwrap();
 }
 
 lazy_static! {
     static ref TABLE_GLOBAL_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z0-9_]+)$",
-        TABLE_GLOBAL_KEY_PREFIX
+        "^{}-({})-({})-({})$",
+        TABLE_GLOBAL_KEY_PREFIX,
+        ALPHANUMERICS_NAME_PATTERN,
+        ALPHANUMERICS_NAME_PATTERN,
+        ALPHANUMERICS_NAME_PATTERN
     ))
     .unwrap();
 }
 
 lazy_static! {
     static ref TABLE_REGIONAL_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-([a-zA-Z_]+)-([a-zA-Z_]+)-([a-zA-Z0-9_]+)-([0-9]+)$",
-        TABLE_REGIONAL_KEY_PREFIX
+        "^{}-({})-({})-({})-([0-9]+)$",
+        TABLE_REGIONAL_KEY_PREFIX,
+        ALPHANUMERICS_NAME_PATTERN,
+        ALPHANUMERICS_NAME_PATTERN,
+        ALPHANUMERICS_NAME_PATTERN
     ))
     .unwrap();
 }

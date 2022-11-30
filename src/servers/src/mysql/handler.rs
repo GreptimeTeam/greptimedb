@@ -18,9 +18,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use common_telemetry::{debug, error};
 use opensrv_mysql::{
-    AsyncMysqlShim, ErrorKind, ParamParser, QueryResultWriter, StatementMetaWriter,
+    AsyncMysqlShim, ErrorKind, InitWriter, ParamParser, QueryResultWriter, StatementMetaWriter,
 };
 use rand::RngCore;
+use session::Session;
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
 
@@ -36,7 +37,9 @@ pub struct MysqlInstanceShim {
     query_handler: SqlQueryHandlerRef,
     salt: [u8; 20],
     client_addr: String,
+    // TODO(LFC): Break `Context` struct into different fields in `Session`, each with its own purpose.
     ctx: Arc<RwLock<Option<Context>>>,
+    session: Arc<Session>,
 }
 
 impl MysqlInstanceShim {
@@ -59,6 +62,7 @@ impl MysqlInstanceShim {
             salt: scramble,
             client_addr,
             ctx: Arc::new(RwLock::new(None)),
+            session: Arc::new(Session::new()),
         }
     }
 }
@@ -147,14 +151,17 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         debug!("Start executing query: '{}'", query);
         let start = Instant::now();
 
-        // TODO(LFC): Find a better way:
+        // TODO(LFC): Find a better way to deal with these special federated queries.
         // `check` uses regex to filter out unsupported statements emitted by MySQL's federated
         // components, this is quick and dirty, there must be a better way to do it.
-        let output = if let Some(output) = crate::mysql::federated::check(query) {
-            Ok(output)
-        } else {
-            self.query_handler.do_query(query).await
-        };
+        let output =
+            if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
+                Ok(output)
+            } else {
+                self.query_handler
+                    .do_query(query, self.session.context())
+                    .await
+            };
 
         debug!(
             "Finished executing query: '{}', total time costs in microseconds: {}",
@@ -164,5 +171,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         let mut writer = MysqlResultWriter::new(writer);
         writer.write(query, output).await
+    }
+
+    async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
+        self.session
+            .context()
+            .set_current_schema(database.trim().to_string());
+        w.ok().await.map_err(|e| e.into())
     }
 }

@@ -487,6 +487,7 @@ mod test {
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
+    use session::context::SessionContext;
     use tokio::sync::mpsc;
 
     use super::*;
@@ -498,7 +499,7 @@ mod test {
 
     #[async_trait]
     impl SqlQueryHandler for DummyInstance {
-        async fn do_query(&self, _query: &str) -> Result<Output> {
+        async fn do_query(&self, _: &str, _: Arc<SessionContext>) -> Result<Output> {
             unimplemented!()
         }
     }

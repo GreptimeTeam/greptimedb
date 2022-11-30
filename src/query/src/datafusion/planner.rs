@@ -21,6 +21,7 @@ use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::sql::planner::{ContextProvider, SqlToRel};
 use datatypes::arrow::datatypes::DataType;
+use session::context::SessionContext;
 use snafu::ResultExt;
 use sql::statements::explain::Explain;
 use sql::statements::query::Query;
@@ -92,11 +93,12 @@ where
 
 pub(crate) struct DfContextProviderAdapter {
     state: QueryEngineState,
+    session_ctx: Arc<SessionContext>,
 }
 
 impl DfContextProviderAdapter {
-    pub(crate) fn new(state: QueryEngineState) -> Self {
-        Self { state }
+    pub(crate) fn new(state: QueryEngineState, session_ctx: Arc<SessionContext>) -> Self {
+        Self { state, session_ctx }
     }
 }
 
@@ -104,11 +106,18 @@ impl DfContextProviderAdapter {
 ///                           manage UDFs, UDAFs, variables by ourself in future.
 impl ContextProvider for DfContextProviderAdapter {
     fn get_table_provider(&self, name: TableReference) -> Option<Arc<dyn TableProvider>> {
-        self.state
-            .df_context()
-            .state
-            .lock()
-            .get_table_provider(name)
+        let schema = self.session_ctx.current_schema();
+        let execution_ctx = self.state.df_context().state.lock();
+        match name {
+            TableReference::Bare { table } if schema.is_some() => {
+                execution_ctx.get_table_provider(TableReference::Partial {
+                    // unwrap safety: checked in this match's arm
+                    schema: &schema.unwrap(),
+                    table,
+                })
+            }
+            _ => execution_ctx.get_table_provider(name),
+        }
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {

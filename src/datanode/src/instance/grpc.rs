@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::result::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use api::v1::{
     admin_expr, object_expr, select_expr, AdminExpr, AdminResult, Column, CreateDatabaseExpr,
@@ -26,6 +28,7 @@ use common_grpc_expr::insertion_expr_to_request;
 use common_query::Output;
 use query::plan::LogicalPlan;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
+use session::context::SessionContext;
 use snafu::prelude::*;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::CreateDatabaseRequest;
@@ -110,7 +113,10 @@ impl Instance {
     async fn do_handle_select(&self, select_expr: SelectExpr) -> Result<Output> {
         let expr = select_expr.expr;
         match expr {
-            Some(select_expr::Expr::Sql(sql)) => self.execute_sql(&sql).await,
+            Some(select_expr::Expr::Sql(sql)) => {
+                self.execute_sql(&sql, Arc::new(SessionContext::new()))
+                    .await
+            }
             Some(select_expr::Expr::LogicalPlan(plan)) => self.execute_logical(plan).await,
             Some(select_expr::Expr::PhysicalPlan(api::v1::PhysicalPlan { original_ql, plan })) => {
                 self.physical_planner

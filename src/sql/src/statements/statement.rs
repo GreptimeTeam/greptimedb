@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use sqlparser::ast::Statement as SpStatement;
-use sqlparser::parser::ParserError;
-
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
 use crate::statements::describe::DescribeTable;
@@ -52,37 +49,6 @@ pub enum Statement {
     Explain(Explain),
 }
 
-/// Converts Statement to sqlparser statement
-impl TryFrom<Statement> for SpStatement {
-    type Error = sqlparser::parser::ParserError;
-
-    fn try_from(value: Statement) -> Result<Self, Self::Error> {
-        match value {
-            Statement::ShowDatabases(_) => Err(ParserError::ParserError(
-                "sqlparser does not support SHOW DATABASE query.".to_string(),
-            )),
-            Statement::ShowTables(_) => Err(ParserError::ParserError(
-                "sqlparser does not support SHOW TABLES query.".to_string(),
-            )),
-            Statement::ShowCreateTable(_) => Err(ParserError::ParserError(
-                "sqlparser does not support SHOW CREATE TABLE query.".to_string(),
-            )),
-            Statement::DescribeTable(_) => Err(ParserError::ParserError(
-                "sqlparser does not support DESCRIBE TABLE query.".to_string(),
-            )),
-            Statement::DropTable(_) => Err(ParserError::ParserError(
-                "sqlparser does not support DROP TABLE query.".to_string(),
-            )),
-            Statement::Query(s) => Ok(SpStatement::Query(Box::new(s.inner))),
-            Statement::Insert(i) => Ok(i.inner),
-            Statement::CreateDatabase(_) | Statement::CreateTable(_) | Statement::Alter(_) => {
-                unimplemented!()
-            }
-            Statement::Explain(e) => Ok(e.inner),
-        }
-    }
-}
-
 /// Comment hints from SQL.
 /// It'll be enabled when using `--comment` in mysql client.
 /// Eg: `SELECT * FROM system.number LIMIT 1; -- { ErrorCode 25 }`
@@ -91,25 +57,4 @@ pub struct Hint {
     pub error_code: Option<u16>,
     pub comment: String,
     pub prefix: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use std::assert_matches::assert_matches;
-
-    use sqlparser::dialect::GenericDialect;
-
-    use super::*;
-    use crate::parser::ParserContext;
-
-    #[test]
-    pub fn test_statement_convert() {
-        let sql = "SELECT * FROM table_0";
-        let mut stmts = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        assert_eq!(1, stmts.len());
-        let x = stmts.remove(0);
-        let statement = SpStatement::try_from(x).unwrap();
-
-        assert_matches!(statement, SpStatement::Query { .. });
-    }
 }
