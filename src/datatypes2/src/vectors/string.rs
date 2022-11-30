@@ -350,10 +350,11 @@ mod tests {
 
     #[test]
     fn test_from_non_option_string() {
-        let corpus = vec!["😅😅😅", "😍😍😍😍", "🥵🥵"];
+        let nul = String::from_utf8(vec![0]).unwrap();
+        let corpus = vec!["😅😅😅", "😍😍😍😍", "🥵🥵", nul.as_str()];
         let vector = StringVector::from(corpus);
         let serialized = serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap();
-        assert_eq!(r#"["😅😅😅","😍😍😍😍","🥵🥵"]"#, serialized);
+        assert_eq!(r#"["😅😅😅","😍😍😍😍","🥵🥵","\u0000"]"#, serialized);
 
         let corpus = vec![
             "🀀🀀🀀".to_string(),
