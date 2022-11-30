@@ -30,6 +30,8 @@ use substrait_proto::protobuf::rel::RelType;
 use substrait_proto::protobuf::{PlanRel, ReadRel, Rel};
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::context::ConvertorContext;
+use crate::df_expr::{expression_from_df_expr, to_df_expr};
 use crate::error::{
     DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, Error, InternalSnafu,
     InvalidParametersSnafu, MissingFieldSnafu, SchemaNotMatchSnafu, TableNotFoundSnafu,
@@ -40,6 +42,7 @@ use crate::SubstraitPlan;
 
 pub struct DFLogicalSubstraitConvertor {
     catalog_manager: CatalogManagerRef,
+    ctx: ConvertorContext,
 }
 
 impl SubstraitPlan for DFLogicalSubstraitConvertor {
@@ -59,7 +62,7 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         self.convert_rel(rel)
     }
 
-    fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
+    fn encode(&mut self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
         let rel = self.convert_plan(plan)?;
         let plan_rel = PlanRel {
             rel_type: Some(PlanRelType::Rel(rel)),
@@ -74,7 +77,10 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 
 impl DFLogicalSubstraitConvertor {
     pub fn new(catalog_manager: CatalogManagerRef) -> Self {
-        Self { catalog_manager }
+        Self {
+            catalog_manager,
+            ctx: ConvertorContext::default(),
+        }
     }
 }
 
@@ -190,6 +196,13 @@ impl DFLogicalSubstraitConvertor {
             }
         );
 
+        // Convert filter
+        let filters = if let Some(filter) = read_rel.filter {
+            vec![to_df_expr(&self.ctx, *filter, &retrieved_schema)?]
+        } else {
+            vec![]
+        };
+
         // Calculate the projected schema
         let projected_schema = project_schema(&stored_schema, projection.as_ref())
             .context(DFInternalSnafu)?
@@ -202,7 +215,7 @@ impl DFLogicalSubstraitConvertor {
             source: adapter,
             projection,
             projected_schema,
-            filters: vec![],
+            filters,
             limit: None,
         }))
     }
@@ -219,7 +232,7 @@ impl DFLogicalSubstraitConvertor {
 }
 
 impl DFLogicalSubstraitConvertor {
-    pub fn convert_plan(&self, plan: LogicalPlan) -> Result<Rel, Error> {
+    pub fn convert_plan(&mut self, plan: LogicalPlan) -> Result<Rel, Error> {
         match plan {
             LogicalPlan::Projection(_) => UnsupportedPlanSnafu {
                 name: "DataFusion Logical Projection",
@@ -287,7 +300,7 @@ impl DFLogicalSubstraitConvertor {
         }
     }
 
-    pub fn convert_table_scan_plan(&self, table_scan: TableScan) -> Result<ReadRel, Error> {
+    pub fn convert_table_scan_plan(&mut self, table_scan: TableScan) -> Result<ReadRel, Error> {
         let provider = table_scan
             .source
             .as_any()
@@ -313,10 +326,20 @@ impl DFLogicalSubstraitConvertor {
         // assemble base (unprojected) schema using Table's schema.
         let base_schema = from_schema(&provider.table().schema())?;
 
+        let filter = if let Some(filter) = table_scan.filters.first() {
+            Some(Box::new(expression_from_df_expr(
+                &mut self.ctx,
+                filter,
+                &provider.table().schema(),
+            )?))
+        } else {
+            None
+        };
+
         let read_rel = ReadRel {
             common: None,
             base_schema: Some(base_schema),
-            filter: None,
+            filter,
             projection,
             advanced_extension: None,
             read_type: Some(read_type),
@@ -393,7 +416,7 @@ mod test {
     }
 
     async fn logical_plan_round_trip(plan: LogicalPlan, catalog: CatalogManagerRef) {
-        let convertor = DFLogicalSubstraitConvertor::new(catalog);
+        let mut convertor = DFLogicalSubstraitConvertor::new(catalog);
 
         let proto = convertor.encode(plan.clone()).unwrap();
         let tripped_plan = convertor.decode(proto).unwrap();

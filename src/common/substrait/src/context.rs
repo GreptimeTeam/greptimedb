@@ -12,23 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
+#[derive(Default)]
 pub struct ConvertorContext {
-    scalar_fn_set: HashSet<String>,
+    scalar_fn_names: HashMap<String, u32>,
     scalar_fn_map: HashMap<u32, String>,
 }
 
 impl ConvertorContext {
-    pub fn register_scalar_fn<S: AsRef<str>>(&mut self, name: S) {
-        if self.scalar_fn_set.contains(name.as_ref()) {
-            return;
+    pub fn register_scalar_fn<S: AsRef<str>>(&mut self, name: S) -> u32 {
+        if let Some(anchor) = self.scalar_fn_names.get(name.as_ref()) {
+            return *anchor;
         }
 
         let next_anchor = self.scalar_fn_map.len() as _;
         self.scalar_fn_map
             .insert(next_anchor, name.as_ref().to_string());
-        self.scalar_fn_set.insert(name.as_ref().to_string());
+        self.scalar_fn_names
+            .insert(name.as_ref().to_string(), next_anchor);
+        next_anchor
     }
 
     pub fn find_scalar_fn(&self, anchor: u32) -> Option<&str> {

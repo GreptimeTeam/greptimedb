@@ -21,14 +21,17 @@ pub fn to_df_expr(ctx: &ConvertorContext, expression: Expression, schema: &Schem
         RexType::Literal(_literal) => todo!(),
         RexType::Selection(selection) => convert_selection_rex(selection, schema),
         RexType::ScalarFunction(scalar_fn) => convert_scalar_function(ctx, scalar_fn, schema),
-        RexType::WindowFunction(_) => todo!(),
-        RexType::IfThen(_) => todo!(),
-        RexType::SwitchExpression(_) => todo!(),
-        RexType::SingularOrList(_) => todo!(),
-        RexType::MultiOrList(_) => todo!(),
-        RexType::Cast(_) => todo!(),
-        RexType::Subquery(_) => todo!(),
-        RexType::Enum(_) => todo!(),
+        RexType::WindowFunction(_)
+        | RexType::IfThen(_)
+        | RexType::SwitchExpression(_)
+        | RexType::SingularOrList(_)
+        | RexType::MultiOrList(_)
+        | RexType::Cast(_)
+        | RexType::Subquery(_)
+        | RexType::Enum(_) => UnsupportedExprSnafu {
+            name: format!("substrait expression {:?}", expr_rex_type),
+        }
+        .fail()?,
     }
 }
 
@@ -399,6 +402,239 @@ pub fn convert_scalar_function(
 }
 
 /// Convert DataFusion's `Expr` to substrait's `Expression`
-pub fn from_df_expr(expr: &Expr) -> Result<Expression> {
-    todo!()
+pub fn expression_from_df_expr(
+    ctx: &mut ConvertorContext,
+    expr: &Expr,
+    schema: &Schema,
+) -> Result<Expression> {
+    let expression = match expr {
+        // Don't merge them with other unsupported expr arms to perserve the ordering.
+        Expr::Alias(..) | Expr::Column(..) | Expr::ScalarVariable(..) | Expr::Literal(..) => {
+            UnsupportedExprSnafu {
+                name: expr.to_string(),
+            }
+            .fail()?
+        }
+        Expr::BinaryExpr { left, op, right } => {
+            let left = expression_from_df_expr(ctx, left, schema)?;
+            let right = expression_from_df_expr(ctx, right, schema)?;
+            let arguments = utils::expression_to_argument(vec![left, right]);
+            let op_name = utils::name_df_operator(op);
+            let function_reference = ctx.register_scalar_fn(op_name);
+            utils::build_expression(function_reference, arguments)
+        }
+        Expr::Not(e) => {
+            let arg = expression_from_df_expr(ctx, e, schema)?;
+            let arguments = utils::expression_to_argument(vec![arg]);
+            let op_name = "not";
+            let function_reference = ctx.register_scalar_fn(op_name);
+            utils::build_expression(function_reference, arguments)
+        }
+        Expr::IsNotNull(e) => {
+            let arg = expression_from_df_expr(ctx, e, schema)?;
+            let arguments = utils::expression_to_argument(vec![arg]);
+            let op_name = "is_not_null";
+            let function_reference = ctx.register_scalar_fn(op_name);
+            utils::build_expression(function_reference, arguments)
+        }
+        Expr::IsNull(e) => {
+            let arg = expression_from_df_expr(ctx, e, schema)?;
+            let arguments = utils::expression_to_argument(vec![arg]);
+            let op_name = "is_not_null";
+            let function_reference = ctx.register_scalar_fn(op_name);
+            utils::build_expression(function_reference, arguments)
+        }
+        Expr::Negative(e) => {
+            let arg = expression_from_df_expr(ctx, e, schema)?;
+            let arguments = utils::expression_to_argument(vec![arg]);
+            let op_name = "negative";
+            let function_reference = ctx.register_scalar_fn(op_name);
+            utils::build_expression(function_reference, arguments)
+        }
+        // Don't merge them with other unsupported expr arms to perserve the ordering.
+        Expr::GetIndexedField { .. } => UnsupportedExprSnafu {
+            name: expr.to_string(),
+        }
+        .fail()?,
+        Expr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => {
+            let expr = expression_from_df_expr(ctx, expr, schema)?;
+            let low = expression_from_df_expr(ctx, low, schema)?;
+            let high = expression_from_df_expr(ctx, high, schema)?;
+            let arguments = utils::expression_to_argument(vec![expr, low, high]);
+            let op_name = if *negated { "not_between" } else { "between" };
+            let function_reference = ctx.register_scalar_fn(op_name);
+            utils::build_expression(function_reference, arguments)
+        }
+        // Don't merge them with other unsupported expr arms to perserve the ordering.
+        Expr::Case { .. } | Expr::Cast { .. } | Expr::TryCast { .. } => UnsupportedExprSnafu {
+            name: expr.to_string(),
+        }
+        .fail()?,
+        Expr::Sort {
+            expr,
+            asc,
+            nulls_first: _,
+        } => {
+            let expr = expression_from_df_expr(ctx, expr, schema)?;
+            let arguments = utils::expression_to_argument(vec![expr]);
+            let op_name = if *asc { "sort_asc" } else { "sort_des" };
+            let function_reference = ctx.register_scalar_fn(op_name);
+            utils::build_expression(function_reference, arguments)
+        }
+        Expr::ScalarFunction { fun, args } => {
+            let arguments = utils::expression_to_argument(
+                args.iter()
+                    .map(|e| expression_from_df_expr(ctx, e, schema))
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            let op_name = utils::name_builtin_scalar_function(fun);
+            let function_reference = ctx.register_scalar_fn(op_name);
+            utils::build_expression(function_reference, arguments)
+        }
+        // Don't merge them with other unsupported expr arms to perserve the ordering.
+        Expr::ScalarUDF { .. }
+        | Expr::AggregateFunction { .. }
+        | Expr::WindowFunction { .. }
+        | Expr::AggregateUDF { .. }
+        | Expr::InList { .. }
+        | Expr::Wildcard => UnsupportedExprSnafu {
+            name: expr.to_string(),
+        }
+        .fail()?,
+    };
+
+    Ok(expression)
+}
+
+mod utils {
+    use datafusion_expr::{BuiltinScalarFunction, Operator};
+    use substrait_proto::protobuf::expression::{RexType, ScalarFunction};
+    use substrait_proto::protobuf::function_argument::ArgType;
+    use substrait_proto::protobuf::{Expression, FunctionArgument};
+
+    pub(crate) fn name_df_operator(op: &Operator) -> &str {
+        match op {
+            Operator::Eq => "equal",
+            Operator::NotEq => "not_equal",
+            Operator::Lt => "lt",
+            Operator::LtEq => "lte",
+            Operator::Gt => "gt",
+            Operator::GtEq => "gte",
+            Operator::Plus => "plus",
+            Operator::Minus => "minus",
+            Operator::Multiply => "multiply",
+            Operator::Divide => "divide",
+            Operator::Modulo => "modulo",
+            Operator::And => "and",
+            Operator::Or => "or",
+            Operator::Like => "like",
+            Operator::NotLike => "not_like",
+            Operator::IsDistinctFrom => "is_distinct_from",
+            Operator::IsNotDistinctFrom => "is_not_distinct_from",
+            Operator::RegexMatch => "regex_match",
+            Operator::RegexIMatch => "regex_i_match",
+            Operator::RegexNotMatch => "regex_not_match",
+            Operator::RegexNotIMatch => "regex_not_i_match",
+            Operator::BitwiseAnd => "bitwise_and",
+            Operator::BitwiseOr => "bitwise_or",
+        }
+    }
+
+    /// Convert list of [Expression] to [FunctionArgument] vector.
+    pub(crate) fn expression_to_argument(expressions: Vec<Expression>) -> Vec<FunctionArgument> {
+        expressions
+            .into_iter()
+            .map(|expr| FunctionArgument {
+                arg_type: Some(ArgType::Value(expr)),
+            })
+            .collect()
+    }
+
+    /// Convenient builder for [Expression]
+    pub(crate) fn build_expression(
+        function_reference: u32,
+        arguments: Vec<FunctionArgument>,
+    ) -> Expression {
+        Expression {
+            rex_type: Some(RexType::ScalarFunction(ScalarFunction {
+                function_reference,
+                arguments,
+                output_type: None,
+                ..Default::default()
+            })),
+        }
+    }
+
+    pub(crate) fn name_builtin_scalar_function(fun: &BuiltinScalarFunction) -> &str {
+        match fun {
+            BuiltinScalarFunction::Abs => "abs",
+            BuiltinScalarFunction::Acos => "acos",
+            BuiltinScalarFunction::Asin => "asin",
+            BuiltinScalarFunction::Atan => "atan",
+            BuiltinScalarFunction::Ceil => "ceil",
+            BuiltinScalarFunction::Cos => "cos",
+            BuiltinScalarFunction::Digest => "digest",
+            BuiltinScalarFunction::Exp => "exp",
+            BuiltinScalarFunction::Floor => "floor",
+            BuiltinScalarFunction::Ln => "ln",
+            BuiltinScalarFunction::Log => "log",
+            BuiltinScalarFunction::Log10 => "log10",
+            BuiltinScalarFunction::Log2 => "log2",
+            BuiltinScalarFunction::Round => "round",
+            BuiltinScalarFunction::Signum => "signum",
+            BuiltinScalarFunction::Sin => "sin",
+            BuiltinScalarFunction::Sqrt => "sqrt",
+            BuiltinScalarFunction::Tan => "tan",
+            BuiltinScalarFunction::Trunc => "trunc",
+            BuiltinScalarFunction::Array => "make_array",
+            BuiltinScalarFunction::Ascii => "ascii",
+            BuiltinScalarFunction::BitLength => "bit_length",
+            BuiltinScalarFunction::Btrim => "btrim",
+            BuiltinScalarFunction::CharacterLength => "character_length",
+            BuiltinScalarFunction::Chr => "chr",
+            BuiltinScalarFunction::Concat => "concat",
+            BuiltinScalarFunction::ConcatWithSeparator => "concat_ws",
+            BuiltinScalarFunction::DatePart => "date_part",
+            BuiltinScalarFunction::DateTrunc => "date_trunc",
+            BuiltinScalarFunction::InitCap => "initcap",
+            BuiltinScalarFunction::Left => "left",
+            BuiltinScalarFunction::Lpad => "lpad",
+            BuiltinScalarFunction::Lower => "lower",
+            BuiltinScalarFunction::Ltrim => "ltrim",
+            BuiltinScalarFunction::MD5 => "md5",
+            BuiltinScalarFunction::NullIf => "nullif",
+            BuiltinScalarFunction::OctetLength => "octet_length",
+            BuiltinScalarFunction::Random => "random",
+            BuiltinScalarFunction::RegexpReplace => "regexp_replace",
+            BuiltinScalarFunction::Repeat => "repeat",
+            BuiltinScalarFunction::Replace => "replace",
+            BuiltinScalarFunction::Reverse => "reverse",
+            BuiltinScalarFunction::Right => "right",
+            BuiltinScalarFunction::Rpad => "rpad",
+            BuiltinScalarFunction::Rtrim => "rtrim",
+            BuiltinScalarFunction::SHA224 => "sha224",
+            BuiltinScalarFunction::SHA256 => "sha256",
+            BuiltinScalarFunction::SHA384 => "sha384",
+            BuiltinScalarFunction::SHA512 => "sha512",
+            BuiltinScalarFunction::SplitPart => "split_part",
+            BuiltinScalarFunction::StartsWith => "starts_with",
+            BuiltinScalarFunction::Strpos => "strpos",
+            BuiltinScalarFunction::Substr => "substr",
+            BuiltinScalarFunction::ToHex => "to_hex",
+            BuiltinScalarFunction::ToTimestamp => "to_timestamp",
+            BuiltinScalarFunction::ToTimestampMillis => "to_timestamp_millis",
+            BuiltinScalarFunction::ToTimestampMicros => "to_timestamp_macros",
+            BuiltinScalarFunction::ToTimestampSeconds => "to_timestamp_seconds",
+            BuiltinScalarFunction::Now => "now",
+            BuiltinScalarFunction::Translate => "translate",
+            BuiltinScalarFunction::Trim => "trim",
+            BuiltinScalarFunction::Upper => "upper",
+            BuiltinScalarFunction::RegexpMatch => "regexp_match",
+        }
+    }
 }

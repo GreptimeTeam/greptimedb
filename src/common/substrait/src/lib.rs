@@ -32,5 +32,5 @@ pub trait SubstraitPlan {
 
     fn decode<B: Buf + Send>(&self, message: B) -> Result<Self::Plan, Self::Error>;
 
-    fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error>;
+    fn encode(&mut self, plan: Self::Plan) -> Result<Bytes, Self::Error>;
 }
