@@ -160,7 +160,7 @@ break things. Benchmark on development branch may not represent its potential
 performance. We release pre-built binaries constantly for functional
 evaluation. Do not use it in production at the moment.
 
-For future plans, check out [GreptimeDB roadmap](https://github.com/GreptimeTeam/greptimedb/issues/669)
+For future plans, check out [GreptimeDB roadmap](https://github.com/GreptimeTeam/greptimedb/issues/669).
 
 ## Community
 
