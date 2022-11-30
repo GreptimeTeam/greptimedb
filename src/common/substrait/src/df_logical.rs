@@ -326,10 +326,15 @@ impl DFLogicalSubstraitConvertor {
         // assemble base (unprojected) schema using Table's schema.
         let base_schema = from_schema(&provider.table().schema())?;
 
-        let filter = if let Some(filter) = table_scan.filters.first() {
+        // make conjunction over a list of filters and convert the result to substrait
+        let filter = if let Some(conjunction) = table_scan
+            .filters
+            .into_iter()
+            .reduce(|accum, expr| accum.and(expr))
+        {
             Some(Box::new(expression_from_df_expr(
                 &mut self.ctx,
-                filter,
+                &conjunction,
                 &provider.table().schema(),
             )?))
         } else {
