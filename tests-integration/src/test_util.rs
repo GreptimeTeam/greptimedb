@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,8 @@ use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use object_store::backend::s3;
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
+use once_cell::sync::OnceCell;
+use rand::Rng;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServer};
 use servers::server::Server;
@@ -42,6 +45,13 @@ use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::CreateTableRequest;
 use tempdir::TempDir;
+static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
+
+fn get_port() -> usize {
+    PORTS
+        .get_or_init(|| AtomicUsize::new(rand::thread_rng().gen_range(3500..3900)))
+        .fetch_add(1, Ordering::Relaxed)
+}
 
 pub enum StorageType {
     S3,
@@ -252,10 +262,11 @@ pub async fn setup_test_app_with_frontend(
 pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
-    datanode_port: usize,
-    frontend_port: usize,
 ) -> (String, TestGuard, Arc<GrpcServer>, Arc<GrpcServer>) {
     common_telemetry::init_default_ut_logging();
+
+    let datanode_port = get_port();
+    let frontend_port = get_port();
 
     let (mut opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let datanode_grpc_addr = format!("127.0.0.1:{}", datanode_port);
