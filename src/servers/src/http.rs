@@ -344,55 +344,38 @@ impl HttpServer {
                 url: format!("/{}", HTTP_API_VERSION),
                 ..OpenAPIServer::default()
             }],
-
             ..OpenApi::default()
         };
 
-        // TODO(LFC): Use released Axum.
-        // Axum version 0.6 introduces state within router, making router methods far more elegant
-        // to write. Though version 0.6 is rc, I think it's worth to upgrade.
-        // Prior to version 0.6, we only have a single "Extension" to share all query
-        // handlers amongst router methods. That requires us to pack all query handlers in a shared
-        // state, and check-then-get the desired query handler in different router methods, which
-        // is a lot of tedious work.
-        let sql_router = ApiRouter::with_state(ApiState {
-            sql_handler: self.sql_handler.clone(),
-            script_handler: self.script_handler.clone(),
-        })
-        .api_route(
-            "/sql",
-            apirouting::get_with(handler::sql, handler::sql_docs)
-                .post_with(handler::sql, handler::sql_docs),
-        )
-        .api_route("/scripts", apirouting::post(script::scripts))
-        .api_route("/run-script", apirouting::post(script::run_script))
-        .route("/private/api.json", apirouting::get(serve_api))
-        .route("/private/docs", apirouting::get(serve_docs))
-        .finish_api(&mut api)
-        .layer(Extension(Arc::new(api)));
+        let sql_router = self
+            .route_sql(ApiState {
+                sql_handler: self.sql_handler.clone(),
+                script_handler: self.script_handler.clone(),
+            })
+            .finish_api(&mut api)
+            .layer(Extension(Arc::new(api)));
 
         let mut router = Router::new().nest(&format!("/{}", HTTP_API_VERSION), sql_router);
 
         if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
-            let opentsdb_router = Router::with_state(opentsdb_handler)
-                .route("/api/put", routing::post(opentsdb::put));
-
-            router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
+            router = router.nest(
+                &format!("/{}/opentsdb", HTTP_API_VERSION),
+                self.route_opentsdb(opentsdb_handler),
+            );
         }
 
         if let Some(influxdb_handler) = self.influxdb_handler.clone() {
-            let influxdb_router =
-                Router::with_state(influxdb_handler).route("/write", routing::post(influxdb_write));
-
-            router = router.nest(&format!("/{}/influxdb", HTTP_API_VERSION), influxdb_router);
+            router = router.nest(
+                &format!("/{}/influxdb", HTTP_API_VERSION),
+                self.route_influxdb(influxdb_handler),
+            );
         }
 
         if let Some(prom_handler) = self.prom_handler.clone() {
-            let prom_router = Router::with_state(prom_handler)
-                .route("/write", routing::post(prometheus::remote_write))
-                .route("/read", routing::post(prometheus::remote_read));
-
-            router = router.nest(&format!("/{}/prometheus", HTTP_API_VERSION), prom_router);
+            router = router.nest(
+                &format!("/{}/prometheus", HTTP_API_VERSION),
+                self.route_prom(prom_handler),
+            );
         }
 
         router = router.route("/metrics", routing::get(handler::metrics));
@@ -407,6 +390,39 @@ impl HttpServer {
                     // custom layer
                     .layer(middleware::from_fn(context::build_ctx)),
             )
+    }
+
+    fn route_sql<S>(&self, api_state: ApiState) -> ApiRouter<S> {
+        ApiRouter::new()
+            .api_route(
+                "/sql",
+                apirouting::get_with(handler::sql, handler::sql_docs)
+                    .post_with(handler::sql, handler::sql_docs),
+            )
+            .api_route("/scripts", apirouting::post(script::scripts))
+            .api_route("/run-script", apirouting::post(script::run_script))
+            .route("/private/api.json", apirouting::get(serve_api))
+            .route("/private/docs", apirouting::get(serve_docs))
+            .with_state(api_state)
+    }
+
+    fn route_prom<S>(&self, prom_handler: PrometheusProtocolHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/write", routing::post(prometheus::remote_write))
+            .route("/read", routing::post(prometheus::remote_read))
+            .with_state(prom_handler)
+    }
+
+    fn route_influxdb<S>(&self, influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/write", routing::post(influxdb_write))
+            .with_state(influxdb_handler)
+    }
+
+    fn route_opentsdb<S>(&self, opentsdb_handler: OpentsdbProtocolHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/api/put", routing::post(opentsdb::put))
+            .with_state(opentsdb_handler)
     }
 }
 
