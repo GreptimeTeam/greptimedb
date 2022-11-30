@@ -22,7 +22,7 @@ use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, Float32Type, Float64Type, Int16Type,
-    Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    Int32Type, Int64Type, Int8Type, NullType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -30,7 +30,7 @@ use crate::vectors::MutableVector;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[enum_dispatch::enum_dispatch(DataType)]
 pub enum ConcreteDataType {
-    // Null(NullType),
+    Null(NullType),
     Boolean(BooleanType),
 
     // Numeric types:
@@ -190,8 +190,8 @@ macro_rules! impl_new_concrete_type_functions {
 }
 
 impl_new_concrete_type_functions!(
-    Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64, Binary,
-    Date, DateTime
+    Null, Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64,
+    Binary, Date, DateTime
 );
 
 // impl ConcreteDataType {

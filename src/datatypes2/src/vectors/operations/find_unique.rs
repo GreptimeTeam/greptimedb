@@ -15,6 +15,7 @@
 use common_base::BitVec;
 
 use crate::scalars::ScalarVector;
+use crate::vectors::{NullVector, Vector};
 
 // To implement `find_unique()` correctly, we need to keep in mind that always marks an element as
 // selected when it is different from the previous one, and leaves the `selected` unchanged
@@ -60,20 +61,20 @@ pub(crate) fn find_unique_scalar<'a, T: ScalarVector>(
     }
 }
 
-// pub(crate) fn find_unique_null(
-//     vector: &NullVector,
-//     selected: &mut BitVec,
-//     prev_vector: Option<&NullVector>,
-// ) {
-//     if vector.is_empty() {
-//         return;
-//     }
+pub(crate) fn find_unique_null(
+    vector: &NullVector,
+    selected: &mut BitVec,
+    prev_vector: Option<&NullVector>,
+) {
+    if vector.is_empty() {
+        return;
+    }
 
-//     let is_first_not_duplicate = prev_vector.map(|pv| pv.is_empty()).unwrap_or(true);
-//     if is_first_not_duplicate {
-//         selected.set(0, true);
-//     }
-// }
+    let is_first_not_duplicate = prev_vector.map(NullVector::is_empty).unwrap_or(true);
+    if is_first_not_duplicate {
+        selected.set(0, true);
+    }
+}
 
 // pub(crate) fn find_unique_constant(
 //     vector: &ConstantVector,
@@ -210,56 +211,56 @@ mod tests {
         check_bitmap(&[true, false, true, true], &selected);
     }
 
-    // fn check_find_unique_null(len: usize) {
-    //     let input = NullVector::new(len);
-    //     let mut selected = BitVec::repeat(false, input.len());
-    //     input.find_unique(&mut selected, None);
+    fn check_find_unique_null(len: usize) {
+        let input = NullVector::new(len);
+        let mut selected = BitVec::repeat(false, input.len());
+        input.find_unique(&mut selected, None);
 
-    //     let mut expect = vec![false; len];
-    //     if !expect.is_empty() {
-    //         expect[0] = true;
-    //     }
-    //     check_bitmap(&expect, &selected);
+        let mut expect = vec![false; len];
+        if !expect.is_empty() {
+            expect[0] = true;
+        }
+        check_bitmap(&expect, &selected);
 
-    //     let mut selected = BitVec::repeat(false, input.len());
-    //     let prev = Some(NullVector::new(1));
-    //     input.find_unique(&mut selected, prev.as_ref().map(|v| v as _));
-    //     let expect = vec![false; len];
-    //     check_bitmap(&expect, &selected);
-    // }
+        let mut selected = BitVec::repeat(false, input.len());
+        let prev = Some(NullVector::new(1));
+        input.find_unique(&mut selected, prev.as_ref().map(|v| v as _));
+        let expect = vec![false; len];
+        check_bitmap(&expect, &selected);
+    }
 
-    // #[test]
-    // fn test_find_unique_null() {
-    //     for len in 0..5 {
-    //         check_find_unique_null(len);
-    //     }
-    // }
+    #[test]
+    fn test_find_unique_null() {
+        for len in 0..5 {
+            check_find_unique_null(len);
+        }
+    }
 
-    // #[test]
-    // fn test_find_unique_null_with_prev() {
-    //     let prev = NullVector::new(1);
+    #[test]
+    fn test_find_unique_null_with_prev() {
+        let prev = NullVector::new(1);
 
-    //     // Keep flags unchanged.
-    //     let mut selected = new_bitmap(&[true, false, true, false]);
-    //     let v = NullVector::new(4);
-    //     v.find_unique(&mut selected, Some(&prev));
-    //     check_bitmap(&[true, false, true, false], &selected);
+        // Keep flags unchanged.
+        let mut selected = new_bitmap(&[true, false, true, false]);
+        let v = NullVector::new(4);
+        v.find_unique(&mut selected, Some(&prev));
+        check_bitmap(&[true, false, true, false], &selected);
 
-    //     // Keep flags unchanged.
-    //     let mut selected = new_bitmap(&[false, false, true, false]);
-    //     v.find_unique(&mut selected, Some(&prev));
-    //     check_bitmap(&[false, false, true, false], &selected);
+        // Keep flags unchanged.
+        let mut selected = new_bitmap(&[false, false, true, false]);
+        v.find_unique(&mut selected, Some(&prev));
+        check_bitmap(&[false, false, true, false], &selected);
 
-    //     // Prev is None, select first element.
-    //     let mut selected = new_bitmap(&[false, false, true, false]);
-    //     v.find_unique(&mut selected, None);
-    //     check_bitmap(&[true, false, true, false], &selected);
+        // Prev is None, select first element.
+        let mut selected = new_bitmap(&[false, false, true, false]);
+        v.find_unique(&mut selected, None);
+        check_bitmap(&[true, false, true, false], &selected);
 
-    //     // Prev is empty, select first element.
-    //     let mut selected = new_bitmap(&[false, false, true, false]);
-    //     v.find_unique(&mut selected, Some(&NullVector::new(0)));
-    //     check_bitmap(&[true, false, true, false], &selected);
-    // }
+        // Prev is empty, select first element.
+        let mut selected = new_bitmap(&[false, false, true, false]);
+        v.find_unique(&mut selected, Some(&NullVector::new(0)));
+        check_bitmap(&[true, false, true, false], &selected);
+    }
 
     // fn check_find_unique_constant(len: usize) {
     //     let input = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[8])), len);

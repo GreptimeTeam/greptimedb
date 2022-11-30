@@ -20,7 +20,7 @@ use common_base::BitVec;
 
 use crate::error::Result;
 use crate::types::LogicalPrimitiveType;
-use crate::vectors::{BinaryVector, BooleanVector, PrimitiveVector, Vector, VectorRef};
+use crate::vectors::{BinaryVector, BooleanVector, NullVector, PrimitiveVector, Vector, VectorRef};
 
 /// Vector compute operations.
 pub trait VectorOp {
@@ -97,5 +97,20 @@ impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
 
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
         filter::filter_non_constant!(self, PrimitiveVector<T>, filter)
+    }
+}
+
+impl VectorOp for NullVector {
+    fn replicate(&self, offsets: &[usize]) -> VectorRef {
+        replicate::replicate_null(self, offsets)
+    }
+
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
+        let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<NullVector>());
+        find_unique::find_unique_null(self, selected, prev_vector);
+    }
+
+    fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
+        filter::filter_non_constant!(self, NullVector, filter)
     }
 }
