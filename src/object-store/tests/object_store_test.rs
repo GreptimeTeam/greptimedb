@@ -17,6 +17,7 @@ use std::env;
 use anyhow::Result;
 use common_telemetry::logging;
 use object_store::backend::{fs, s3};
+use object_store::test_util::S3TempFolderGuard;
 use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore};
 use tempdir::TempDir;
 
@@ -110,15 +111,21 @@ async fn test_s3_backend() -> Result<()> {
         if !bucket.is_empty() {
             logging::info!("Running s3 test.");
 
+            let root = uuid::Uuid::new_v4().to_string();
+
             let accessor = s3::Builder::default()
+                .root(&root)
                 .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
                 .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
                 .bucket(&bucket)
                 .build()?;
 
             let store = ObjectStore::new(accessor);
+
+            let mut guard = S3TempFolderGuard::new(&store, "/");
             test_object_crud(&store).await?;
             test_object_list(&store).await?;
+            guard.remove_all().await?;
         }
     }
 

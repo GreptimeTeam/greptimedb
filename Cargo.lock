@@ -3655,11 +3655,13 @@ name = "object-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "common-runtime",
  "common-telemetry",
  "futures",
  "opendal",
  "tempdir",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -6189,6 +6191,7 @@ dependencies = [
 name = "tests-integration"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "api",
  "axum 0.6.1",
  "axum-test-helper",
@@ -6201,6 +6204,8 @@ dependencies = [
  "datatypes",
  "frontend",
  "mito",
+ "object-store",
+ "paste",
  "serde",
  "serde_json",
  "servers",
@@ -6209,6 +6214,7 @@ dependencies = [
  "table",
  "tempdir",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -6985,6 +6991,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd6469f4314d5f1ffec476e05f17cc9a78bc7a27a6a857842170bdf8d6f98d2f"
 dependencies = [
  "getrandom 0.2.7",
+ "serde",
 ]
 
 [[package]]

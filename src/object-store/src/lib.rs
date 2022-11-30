@@ -15,7 +15,8 @@
 pub use opendal::raw::SeekableReader;
 pub use opendal::{
     layers, services, Error, ErrorKind, Layer, Object, ObjectLister, ObjectMetadata, ObjectMode,
-    Operator as ObjectStore,
+    Operator as ObjectStore, Result,
 };
 pub mod backend;
+pub mod test_util;
 pub mod util;

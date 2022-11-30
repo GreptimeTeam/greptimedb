@@ -5,6 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
+common-runtime = { path = "../common/runtime" }
 futures = { version = "0.3" }
 opendal = { version = "0.21", features = ["layers-tracing", "layers-metrics"]}
 tokio = { version = "1.0", features = ["full"] }
@@ -13,3 +14,4 @@ tokio = { version = "1.0", features = ["full"] }
 anyhow = "1.0"
 common-telemetry = { path = "../common/telemetry" }
 tempdir = "0.3"
+uuid = { version = "1", features = ["serde", "v4"] }

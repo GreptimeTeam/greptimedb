@@ -12,66 +12,54 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use axum::http::StatusCode;
-use axum::Router;
 use axum_test_helper::TestClient;
-use datanode::instance::{Instance, InstanceRef};
-use datatypes::prelude::ConcreteDataType;
-use frontend::frontend::FrontendOptions;
-use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use serde_json::json;
-use servers::http::{HttpOptions, HttpServer, JsonOutput, JsonResponse};
-use test_util::TestGuard;
-use tests_integration::test_util;
+use servers::http::{JsonOutput, JsonResponse};
+use tests_integration::test_util::{setup_test_app, setup_test_app_with_frontend, StorageType};
 
-async fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
-    let fe_opts = FrontendOptions::default();
-    let mut frontend_instance = FeInstance::try_new(&fe_opts).await.unwrap();
-    frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
-    frontend_instance.set_script_handler(datanode_instance);
-    frontend_instance
+#[macro_export]
+macro_rules! http_test {
+    ($service:ident, $($(#[$meta:meta])* $test:ident),*,) => {
+        paste::item! {
+            mod [<http_ $service:lower _test>] {
+                $(
+                    #[tokio::test(flavor = "multi_thread")]
+                    $(
+                        #[$meta]
+                    )*
+                    async fn [< $test >]() -> anyhow::Result<()> {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            let _ = $crate::http::$test(store_type).await;
+                        }
+
+                        Ok(())
+                    }
+                )*
+            }
+        }
+    };
 }
 
-async fn make_test_app(name: &str) -> (Router, TestGuard) {
-    let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    instance.start().await.unwrap();
-    test_util::create_test_table(
-        instance.catalog_manager(),
-        instance.sql_handler(),
-        ConcreteDataType::timestamp_millis_datatype(),
-    )
-    .await
-    .unwrap();
-    let http_server = HttpServer::new(instance, HttpOptions::default());
-    (http_server.make_app(), guard)
+#[macro_export]
+macro_rules! http_tests {
+     ($($service:ident),*) => {
+        $(
+            http_test!(
+                $service,
+
+                test_sql_api,
+                test_metrics_api,
+                test_scripts_api,
+            );
+        )*
+    };
 }
 
-async fn make_test_app_with_frontend(name: &str) -> (Router, TestGuard) {
-    let (opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let mut frontend = build_frontend_instance(instance.clone()).await;
-    instance.start().await.unwrap();
-    test_util::create_test_table(
-        frontend.catalog_manager().as_ref().unwrap(),
-        instance.sql_handler(),
-        ConcreteDataType::timestamp_millis_datatype(),
-    )
-    .await
-    .unwrap();
-    frontend.start().await.unwrap();
-    let mut http_server = HttpServer::new(Arc::new(frontend), HttpOptions::default());
-    http_server.set_script_handler(instance.clone());
-    let app = http_server.make_app();
-    (app, guard)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_sql_api() {
+pub async fn test_sql_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, _guard) = make_test_app("sql_api").await;
+    let (app, mut guard) = setup_test_app(store_type, "sql_api").await;
     let client = TestClient::new(app);
     let res = client.get("/v1/sql").send().await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -174,13 +162,14 @@ async fn test_sql_api() {
             "records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"Timestamp"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
+
+    guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_metrics_api() {
+pub async fn test_metrics_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     common_telemetry::init_default_metrics_recorder();
-    let (app, _guard) = make_test_app("metrics_api").await;
+    let (app, mut guard) = setup_test_app(store_type, "metrics_api").await;
     let client = TestClient::new(app);
 
     // Send a sql
@@ -195,12 +184,12 @@ async fn test_metrics_api() {
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.text().await;
     assert!(body.contains("datanode_handle_sql_elapsed"));
+    guard.remove_all().await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_scripts_api() {
+pub async fn test_scripts_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, _guard) = make_test_app_with_frontend("script_api").await;
+    let (app, mut guard) = setup_test_app_with_frontend(store_type, "script_api").await;
     let client = TestClient::new(app);
 
     let res = client
@@ -238,4 +227,6 @@ def test(n):
             "records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}
         })).unwrap()
     );
+
+    guard.remove_all().await;
 }

@@ -17,6 +17,7 @@ datanode = { path = "../src/datanode" }
 datatypes = { path = "../src/datatypes" }
 frontend = { path = "../src/frontend" }
 mito = { path = "../src/mito", features = ["test"] }
+object-store = { path = "../src/object-store" }
 serde = "1.0"
 serde_json = "1.0"
 servers = { path = "../src/servers" }
@@ -25,3 +26,8 @@ sql = { path = "../src/sql" }
 table = { path = "../src/table" }
 tempdir = "0.3"
 tokio = { version = "1.20", features = ["full"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+anyhow = "1.0"
+paste = "1.0"
