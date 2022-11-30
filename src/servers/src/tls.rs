@@ -51,6 +51,8 @@ impl TlsOption {
         let cert = certs(&mut BufReader::new(File::open(&self.cert_path)?))
             .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid cert"))
             .map(|mut certs| certs.drain(..).map(Certificate).collect())?;
+
+        // TODO(SSebo): support more private key types
         let key = pkcs8_private_keys(&mut BufReader::new(File::open(&self.key_path)?))
             .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid key"))
             .map(|mut keys| keys.drain(..).map(PrivateKey).next())?
