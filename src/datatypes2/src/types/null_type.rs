@@ -48,7 +48,7 @@ impl DataType for NullType {
         ArrowDataType::Null
     }
 
-    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        Box::new(NullVectorBuilder::with_capacity(capacity))
+    fn create_mutable_vector(&self, _capacity: usize) -> Box<dyn MutableVector> {
+        Box::new(NullVectorBuilder::default())
     }
 }

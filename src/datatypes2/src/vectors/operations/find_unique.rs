@@ -70,7 +70,7 @@ pub(crate) fn find_unique_null(
         return;
     }
 
-    let is_first_not_duplicate = prev_vector.map(|pv| pv.is_empty()).unwrap_or(true);
+    let is_first_not_duplicate = prev_vector.map(NullVector::is_empty).unwrap_or(true);
     if is_first_not_duplicate {
         selected.set(0, true);
     }
