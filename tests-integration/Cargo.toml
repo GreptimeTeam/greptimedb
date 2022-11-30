@@ -15,6 +15,7 @@ common-runtime = { path = "../src/common/runtime" }
 common-telemetry = { path = "../src/common/telemetry" }
 datanode = { path = "../src/datanode" }
 datatypes = { path = "../src/datatypes" }
+dotenv = "0.15"
 frontend = { path = "../src/frontend" }
 mito = { path = "../src/mito", features = ["test"] }
 object-store = { path = "../src/object-store" }

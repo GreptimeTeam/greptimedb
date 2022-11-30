@@ -50,6 +50,8 @@ pub enum StorageType {
 
 impl StorageType {
     pub fn test_on(&self) -> bool {
+        let _ = dotenv::dotenv();
+
         match self {
             StorageType::File => true, // always test file
             StorageType::S3 => {
@@ -67,6 +69,8 @@ fn get_test_store_config(
     store_type: &StorageType,
     name: &str,
 ) -> (ObjectStoreConfig, Option<TempDirGuard>) {
+    let _ = dotenv::dotenv();
+
     match store_type {
         StorageType::S3 => {
             let root = uuid::Uuid::new_v4().to_string();
