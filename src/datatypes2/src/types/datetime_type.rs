@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::data_type::{ConcreteDataType, DataType};
-use crate::error;
+use crate::error::{self, Result};
 use crate::prelude::{LogicalTypeId, MutableVector, ScalarVectorBuilder, Value, ValueRef, Vector};
 use crate::types::LogicalPrimitiveType;
 use crate::vectors::{DateTimeVector, DateTimeVectorBuilder, PrimitiveVector};
@@ -62,7 +62,7 @@ impl LogicalPrimitiveType for DateTimeType {
         "DateTime"
     }
 
-    fn cast_vector(vector: &dyn Vector) -> crate::Result<&PrimitiveVector<Self>> {
+    fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveVector<Self>> {
         vector
             .as_any()
             .downcast_ref::<DateTimeVector>()
@@ -74,7 +74,7 @@ impl LogicalPrimitiveType for DateTimeType {
             })
     }
 
-    fn cast_value_ref(value: ValueRef) -> crate::Result<Option<Self::Wrapper>> {
+    fn cast_value_ref(value: ValueRef) -> Result<Option<Self::Wrapper>> {
         match value {
             ValueRef::Null => Ok(None),
             ValueRef::DateTime(v) => Ok(Some(v)),

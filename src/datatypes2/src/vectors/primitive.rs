@@ -77,6 +77,13 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
         }
     }
 
+    pub fn from_wrapper_slice<P: AsRef<[T::Wrapper]>>(slice: P) -> Self {
+        let iter = slice.as_ref().iter().copied().map(WrapperType::into_native);
+        Self {
+            array: PrimitiveArray::from_iter_values(iter),
+        }
+    }
+
     pub fn from_vec(array: Vec<T::Native>) -> Self {
         Self {
             array: PrimitiveArray::from_iter_values(array),
@@ -511,5 +518,30 @@ mod tests {
 
         let expect: VectorRef = Arc::new(Int64Vector::from_slice(&[123, 8, 9]));
         assert_eq!(expect, vector);
+    }
+
+    #[test]
+    fn test_from_wrapper_slice() {
+        macro_rules! test_from_wrapper_slice {
+            ($vec: ident, $ty: ident) => {
+                let from_wrapper_slice = $vec::from_wrapper_slice(&[
+                    $ty::from_native($ty::MAX),
+                    $ty::from_native($ty::MIN),
+                ]);
+                let from_slice = $vec::from_slice(&[$ty::MAX, $ty::MIN]);
+                assert_eq!(from_wrapper_slice, from_slice);
+            };
+        }
+
+        test_from_wrapper_slice!(UInt8Vector, u8);
+        test_from_wrapper_slice!(Int8Vector, i8);
+        test_from_wrapper_slice!(UInt16Vector, u16);
+        test_from_wrapper_slice!(Int16Vector, i16);
+        test_from_wrapper_slice!(UInt32Vector, u32);
+        test_from_wrapper_slice!(Int32Vector, i32);
+        test_from_wrapper_slice!(UInt64Vector, u64);
+        test_from_wrapper_slice!(Int64Vector, i64);
+        test_from_wrapper_slice!(Float32Vector, f32);
+        test_from_wrapper_slice!(Float64Vector, f64);
     }
 }
