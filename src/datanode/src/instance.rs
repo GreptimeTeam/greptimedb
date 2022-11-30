@@ -189,19 +189,21 @@ impl Instance {
 
 pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
     let object_store = match store_config {
-        ObjectStoreConfig::File { data_dir } => new_fs_object_store(data_dir).await?,
-        ObjectStoreConfig::S3 { .. } => new_s3_object_store(store_config).await?,
+        ObjectStoreConfig::File { data_dir } => new_fs_object_store(data_dir).await,
+        ObjectStoreConfig::S3 { .. } => new_s3_object_store(store_config).await,
     };
 
-    Ok(object_store
-        // Add retry
-        .layer(RetryLayer::new(ExponentialBackoff::default().with_jitter()))
-        // Add metrics
-        .layer(MetricsLayer)
-        // Add logging
-        .layer(LoggingLayer)
-        // Add tracing
-        .layer(TracingLayer))
+    object_store.map(|object_store| {
+        object_store
+            // Add retry
+            .layer(RetryLayer::new(ExponentialBackoff::default().with_jitter()))
+            // Add metrics
+            .layer(MetricsLayer)
+            // Add logging
+            .layer(LoggingLayer)
+            // Add tracing
+            .layer(TracingLayer)
+    })
 }
 
 pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
