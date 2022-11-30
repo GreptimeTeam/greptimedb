@@ -89,7 +89,7 @@ impl From<&[Option<&str>]> for StringVector {
 impl From<Vec<String>> for StringVector {
     fn from(data: Vec<String>) -> Self {
         Self {
-            array: StringArray::from_iter(data.into_iter().map(|s| Some(s))),
+            array: StringArray::from_iter(data.into_iter().map(Some)),
         }
     }
 }
@@ -97,7 +97,7 @@ impl From<Vec<String>> for StringVector {
 impl From<Vec<&str>> for StringVector {
     fn from(data: Vec<&str>) -> Self {
         Self {
-            array: StringArray::from_iter(data.into_iter().map(|s| Some(s))),
+            array: StringArray::from_iter(data.into_iter().map(Some)),
         }
     }
 }
