@@ -23,4 +23,3 @@ jobs:
           body: |
             A document change request is generated from
             ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
-          assignees: ${{ github.event.issue.user.login || github.event.pull_request.user.login }}
