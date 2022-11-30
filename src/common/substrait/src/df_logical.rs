@@ -24,10 +24,11 @@ use prost::Message;
 use snafu::{ensure, OptionExt, ResultExt};
 use substrait_proto::protobuf::expression::mask_expression::{StructItem, StructSelect};
 use substrait_proto::protobuf::expression::MaskExpression;
+use substrait_proto::protobuf::extensions::simple_extension_declaration::MappingType;
 use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
 use substrait_proto::protobuf::read_rel::{NamedTable, ReadType};
 use substrait_proto::protobuf::rel::RelType;
-use substrait_proto::protobuf::{PlanRel, ReadRel, Rel};
+use substrait_proto::protobuf::{Plan, PlanRel, ReadRel, Rel};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::context::ConvertorContext;
@@ -42,7 +43,6 @@ use crate::SubstraitPlan;
 
 pub struct DFLogicalSubstraitConvertor {
     catalog_manager: CatalogManagerRef,
-    ctx: ConvertorContext,
 }
 
 impl SubstraitPlan for DFLogicalSubstraitConvertor {
@@ -51,25 +51,15 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
     type Plan = LogicalPlan;
 
     fn decode<B: Buf + Send>(&self, message: B) -> Result<Self::Plan, Self::Error> {
-        let plan_rel = PlanRel::decode(message).context(DecodeRelSnafu)?;
-        let rel = match plan_rel.rel_type.context(EmptyPlanSnafu)? {
-            PlanRelType::Rel(rel) => rel,
-            PlanRelType::Root(_) => UnsupportedPlanSnafu {
-                name: "Root Relation",
-            }
-            .fail()?,
-        };
-        self.convert_rel(rel)
+        let plan = Plan::decode(message).context(DecodeRelSnafu)?;
+        self.convert_plan(plan)
     }
 
-    fn encode(&mut self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
-        let rel = self.convert_plan(plan)?;
-        let plan_rel = PlanRel {
-            rel_type: Some(PlanRelType::Rel(rel)),
-        };
+    fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
+        let plan = self.convert_df_plan(plan)?;
 
         let mut buf = BytesMut::new();
-        plan_rel.encode(&mut buf).context(EncodeRelSnafu)?;
+        plan.encode(&mut buf).context(EncodeRelSnafu)?;
 
         Ok(buf.freeze())
     }
@@ -77,18 +67,40 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 
 impl DFLogicalSubstraitConvertor {
     pub fn new(catalog_manager: CatalogManagerRef) -> Self {
-        Self {
-            catalog_manager,
-            ctx: ConvertorContext::default(),
-        }
+        Self { catalog_manager }
     }
 }
 
 impl DFLogicalSubstraitConvertor {
-    pub fn convert_rel(&self, rel: Rel) -> Result<LogicalPlan, Error> {
+    pub fn convert_plan(&self, mut plan: Plan) -> Result<LogicalPlan, Error> {
+        // prepare convertor context
+        let mut ctx = ConvertorContext::default();
+        for simple_ext in plan.extensions {
+            if let Some(MappingType::ExtensionFunction(function_extension)) =
+                simple_ext.mapping_type
+            {
+                ctx.register_scalar_with_anchor(
+                    function_extension.name,
+                    function_extension.function_anchor,
+                );
+            }
+        }
+
+        // extract rel
+        let rel = if let Some(PlanRel { rel_type }) = plan.relations.pop()
+        && let Some(PlanRelType::Rel(rel)) = rel_type {
+            rel
+        } else {
+            UnsupportedPlanSnafu {
+                name: "Emply or non-Rel relation",
+            }
+            .fail()?
+        };
         let rel_type = rel.rel_type.context(EmptyPlanSnafu)?;
+
+        // build logical plan
         let logical_plan = match rel_type {
-            RelType::Read(read_rel) => self.convert_read_rel(read_rel),
+            RelType::Read(read_rel) => self.convert_read_rel(&mut ctx, read_rel),
             RelType::Filter(_filter_rel) => UnsupportedPlanSnafu {
                 name: "Filter Relation",
             }
@@ -138,9 +150,12 @@ impl DFLogicalSubstraitConvertor {
         Ok(logical_plan)
     }
 
-    fn convert_read_rel(&self, read_rel: Box<ReadRel>) -> Result<LogicalPlan, Error> {
+    fn convert_read_rel(
+        &self,
+        ctx: &mut ConvertorContext,
+        read_rel: Box<ReadRel>,
+    ) -> Result<LogicalPlan, Error> {
         // Extract the catalog, schema and table name from NamedTable. Assume the first three are those names.
-
         let read_type = read_rel.read_type.context(MissingFieldSnafu {
             field: "read_type",
             plan: "Read",
@@ -198,7 +213,7 @@ impl DFLogicalSubstraitConvertor {
 
         // Convert filter
         let filters = if let Some(filter) = read_rel.filter {
-            vec![to_df_expr(&self.ctx, *filter, &retrieved_schema)?]
+            vec![to_df_expr(&ctx, *filter, &retrieved_schema)?]
         } else {
             vec![]
         };
@@ -232,8 +247,12 @@ impl DFLogicalSubstraitConvertor {
 }
 
 impl DFLogicalSubstraitConvertor {
-    pub fn convert_plan(&mut self, plan: LogicalPlan) -> Result<Rel, Error> {
-        match plan {
+    pub fn convert_df_plan(&self, plan: LogicalPlan) -> Result<Plan, Error> {
+        let mut ctx = ConvertorContext::default();
+
+        // TODO(ruihang): extract this translation logic into a separated function
+        // convert PlanRel
+        let rel = match plan {
             LogicalPlan::Projection(_) => UnsupportedPlanSnafu {
                 name: "DataFusion Logical Projection",
             }
@@ -271,10 +290,10 @@ impl DFLogicalSubstraitConvertor {
             }
             .fail()?,
             LogicalPlan::TableScan(table_scan) => {
-                let read_rel = self.convert_table_scan_plan(table_scan)?;
-                Ok(Rel {
+                let read_rel = self.convert_table_scan_plan(&mut ctx, table_scan)?;
+                Rel {
                     rel_type: Some(RelType::Read(Box::new(read_rel))),
-                })
+                }
             }
             LogicalPlan::EmptyRelation(_) => UnsupportedPlanSnafu {
                 name: "DataFusion Logical EmptyRelation",
@@ -297,10 +316,30 @@ impl DFLogicalSubstraitConvertor {
                 ),
             }
             .fail()?,
-        }
+        };
+
+        // convert extension
+        let extensions = ctx.generate_function_extension();
+
+        // assemble PlanRel
+        let plan_rel = PlanRel {
+            rel_type: Some(PlanRelType::Rel(rel)),
+        };
+
+        Ok(Plan {
+            extension_uris: vec![],
+            extensions,
+            relations: vec![plan_rel],
+            advanced_extensions: None,
+            expected_type_urls: vec![],
+        })
     }
 
-    pub fn convert_table_scan_plan(&mut self, table_scan: TableScan) -> Result<ReadRel, Error> {
+    pub fn convert_table_scan_plan(
+        &self,
+        ctx: &mut ConvertorContext,
+        table_scan: TableScan,
+    ) -> Result<ReadRel, Error> {
         let provider = table_scan
             .source
             .as_any()
@@ -333,7 +372,7 @@ impl DFLogicalSubstraitConvertor {
             .reduce(|accum, expr| accum.and(expr))
         {
             Some(Box::new(expression_from_df_expr(
-                &mut self.ctx,
+                ctx,
                 &conjunction,
                 &provider.table().schema(),
             )?))
@@ -421,7 +460,7 @@ mod test {
     }
 
     async fn logical_plan_round_trip(plan: LogicalPlan, catalog: CatalogManagerRef) {
-        let mut convertor = DFLogicalSubstraitConvertor::new(catalog);
+        let convertor = DFLogicalSubstraitConvertor::new(catalog);
 
         let proto = convertor.encode(plan.clone()).unwrap();
         let tripped_plan = convertor.decode(proto).unwrap();

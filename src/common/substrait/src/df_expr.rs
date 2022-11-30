@@ -57,7 +57,7 @@ pub fn convert_scalar_function(
             inputs.push_back(to_df_expr(ctx, sub_expr, schema)?);
         } else {
             InvalidParametersSnafu {
-                reason: format!("Only value expression arg is supported to be function argument"),
+                reason: "Only value expression arg is supported to be function argument",
             }
             .fail()?;
         }

@@ -14,6 +14,11 @@
 
 use std::collections::HashMap;
 
+use substrait_proto::protobuf::extensions::simple_extension_declaration::{
+    ExtensionFunction, MappingType,
+};
+use substrait_proto::protobuf::extensions::SimpleExtensionDeclaration;
+
 #[derive(Default)]
 pub struct ConvertorContext {
     scalar_fn_names: HashMap<String, u32>,
@@ -34,7 +39,28 @@ impl ConvertorContext {
         next_anchor
     }
 
+    pub fn register_scalar_with_anchor<S: AsRef<str>>(&mut self, name: S, anchor: u32) {
+        self.scalar_fn_map.insert(anchor, name.as_ref().to_string());
+        self.scalar_fn_names
+            .insert(name.as_ref().to_string(), anchor);
+    }
+
     pub fn find_scalar_fn(&self, anchor: u32) -> Option<&str> {
         self.scalar_fn_map.get(&anchor).map(|s| s.as_str())
+    }
+
+    pub fn generate_function_extension(&self) -> Vec<SimpleExtensionDeclaration> {
+        let mut result = Vec::with_capacity(self.scalar_fn_map.len());
+        for (anchor, name) in &self.scalar_fn_map {
+            let declaration = SimpleExtensionDeclaration {
+                mapping_type: Some(MappingType::ExtensionFunction(ExtensionFunction {
+                    extension_uri_reference: 0,
+                    function_anchor: *anchor,
+                    name: name.clone(),
+                })),
+            };
+            result.push(declaration);
+        }
+        result
     }
 }
