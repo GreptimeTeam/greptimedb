@@ -135,3 +135,18 @@ fn create_query() -> Query<http_handler::SqlQuery> {
         database: None,
     })
 }
+
+/// Currently the payload of response should be simply an empty json "{}";
+#[tokio::test]
+async fn test_health() {
+    let expected_json = http_handler::HealthResponse {};
+    let expected_json_str = "{}".to_string();
+
+    let query = http_handler::HealthQuery {};
+    let Json(json) = http_handler::health(Query(query)).await;
+    assert_eq!(json, expected_json);
+    assert_eq!(
+        serde_json::ser::to_string(&json).unwrap(),
+        expected_json_str
+    );
+}

@@ -380,6 +380,11 @@ impl HttpServer {
 
         router = router.route("/metrics", routing::get(handler::metrics));
 
+        router = router.route(
+            "/health",
+            routing::get(handler::health).post(handler::health),
+        );
+
         router
             // middlewares
             .layer(

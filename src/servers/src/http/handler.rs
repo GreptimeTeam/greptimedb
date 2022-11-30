@@ -63,3 +63,17 @@ pub async fn metrics(Query(_params): Query<HashMap<String, String>>) -> String {
         "Prometheus handle not initialized.".to_owned()
     }
 }
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct HealthQuery {}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct HealthResponse {}
+
+/// Handler to export healthy check  
+///      
+/// Currently simply return status "200 OK" (default) with an empty json payload "{}"
+#[axum_macros::debug_handler]
+pub async fn health(Query(_params): Query<HealthQuery>) -> Json<HealthResponse> {
+    Json(HealthResponse {})
+}
