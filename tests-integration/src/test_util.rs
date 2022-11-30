@@ -52,7 +52,13 @@ impl StorageType {
     pub fn test_on(&self) -> bool {
         match self {
             StorageType::File => true, // always test file
-            StorageType::S3 => env::var("GT_S3_BUCKET").is_ok(),
+            StorageType::S3 => {
+                if let Ok(b) = env::var("GT_S3_BUCKET") {
+                    !b.is_empty()
+                } else {
+                    false
+                }
+            }
         }
     }
 }
