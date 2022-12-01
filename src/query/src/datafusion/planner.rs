@@ -21,7 +21,7 @@ use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::sql::planner::{ContextProvider, SqlToRel};
 use datatypes::arrow::datatypes::DataType;
-use session::context::SessionContext;
+use session::context::SessionContextRef;
 use snafu::ResultExt;
 use sql::statements::explain::Explain;
 use sql::statements::query::Query;
@@ -94,11 +94,11 @@ where
 
 pub(crate) struct DfContextProviderAdapter {
     state: QueryEngineState,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: SessionContextRef,
 }
 
 impl DfContextProviderAdapter {
-    pub(crate) fn new(state: QueryEngineState, session_ctx: Arc<SessionContext>) -> Self {
+    pub(crate) fn new(state: QueryEngineState, session_ctx: SessionContextRef) -> Self {
         Self { state, session_ctx }
     }
 }

@@ -16,11 +16,11 @@ pub mod context;
 
 use std::sync::Arc;
 
-use crate::context::SessionContext;
+use crate::context::{SessionContext, SessionContextRef};
 
 #[derive(Default)]
 pub struct Session {
-    session_ctx: Arc<SessionContext>,
+    session_ctx: SessionContextRef,
 }
 
 impl Session {
@@ -30,7 +30,7 @@ impl Session {
         }
     }
 
-    pub fn context(&self) -> Arc<SessionContext> {
+    pub fn context(&self) -> SessionContextRef {
         self.session_ctx.clone()
     }
 }

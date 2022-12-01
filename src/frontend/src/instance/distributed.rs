@@ -33,7 +33,7 @@ use meta_client::rpc::{
 };
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
-use session::context::SessionContext;
+use session::context::SessionContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
@@ -133,7 +133,7 @@ impl DistInstance {
         &self,
         sql: &str,
         stmt: Statement,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: SessionContextRef,
     ) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {

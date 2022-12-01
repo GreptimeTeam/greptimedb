@@ -12,14 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use common_telemetry::error;
 use query::query_engine::QueryEngineRef;
 use query::sql::{describe_table, explain, show_databases, show_tables};
-use session::context::SessionContext;
+use session::context::SessionContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
@@ -75,7 +73,7 @@ impl SqlHandler {
     pub async fn execute(
         &self,
         request: SqlRequest,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: SessionContextRef,
     ) -> Result<Output> {
         let result = match request {
             SqlRequest::Insert(req) => self.insert(req).await,

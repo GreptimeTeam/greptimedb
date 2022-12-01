@@ -32,7 +32,7 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
-use session::context::SessionContext;
+use session::context::SessionContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
@@ -80,7 +80,7 @@ impl QueryEngine for DatafusionQueryEngine {
     fn statement_to_plan(
         &self,
         stmt: Statement,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: SessionContextRef,
     ) -> Result<LogicalPlan> {
         let context_provider = DfContextProviderAdapter::new(self.state.clone(), session_ctx);
         let planner = DfPlanner::new(&context_provider);
@@ -88,7 +88,7 @@ impl QueryEngine for DatafusionQueryEngine {
         planner.statement_to_plan(stmt)
     }
 
-    fn sql_to_plan(&self, sql: &str, session_ctx: Arc<SessionContext>) -> Result<LogicalPlan> {
+    fn sql_to_plan(&self, sql: &str, session_ctx: SessionContextRef) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
         let stmt = self.sql_to_statement(sql)?;
         self.statement_to_plan(stmt, session_ctx)

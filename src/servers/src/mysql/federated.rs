@@ -26,7 +26,7 @@ use datatypes::vectors::StringVector;
 use once_cell::sync::Lazy;
 use regex::bytes::RegexSet;
 use regex::Regex;
-use session::context::SessionContext;
+use session::context::SessionContextRef;
 
 // TODO(LFC): Include GreptimeDB's version and git commit tag etc.
 const MYSQL_VERSION: &str = "8.0.26";
@@ -252,7 +252,7 @@ fn check_show_variables(query: &str) -> Option<Output> {
 }
 
 // Check for SET or others query, this is the final check of the federated query.
-fn check_others(query: &str, session_ctx: Arc<SessionContext>) -> Option<Output> {
+fn check_others(query: &str, session_ctx: SessionContextRef) -> Option<Output> {
     if OTHER_NOT_SUPPORTED_STMT.is_match(query.as_bytes()) {
         return Some(Output::RecordBatches(RecordBatches::empty()));
     }
@@ -277,7 +277,7 @@ fn check_others(query: &str, session_ctx: Arc<SessionContext>) -> Option<Output>
 
 // Check whether the query is a federated or driver setup command,
 // and return some faked results if there are any.
-pub(crate) fn check(query: &str, session_ctx: Arc<SessionContext>) -> Option<Output> {
+pub(crate) fn check(query: &str, session_ctx: SessionContextRef) -> Option<Output> {
     // First to check the query is like "select @@variables".
     let output = check_select_variable(query);
     if output.is_some() {
@@ -296,6 +296,8 @@ pub(crate) fn check(query: &str, session_ctx: Arc<SessionContext>) -> Option<Out
 
 #[cfg(test)]
 mod test {
+    use session::context::SessionContext;
+
     use super::*;
 
     #[test]

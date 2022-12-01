@@ -23,7 +23,7 @@ use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::physical_plan::PhysicalPlan;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
-use session::context::SessionContext;
+use session::context::SessionContextRef;
 use sql::statements::statement::Statement;
 
 use crate::datafusion::DatafusionQueryEngine;
@@ -41,10 +41,10 @@ pub trait QueryEngine: Send + Sync {
     fn statement_to_plan(
         &self,
         stmt: Statement,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: SessionContextRef,
     ) -> Result<LogicalPlan>;
 
-    fn sql_to_plan(&self, sql: &str, session_ctx: Arc<SessionContext>) -> Result<LogicalPlan>;
+    fn sql_to_plan(&self, sql: &str, session_ctx: SessionContextRef) -> Result<LogicalPlan>;
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
 

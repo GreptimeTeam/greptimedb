@@ -5553,6 +5553,7 @@ name = "session"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "common-telemetry",
 ]
 
 [[package]]

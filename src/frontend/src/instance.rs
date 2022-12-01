@@ -48,7 +48,7 @@ use servers::query_handler::{
     PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
 };
 use servers::{error as server_error, Mode};
-use session::context::SessionContext;
+use session::context::{SessionContext, SessionContextRef};
 use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
@@ -217,7 +217,7 @@ impl Instance {
         &self,
         expr: Select,
         stmt: Statement,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: SessionContextRef,
     ) -> Result<Output> {
         if let Some(dist_instance) = &self.dist_instance {
             let Select::Sql(sql) = expr;
@@ -309,7 +309,7 @@ impl Instance {
         &self,
         sql: &str,
         explain_stmt: Explain,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: SessionContextRef,
     ) -> Result<Output> {
         if let Some(dist_instance) = &self.dist_instance {
             dist_instance
@@ -518,7 +518,7 @@ impl Instance {
         insert_request_to_insert_batch(&insert_request)
     }
 
-    fn handle_use(&self, db: String, session_ctx: Arc<SessionContext>) -> Result<Output> {
+    fn handle_use(&self, db: String, session_ctx: SessionContextRef) -> Result<Output> {
         let catalog_manager = &self.catalog_manager;
         if let Some(catalog_manager) = catalog_manager {
             ensure!(
@@ -529,7 +529,7 @@ impl Instance {
                 error::SchemaNotFoundSnafu { schema_info: &db }
             );
 
-            session_ctx.set_current_schema(db);
+            session_ctx.set_current_schema(&db);
 
             Ok(Output::RecordBatches(RecordBatches::empty()))
         } else {
@@ -580,7 +580,7 @@ impl SqlQueryHandler for Instance {
     async fn do_query(
         &self,
         query: &str,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: SessionContextRef,
     ) -> server_error::Result<Output> {
         let stmt = parse_stmt(query)
             .map_err(BoxedError::new)

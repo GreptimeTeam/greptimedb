@@ -15,6 +15,9 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
+use common_telemetry::info;
+
+pub type SessionContextRef = Arc<SessionContext>;
 
 pub struct SessionContext {
     current_schema: ArcSwapOption<String>,
@@ -40,13 +43,14 @@ impl SessionContext {
     }
 
     pub fn current_schema(&self) -> Option<String> {
-        self.current_schema
-            .load()
-            .as_ref()
-            .map(|x| String::clone(x))
+        self.current_schema.load().as_deref().cloned()
     }
 
-    pub fn set_current_schema(&self, schema: String) {
-        let _ = self.current_schema.swap(Some(Arc::new(schema)));
+    pub fn set_current_schema(&self, schema: &str) {
+        let last = self.current_schema.swap(Some(Arc::new(schema.to_string())));
+        info!(
+            "set new session default schema: {:?}, swap old: {:?}",
+            schema, last
+        )
     }
 }

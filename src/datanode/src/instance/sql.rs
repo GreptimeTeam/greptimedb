@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
@@ -22,7 +20,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{error, info};
 use common_telemetry::timer;
 use servers::query_handler::SqlQueryHandler;
-use session::context::SessionContext;
+use session::context::SessionContextRef;
 use snafu::prelude::*;
 use sql::ast::ObjectName;
 use sql::statements::statement::Statement;
@@ -35,7 +33,7 @@ use crate::metric;
 use crate::sql::SqlRequest;
 
 impl Instance {
-    pub async fn execute_sql(&self, sql: &str, session_ctx: Arc<SessionContext>) -> Result<Output> {
+    pub async fn execute_sql(&self, sql: &str, session_ctx: SessionContextRef) -> Result<Output> {
         let stmt = self
             .query_engine
             .sql_to_statement(sql)
@@ -151,7 +149,7 @@ impl Instance {
                     error::SchemaNotFoundSnafu { name: &db }
                 );
 
-                session_ctx.set_current_schema(db);
+                session_ctx.set_current_schema(&db);
 
                 Ok(Output::RecordBatches(RecordBatches::empty()))
             }
@@ -159,10 +157,12 @@ impl Instance {
     }
 }
 
+// TODO(LFC): Refactor consideration: move this function to some helper mod,
+// could be done together or after `TableReference`'s refactoring, when issue #559 is resolved.
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
 fn table_idents_to_full_name(
     obj_name: &ObjectName,
-    session_ctx: Arc<SessionContext>,
+    session_ctx: SessionContextRef,
 ) -> Result<(String, String, String)> {
     match &obj_name.0[..] {
         [table] => Ok((
@@ -194,7 +194,7 @@ impl SqlQueryHandler for Instance {
     async fn do_query(
         &self,
         query: &str,
-        session_ctx: Arc<SessionContext>,
+        session_ctx: SessionContextRef,
     ) -> servers::error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
         self.execute_sql(query, session_ctx)
@@ -209,6 +209,10 @@ impl SqlQueryHandler for Instance {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
+    use session::context::SessionContext;
+
     use super::*;
 
     #[test]
