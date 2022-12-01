@@ -112,7 +112,7 @@ impl Value {
     pub fn data_type(&self) -> ConcreteDataType {
         // TODO(yingwen): Implement this once all data types are implemented.
         match self {
-            // Value::Null => ConcreteDataType::null_datatype(),
+            Value::Null => ConcreteDataType::null_datatype(),
             Value::Boolean(_) => ConcreteDataType::boolean_datatype(),
             Value::UInt8(_) => ConcreteDataType::uint8_datatype(),
             Value::UInt16(_) => ConcreteDataType::uint16_datatype(),
@@ -126,11 +126,10 @@ impl Value {
             Value::Float64(_) => ConcreteDataType::float64_datatype(),
             Value::String(_) => ConcreteDataType::string_datatype(),
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
-            // Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
             Value::Date(_) => ConcreteDataType::date_datatype(),
             Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
-            _ => todo!(),
+            Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
         }
     }
 
@@ -371,8 +370,7 @@ impl ListValue {
 
 impl Default for ListValue {
     fn default() -> ListValue {
-        // ListValue::new(None, ConcreteDataType::null_datatype())
-        unimplemented!()
+        ListValue::new(None, ConcreteDataType::null_datatype())
     }
 }
 
@@ -413,23 +411,23 @@ impl TryFrom<ScalarValue> for Value {
                 Value::from(s.map(StringBytes::from))
             }
             ScalarValue::Binary(b) | ScalarValue::LargeBinary(b) => Value::from(b.map(Bytes::from)),
-            // ScalarValue::List(vs, t) => {
-            //     let items = if let Some(vs) = vs {
-            //         let vs = vs
-            //             .into_iter()
-            //             .map(ScalarValue::try_into)
-            //             .collect::<Result<_>>()?;
-            //         Some(Box::new(vs))
-            //     } else {
-            //         None
-            //     };
-            //     let datatype = t.as_ref().try_into()?;
-            //     Value::List(ListValue::new(items, datatype))
-            // }
+            ScalarValue::List(vs, field) => {
+                let items = if let Some(vs) = vs {
+                    let vs = vs
+                        .into_iter()
+                        .map(ScalarValue::try_into)
+                        .collect::<Result<_>>()?;
+                    Some(Box::new(vs))
+                } else {
+                    None
+                };
+                let datatype = ConcreteDataType::try_from(field.data_type())?;
+                Value::List(ListValue::new(items, datatype))
+            }
             ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
-            // ScalarValue::Date64(d) => d
-            //     .map(|x| Value::DateTime(DateTime::new(x)))
-            //     .unwrap_or(Value::Null),
+            ScalarValue::Date64(d) => d
+                .map(|x| Value::DateTime(DateTime::new(x)))
+                .unwrap_or(Value::Null),
             // ScalarValue::TimestampSecond(t, _) => t
             //     .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Second)))
             //     .unwrap_or(Value::Null),
@@ -653,6 +651,7 @@ impl<'a> PartialOrd for ListValueRef<'a> {
 // TODO(yingwen): Pass all tests.
 #[cfg(test)]
 mod tests {
+    use arrow::datatypes::DataType as ArrowDataType;
     use num_traits::Float;
 
     use super::*;
@@ -767,27 +766,24 @@ mod tests {
             ScalarValue::LargeBinary(None).try_into().unwrap()
         );
 
-        // assert_eq!(
-        //     Value::List(ListValue::new(
-        //         Some(Box::new(vec![Value::Int32(1), Value::Null])),
-        //         ConcreteDataType::int32_datatype()
-        //     )),
-        //     ScalarValue::List(
-        //         Some(Box::new(vec![
-        //             ScalarValue::Int32(Some(1)),
-        //             ScalarValue::Int32(None)
-        //         ])),
-        //         Box::new(ArrowDataType::Int32)
-        //     )
-        //     .try_into()
-        //     .unwrap()
-        // );
-        // assert_eq!(
-        //     Value::List(ListValue::new(None, ConcreteDataType::uint32_datatype())),
-        //     ScalarValue::List(None, Box::new(ArrowDataType::UInt32))
-        //         .try_into()
-        //         .unwrap()
-        // );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![Value::Int32(1), Value::Null])),
+                ConcreteDataType::int32_datatype()
+            )),
+            ScalarValue::new_list(
+                Some(vec![ScalarValue::Int32(Some(1)), ScalarValue::Int32(None)]),
+                ArrowDataType::Int32,
+            )
+            .try_into()
+            .unwrap()
+        );
+        assert_eq!(
+            Value::List(ListValue::new(None, ConcreteDataType::uint32_datatype())),
+            ScalarValue::new_list(None, ArrowDataType::UInt32)
+                .try_into()
+                .unwrap()
+        );
 
         assert_eq!(
             Value::Date(Date::new(123)),
@@ -795,11 +791,11 @@ mod tests {
         );
         assert_eq!(Value::Null, ScalarValue::Date32(None).try_into().unwrap());
 
-        // assert_eq!(
-        //     Value::DateTime(DateTime::new(456)),
-        //     ScalarValue::Date64(Some(456)).try_into().unwrap()
-        // );
-        // assert_eq!(Value::Null, ScalarValue::Date64(None).try_into().unwrap());
+        assert_eq!(
+            Value::DateTime(DateTime::new(456)),
+            ScalarValue::Date64(Some(456)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Date64(None).try_into().unwrap());
 
         // assert_eq!(
         //     Value::Timestamp(Timestamp::new(1, TimeUnit::Second)),
@@ -960,21 +956,25 @@ mod tests {
             &ConcreteDataType::binary_datatype(),
             &Value::Binary(Bytes::from(b"world".as_slice())),
         );
-        // check_type_and_value(
-        //     &ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
-        //     &Value::List(ListValue::new(
-        //         Some(Box::new(vec![Value::Int32(10)])),
-        //         ConcreteDataType::int32_datatype(),
-        //     )),
-        // );
+        check_type_and_value(
+            &ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()),
+            &Value::List(ListValue::new(
+                Some(Box::new(vec![Value::Int32(10)])),
+                ConcreteDataType::int32_datatype(),
+            )),
+        );
+        check_type_and_value(
+            &ConcreteDataType::list_datatype(ConcreteDataType::null_datatype()),
+            &Value::List(ListValue::default()),
+        );
         check_type_and_value(
             &ConcreteDataType::date_datatype(),
             &Value::Date(Date::new(1)),
         );
-        // check_type_and_value(
-        //     &ConcreteDataType::datetime_datatype(),
-        //     &Value::DateTime(DateTime::new(1)),
-        // );
+        check_type_and_value(
+            &ConcreteDataType::datetime_datatype(),
+            &Value::DateTime(DateTime::new(1)),
+        );
         // check_type_and_value(
         //     &ConcreteDataType::timestamp_millis_datatype(),
         //     &Value::Timestamp(Timestamp::from_millis(1)),
@@ -1075,15 +1075,15 @@ mod tests {
             to_json(Value::Timestamp(Timestamp::from_millis(1)))
         );
 
-        // let json_value: serde_json::Value =
-        //     serde_json::from_str(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#).unwrap();
-        // assert_eq!(
-        //     json_value,
-        //     to_json(Value::List(ListValue {
-        //         items: Some(Box::new(vec![Value::Int32(123)])),
-        //         datatype: ConcreteDataType::int32_datatype(),
-        //     }))
-        // );
+        let json_value: serde_json::Value =
+            serde_json::from_str(r#"{"items":[{"Int32":123}],"datatype":{"Int32":{}}}"#).unwrap();
+        assert_eq!(
+            json_value,
+            to_json(Value::List(ListValue {
+                items: Some(Box::new(vec![Value::Int32(123)])),
+                datatype: ConcreteDataType::int32_datatype(),
+            }))
+        );
     }
 
     #[test]
@@ -1197,7 +1197,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        // assert_eq!(Value::Null.to_string(), "Null");
+        assert_eq!(Value::Null.to_string(), "Null");
         assert_eq!(Value::UInt8(8).to_string(), "8");
         assert_eq!(Value::UInt16(16).to_string(), "16");
         assert_eq!(Value::UInt32(32).to_string(), "32");
