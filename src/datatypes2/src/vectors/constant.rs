@@ -74,7 +74,6 @@ impl ConstantVector {
         if length == self.len() {
             return Ok(Arc::new(self.clone()));
         }
-        println!("filter null count: {:?}", filter.null_count());
         Ok(Arc::new(ConstantVector::new(self.inner().clone(), length)))
     }
 }
