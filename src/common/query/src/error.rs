@@ -1,9 +1,9 @@
 use std::any::Any;
 
-use arrow::datatypes::DataType as ArrowDatatype;
 use arrow::error::ArrowError;
 use common_error::prelude::*;
 use datafusion_common::DataFusionError;
+use arrow::datatypes::DataType as ArrowDatatype;
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
 use statrs::StatsError;
