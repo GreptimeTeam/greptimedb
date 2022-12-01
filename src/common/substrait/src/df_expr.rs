@@ -38,7 +38,10 @@ use crate::error::{
 pub fn to_df_expr(ctx: &ConvertorContext, expression: Expression, schema: &Schema) -> Result<Expr> {
     let expr_rex_type = expression.rex_type.context(EmptyExprSnafu)?;
     match expr_rex_type {
-        RexType::Literal(_) => todo!(),
+        RexType::Literal(_) => UnsupportedExprSnafu {
+            name: "substrait Literal expression",
+        }
+        .fail()?,
         RexType::Selection(selection) => convert_selection_rex(*selection, schema),
         RexType::ScalarFunction(scalar_fn) => convert_scalar_function(ctx, scalar_fn, schema),
         RexType::WindowFunction(_)
@@ -471,7 +474,7 @@ pub fn expression_from_df_expr(
         Expr::IsNull(e) => {
             let arg = expression_from_df_expr(ctx, e, schema)?;
             let arguments = utils::expression_to_argument(vec![arg]);
-            let op_name = "is_not_null";
+            let op_name = "is_null";
             let function_reference = ctx.register_scalar_fn(op_name);
             utils::build_scalar_function_expression(function_reference, arguments)
         }
