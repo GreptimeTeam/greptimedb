@@ -18,7 +18,7 @@ use common_query::physical_plan::PhysicalPlan;
 
 use crate::error::Result;
 use crate::plan::LogicalPlan;
-use crate::query_engine::QueryContext;
+use crate::query_engine::QueryEngineContext;
 
 /// Physical query planner that converts a `LogicalPlan` to an
 /// `ExecutionPlan` suitable for execution.
@@ -27,7 +27,7 @@ pub trait PhysicalPlanner {
     /// Create a physical plan from a logical plan
     async fn create_physical_plan(
         &self,
-        ctx: &mut QueryContext,
+        ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>>;
 }

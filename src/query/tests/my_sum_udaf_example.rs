@@ -36,7 +36,7 @@ use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use query::error::Result;
 use query::QueryEngineFactory;
-use session::context::SessionContext;
+use session::context::QueryContext;
 use table::test_util::MemTable;
 
 #[derive(Debug, Default)]
@@ -229,7 +229,7 @@ where
         "select MY_SUM({}) as my_sum from {}",
         column_name, table_name
     );
-    let plan = engine.sql_to_plan(&sql, Arc::new(SessionContext::new()))?;
+    let plan = engine.sql_to_plan(&sql, Arc::new(QueryContext::new()))?;
 
     let output = engine.execute(&plan).await?;
     let recordbatch_stream = match output {

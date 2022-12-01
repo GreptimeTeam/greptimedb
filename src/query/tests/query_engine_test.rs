@@ -37,7 +37,7 @@ use query::plan::LogicalPlan;
 use query::query_engine::QueryEngineFactory;
 use query::QueryEngine;
 use rand::Rng;
-use session::context::SessionContext;
+use session::context::QueryContext;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
 use table::test_util::MemTable;
@@ -137,7 +137,7 @@ async fn test_udf() -> Result<()> {
 
     let plan = engine.sql_to_plan(
         "select pow(number, number) as p from numbers limit 10",
-        Arc::new(SessionContext::new()),
+        Arc::new(QueryContext::new()),
     )?;
 
     let output = engine.execute(&plan).await?;
@@ -247,7 +247,7 @@ where
 {
     let sql = format!("SELECT {} FROM {}", column_name, table_name);
     let plan = engine
-        .sql_to_plan(&sql, Arc::new(SessionContext::new()))
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
@@ -337,7 +337,7 @@ async fn execute_median<'a>(
         column_name, table_name
     );
     let plan = engine
-        .sql_to_plan(&sql, Arc::new(SessionContext::new()))
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();

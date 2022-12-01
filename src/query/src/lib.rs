@@ -26,4 +26,6 @@ pub mod planner;
 pub mod query_engine;
 pub mod sql;
 
-pub use crate::query_engine::{QueryContext, QueryEngine, QueryEngineFactory, QueryEngineRef};
+pub use crate::query_engine::{
+    QueryEngine, QueryEngineContext, QueryEngineFactory, QueryEngineRef,
+};

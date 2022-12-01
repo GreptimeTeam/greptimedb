@@ -27,7 +27,7 @@ use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use servers::Mode;
-use session::context::SessionContext;
+use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 
 use crate::instance::{parse_stmt, Instance};
@@ -97,9 +97,8 @@ impl Instance {
             let object_result = if let Some(dist_instance) = &self.dist_instance {
                 let output = futures::future::ready(parse_stmt(&sql))
                     .and_then(|stmt| {
-                        let session_ctx =
-                            Arc::new(SessionContext::with_current_schema(db.to_string()));
-                        dist_instance.handle_sql(&sql, stmt, session_ctx)
+                        let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
+                        dist_instance.handle_sql(&sql, stmt, query_ctx)
                     })
                     .await;
                 to_object_result(output).await.try_into()

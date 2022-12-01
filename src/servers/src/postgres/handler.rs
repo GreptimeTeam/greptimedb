@@ -27,7 +27,7 @@ use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{text_query_response, FieldInfo, Response, Tag, TextDataRowEncoder};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{PgWireError, PgWireResult};
-use session::context::SessionContext;
+use session::context::QueryContext;
 
 use crate::error::{self, Error, Result};
 use crate::query_handler::SqlQueryHandlerRef;
@@ -49,10 +49,10 @@ impl SimpleQueryHandler for PostgresServerHandler {
         C: ClientInfo + Unpin + Send + Sync,
     {
         // TODO(LFC): Sessions in pg server.
-        let session_ctx = Arc::new(SessionContext::new());
+        let query_ctx = Arc::new(QueryContext::new());
         let output = self
             .query_handler
-            .do_query(query, session_ctx)
+            .do_query(query, query_ctx)
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 

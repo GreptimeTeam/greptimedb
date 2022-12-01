@@ -30,7 +30,7 @@ use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
 use query::error::Result;
 use query::{QueryEngine, QueryEngineFactory};
-use session::context::SessionContext;
+use session::context::QueryContext;
 use table::test_util::MemTable;
 
 #[tokio::test]
@@ -55,7 +55,7 @@ async fn test_percentile_correctness() -> Result<()> {
     let engine = create_correctness_engine();
     let sql = String::from("select PERCENTILE(corr_number,88.0) as percentile from corr_numbers");
     let plan = engine
-        .sql_to_plan(&sql, Arc::new(SessionContext::new()))
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
@@ -117,7 +117,7 @@ async fn execute_percentile<'a>(
         column_name, table_name
     );
     let plan = engine
-        .sql_to_plan(&sql, Arc::new(SessionContext::new()))
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();

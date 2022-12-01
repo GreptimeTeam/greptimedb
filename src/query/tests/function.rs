@@ -27,7 +27,7 @@ use datatypes::vectors::PrimitiveVector;
 use query::query_engine::QueryEngineFactory;
 use query::QueryEngine;
 use rand::Rng;
-use session::context::SessionContext;
+use session::context::QueryContext;
 use table::test_util::MemTable;
 
 pub fn create_query_engine() -> Arc<dyn QueryEngine> {
@@ -82,7 +82,7 @@ where
 {
     let sql = format!("SELECT {} FROM {}", column_name, table_name);
     let plan = engine
-        .sql_to_plan(&sql, Arc::new(SessionContext::new()))
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();

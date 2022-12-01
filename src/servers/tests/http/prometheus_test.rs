@@ -27,7 +27,7 @@ use servers::http::{HttpOptions, HttpServer};
 use servers::prometheus;
 use servers::prometheus::{snappy_compress, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse, SqlQueryHandler};
-use session::context::SessionContextRef;
+use session::context::QueryContextRef;
 use tokio::sync::mpsc;
 
 struct DummyInstance {
@@ -70,7 +70,7 @@ impl PrometheusProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, _: &str, _: SessionContextRef) -> Result<Output> {
+    async fn do_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
         unimplemented!()
     }
 }

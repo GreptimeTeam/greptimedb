@@ -26,7 +26,7 @@ use datatypes::vectors::StringVector;
 use once_cell::sync::Lazy;
 use regex::bytes::RegexSet;
 use regex::Regex;
-use session::context::SessionContextRef;
+use session::context::QueryContextRef;
 
 // TODO(LFC): Include GreptimeDB's version and git commit tag etc.
 const MYSQL_VERSION: &str = "8.0.26";
@@ -252,7 +252,7 @@ fn check_show_variables(query: &str) -> Option<Output> {
 }
 
 // Check for SET or others query, this is the final check of the federated query.
-fn check_others(query: &str, session_ctx: SessionContextRef) -> Option<Output> {
+fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     if OTHER_NOT_SUPPORTED_STMT.is_match(query.as_bytes()) {
         return Some(Output::RecordBatches(RecordBatches::empty()));
     }
@@ -260,7 +260,7 @@ fn check_others(query: &str, session_ctx: SessionContextRef) -> Option<Output> {
     let recordbatches = if SELECT_VERSION_PATTERN.is_match(query) {
         Some(select_function("version()", MYSQL_VERSION))
     } else if SELECT_DATABASE_PATTERN.is_match(query) {
-        let schema = session_ctx
+        let schema = query_ctx
             .current_schema()
             .unwrap_or_else(|| "NULL".to_string());
         Some(select_function("database()", &schema))
@@ -277,7 +277,7 @@ fn check_others(query: &str, session_ctx: SessionContextRef) -> Option<Output> {
 
 // Check whether the query is a federated or driver setup command,
 // and return some faked results if there are any.
-pub(crate) fn check(query: &str, session_ctx: SessionContextRef) -> Option<Output> {
+pub(crate) fn check(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     // First to check the query is like "select @@variables".
     let output = check_select_variable(query);
     if output.is_some() {
@@ -291,27 +291,27 @@ pub(crate) fn check(query: &str, session_ctx: SessionContextRef) -> Option<Outpu
     }
 
     // Last check.
-    check_others(query, session_ctx)
+    check_others(query, query_ctx)
 }
 
 #[cfg(test)]
 mod test {
-    use session::context::SessionContext;
+    use session::context::QueryContext;
 
     use super::*;
 
     #[test]
     fn test_check() {
         let query = "select 1";
-        let result = check(query, Arc::new(SessionContext::new()));
+        let result = check(query, Arc::new(QueryContext::new()));
         assert!(result.is_none());
 
         let query = "select versiona";
-        let output = check(query, Arc::new(SessionContext::new()));
+        let output = check(query, Arc::new(QueryContext::new()));
         assert!(output.is_none());
 
         fn test(query: &str, expected: Vec<&str>) {
-            let output = check(query, Arc::new(SessionContext::new()));
+            let output = check(query, Arc::new(QueryContext::new()));
             match output.unwrap() {
                 Output::RecordBatches(r) => {
                     assert_eq!(r.pretty_print().lines().collect::<Vec<_>>(), expected)

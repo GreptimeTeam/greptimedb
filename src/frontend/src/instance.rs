@@ -48,7 +48,7 @@ use servers::query_handler::{
     PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
 };
 use servers::{error as server_error, Mode};
-use session::context::{SessionContext, SessionContextRef};
+use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
@@ -217,11 +217,11 @@ impl Instance {
         &self,
         expr: Select,
         stmt: Statement,
-        session_ctx: SessionContextRef,
+        query_ctx: QueryContextRef,
     ) -> Result<Output> {
         if let Some(dist_instance) = &self.dist_instance {
             let Select::Sql(sql) = expr;
-            dist_instance.handle_sql(&sql, stmt, session_ctx).await
+            dist_instance.handle_sql(&sql, stmt, query_ctx).await
         } else {
             // TODO(LFC): Refactor consideration: Datanode should directly execute statement in standalone mode to avoid parse SQL again.
             // Find a better way to execute query between Frontend and Datanode in standalone mode.
@@ -309,11 +309,11 @@ impl Instance {
         &self,
         sql: &str,
         explain_stmt: Explain,
-        session_ctx: SessionContextRef,
+        query_ctx: QueryContextRef,
     ) -> Result<Output> {
         if let Some(dist_instance) = &self.dist_instance {
             dist_instance
-                .handle_sql(sql, Statement::Explain(explain_stmt), session_ctx)
+                .handle_sql(sql, Statement::Explain(explain_stmt), query_ctx)
                 .await
         } else {
             Ok(Output::AffectedRows(0))
@@ -518,7 +518,7 @@ impl Instance {
         insert_request_to_insert_batch(&insert_request)
     }
 
-    fn handle_use(&self, db: String, session_ctx: SessionContextRef) -> Result<Output> {
+    fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
         let catalog_manager = &self.catalog_manager;
         if let Some(catalog_manager) = catalog_manager {
             ensure!(
@@ -529,7 +529,7 @@ impl Instance {
                 error::SchemaNotFoundSnafu { schema_info: &db }
             );
 
-            session_ctx.set_current_schema(&db);
+            query_ctx.set_current_schema(&db);
 
             Ok(Output::RecordBatches(RecordBatches::empty()))
         } else {
@@ -580,7 +580,7 @@ impl SqlQueryHandler for Instance {
     async fn do_query(
         &self,
         query: &str,
-        session_ctx: SessionContextRef,
+        query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
         let stmt = parse_stmt(query)
             .map_err(BoxedError::new)
@@ -591,7 +591,7 @@ impl SqlQueryHandler for Instance {
             | Statement::ShowTables(_)
             | Statement::DescribeTable(_)
             | Statement::Query(_) => {
-                self.handle_select(Select::Sql(query.to_string()), stmt, session_ctx)
+                self.handle_select(Select::Sql(query.to_string()), stmt, query_ctx)
                     .await
             }
             Statement::Insert(insert) => match self.mode {
@@ -663,12 +663,12 @@ impl SqlQueryHandler for Instance {
                 self.handle_drop_table(expr).await
             }
             Statement::Explain(explain_stmt) => {
-                self.handle_explain(query, explain_stmt, session_ctx).await
+                self.handle_explain(query, explain_stmt, query_ctx).await
             }
             Statement::ShowCreateTable(_) => {
                 return server_error::NotSupportedSnafu { feat: query }.fail();
             }
-            Statement::Use(db) => self.handle_use(db, session_ctx),
+            Statement::Use(db) => self.handle_use(db, query_ctx),
         }
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu { query })
@@ -732,8 +732,8 @@ impl GrpcQueryHandler for Instance {
                         })?;
                     match select {
                         select_expr::Expr::Sql(sql) => {
-                            let session_ctx = Arc::new(SessionContext::new());
-                            let output = SqlQueryHandler::do_query(self, sql, session_ctx).await;
+                            let query_ctx = Arc::new(QueryContext::new());
+                            let output = SqlQueryHandler::do_query(self, sql, query_ctx).await;
                             Ok(to_object_result(output).await)
                         }
                         _ => {
@@ -814,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_sql() {
-        let session_ctx = Arc::new(SessionContext::new());
+        let query_ctx = Arc::new(QueryContext::new());
 
         let instance = tests::create_frontend_instance().await;
 
@@ -827,7 +827,7 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(ts, host)
                         ) engine=mito with(regions=1);"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, session_ctx.clone())
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .unwrap();
         match output {
@@ -840,7 +840,7 @@ mod tests {
                                 ('frontend.host2', null, null, 2000),
                                 ('frontend.host3', 3.3, 300, 3000)
                                 "#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, session_ctx.clone())
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .unwrap();
         match output {
@@ -849,7 +849,7 @@ mod tests {
         }
 
         let sql = "select * from demo";
-        let output = SqlQueryHandler::do_query(&*instance, sql, session_ctx.clone())
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .unwrap();
         match output {
@@ -871,7 +871,7 @@ mod tests {
         };
 
         let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
-        let output = SqlQueryHandler::do_query(&*instance, sql, session_ctx.clone())
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .unwrap();
         match output {

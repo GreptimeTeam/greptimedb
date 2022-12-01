@@ -21,7 +21,7 @@ use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
 use common_telemetry::{error, info};
 use futures::TryFutureExt;
-use session::context::SessionContext;
+use session::context::QueryContext;
 use snafu::prelude::*;
 use table::requests::DropTableRequest;
 
@@ -78,7 +78,7 @@ impl Instance {
             .and_then(|request| {
                 self.sql_handler().execute(
                     SqlRequest::CreateTable(request),
-                    Arc::new(SessionContext::new()),
+                    Arc::new(QueryContext::new()),
                 )
             })
             .await;
@@ -113,7 +113,7 @@ impl Instance {
         let result = futures::future::ready(request)
             .and_then(|request| {
                 self.sql_handler()
-                    .execute(SqlRequest::Alter(request), Arc::new(SessionContext::new()))
+                    .execute(SqlRequest::Alter(request), Arc::new(QueryContext::new()))
             })
             .await;
         match result {
@@ -137,7 +137,7 @@ impl Instance {
         };
         let result = self
             .sql_handler()
-            .execute(SqlRequest::DropTable(req), Arc::new(SessionContext::new()))
+            .execute(SqlRequest::DropTable(req), Arc::new(QueryContext::new()))
             .await;
         match result {
             Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()

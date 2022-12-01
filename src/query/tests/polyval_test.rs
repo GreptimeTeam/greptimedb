@@ -26,7 +26,7 @@ use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
 use query::error::Result;
 use query::QueryEngine;
-use session::context::SessionContext;
+use session::context::QueryContext;
 
 #[tokio::test]
 async fn test_polyval_aggregator() -> Result<()> {
@@ -94,7 +94,7 @@ async fn execute_polyval<'a>(
         column_name, table_name
     );
     let plan = engine
-        .sql_to_plan(&sql, Arc::new(SessionContext::new()))
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();

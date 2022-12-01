@@ -21,7 +21,7 @@ use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::sql::planner::{ContextProvider, SqlToRel};
 use datatypes::arrow::datatypes::DataType;
-use session::context::SessionContextRef;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::explain::Explain;
 use sql::statements::query::Query;
@@ -94,12 +94,12 @@ where
 
 pub(crate) struct DfContextProviderAdapter {
     state: QueryEngineState,
-    session_ctx: SessionContextRef,
+    query_ctx: QueryContextRef,
 }
 
 impl DfContextProviderAdapter {
-    pub(crate) fn new(state: QueryEngineState, session_ctx: SessionContextRef) -> Self {
-        Self { state, session_ctx }
+    pub(crate) fn new(state: QueryEngineState, query_ctx: QueryContextRef) -> Self {
+        Self { state, query_ctx }
     }
 }
 
@@ -107,7 +107,7 @@ impl DfContextProviderAdapter {
 ///                           manage UDFs, UDAFs, variables by ourself in future.
 impl ContextProvider for DfContextProviderAdapter {
     fn get_table_provider(&self, name: TableReference) -> Option<Arc<dyn TableProvider>> {
-        let schema = self.session_ctx.current_schema();
+        let schema = self.query_ctx.current_schema();
         let execution_ctx = self.state.df_context().state.lock();
         match name {
             TableReference::Bare { table } if schema.is_some() => {

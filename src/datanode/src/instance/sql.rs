@@ -20,7 +20,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{error, info};
 use common_telemetry::timer;
 use servers::query_handler::SqlQueryHandler;
-use session::context::SessionContextRef;
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::ast::ObjectName;
 use sql::statements::statement::Statement;
@@ -33,7 +33,7 @@ use crate::metric;
 use crate::sql::SqlRequest;
 
 impl Instance {
-    pub async fn execute_sql(&self, sql: &str, session_ctx: SessionContextRef) -> Result<Output> {
+    pub async fn execute_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
         let stmt = self
             .query_engine
             .sql_to_statement(sql)
@@ -43,7 +43,7 @@ impl Instance {
             Statement::Query(_) => {
                 let logical_plan = self
                     .query_engine
-                    .statement_to_plan(stmt, session_ctx)
+                    .statement_to_plan(stmt, query_ctx)
                     .context(ExecuteSqlSnafu)?;
 
                 self.query_engine
@@ -53,14 +53,14 @@ impl Instance {
             }
             Statement::Insert(i) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(i.table_name(), session_ctx.clone())?;
+                    table_idents_to_full_name(i.table_name(), query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
                 let request = self.sql_handler.insert_to_request(
                     self.catalog_manager.clone(),
                     *i,
                     table_ref,
                 )?;
-                self.sql_handler.execute(request, session_ctx).await
+                self.sql_handler.execute(request, query_ctx).await
             }
 
             Statement::CreateDatabase(c) => {
@@ -71,7 +71,7 @@ impl Instance {
                 info!("Creating a new database: {}", request.db_name);
 
                 self.sql_handler
-                    .execute(SqlRequest::CreateDatabase(request), session_ctx)
+                    .execute(SqlRequest::CreateDatabase(request), query_ctx)
                     .await
             }
 
@@ -87,8 +87,7 @@ impl Instance {
                 // TODO(hl): Select table engine by engine_name
 
                 let name = c.name.clone();
-                let (catalog, schema, table) =
-                    table_idents_to_full_name(&name, session_ctx.clone())?;
+                let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
                 let request = self.sql_handler.create_to_request(table_id, c, table_ref)?;
                 let table_id = request.id;
@@ -98,43 +97,42 @@ impl Instance {
                 );
 
                 self.sql_handler
-                    .execute(SqlRequest::CreateTable(request), session_ctx)
+                    .execute(SqlRequest::CreateTable(request), query_ctx)
                     .await
             }
             Statement::Alter(alter_table) => {
                 let name = alter_table.table_name().clone();
-                let (catalog, schema, table) =
-                    table_idents_to_full_name(&name, session_ctx.clone())?;
+                let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
                 let req = self.sql_handler.alter_to_request(alter_table, table_ref)?;
                 self.sql_handler
-                    .execute(SqlRequest::Alter(req), session_ctx)
+                    .execute(SqlRequest::Alter(req), query_ctx)
                     .await
             }
             Statement::DropTable(drop_table) => {
                 let req = self.sql_handler.drop_table_to_request(drop_table);
                 self.sql_handler
-                    .execute(SqlRequest::DropTable(req), session_ctx)
+                    .execute(SqlRequest::DropTable(req), query_ctx)
                     .await
             }
             Statement::ShowDatabases(stmt) => {
                 self.sql_handler
-                    .execute(SqlRequest::ShowDatabases(stmt), session_ctx)
+                    .execute(SqlRequest::ShowDatabases(stmt), query_ctx)
                     .await
             }
             Statement::ShowTables(stmt) => {
                 self.sql_handler
-                    .execute(SqlRequest::ShowTables(stmt), session_ctx)
+                    .execute(SqlRequest::ShowTables(stmt), query_ctx)
                     .await
             }
             Statement::Explain(stmt) => {
                 self.sql_handler
-                    .execute(SqlRequest::Explain(Box::new(stmt)), session_ctx)
+                    .execute(SqlRequest::Explain(Box::new(stmt)), query_ctx)
                     .await
             }
             Statement::DescribeTable(stmt) => {
                 self.sql_handler
-                    .execute(SqlRequest::DescribeTable(stmt), session_ctx)
+                    .execute(SqlRequest::DescribeTable(stmt), query_ctx)
                     .await
             }
             Statement::ShowCreateTable(_stmt) => {
@@ -149,7 +147,7 @@ impl Instance {
                     error::SchemaNotFoundSnafu { name: &db }
                 );
 
-                session_ctx.set_current_schema(&db);
+                query_ctx.set_current_schema(&db);
 
                 Ok(Output::RecordBatches(RecordBatches::empty()))
             }
@@ -162,12 +160,12 @@ impl Instance {
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
 fn table_idents_to_full_name(
     obj_name: &ObjectName,
-    session_ctx: SessionContextRef,
+    query_ctx: QueryContextRef,
 ) -> Result<(String, String, String)> {
     match &obj_name.0[..] {
         [table] => Ok((
             DEFAULT_CATALOG_NAME.to_string(),
-            session_ctx.current_schema().unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
+            query_ctx.current_schema().unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
             table.value.clone(),
         )),
         [schema, table] => Ok((
@@ -194,10 +192,10 @@ impl SqlQueryHandler for Instance {
     async fn do_query(
         &self,
         query: &str,
-        session_ctx: SessionContextRef,
+        query_ctx: QueryContextRef,
     ) -> servers::error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
-        self.execute_sql(query, session_ctx)
+        self.execute_sql(query, query_ctx)
             .await
             .map_err(|e| {
                 error!(e; "Instance failed to execute sql");
@@ -211,7 +209,7 @@ impl SqlQueryHandler for Instance {
 mod test {
     use std::sync::Arc;
 
-    use session::context::SessionContext;
+    use session::context::QueryContext;
 
     use super::*;
 
@@ -226,13 +224,11 @@ mod test {
         let bare = ObjectName(vec![my_table.into()]);
 
         let using_schema = "foo";
-        let session_ctx = Arc::new(SessionContext::with_current_schema(
-            using_schema.to_string(),
-        ));
-        let empty_ctx = Arc::new(SessionContext::new());
+        let query_ctx = Arc::new(QueryContext::with_current_schema(using_schema.to_string()));
+        let empty_ctx = Arc::new(QueryContext::new());
 
         assert_eq!(
-            table_idents_to_full_name(&full, session_ctx.clone()).unwrap(),
+            table_idents_to_full_name(&full, query_ctx.clone()).unwrap(),
             (
                 my_catalog.to_string(),
                 my_schema.to_string(),
@@ -249,7 +245,7 @@ mod test {
         );
 
         assert_eq!(
-            table_idents_to_full_name(&partial, session_ctx.clone()).unwrap(),
+            table_idents_to_full_name(&partial, query_ctx.clone()).unwrap(),
             (
                 DEFAULT_CATALOG_NAME.to_string(),
                 my_schema.to_string(),
@@ -266,7 +262,7 @@ mod test {
         );
 
         assert_eq!(
-            table_idents_to_full_name(&bare, session_ctx).unwrap(),
+            table_idents_to_full_name(&bare, query_ctx).unwrap(),
             (
                 DEFAULT_CATALOG_NAME.to_string(),
                 using_schema.to_string(),

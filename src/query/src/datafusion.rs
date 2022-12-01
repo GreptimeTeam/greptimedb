@@ -32,7 +32,7 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
-use session::context::SessionContextRef;
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
@@ -47,7 +47,7 @@ use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
 use crate::plan::LogicalPlan;
 use crate::planner::Planner;
-use crate::query_engine::{QueryContext, QueryEngineState};
+use crate::query_engine::{QueryEngineContext, QueryEngineState};
 use crate::{metric, QueryEngine};
 
 pub(crate) struct DatafusionQueryEngine {
@@ -80,22 +80,22 @@ impl QueryEngine for DatafusionQueryEngine {
     fn statement_to_plan(
         &self,
         stmt: Statement,
-        session_ctx: SessionContextRef,
+        query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
-        let context_provider = DfContextProviderAdapter::new(self.state.clone(), session_ctx);
+        let context_provider = DfContextProviderAdapter::new(self.state.clone(), query_ctx);
         let planner = DfPlanner::new(&context_provider);
 
         planner.statement_to_plan(stmt)
     }
 
-    fn sql_to_plan(&self, sql: &str, session_ctx: SessionContextRef) -> Result<LogicalPlan> {
+    fn sql_to_plan(&self, sql: &str, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
         let stmt = self.sql_to_statement(sql)?;
-        self.statement_to_plan(stmt, session_ctx)
+        self.statement_to_plan(stmt, query_ctx)
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
-        let mut ctx = QueryContext::new(self.state.clone());
+        let mut ctx = QueryEngineContext::new(self.state.clone());
         let logical_plan = self.optimize_logical_plan(&mut ctx, plan)?;
         let physical_plan = self.create_physical_plan(&mut ctx, &logical_plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
@@ -106,7 +106,7 @@ impl QueryEngine for DatafusionQueryEngine {
     }
 
     async fn execute_physical(&self, plan: &Arc<dyn PhysicalPlan>) -> Result<Output> {
-        let ctx = QueryContext::new(self.state.clone());
+        let ctx = QueryEngineContext::new(self.state.clone());
         Ok(Output::Stream(self.execute_stream(&ctx, plan).await?))
     }
 
@@ -133,7 +133,7 @@ impl QueryEngine for DatafusionQueryEngine {
 impl LogicalOptimizer for DatafusionQueryEngine {
     fn optimize_logical_plan(
         &self,
-        _ctx: &mut QueryContext,
+        _: &mut QueryEngineContext,
         plan: &LogicalPlan,
     ) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
@@ -157,7 +157,7 @@ impl LogicalOptimizer for DatafusionQueryEngine {
 impl PhysicalPlanner for DatafusionQueryEngine {
     async fn create_physical_plan(
         &self,
-        _ctx: &mut QueryContext,
+        _: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
         let _timer = timer!(metric::METRIC_CREATE_PHYSICAL_ELAPSED);
@@ -189,7 +189,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
 impl PhysicalOptimizer for DatafusionQueryEngine {
     fn optimize_physical_plan(
         &self,
-        _ctx: &mut QueryContext,
+        _: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
         let _timer = timer!(metric::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
@@ -217,7 +217,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
 impl QueryExecutor for DatafusionQueryEngine {
     async fn execute_stream(
         &self,
-        ctx: &QueryContext,
+        ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
         let _timer = timer!(metric::METRIC_EXEC_PLAN_ELAPSED);
@@ -256,7 +256,7 @@ mod tests {
     use common_recordbatch::util;
     use datafusion::field_util::{FieldExt, SchemaExt};
     use datatypes::arrow::array::UInt64Array;
-    use session::context::SessionContext;
+    use session::context::QueryContext;
     use table::table::numbers::NumbersTable;
 
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
@@ -285,7 +285,7 @@ mod tests {
         let sql = "select sum(number) from numbers limit 20";
 
         let plan = engine
-            .sql_to_plan(sql, Arc::new(SessionContext::new()))
+            .sql_to_plan(sql, Arc::new(QueryContext::new()))
             .unwrap();
 
         assert_eq!(
@@ -303,7 +303,7 @@ mod tests {
         let sql = "select sum(number) from numbers limit 20";
 
         let plan = engine
-            .sql_to_plan(sql, Arc::new(SessionContext::new()))
+            .sql_to_plan(sql, Arc::new(QueryContext::new()))
             .unwrap();
         let output = engine.execute(&plan).await.unwrap();
 

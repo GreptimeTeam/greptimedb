@@ -16,21 +16,21 @@ pub mod context;
 
 use std::sync::Arc;
 
-use crate::context::{SessionContext, SessionContextRef};
+use crate::context::{QueryContext, QueryContextRef};
 
 #[derive(Default)]
 pub struct Session {
-    session_ctx: SessionContextRef,
+    query_ctx: QueryContextRef,
 }
 
 impl Session {
     pub fn new() -> Self {
         Session {
-            session_ctx: Arc::new(SessionContext::new()),
+            query_ctx: Arc::new(QueryContext::new()),
         }
     }
 
-    pub fn context(&self) -> SessionContextRef {
-        self.session_ctx.clone()
+    pub fn context(&self) -> QueryContextRef {
+        self.query_ctx.clone()
     }
 }

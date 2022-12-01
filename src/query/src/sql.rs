@@ -22,7 +22,7 @@ use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{Helper, StringVector};
 use once_cell::sync::Lazy;
-use session::context::SessionContextRef;
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
@@ -113,7 +113,7 @@ pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -
 pub fn show_tables(
     stmt: ShowTables,
     catalog_manager: CatalogManagerRef,
-    session_ctx: SessionContextRef,
+    query_ctx: QueryContextRef,
 ) -> Result<Output> {
     // TODO(LFC): supports WHERE
     ensure!(
@@ -126,7 +126,7 @@ pub fn show_tables(
     let schema = if let Some(database) = stmt.database {
         database
     } else {
-        session_ctx
+        query_ctx
             .current_schema()
             .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string())
     };
@@ -155,9 +155,9 @@ pub fn show_tables(
 pub async fn explain(
     stmt: Box<Explain>,
     query_engine: QueryEngineRef,
-    session_ctx: SessionContextRef,
+    query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let plan = query_engine.statement_to_plan(Statement::Explain(*stmt), session_ctx)?;
+    let plan = query_engine.statement_to_plan(Statement::Explain(*stmt), query_ctx)?;
     query_engine.execute(&plan).await
 }
 

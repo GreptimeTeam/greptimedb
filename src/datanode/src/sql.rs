@@ -17,7 +17,7 @@ use common_query::Output;
 use common_telemetry::error;
 use query::query_engine::QueryEngineRef;
 use query::sql::{describe_table, explain, show_databases, show_tables};
-use session::context::SessionContextRef;
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
@@ -70,11 +70,7 @@ impl SqlHandler {
     // Now we have some query related state (like current using database in session context), maybe
     // we could create a new struct called `Planner` that stores context and handle these queries
     // there, instead of executing here in a "static" fashion.
-    pub async fn execute(
-        &self,
-        request: SqlRequest,
-        session_ctx: SessionContextRef,
-    ) -> Result<Output> {
+    pub async fn execute(&self, request: SqlRequest, query_ctx: QueryContextRef) -> Result<Output> {
         let result = match request {
             SqlRequest::Insert(req) => self.insert(req).await,
             SqlRequest::CreateTable(req) => self.create_table(req).await,
@@ -85,13 +81,12 @@ impl SqlHandler {
                 show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
             SqlRequest::ShowTables(stmt) => {
-                show_tables(stmt, self.catalog_manager.clone(), session_ctx)
-                    .context(ExecuteSqlSnafu)
+                show_tables(stmt, self.catalog_manager.clone(), query_ctx).context(ExecuteSqlSnafu)
             }
             SqlRequest::DescribeTable(stmt) => {
                 describe_table(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
-            SqlRequest::Explain(stmt) => explain(stmt, self.query_engine.clone(), session_ctx)
+            SqlRequest::Explain(stmt) => explain(stmt, self.query_engine.clone(), query_ctx)
                 .await
                 .context(ExecuteSqlSnafu),
         };

@@ -22,7 +22,7 @@ use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::array::{Int64Array, UInt64Array, Utf8Array};
 use datatypes::arrow_array::StringArray;
 use datatypes::prelude::ConcreteDataType;
-use session::context::SessionContext;
+use session::context::QueryContext;
 
 use crate::instance::Instance;
 use crate::tests::test_util;
@@ -612,6 +612,6 @@ async fn execute_sql(instance: &Instance, sql: &str) -> Output {
 }
 
 async fn execute_sql_in_db(instance: &Instance, sql: &str, db: &str) -> Output {
-    let session_ctx = Arc::new(SessionContext::with_current_schema(db.to_string()));
-    instance.execute_sql(sql, session_ctx).await.unwrap()
+    let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
+    instance.execute_sql(sql, query_ctx).await.unwrap()
 }

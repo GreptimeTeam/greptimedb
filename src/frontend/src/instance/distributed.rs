@@ -33,7 +33,7 @@ use meta_client::rpc::{
 };
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
-use session::context::SessionContextRef;
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
@@ -133,23 +133,23 @@ impl DistInstance {
         &self,
         sql: &str,
         stmt: Statement,
-        session_ctx: SessionContextRef,
+        query_ctx: QueryContextRef,
     ) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {
                 let plan = self
                     .query_engine
-                    .statement_to_plan(stmt, session_ctx)
+                    .statement_to_plan(stmt, query_ctx)
                     .context(error::ExecuteSqlSnafu { sql })?;
                 self.query_engine.execute(&plan).await
             }
             Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
             Statement::ShowTables(stmt) => {
-                show_tables(stmt, self.catalog_manager.clone(), session_ctx)
+                show_tables(stmt, self.catalog_manager.clone(), query_ctx)
             }
             Statement::DescribeTable(stmt) => describe_table(stmt, self.catalog_manager.clone()),
             Statement::Explain(stmt) => {
-                explain(Box::new(stmt), self.query_engine.clone(), session_ctx).await
+                explain(Box::new(stmt), self.query_engine.clone(), query_ctx).await
             }
             _ => unreachable!(),
         }

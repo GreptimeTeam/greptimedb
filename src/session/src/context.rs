@@ -17,19 +17,19 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use common_telemetry::info;
 
-pub type SessionContextRef = Arc<SessionContext>;
+pub type QueryContextRef = Arc<QueryContext>;
 
-pub struct SessionContext {
+pub struct QueryContext {
     current_schema: ArcSwapOption<String>,
 }
 
-impl Default for SessionContext {
+impl Default for QueryContext {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SessionContext {
+impl QueryContext {
     pub fn new() -> Self {
         Self {
             current_schema: ArcSwapOption::new(None),

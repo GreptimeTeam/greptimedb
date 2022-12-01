@@ -65,7 +65,7 @@ mod tests {
     use common_query::Output;
     use datafusion::arrow_print;
     use servers::query_handler::SqlQueryHandler;
-    use session::context::SessionContext;
+    use session::context::QueryContext;
 
     use super::*;
     use crate::tests;
@@ -124,7 +124,7 @@ mod tests {
         assert!(result.is_ok());
 
         let output = instance
-            .do_query("select * from my_metric_1", Arc::new(SessionContext::new()))
+            .do_query("select * from my_metric_1", Arc::new(QueryContext::new()))
             .await
             .unwrap();
         match output {

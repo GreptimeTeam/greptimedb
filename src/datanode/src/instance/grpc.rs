@@ -28,7 +28,7 @@ use common_grpc_expr::insertion_expr_to_request;
 use common_query::Output;
 use query::plan::LogicalPlan;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
-use session::context::SessionContext;
+use session::context::QueryContext;
 use snafu::prelude::*;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::CreateDatabaseRequest;
@@ -114,8 +114,7 @@ impl Instance {
         let expr = select_expr.expr;
         match expr {
             Some(select_expr::Expr::Sql(sql)) => {
-                self.execute_sql(&sql, Arc::new(SessionContext::new()))
-                    .await
+                self.execute_sql(&sql, Arc::new(QueryContext::new())).await
             }
             Some(select_expr::Expr::LogicalPlan(plan)) => self.execute_logical(plan).await,
             Some(select_expr::Expr::PhysicalPlan(api::v1::PhysicalPlan { original_ql, plan })) => {

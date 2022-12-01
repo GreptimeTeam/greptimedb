@@ -22,7 +22,7 @@ use common_error::status_code::StatusCode;
 use common_telemetry::metric;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use session::context::SessionContext;
+use session::context::QueryContext;
 
 use crate::http::{ApiState, JsonResponse};
 
@@ -42,8 +42,8 @@ pub async fn sql(
     let start = Instant::now();
     let resp = if let Some(sql) = &params.sql {
         // TODO(LFC): Sessions in http server.
-        let session_ctx = Arc::new(SessionContext::new());
-        JsonResponse::from_output(sql_handler.do_query(sql, session_ctx).await).await
+        let query_ctx = Arc::new(QueryContext::new());
+        JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
     } else {
         JsonResponse::with_error(
             "sql parameter is required.".to_string(),
