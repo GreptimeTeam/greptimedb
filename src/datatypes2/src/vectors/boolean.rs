@@ -52,6 +52,10 @@ impl BooleanVector {
             array: BooleanArray::from(data),
         }
     }
+
+    pub(crate) fn count_false(&self) -> usize {
+        self.array.false_count()
+    }
 }
 
 impl From<Vec<bool>> for BooleanVector {

@@ -70,10 +70,11 @@ impl ConstantVector {
     }
 
     pub(crate) fn filter_vector(&self, filter: &BooleanVector) -> Result<VectorRef> {
-        let length = filter.len() - filter.null_count();
+        let length = self.len() - filter.count_false();
         if length == self.len() {
             return Ok(Arc::new(self.clone()));
         }
+        println!("filter null count: {:?}", filter.null_count());
         Ok(Arc::new(ConstantVector::new(self.inner().clone(), length)))
     }
 }
