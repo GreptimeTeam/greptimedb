@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_query::Output;
+use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{error, info};
 use common_telemetry::timer;
 use servers::query_handler::SqlQueryHandler;
@@ -140,6 +141,19 @@ impl Instance {
             }
             Statement::ShowCreateTable(_stmt) => {
                 unimplemented!("SHOW CREATE TABLE is unimplemented yet");
+            }
+            Statement::Use(db) => {
+                ensure!(
+                    self.catalog_manager
+                        .schema(DEFAULT_CATALOG_NAME, &db)
+                        .context(error::CatalogSnafu)?
+                        .is_some(),
+                    error::SchemaNotFoundSnafu { name: &db }
+                );
+
+                session_ctx.set_current_schema(db);
+
+                Ok(Output::RecordBatches(RecordBatches::empty()))
             }
         }
     }

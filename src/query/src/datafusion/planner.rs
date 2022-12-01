@@ -86,7 +86,8 @@ where
             | Statement::CreateDatabase(_)
             | Statement::Alter(_)
             | Statement::Insert(_)
-            | Statement::DropTable(_) => unreachable!(),
+            | Statement::DropTable(_)
+            | Statement::Use(_) => unreachable!(),
         }
     }
 }

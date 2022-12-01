@@ -47,6 +47,7 @@ pub enum Statement {
     DescribeTable(DescribeTable),
     // EXPLAIN QUERY
     Explain(Explain),
+    Use(String),
 }
 
 /// Comment hints from SQL.

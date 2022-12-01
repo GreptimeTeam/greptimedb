@@ -38,6 +38,7 @@ use common_error::prelude::{BoxedError, StatusCode};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_grpc::select::to_object_result;
 use common_query::Output;
+use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, error, info};
 use distributed::DistInstance;
 use meta_client::client::MetaClientBuilder;
@@ -516,6 +517,26 @@ impl Instance {
         let insert_request = insert_to_request(&schema_provider, *insert)?;
         insert_request_to_insert_batch(&insert_request)
     }
+
+    fn handle_use(&self, db: String, session_ctx: Arc<SessionContext>) -> Result<Output> {
+        let catalog_manager = &self.catalog_manager;
+        if let Some(catalog_manager) = catalog_manager {
+            ensure!(
+                catalog_manager
+                    .schema(DEFAULT_CATALOG_NAME, &db)
+                    .context(error::CatalogSnafu)?
+                    .is_some(),
+                error::SchemaNotFoundSnafu { schema_info: &db }
+            );
+
+            session_ctx.set_current_schema(db);
+
+            Ok(Output::RecordBatches(RecordBatches::empty()))
+        } else {
+            // TODO(LFC): Handle "use" stmt here.
+            unimplemented!()
+        }
+    }
 }
 
 #[async_trait]
@@ -569,11 +590,10 @@ impl SqlQueryHandler for Instance {
             Statement::ShowDatabases(_)
             | Statement::ShowTables(_)
             | Statement::DescribeTable(_)
-            | Statement::Query(_) => self
-                .handle_select(Select::Sql(query.to_string()), stmt, session_ctx)
-                .await
-                .map_err(BoxedError::new)
-                .context(server_error::ExecuteQuerySnafu { query }),
+            | Statement::Query(_) => {
+                self.handle_select(Select::Sql(query.to_string()), stmt, session_ctx)
+                    .await
+            }
             Statement::Insert(insert) => match self.mode {
                 Mode::Standalone => {
                     let (catalog_name, schema_name, table_name) = insert
@@ -596,10 +616,7 @@ impl SqlQueryHandler for Instance {
                         columns,
                         row_count,
                     };
-                    self.handle_insert(expr)
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(server_error::ExecuteQuerySnafu { query })
+                    self.handle_insert(expr).await
                 }
                 Mode::Distributed => {
                     let affected = self
@@ -622,46 +639,36 @@ impl SqlQueryHandler for Instance {
 
                 self.handle_create_table(create_expr, create.partitions)
                     .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })
             }
             Statement::CreateDatabase(c) => {
                 let expr = CreateDatabaseExpr {
                     database_name: c.name.to_string(),
                 };
-                self.handle_create_database(expr)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })
+                self.handle_create_database(expr).await
             }
-            Statement::Alter(alter_stmt) => self
-                .handle_alter(
+            Statement::Alter(alter_stmt) => {
+                self.handle_alter(
                     AlterExpr::try_from(alter_stmt)
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteAlterSnafu { query })?,
                 )
                 .await
-                .map_err(BoxedError::new)
-                .context(server_error::ExecuteQuerySnafu { query }),
+            }
             Statement::DropTable(drop_stmt) => {
                 let expr = DropTableExpr {
                     catalog_name: drop_stmt.catalog_name,
                     schema_name: drop_stmt.schema_name,
                     table_name: drop_stmt.table_name,
                 };
-                self.handle_drop_table(expr)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })
+                self.handle_drop_table(expr).await
             }
-            Statement::Explain(explain_stmt) => self
-                .handle_explain(query, explain_stmt, session_ctx)
-                .await
-                .map_err(BoxedError::new)
-                .context(server_error::ExecuteQuerySnafu { query }),
+            Statement::Explain(explain_stmt) => {
+                self.handle_explain(query, explain_stmt, session_ctx).await
+            }
             Statement::ShowCreateTable(_) => {
                 return server_error::NotSupportedSnafu { feat: query }.fail();
             }
+            Statement::Use(db) => self.handle_use(db, session_ctx),
         }
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu { query })
