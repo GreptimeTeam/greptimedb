@@ -12,11 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use opendal::raw::SeekableReader;
-pub use opendal::{
-    layers, services, Error, ErrorKind, Layer, Object, ObjectLister, ObjectMetadata, ObjectMode,
-    Operator as ObjectStore, Result,
-};
-pub mod backend;
-pub mod test_util;
-pub mod util;
+use crate::{ObjectStore, Result};
+
+pub struct TempFolder {
+    store: ObjectStore,
+    // The path under root.
+    path: String,
+}
+
+impl TempFolder {
+    pub fn new(store: &ObjectStore, path: &str) -> Self {
+        Self {
+            store: store.clone(),
+            path: path.to_string(),
+        }
+    }
+
+    pub async fn remove_all(&mut self) -> Result<()> {
+        let batch = self.store.batch();
+        batch.remove_all(&self.path).await
+    }
+}
