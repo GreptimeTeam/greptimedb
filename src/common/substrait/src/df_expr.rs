@@ -65,7 +65,7 @@ pub fn convert_selection_rex(selection: FieldReference, schema: &Schema) -> Resu
     && let Some(SegReferenceType::StructField(field))  = direct_ref.reference_type{
         let column_name = schema.column_name_by_index(field.field as _).to_string();
          Ok(Expr::Column(Column{ relation: None, name: column_name }))
-    } else{
+    } else {
         InvalidParametersSnafu{reason:"Only support direct struct reference in Selection Rex"}.fail()
     }
 }

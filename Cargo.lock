@@ -5945,6 +5945,7 @@ dependencies = [
  "catalog",
  "common-catalog",
  "common-error",
+ "common-telemetry",
  "datafusion",
  "datafusion-expr",
  "datatypes",

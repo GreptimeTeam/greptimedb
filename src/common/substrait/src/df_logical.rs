@@ -17,6 +17,7 @@ use std::sync::Arc;
 use bytes::{Buf, Bytes, BytesMut};
 use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
+use common_telemetry::debug;
 use datafusion::datasource::TableProvider;
 use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
 use datafusion::physical_plan::project_schema;
@@ -83,6 +84,8 @@ impl DFLogicalSubstraitConvertor {
                     function_extension.name,
                     function_extension.function_anchor,
                 );
+            } else {
+                debug!("Encounter unsupported substrait extension {:?}", simple_ext);
             }
         }
 
