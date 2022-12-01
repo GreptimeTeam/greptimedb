@@ -43,7 +43,7 @@ impl ListVector {
     pub fn values_iter(&self) -> impl Iterator<Item = Result<Option<VectorRef>>> + '_ {
         self.array
             .iter()
-            .map(|value_opt| value_opt.map(|v| Helper::try_into_vector(v)).transpose())
+            .map(|value_opt| value_opt.map(Helper::try_into_vector).transpose())
     }
 
     fn to_array_data(&self) -> ArrayData {
