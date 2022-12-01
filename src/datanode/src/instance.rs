@@ -195,13 +195,9 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
 
     object_store.map(|object_store| {
         object_store
-            // Add retry
             .layer(RetryLayer::new(ExponentialBackoff::default().with_jitter()))
-            // Add metrics
             .layer(MetricsLayer)
-            // Add logging
             .layer(LoggingLayer)
-            // Add tracing
             .layer(TracingLayer)
     })
 }
