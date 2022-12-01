@@ -97,7 +97,7 @@ mod tests {
         let cv = ConstantVector::new(v.clone(), 2);
         let offsets = [1, 4];
 
-        let cv = cv.replicate_vector(&offsets);
+        let cv = cv.replicate(&offsets);
         assert_eq!(4, cv.len());
 
         let expect: VectorRef = Arc::new(ConstantVector::new(v, 4));

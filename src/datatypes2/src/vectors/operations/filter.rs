@@ -66,7 +66,7 @@ mod tests {
     fn check_filter_constant(expect_length: usize, input_length: usize, filter: &[bool]) {
         let v = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[123])), input_length);
         let filter = BooleanVector::from_slice(filter);
-        let out = v.filter_vector(&filter).unwrap();
+        let out = v.filter(&filter).unwrap();
 
         assert!(out.is_const());
         assert_eq!(expect_length, out.len());
