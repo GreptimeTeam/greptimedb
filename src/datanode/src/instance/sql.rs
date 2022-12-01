@@ -206,3 +206,76 @@ impl SqlQueryHandler for Instance {
             .context(servers::error::ExecuteQuerySnafu { query })
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_table_idents_to_full_name() {
+        let my_catalog = "my_catalog";
+        let my_schema = "my_schema";
+        let my_table = "my_table";
+
+        let full = ObjectName(vec![my_catalog.into(), my_schema.into(), my_table.into()]);
+        let partial = ObjectName(vec![my_schema.into(), my_table.into()]);
+        let bare = ObjectName(vec![my_table.into()]);
+
+        let using_schema = "foo";
+        let session_ctx = Arc::new(SessionContext::with_current_schema(
+            using_schema.to_string(),
+        ));
+        let empty_ctx = Arc::new(SessionContext::new());
+
+        assert_eq!(
+            table_idents_to_full_name(&full, session_ctx.clone()).unwrap(),
+            (
+                my_catalog.to_string(),
+                my_schema.to_string(),
+                my_table.to_string()
+            )
+        );
+        assert_eq!(
+            table_idents_to_full_name(&full, empty_ctx.clone()).unwrap(),
+            (
+                my_catalog.to_string(),
+                my_schema.to_string(),
+                my_table.to_string()
+            )
+        );
+
+        assert_eq!(
+            table_idents_to_full_name(&partial, session_ctx.clone()).unwrap(),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                my_schema.to_string(),
+                my_table.to_string()
+            )
+        );
+        assert_eq!(
+            table_idents_to_full_name(&partial, empty_ctx.clone()).unwrap(),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                my_schema.to_string(),
+                my_table.to_string()
+            )
+        );
+
+        assert_eq!(
+            table_idents_to_full_name(&bare, session_ctx).unwrap(),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                using_schema.to_string(),
+                my_table.to_string()
+            )
+        );
+        assert_eq!(
+            table_idents_to_full_name(&bare, empty_ctx).unwrap(),
+            (
+                DEFAULT_CATALOG_NAME.to_string(),
+                DEFAULT_SCHEMA_NAME.to_string(),
+                my_table.to_string()
+            )
+        );
+    }
+}
