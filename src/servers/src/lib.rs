@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod auth;
 pub mod context;
 pub mod error;
 pub mod grpc;

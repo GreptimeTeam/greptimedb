@@ -18,6 +18,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
+use crate::auth::UserInfo;
 use crate::error::{BuildingContextSnafu, Result};
 
 type CtxFnRef = Arc<dyn Fn(&Context) -> bool + Send + Sync>;
@@ -41,10 +42,8 @@ impl Context {
 #[derive(Default)]
 pub struct CtxBuilder {
     client_addr: Option<String>,
-
-    username: Option<String>,
     from_channel: Option<Channel>,
-    auth_method: Option<AuthMethod>,
+    user_info: Option<UserInfo>,
 }
 
 impl CtxBuilder {
@@ -52,23 +51,18 @@ impl CtxBuilder {
         CtxBuilder::default()
     }
 
-    pub fn client_addr(mut self, addr: Option<String>) -> CtxBuilder {
-        self.client_addr = addr;
+    pub fn client_addr(mut self, addr: String) -> CtxBuilder {
+        self.client_addr = Some(addr);
         self
     }
 
-    pub fn set_channel(mut self, channel: Option<Channel>) -> CtxBuilder {
-        self.from_channel = channel;
+    pub fn set_channel(mut self, channel: Channel) -> CtxBuilder {
+        self.from_channel = Some(channel);
         self
     }
 
-    pub fn set_auth_method(mut self, auth_method: Option<AuthMethod>) -> CtxBuilder {
-        self.auth_method = auth_method;
-        self
-    }
-
-    pub fn set_username(mut self, username: Option<String>) -> CtxBuilder {
-        self.username = username;
+    pub fn set_user_info(mut self, user_info: UserInfo) -> CtxBuilder {
+        self.user_info = Some(user_info);
         self
     }
 
@@ -78,16 +72,13 @@ impl CtxBuilder {
                 client_host: self.client_addr.context(BuildingContextSnafu {
                     err_msg: "unknown client addr while building ctx",
                 })?,
-            },
-            user_info: UserInfo {
-                username: self.username,
-                from_channel: self.from_channel.context(BuildingContextSnafu {
+                channel: self.from_channel.context(BuildingContextSnafu {
                     err_msg: "unknown channel while building ctx",
                 })?,
-                auth_method: self.auth_method.context(BuildingContextSnafu {
-                    err_msg: "unknown auth method while building ctx",
-                })?,
             },
+            user_info: self.user_info.context(BuildingContextSnafu {
+                err_msg: "missing user info while building ctx",
+            })?,
 
             exec_info: ExecInfo::default(),
             quota: Quota::default(),
@@ -116,16 +107,10 @@ impl Default for ExecInfo {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ClientInfo {
     pub client_host: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct UserInfo {
-    pub username: Option<String>,
-    pub from_channel: Channel,
-    pub auth_method: AuthMethod,
+    pub channel: Channel,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,29 +118,6 @@ pub enum Channel {
     GRPC,
     HTTP,
     MYSQL,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AuthMethod {
-    None,
-    Password {
-        hash_method: AuthHashMethod,
-        hashed_value: Vec<u8>,
-        salt: Vec<u8>,
-    },
-    Token(String),
-}
-
-impl Default for AuthMethod {
-    fn default() -> Self {
-        AuthMethod::None
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AuthHashMethod {
-    DoubleSha1,
-    Sha256,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -170,20 +132,19 @@ mod test {
 
     use std::sync::Arc;
 
-    use crate::context::AuthMethod::Token;
-    use crate::context::Channel::HTTP;
-    use crate::context::{Channel, Context, CtxBuilder, UserInfo};
+    use crate::auth::AuthMethod;
+    use crate::context::Channel::{self, HTTP};
+    use crate::context::{ClientInfo, Context, CtxBuilder, UserInfo};
 
     #[test]
     fn test_predicate() {
         let mut ctx = Context {
             exec_info: Default::default(),
-            client_info: Default::default(),
-            user_info: UserInfo {
-                username: None,
-                from_channel: Channel::GRPC,
-                auth_method: Default::default(),
+            client_info: ClientInfo {
+                client_host: Default::default(),
+                channel: Channel::GRPC,
             },
+            user_info: UserInfo::new(None, vec![AuthMethod::PlainPwd(b"123456".to_vec())]),
             quota: Default::default(),
             predicates: vec![],
         };
@@ -204,9 +165,12 @@ mod test {
     #[test]
     fn test_build() {
         let ctx = CtxBuilder::new()
-            .client_addr(Some("127.0.0.1:4001".to_string()))
-            .set_channel(Some(HTTP))
-            .set_auth_method(Some(Token("HELLO".to_string())))
+            .client_addr("127.0.0.1:4001".to_string())
+            .set_channel(HTTP)
+            .set_user_info(UserInfo::new(
+                None,
+                vec![AuthMethod::PlainPwd(b"123456".to_vec())],
+            ))
             .build()
             .unwrap();
 
@@ -216,10 +180,6 @@ mod test {
         assert_eq!(ctx.exec_info.trace_id, None);
 
         assert_eq!(ctx.client_info.client_host, String::from("127.0.0.1:4001"));
-
-        assert_eq!(ctx.user_info.username, None);
-        assert_eq!(ctx.user_info.from_channel, HTTP);
-        assert_eq!(ctx.user_info.auth_method, Token(String::from("HELLO")));
 
         assert_eq!(ctx.quota.total, 0);
         assert_eq!(ctx.quota.consumed, 0);
