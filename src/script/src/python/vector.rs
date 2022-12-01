@@ -1051,13 +1051,7 @@ pub mod tests {
     /// test the paired `val_to_obj` and `pyobj_to_val` func
     #[test]
     fn test_val2pyobj2val() {
-        rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
-            // We are freezing the stdlib, so according to this issue:
-            // https://github.com/RustPython/RustPython/issues/4292
-            // add this line for frozen stdlib
-            vm.add_frozen(rustpython_pylib::frozen_stdlib());
-        })
-        .enter(|vm| {
+        rustpython_vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
             let i = value::Value::Float32(OrderedFloat(2.0));
             let j = value::Value::Int32(1);
             let dtype = i.data_type();
@@ -1099,13 +1093,7 @@ pub mod tests {
 
     #[test]
     fn test_getitem_by_index_in_vm() {
-        rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
-            // We are freezing the stdlib, so according to this issue:
-            // https://github.com/RustPython/RustPython/issues/4292
-            // add this line for frozen stdlib
-            vm.add_frozen(rustpython_pylib::frozen_stdlib());
-        })
-        .enter(|vm| {
+        rustpython_vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
             PyVector::make_class(&vm.ctx);
             let a: VectorRef = Arc::new(Int32Vector::from_vec(vec![1, 2, 3, 4]));
             let a = PyVector::from(a);
@@ -1229,12 +1217,7 @@ pub mod tests {
             ),
         ];
 
-        let interpreter = rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
-            // We are freezing the stdlib, so according to this issue:
-            // https://github.com/RustPython/RustPython/issues/4292
-            // add this line for frozen stdlib
-            vm.add_frozen(rustpython_pylib::frozen_stdlib());
-        });
+        let interpreter = rustpython_vm::Interpreter::without_stdlib(Default::default());
         for (code, pred) in snippet {
             let result = execute_script(&interpreter, code, None, pred);
 

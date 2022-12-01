@@ -39,10 +39,6 @@ fn convert_scalar_to_py_obj_and_back() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
         // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
         PyVector::make_class(&vm.ctx);
-        // We are freezing the stdlib, so according to this issue:
-        // https://github.com/RustPython/RustPython/issues/4292
-        // add this line for stdlib
-        vm.add_frozen(rustpython_pylib::frozen_stdlib());
     })
     .enter(|vm| {
         let col = DFColValue::Scalar(ScalarValue::Float64(Some(1.0)));
@@ -344,11 +340,6 @@ fn run_builtin_fn_testcases() {
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
     let cached_vm = rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
         vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
-        // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
-        // We are freezing the stdlib, so according to this issue:
-        // https://github.com/RustPython/RustPython/issues/4292
-        // add this line for stdlib
-        vm.add_frozen(rustpython_pylib::frozen_stdlib());
         PyVector::make_class(&vm.ctx);
     });
     for (idx, case) in testcases.into_iter().enumerate() {
@@ -454,10 +445,6 @@ fn set_lst_of_vecs_in_scope(
 fn test_vm() {
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
         vm.add_native_module("udf_builtins", Box::new(greptime_builtin::make_module));
-        // We are freezing the stdlib, so according to this issue:
-        // https://github.com/RustPython/RustPython/issues/4292
-        // add this line for stdlib
-        vm.add_frozen(rustpython_pylib::frozen_stdlib());
         // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
         PyVector::make_class(&vm.ctx);
     })
