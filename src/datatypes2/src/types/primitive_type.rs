@@ -189,7 +189,7 @@ impl WrapperType for DateTime {
 
 macro_rules! define_logical_primitive_type {
     ($Native: ident, $TypeId: ident, $DataType: ident) => {
-        // We need to define it as empty struct `struct DataType {}` instead of a struct-unit
+        // We need to define it as an empty struct `struct DataType {}` instead of a struct-unit
         // `struct DataType;` to ensure the serialized JSON string is compatible with previous
         // implementation.
         #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
