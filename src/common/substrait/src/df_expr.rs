@@ -6,19 +6,25 @@ use datafusion_expr::{expr_fn, BuiltinScalarFunction, Operator};
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt};
 use substrait_proto::protobuf::expression::field_reference::ReferenceType as FieldReferenceType;
-use substrait_proto::protobuf::expression::reference_segment::ReferenceType as SegReferenceType;
-use substrait_proto::protobuf::expression::{FieldReference, RexType, ScalarFunction};
+use substrait_proto::protobuf::expression::reference_segment::{
+    ReferenceType as SegReferenceType, StructField,
+};
+use substrait_proto::protobuf::expression::{
+    FieldReference, ReferenceSegment, RexType, ScalarFunction,
+};
 use substrait_proto::protobuf::function_argument::ArgType;
 use substrait_proto::protobuf::Expression;
 
 use crate::context::ConvertorContext;
-use crate::error::{EmptyExprSnafu, InvalidParametersSnafu, Result, UnsupportedExprSnafu};
+use crate::error::{
+    EmptyExprSnafu, InvalidParametersSnafu, MissingFieldSnafu, Result, UnsupportedExprSnafu,
+};
 
 /// Convert substrait's `Expression` to DataFusion's `Expr`.
 pub fn to_df_expr(ctx: &ConvertorContext, expression: Expression, schema: &Schema) -> Result<Expr> {
     let expr_rex_type = expression.rex_type.context(EmptyExprSnafu)?;
     match expr_rex_type {
-        RexType::Literal(_literal) => todo!(),
+        RexType::Literal(_) => todo!(),
         RexType::Selection(selection) => convert_selection_rex(selection, schema),
         RexType::ScalarFunction(scalar_fn) => convert_scalar_function(ctx, scalar_fn, schema),
         RexType::WindowFunction(_)
@@ -35,6 +41,8 @@ pub fn to_df_expr(ctx: &ConvertorContext, expression: Expression, schema: &Schem
     }
 }
 
+/// Convert Substrait's `FieldReference` - `DirectReference` - `StructField` to Datafusion's
+/// `Column` expr.
 pub fn convert_selection_rex(selection: Box<FieldReference>, schema: &Schema) -> Result<Expr> {
     if let Some(FieldReferenceType::DirectReference(direct_ref)) = selection.reference_type
     && let Some(SegReferenceType::StructField(field))  = direct_ref.reference_type{
@@ -409,47 +417,56 @@ pub fn expression_from_df_expr(
 ) -> Result<Expression> {
     let expression = match expr {
         // Don't merge them with other unsupported expr arms to perserve the ordering.
-        Expr::Alias(..) | Expr::Column(..) | Expr::ScalarVariable(..) | Expr::Literal(..) => {
-            UnsupportedExprSnafu {
-                name: expr.to_string(),
-            }
-            .fail()?
+        Expr::Alias(..) => UnsupportedExprSnafu {
+            name: expr.to_string(),
         }
+        .fail()?,
+        Expr::Column(column) => {
+            let field_reference = convert_column(column, schema)?;
+            Expression {
+                rex_type: Some(RexType::Selection(Box::new(field_reference))),
+            }
+        }
+        // Don't merge them with other unsupported expr arms to perserve the ordering.
+        Expr::ScalarVariable(..) | Expr::Literal(..) => UnsupportedExprSnafu {
+            name: expr.to_string(),
+        }
+        .fail()?,
         Expr::BinaryExpr { left, op, right } => {
             let left = expression_from_df_expr(ctx, left, schema)?;
             let right = expression_from_df_expr(ctx, right, schema)?;
             let arguments = utils::expression_to_argument(vec![left, right]);
             let op_name = utils::name_df_operator(op);
             let function_reference = ctx.register_scalar_fn(op_name);
-            utils::build_expression(function_reference, arguments)
+            utils::build_scalar_function_expression(function_reference, arguments)
         }
         Expr::Not(e) => {
             let arg = expression_from_df_expr(ctx, e, schema)?;
             let arguments = utils::expression_to_argument(vec![arg]);
             let op_name = "not";
             let function_reference = ctx.register_scalar_fn(op_name);
-            utils::build_expression(function_reference, arguments)
+            utils::build_scalar_function_expression(function_reference, arguments)
         }
         Expr::IsNotNull(e) => {
             let arg = expression_from_df_expr(ctx, e, schema)?;
             let arguments = utils::expression_to_argument(vec![arg]);
             let op_name = "is_not_null";
             let function_reference = ctx.register_scalar_fn(op_name);
-            utils::build_expression(function_reference, arguments)
+            utils::build_scalar_function_expression(function_reference, arguments)
         }
         Expr::IsNull(e) => {
             let arg = expression_from_df_expr(ctx, e, schema)?;
             let arguments = utils::expression_to_argument(vec![arg]);
             let op_name = "is_not_null";
             let function_reference = ctx.register_scalar_fn(op_name);
-            utils::build_expression(function_reference, arguments)
+            utils::build_scalar_function_expression(function_reference, arguments)
         }
         Expr::Negative(e) => {
             let arg = expression_from_df_expr(ctx, e, schema)?;
             let arguments = utils::expression_to_argument(vec![arg]);
             let op_name = "negative";
             let function_reference = ctx.register_scalar_fn(op_name);
-            utils::build_expression(function_reference, arguments)
+            utils::build_scalar_function_expression(function_reference, arguments)
         }
         // Don't merge them with other unsupported expr arms to perserve the ordering.
         Expr::GetIndexedField { .. } => UnsupportedExprSnafu {
@@ -468,7 +485,7 @@ pub fn expression_from_df_expr(
             let arguments = utils::expression_to_argument(vec![expr, low, high]);
             let op_name = if *negated { "not_between" } else { "between" };
             let function_reference = ctx.register_scalar_fn(op_name);
-            utils::build_expression(function_reference, arguments)
+            utils::build_scalar_function_expression(function_reference, arguments)
         }
         // Don't merge them with other unsupported expr arms to perserve the ordering.
         Expr::Case { .. } | Expr::Cast { .. } | Expr::TryCast { .. } => UnsupportedExprSnafu {
@@ -484,7 +501,7 @@ pub fn expression_from_df_expr(
             let arguments = utils::expression_to_argument(vec![expr]);
             let op_name = if *asc { "sort_asc" } else { "sort_des" };
             let function_reference = ctx.register_scalar_fn(op_name);
-            utils::build_expression(function_reference, arguments)
+            utils::build_scalar_function_expression(function_reference, arguments)
         }
         Expr::ScalarFunction { fun, args } => {
             let arguments = utils::expression_to_argument(
@@ -494,7 +511,7 @@ pub fn expression_from_df_expr(
             );
             let op_name = utils::name_builtin_scalar_function(fun);
             let function_reference = ctx.register_scalar_fn(op_name);
-            utils::build_expression(function_reference, arguments)
+            utils::build_scalar_function_expression(function_reference, arguments)
         }
         // Don't merge them with other unsupported expr arms to perserve the ordering.
         Expr::ScalarUDF { .. }
@@ -511,6 +528,29 @@ pub fn expression_from_df_expr(
     Ok(expression)
 }
 
+/// Convert DataFusion's `Column` expr into substrait's `FieldReference` -
+/// `DirectReference` - `StructField`.
+pub fn convert_column(column: &Column, schema: &Schema) -> Result<FieldReference> {
+    let column_name = &column.name;
+    let field_index = schema
+        .column_index_by_name(column_name)
+        .context(MissingFieldSnafu {
+            field: format!("{:?}", column),
+            plan: format!("schema: {:?}", schema),
+        })?;
+
+    Ok(FieldReference {
+        reference_type: Some(FieldReferenceType::DirectReference(ReferenceSegment {
+            reference_type: Some(SegReferenceType::StructField(Box::new(StructField {
+                field: field_index as _,
+                child: None,
+            }))),
+        })),
+        root_type: None,
+    })
+}
+
+/// Some utils special for this `DataFusion::Expr` and `Substrait::Expression` convertion.
 mod utils {
     use datafusion_expr::{BuiltinScalarFunction, Operator};
     use substrait_proto::protobuf::expression::{RexType, ScalarFunction};
@@ -556,7 +596,7 @@ mod utils {
     }
 
     /// Convenient builder for [Expression]
-    pub(crate) fn build_expression(
+    pub(crate) fn build_scalar_function_expression(
         function_reference: u32,
         arguments: Vec<FunctionArgument>,
     ) -> Expression {
@@ -636,5 +676,39 @@ mod utils {
             BuiltinScalarFunction::Upper => "upper",
             BuiltinScalarFunction::RegexpMatch => "regexp_match",
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use datatypes::schema::ColumnSchema;
+
+    use super::*;
+
+    #[test]
+    fn expr_round_trip() {
+        let expr = expr_fn::and(
+            expr_fn::col("column_a").lt_eq(expr_fn::col("column_b")),
+            expr_fn::col("column_a").gt(expr_fn::col("column_b")),
+        );
+
+        let schema = Schema::new(vec![
+            ColumnSchema::new(
+                "column_a",
+                datatypes::data_type::ConcreteDataType::int64_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "column_b",
+                datatypes::data_type::ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ]);
+
+        let mut ctx = ConvertorContext::default();
+        let substrait_expr = expression_from_df_expr(&mut ctx, &expr, &schema).unwrap();
+        let converted_expr = to_df_expr(&ctx, substrait_expr, &schema).unwrap();
+
+        assert_eq!(expr, converted_expr);
     }
 }
