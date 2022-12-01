@@ -16,7 +16,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
-use sql::statements::{column_def_to_schema, table_idents_to_full_name};
+use sql::statements::column_def_to_schema;
 use table::engine::{EngineContext, TableReference};
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
 
@@ -53,10 +53,11 @@ impl SqlHandler {
         Ok(Output::AffectedRows(0))
     }
 
-    pub(crate) fn alter_to_request(&self, alter_table: AlterTable) -> Result<AlterTableRequest> {
-        let (catalog_name, schema_name, table_name) =
-            table_idents_to_full_name(alter_table.table_name()).context(error::ParseSqlSnafu)?;
-
+    pub(crate) fn alter_to_request(
+        &self,
+        alter_table: AlterTable,
+        table_ref: TableReference,
+    ) -> Result<AlterTableRequest> {
         let alter_kind = match alter_table.alter_operation() {
             AlterTableOperation::AddConstraint(table_constraint) => {
                 return error::InvalidSqlSnafu {
@@ -77,9 +78,9 @@ impl SqlHandler {
             },
         };
         Ok(AlterTableRequest {
-            catalog_name: Some(catalog_name),
-            schema_name: Some(schema_name),
-            table_name,
+            catalog_name: Some(table_ref.catalog.to_string()),
+            schema_name: Some(table_ref.schema.to_string()),
+            table_name: table_ref.table.to_string(),
             alter_kind,
         })
     }
@@ -112,7 +113,9 @@ mod tests {
     async fn test_alter_to_request_with_adding_column() {
         let handler = create_mock_sql_handler().await;
         let alter_table = parse_sql("ALTER TABLE my_metric_1 ADD tagk_i STRING Null;");
-        let req = handler.alter_to_request(alter_table).unwrap();
+        let req = handler
+            .alter_to_request(alter_table, TableReference::bare("my_metric_1"))
+            .unwrap();
         assert_eq!(req.catalog_name, Some("greptime".to_string()));
         assert_eq!(req.schema_name, Some("public".to_string()));
         assert_eq!(req.table_name, "my_metric_1");

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::prometheus::remote::read_request::ResponseType;
 use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
 use async_trait::async_trait;
@@ -25,6 +27,7 @@ use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use servers::Mode;
+use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 
 use crate::instance::{parse_stmt, Instance};
@@ -93,7 +96,10 @@ impl Instance {
 
             let object_result = if let Some(dist_instance) = &self.dist_instance {
                 let output = futures::future::ready(parse_stmt(&sql))
-                    .and_then(|stmt| dist_instance.handle_sql(&sql, stmt))
+                    .and_then(|stmt| {
+                        let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
+                        dist_instance.handle_sql(&sql, stmt, query_ctx)
+                    })
                     .await;
                 to_object_result(output).await.try_into()
             } else {

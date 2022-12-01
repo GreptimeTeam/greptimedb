@@ -102,6 +102,21 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::DROP => self.parse_drop(),
 
+                    // TODO(LFC): Use "Keyword::USE" when we can upgrade to newer version of crate sqlparser.
+                    Keyword::NoKeyword if w.value.to_lowercase() == "use" => {
+                        self.parser.next_token();
+
+                        let database_name =
+                            self.parser
+                                .parse_identifier()
+                                .context(error::UnexpectedSnafu {
+                                    sql: self.sql,
+                                    expected: "a database name",
+                                    actual: self.peek_token_as_string(),
+                                })?;
+                        Ok(Statement::Use(database_name.value))
+                    }
+
                     // todo(hl) support more statements.
                     _ => self.unsupported(self.peek_token_as_string()),
                 }

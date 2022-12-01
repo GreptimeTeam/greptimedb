@@ -23,6 +23,7 @@ use servers::error::Result;
 use servers::http::{HttpOptions, HttpServer};
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::{InfluxdbLineProtocolHandler, SqlQueryHandler};
+use session::context::QueryContextRef;
 use tokio::sync::mpsc;
 
 struct DummyInstance {
@@ -44,7 +45,7 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, _query: &str) -> Result<Output> {
+    async fn do_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
         unimplemented!()
     }
 }

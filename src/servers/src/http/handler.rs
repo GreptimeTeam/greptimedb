@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
@@ -21,6 +22,7 @@ use common_error::status_code::StatusCode;
 use common_telemetry::metric;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use session::context::QueryContext;
 
 use crate::http::{ApiState, JsonResponse};
 
@@ -39,7 +41,9 @@ pub async fn sql(
     let sql_handler = &state.sql_handler;
     let start = Instant::now();
     let resp = if let Some(sql) = &params.sql {
-        JsonResponse::from_output(sql_handler.do_query(sql).await).await
+        // TODO(LFC): Sessions in http server.
+        let query_ctx = Arc::new(QueryContext::new());
+        JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
     } else {
         JsonResponse::with_error(
             "sql parameter is required.".to_string(),

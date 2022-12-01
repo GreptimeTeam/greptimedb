@@ -22,6 +22,7 @@ use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{Helper, StringVector};
 use once_cell::sync::Lazy;
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
@@ -109,7 +110,11 @@ pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -
     Ok(Output::RecordBatches(records))
 }
 
-pub fn show_tables(stmt: ShowTables, catalog_manager: CatalogManagerRef) -> Result<Output> {
+pub fn show_tables(
+    stmt: ShowTables,
+    catalog_manager: CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
     // TODO(LFC): supports WHERE
     ensure!(
         matches!(stmt.kind, ShowKind::All | ShowKind::Like(_)),
@@ -118,9 +123,15 @@ pub fn show_tables(stmt: ShowTables, catalog_manager: CatalogManagerRef) -> Resu
         }
     );
 
-    let schema = stmt.database.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
+    let schema = if let Some(database) = stmt.database {
+        database
+    } else {
+        query_ctx
+            .current_schema()
+            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string())
+    };
     let schema = catalog_manager
-        .schema(DEFAULT_CATALOG_NAME, schema)
+        .schema(DEFAULT_CATALOG_NAME, &schema)
         .context(error::CatalogSnafu)?
         .context(error::SchemaNotFoundSnafu { schema })?;
     let tables = schema.table_names().context(error::CatalogSnafu)?;
@@ -141,8 +152,12 @@ pub fn show_tables(stmt: ShowTables, catalog_manager: CatalogManagerRef) -> Resu
     Ok(Output::RecordBatches(records))
 }
 
-pub async fn explain(stmt: Box<Explain>, query_engine: QueryEngineRef) -> Result<Output> {
-    let plan = query_engine.statement_to_plan(Statement::Explain(*stmt))?;
+pub async fn explain(
+    stmt: Box<Explain>,
+    query_engine: QueryEngineRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let plan = query_engine.statement_to_plan(Statement::Explain(*stmt), query_ctx)?;
     query_engine.execute(&plan).await
 }
 

@@ -12,14 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::error::Result;
-use crate::plan::LogicalPlan;
-use crate::query_engine::QueryEngineContext;
+pub mod context;
 
-pub trait LogicalOptimizer {
-    fn optimize_logical_plan(
-        &self,
-        ctx: &mut QueryEngineContext,
-        plan: &LogicalPlan,
-    ) -> Result<LogicalPlan>;
+use std::sync::Arc;
+
+use crate::context::{QueryContext, QueryContextRef};
+
+#[derive(Default)]
+pub struct Session {
+    query_ctx: QueryContextRef,
+}
+
+impl Session {
+    pub fn new() -> Self {
+        Session {
+            query_ctx: Arc::new(QueryContext::new()),
+        }
+    }
+
+    pub fn context(&self) -> QueryContextRef {
+        self.query_ctx.clone()
+    }
 }

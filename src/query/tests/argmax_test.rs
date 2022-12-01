@@ -24,6 +24,7 @@ use datatypes::types::PrimitiveElement;
 use function::{create_query_engine, get_numbers_from_table};
 use query::error::Result;
 use query::QueryEngine;
+use session::context::QueryContext;
 
 #[tokio::test]
 async fn test_argmax_aggregator() -> Result<()> {
@@ -95,7 +96,9 @@ async fn execute_argmax<'a>(
         "select ARGMAX({}) as argmax from {}",
         column_name, table_name
     );
-    let plan = engine.sql_to_plan(&sql).unwrap();
+    let plan = engine
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
+        .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {

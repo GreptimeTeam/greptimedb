@@ -1834,6 +1834,7 @@ dependencies = [
  "serde",
  "serde_json",
  "servers",
+ "session",
  "snafu",
  "sql",
  "storage",
@@ -2231,6 +2232,7 @@ dependencies = [
  "serde",
  "serde_json",
  "servers",
+ "session",
  "snafu",
  "sql",
  "sqlparser",
@@ -4515,6 +4517,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "session",
  "snafu",
  "sql",
  "statrs",
@@ -5366,6 +5369,7 @@ dependencies = [
  "rustpython-parser",
  "rustpython-vm",
  "serde",
+ "session",
  "snafu",
  "sql",
  "storage",
@@ -5535,6 +5539,7 @@ dependencies = [
  "script",
  "serde",
  "serde_json",
+ "session",
  "snafu",
  "snap",
  "table",
@@ -5548,6 +5553,14 @@ dependencies = [
  "tonic-reflection",
  "tower",
  "tower-http",
+]
+
+[[package]]
+name = "session"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "common-telemetry",
 ]
 
 [[package]]

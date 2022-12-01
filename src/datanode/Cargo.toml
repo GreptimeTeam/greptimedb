@@ -37,6 +37,7 @@ meta-srv = { path = "../meta-srv", features = ["mock"] }
 metrics = "0.20"
 object-store = { path = "../object-store" }
 query = { path = "../query" }
+session = { path = "../session" }
 script = { path = "../script", features = ["python"], optional = true }
 serde = "1.0"
 serde_json = "1.0"

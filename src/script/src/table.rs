@@ -28,6 +28,7 @@ use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
 use datatypes::vectors::{StringVector, TimestampVector, VectorRef};
 use query::QueryEngineRef;
+use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CreateTableRequest, InsertRequest};
 
@@ -151,7 +152,7 @@ impl ScriptsTable {
 
         let plan = self
             .query_engine
-            .sql_to_plan(&sql)
+            .sql_to_plan(&sql, Arc::new(QueryContext::new()))
             .context(FindScriptSnafu { name })?;
 
         let stream = match self
