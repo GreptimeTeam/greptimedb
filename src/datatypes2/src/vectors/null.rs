@@ -85,7 +85,7 @@ impl Vector for NullVector {
     }
 
     fn validity(&self) -> Validity {
-        Validity::AllNull
+        Validity::all_null(self.array.len())
     }
 
     fn memory_size(&self) -> usize {
@@ -230,7 +230,7 @@ mod tests {
 
         assert_eq!("NullVector", v.vector_type_name());
         assert!(!v.is_const());
-        assert_eq!(Validity::AllNull, v.validity());
+        assert!(v.validity().is_all_null());
         assert!(v.only_null());
 
         for i in 0..32 {
@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn test_null_vector_validity() {
         let vector = NullVector::new(5);
-        assert_eq!(Validity::AllNull, vector.validity());
+        assert!(vector.validity().is_all_null());
         assert_eq!(5, vector.null_count());
     }
 

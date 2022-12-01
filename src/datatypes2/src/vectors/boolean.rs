@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(9, v.len());
         assert_eq!("BooleanVector", v.vector_type_name());
         assert!(!v.is_const());
-        assert_eq!(Validity::AllValid, v.validity());
+        assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
         assert_eq!(64, v.memory_size());
 
@@ -339,20 +339,18 @@ mod tests {
         }
     }
 
-    // TODO(yingwen): Make them compile.
-    // #[test]
-    // fn test_boolean_vector_validity() {
-    //     let vector = BooleanVector::from(vec![Some(true), None, Some(false)]);
-    //     assert_eq!(1, vector.null_count());
-    //     let validity = vector.validity();
-    //     let slots = validity.slots().unwrap();
-    //     assert_eq!(1, slots.null_count());
-    //     assert!(!slots.get_bit(1));
+    #[test]
+    fn test_boolean_vector_validity() {
+        let vector = BooleanVector::from(vec![Some(true), None, Some(false)]);
+        assert_eq!(1, vector.null_count());
+        let validity = vector.validity();
+        assert_eq!(1, validity.null_count());
+        assert!(!validity.is_set(1));
 
-    //     let vector = BooleanVector::from(vec![true, false, false]);
-    //     assert_eq!(0, vector.null_count());
-    //     assert_eq!(Validity::AllValid, vector.validity());
-    // }
+        let vector = BooleanVector::from(vec![true, false, false]);
+        assert_eq!(0, vector.null_count());
+        assert!(vector.validity().is_all_valid());
+    }
 
     #[test]
     fn test_boolean_vector_builder() {

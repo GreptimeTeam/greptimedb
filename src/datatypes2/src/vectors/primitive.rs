@@ -404,7 +404,7 @@ mod tests {
         assert_eq!(4, v.len());
         assert_eq!("Int32Vector", v.vector_type_name());
         assert!(!v.is_const());
-        assert_eq!(Validity::AllValid, v.validity());
+        assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
 
         for i in 0..4 {
@@ -481,26 +481,24 @@ mod tests {
         assert_eq!(input, &res[..]);
     }
 
-    // TODO(yingwen): Make this compile.
-    // #[test]
-    // fn test_primitive_vector_validity() {
-    //     let input = [Some(1i32), Some(2i32), None, None];
-    //     let mut builder = Int32VectorBuilder::with_capacity(input.len());
-    //     for v in input {
-    //         builder.push(v);
-    //     }
-    //     let vector = builder.finish();
-    //     assert_eq!(2, vector.null_count());
-    //     let validity = vector.validity();
-    //     let slots = validity.slots().unwrap();
-    //     assert_eq!(2, slots.null_count());
-    //     assert!(!slots.get_bit(2));
-    //     assert!(!slots.get_bit(3));
+    #[test]
+    fn test_primitive_vector_validity() {
+        let input = [Some(1i32), Some(2i32), None, None];
+        let mut builder = Int32VectorBuilder::with_capacity(input.len());
+        for v in input {
+            builder.push(v);
+        }
+        let vector = builder.finish();
+        assert_eq!(2, vector.null_count());
+        let validity = vector.validity();
+        assert_eq!(2, validity.null_count());
+        assert!(!validity.is_set(2));
+        assert!(!validity.is_set(3));
 
-    //     let vector = Int32Vector::from_slice(vec![1, 2, 3, 4]);
-    //     assert_eq!(0, vector.null_count());
-    //     assert_eq!(Validity::AllValid, vector.validity());
-    // }
+        let vector = Int32Vector::from_slice(vec![1, 2, 3, 4]);
+        assert_eq!(0, vector.null_count());
+        assert!(vector.validity().is_all_valid());
+    }
 
     #[test]
     fn test_memory_size() {

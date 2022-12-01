@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(3, v.len());
         assert_eq!("StringVector", v.vector_type_name());
         assert!(!v.is_const());
-        assert_eq!(Validity::AllValid, v.validity());
+        assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
         assert_eq!(128, v.memory_size());
 
