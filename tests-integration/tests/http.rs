@@ -15,6 +15,7 @@
 use axum::http::StatusCode;
 use axum_test_helper::TestClient;
 use serde_json::json;
+use servers::http::handler::HealthResponse;
 use servers::http::{JsonOutput, JsonResponse};
 use tests_integration::test_util::{setup_test_app, setup_test_app_with_frontend, StorageType};
 
@@ -50,6 +51,7 @@ macro_rules! http_tests {
                 test_sql_api,
                 test_metrics_api,
                 test_scripts_api,
+                test_health_api,
             );
         )*
     };
@@ -227,4 +229,26 @@ def test(n):
     );
 
     guard.remove_all().await;
+}
+
+pub async fn test_health_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, _guard) = setup_test_app_with_frontend(store_type, "health_api").await;
+    let client = TestClient::new(app);
+
+    // we can call health api with both `GET` and `POST` method.
+    let res_post = client.post("/health").send().await;
+    assert_eq!(res_post.status(), StatusCode::OK);
+    let res_get = client.get("/health").send().await;
+    assert_eq!(res_get.status(), StatusCode::OK);
+
+    // both `GET` and `POST` method return same result
+    let body_text = res_post.text().await;
+    assert_eq!(body_text, res_get.text().await);
+
+    // currently health api simply returns an empty json `{}`, which can be deserialized to an empty `HealthResponse`
+    assert_eq!(body_text, "{}");
+
+    let body = serde_json::from_str::<HealthResponse>(&body_text).unwrap();
+    assert_eq!(body, HealthResponse {});
 }
