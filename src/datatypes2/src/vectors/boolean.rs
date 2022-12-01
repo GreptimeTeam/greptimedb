@@ -53,7 +53,7 @@ impl BooleanVector {
         }
     }
 
-    pub(crate) fn count_false(&self) -> usize {
+    pub(crate) fn false_count(&self) -> usize {
         self.array.false_count()
     }
 }

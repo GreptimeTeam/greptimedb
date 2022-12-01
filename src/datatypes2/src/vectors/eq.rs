@@ -99,7 +99,7 @@ mod tests {
     use super::*;
     use crate::vectors::{
         Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector,
-        UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
+        NullVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
     };
 
     fn assert_vector_ref_eq(vector: VectorRef) {
@@ -201,6 +201,6 @@ mod tests {
                 4,
             )),
         );
-        // assert_vector_ref_ne(Arc::new(NullVector::new(5)), Arc::new(NullVector::new(8)));
+        assert_vector_ref_ne(Arc::new(NullVector::new(5)), Arc::new(NullVector::new(8)));
     }
 }
