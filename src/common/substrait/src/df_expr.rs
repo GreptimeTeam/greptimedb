@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::VecDeque;
 use std::str::FromStr;
 
@@ -416,7 +430,7 @@ pub fn expression_from_df_expr(
     schema: &Schema,
 ) -> Result<Expression> {
     let expression = match expr {
-        // Don't merge them with other unsupported expr arms to perserve the ordering.
+        // Don't merge them with other unsupported expr arms to preserve the ordering.
         Expr::Alias(..) => UnsupportedExprSnafu {
             name: expr.to_string(),
         }
@@ -427,7 +441,7 @@ pub fn expression_from_df_expr(
                 rex_type: Some(RexType::Selection(Box::new(field_reference))),
             }
         }
-        // Don't merge them with other unsupported expr arms to perserve the ordering.
+        // Don't merge them with other unsupported expr arms to preserve the ordering.
         Expr::ScalarVariable(..) | Expr::Literal(..) => UnsupportedExprSnafu {
             name: expr.to_string(),
         }
@@ -468,7 +482,7 @@ pub fn expression_from_df_expr(
             let function_reference = ctx.register_scalar_fn(op_name);
             utils::build_scalar_function_expression(function_reference, arguments)
         }
-        // Don't merge them with other unsupported expr arms to perserve the ordering.
+        // Don't merge them with other unsupported expr arms to preserve the ordering.
         Expr::GetIndexedField { .. } => UnsupportedExprSnafu {
             name: expr.to_string(),
         }
@@ -487,7 +501,7 @@ pub fn expression_from_df_expr(
             let function_reference = ctx.register_scalar_fn(op_name);
             utils::build_scalar_function_expression(function_reference, arguments)
         }
-        // Don't merge them with other unsupported expr arms to perserve the ordering.
+        // Don't merge them with other unsupported expr arms to preserve the ordering.
         Expr::Case { .. } | Expr::Cast { .. } | Expr::TryCast { .. } => UnsupportedExprSnafu {
             name: expr.to_string(),
         }
@@ -513,7 +527,7 @@ pub fn expression_from_df_expr(
             let function_reference = ctx.register_scalar_fn(op_name);
             utils::build_scalar_function_expression(function_reference, arguments)
         }
-        // Don't merge them with other unsupported expr arms to perserve the ordering.
+        // Don't merge them with other unsupported expr arms to preserve the ordering.
         Expr::ScalarUDF { .. }
         | Expr::AggregateFunction { .. }
         | Expr::WindowFunction { .. }
@@ -550,7 +564,7 @@ pub fn convert_column(column: &Column, schema: &Schema) -> Result<FieldReference
     })
 }
 
-/// Some utils special for this `DataFusion::Expr` and `Substrait::Expression` convertion.
+/// Some utils special for this `DataFusion::Expr` and `Substrait::Expression` conversion.
 mod utils {
     use datafusion_expr::{BuiltinScalarFunction, Operator};
     use substrait_proto::protobuf::expression::{RexType, ScalarFunction};
