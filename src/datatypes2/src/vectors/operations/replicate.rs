@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::prelude::*;
-// pub(crate) use crate::vectors::constant::replicate_constant;
 // pub(crate) use crate::vectors::date::replicate_date;
 // pub(crate) use crate::vectors::datetime::replicate_datetime;
 pub(crate) use crate::vectors::null::replicate_null;
@@ -44,6 +43,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::vectors::constant::ConstantVector;
     use crate::vectors::{Int32Vector, StringVector, VectorOp};
 
     #[test]
@@ -91,18 +91,18 @@ mod tests {
         assert_eq!(expect, v);
     }
 
-    // #[test]
-    // fn test_replicate_constant() {
-    //     let v = Arc::new(StringVector::from_slice(&["hello"]));
-    //     let cv = ConstantVector::new(v.clone(), 2);
-    //     let offsets = [1, 4];
+    #[test]
+    fn test_replicate_constant() {
+        let v = Arc::new(StringVector::from_slice(&["hello"]));
+        let cv = ConstantVector::new(v.clone(), 2);
+        let offsets = [1, 4];
 
-    //     let cv = cv.replicate(&offsets);
-    //     assert_eq!(4, cv.len());
+        let cv = cv.replicate_vector(&offsets);
+        assert_eq!(4, cv.len());
 
-    //     let expect: VectorRef = Arc::new(ConstantVector::new(v, 4));
-    //     assert_eq!(expect, cv);
-    // }
+        let expect: VectorRef = Arc::new(ConstantVector::new(v, 4));
+        assert_eq!(expect, cv);
+    }
 
     // #[test]
     // fn test_replicate_null() {

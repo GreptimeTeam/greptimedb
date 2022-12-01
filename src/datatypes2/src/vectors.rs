@@ -28,6 +28,7 @@ use crate::vectors::operations::VectorOp;
 
 pub mod binary;
 pub mod boolean;
+pub mod constant;
 pub mod date;
 pub mod datetime;
 mod eq;
