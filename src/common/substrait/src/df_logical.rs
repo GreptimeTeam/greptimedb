@@ -213,7 +213,7 @@ impl DFLogicalSubstraitConvertor {
 
         // Convert filter
         let filters = if let Some(filter) = read_rel.filter {
-            vec![to_df_expr(&ctx, *filter, &retrieved_schema)?]
+            vec![to_df_expr(ctx, *filter, &retrieved_schema)?]
         } else {
             vec![]
         };

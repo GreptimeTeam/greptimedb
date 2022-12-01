@@ -39,7 +39,7 @@ pub fn to_df_expr(ctx: &ConvertorContext, expression: Expression, schema: &Schem
     let expr_rex_type = expression.rex_type.context(EmptyExprSnafu)?;
     match expr_rex_type {
         RexType::Literal(_) => todo!(),
-        RexType::Selection(selection) => convert_selection_rex(selection, schema),
+        RexType::Selection(selection) => convert_selection_rex(*selection, schema),
         RexType::ScalarFunction(scalar_fn) => convert_scalar_function(ctx, scalar_fn, schema),
         RexType::WindowFunction(_)
         | RexType::IfThen(_)
@@ -57,7 +57,7 @@ pub fn to_df_expr(ctx: &ConvertorContext, expression: Expression, schema: &Schem
 
 /// Convert Substrait's `FieldReference` - `DirectReference` - `StructField` to Datafusion's
 /// `Column` expr.
-pub fn convert_selection_rex(selection: Box<FieldReference>, schema: &Schema) -> Result<Expr> {
+pub fn convert_selection_rex(selection: FieldReference, schema: &Schema) -> Result<Expr> {
     if let Some(FieldReferenceType::DirectReference(direct_ref)) = selection.reference_type
     && let Some(SegReferenceType::StructField(field))  = direct_ref.reference_type{
         let column_name = schema.column_name_by_index(field.field as _).to_string();
