@@ -32,3 +32,6 @@ logs/
 
 # Benchmark dataset
 benchmarks/data
+
+# dotenv
+.env

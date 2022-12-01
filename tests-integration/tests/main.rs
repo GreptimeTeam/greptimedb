@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use opendal::raw::SeekableReader;
-pub use opendal::{
-    layers, services, Error, ErrorKind, Layer, Object, ObjectLister, ObjectMetadata, ObjectMode,
-    Operator as ObjectStore, Result,
-};
-pub mod backend;
-pub mod test_util;
-pub mod util;
+#[macro_use]
+mod grpc;
+#[macro_use]
+mod http;
+
+grpc_tests!(File, S3);
+http_tests!(File, S3);
