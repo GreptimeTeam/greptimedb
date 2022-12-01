@@ -23,7 +23,7 @@ use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, Float32Type, Float64Type, Int16Type,
-    Int32Type, Int64Type, Int8Type, NullType, StringType, TimestampMicrosecondType,
+    Int32Type, Int64Type, Int8Type, ListType, NullType, StringType, TimestampMicrosecondType,
     TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
     UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
@@ -56,7 +56,9 @@ pub enum ConcreteDataType {
     Date(DateType),
     DateTime(DateTimeType),
     Timestamp(TimestampType),
-    // List(ListType),
+
+    // Compound types:
+    List(ListType),
 }
 
 // TODO(yingwen): Consider moving these methods to the DataType trait.
@@ -145,7 +147,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
 
     fn try_from(dt: &ArrowDataType) -> Result<ConcreteDataType> {
         let concrete_type = match dt {
-            // ArrowDataType::Null => Self::null_datatype(),
+            ArrowDataType::Null => Self::null_datatype(),
             ArrowDataType::Boolean => Self::boolean_datatype(),
             ArrowDataType::UInt8 => Self::uint8_datatype(),
             ArrowDataType::UInt16 => Self::uint16_datatype(),
@@ -158,13 +160,13 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Float32 => Self::float32_datatype(),
             ArrowDataType::Float64 => Self::float64_datatype(),
             ArrowDataType::Date32 => Self::date_datatype(),
-            // ArrowDataType::Date64 => Self::datetime_datatype(),
+            ArrowDataType::Date64 => Self::datetime_datatype(),
             // ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
-            // ArrowDataType::List(field) => Self::List(ListType::new(
-            //     ConcreteDataType::from_arrow_type(&field.data_type),
-            // )),
+            ArrowDataType::List(field) => Self::List(ListType::new(
+                ConcreteDataType::from_arrow_type(field.data_type()),
+            )),
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
@@ -197,10 +199,6 @@ impl_new_concrete_type_functions!(
 );
 
 impl ConcreteDataType {
-    //     pub fn list_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
-    //         ConcreteDataType::List(ListType::new(inner_type))
-    //     }
-
     pub fn timestamp_second_datatype() -> Self {
         ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType::default()))
     }
@@ -228,6 +226,10 @@ impl ConcreteDataType {
             TimeUnit::Microsecond => Self::timestamp_microsecond_datatype(),
             TimeUnit::Nanosecond => Self::timestamp_nanosecond_datatype(),
         }
+    }
+
+    pub fn list_datatype(item_type: ConcreteDataType) -> ConcreteDataType {
+        ConcreteDataType::List(ListType::new(item_type))
     }
 }
 
@@ -269,10 +271,10 @@ mod tests {
 
     #[test]
     fn test_from_arrow_type() {
-        // assert!(matches!(
-        //     ConcreteDataType::from_arrow_type(&ArrowDataType::Null),
-        //     ConcreteDataType::Null(_)
-        // ));
+        assert!(matches!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::Null),
+            ConcreteDataType::Null(_)
+        ));
         assert!(matches!(
             ConcreteDataType::from_arrow_type(&ArrowDataType::Boolean),
             ConcreteDataType::Boolean(_)

@@ -21,7 +21,8 @@ use common_base::BitVec;
 use crate::error::Result;
 use crate::types::LogicalPrimitiveType;
 use crate::vectors::{
-    BinaryVector, BooleanVector, NullVector, PrimitiveVector, StringVector, Vector, VectorRef,
+    BinaryVector, BooleanVector, ListVector, NullVector, PrimitiveVector, StringVector, Vector,
+    VectorRef,
 };
 
 /// Vector compute operations.
@@ -79,7 +80,7 @@ macro_rules! impl_scalar_vector_op {
 impl_scalar_vector_op!(
     { BinaryVector, replicate_scalar },
     { BooleanVector, replicate_scalar },
-    // { ListVector, replicate_scalar },
+    { ListVector, replicate_scalar },
     { StringVector, replicate_scalar }
     // { DateVector, replicate_date },
     // { DateTimeVector, replicate_datetime },

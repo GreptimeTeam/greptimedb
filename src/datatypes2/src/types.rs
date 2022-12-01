@@ -16,6 +16,7 @@ mod binary_type;
 mod boolean_type;
 mod date_type;
 mod datetime_type;
+mod list_type;
 mod null_type;
 mod primitive_type;
 mod string_type;
@@ -26,6 +27,7 @@ pub use binary_type::BinaryType;
 pub use boolean_type::BooleanType;
 pub use date_type::DateType;
 pub use datetime_type::DateTimeType;
+pub use list_type::ListType;
 pub use null_type::NullType;
 pub use primitive_type::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, LogicalPrimitiveType,

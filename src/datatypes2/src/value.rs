@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{self, Result};
 use crate::prelude::*;
 use crate::type_id::LogicalTypeId;
-// use crate::vectors::ListVector;
+use crate::vectors::ListVector;
 
 pub type OrderedF32 = OrderedFloat<f32>;
 pub type OrderedF64 = OrderedFloat<f64>;
@@ -614,7 +614,8 @@ impl<'a> From<Option<ListValueRef<'a>>> for ValueRef<'a> {
 /// if it becomes bottleneck.
 #[derive(Debug, Clone, Copy)]
 pub enum ListValueRef<'a> {
-    // Indexed { vector: &'a ListVector, idx: usize },
+    // TODO(yingwen): Consider replace this by VectorRef.
+    Indexed { vector: &'a ListVector, idx: usize },
     Ref { val: &'a ListValue },
 }
 
@@ -622,7 +623,7 @@ impl<'a> ListValueRef<'a> {
     /// Convert self to [Value]. This method would clone the underlying data.
     fn to_value(self) -> Value {
         match self {
-            // ListValueRef::Indexed { vector, idx } => vector.get(idx),
+            ListValueRef::Indexed { vector, idx } => vector.get(idx),
             ListValueRef::Ref { val } => Value::List(val.clone()),
         }
     }
