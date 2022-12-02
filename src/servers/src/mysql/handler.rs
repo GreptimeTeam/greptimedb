@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use common_query::Output;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, info};
 use opensrv_mysql::{
     AsyncMysqlShim, ErrorKind, InitWriter, ParamParser, QueryResultWriter, StatementMetaWriter,
 };
@@ -26,8 +26,8 @@ use session::Session;
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
 
-use crate::auth::MysqlAuthPlugin::MysqlNativePwd;
-use crate::auth::{auth_mysql, Identity, UserInfo, UserProviderRef};
+use crate::auth::mysql::{auth_mysql, MysqlAuthPlugin};
+use crate::auth::{Identity, UserInfo, UserProviderRef};
 use crate::context::Channel::MYSQL;
 use crate::context::{Context, CtxBuilder};
 use crate::error::{self, Result};
@@ -119,30 +119,49 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let client_addr = self.client_addr.clone();
 
         let auth_plugin = match auth_plugin {
-            "mysql_native_password" => MysqlNativePwd,
+            "mysql_native_password" => MysqlAuthPlugin::MysqlNativePwd,
             _ => return false,
         };
 
+        // TODO(fys): default user_info maybe read from configuration
         let mut user_info = UserInfo::default();
 
         if let Some(user_provider) = &self.user_provider {
             let user_id = Identity::UserId(username.to_string(), Some(client_addr.clone()));
 
-            match user_provider.get_user_info(user_id).await {
+            match user_provider.get_user_info(&user_id).await {
                 Ok(Some(userinfo)) => {
-                    let auth_method =
-                        if let Some(auth_method) = userinfo.mysql_auth_method(&auth_plugin) {
-                            auth_method
-                        } else {
-                            return false;
-                        };
+                    let auth_method = if let Some(auth_method) =
+                        userinfo.mysql_auth_method(&auth_plugin)
+                    {
+                        auth_method
+                    } else {
+                        error!(
+                                "Failed to auth, channel: mysql, user_id: {:?}, err: no suitable auth method",
+                                user_id
+                            );
+                        return false;
+                    };
 
-                    if !auth_mysql(auth_plugin, auth_data, salt, auth_method) {
+                    if auth_mysql(auth_plugin, auth_data, salt, auth_method) {
+                        info!("Auth successful, channel: mysql, user_id: {:?}", user_id);
+                    } else {
+                        info!("Failed to auth, channel: mysql, user_id: {:?}", user_id);
                         return false;
                     }
                     user_info = userinfo;
                 }
-                _ => return false,
+                Ok(None) => {
+                    error!(
+                        "Failed to auth, user_id: {:?}, err: can not find user info ",
+                        user_id
+                    );
+                    return false;
+                }
+                Err(e) => {
+                    error!("Failed to auth, user_id: {:?}, err: {:?}", user_id, e);
+                    return false;
+                }
             }
         }
 

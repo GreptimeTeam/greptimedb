@@ -24,7 +24,8 @@ use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 
-use crate::auth::{auth_pg, Identity, PgAuthPlugin, UserProviderRef};
+use crate::auth::postgres::{auth_pg, PgAuthPlugin};
+use crate::auth::{Identity, UserProviderRef};
 use crate::error::Result;
 
 struct PgPwdVerifier {
@@ -40,7 +41,7 @@ impl PgPwdVerifier {
 
         if let Some(user_provider) = &self.user_provider {
             match user_provider
-                .get_user_info(Identity::UserId(user_name.to_string(), None))
+                .get_user_info(&Identity::UserId(user_name.to_string(), None))
                 .await?
             {
                 Some(user_info) => {
