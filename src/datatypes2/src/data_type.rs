@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::DataType as ArrowDataType;
+use arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use common_time::timestamp::TimeUnit;
 use paste::paste;
 use serde::{Deserialize, Serialize};
@@ -154,7 +154,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Float64 => Self::float64_datatype(),
             ArrowDataType::Date32 => Self::date_datatype(),
             ArrowDataType::Date64 => Self::datetime_datatype(),
-            // ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
+            ArrowDataType::Timestamp(u, _) => ConcreteDataType::from_arrow_time_unit(u),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             ArrowDataType::List(field) => Self::List(ListType::new(
@@ -218,6 +218,16 @@ impl ConcreteDataType {
             TimeUnit::Millisecond => Self::timestamp_millisecond_datatype(),
             TimeUnit::Microsecond => Self::timestamp_microsecond_datatype(),
             TimeUnit::Nanosecond => Self::timestamp_nanosecond_datatype(),
+        }
+    }
+
+    /// Converts from arrow timestamp unit to
+    pub fn from_arrow_time_unit(t: &ArrowTimeUnit) -> Self {
+        match t {
+            ArrowTimeUnit::Second => Self::timestamp_second_datatype(),
+            ArrowTimeUnit::Millisecond => Self::timestamp_millisecond_datatype(),
+            ArrowTimeUnit::Microsecond => Self::timestamp_microsecond_datatype(),
+            ArrowTimeUnit::Nanosecond => Self::timestamp_nanosecond_datatype(),
         }
     }
 
@@ -344,25 +354,25 @@ mod tests {
         ));
     }
 
-    // #[test]
-    // fn test_from_arrow_timestamp() {
-    //     assert_eq!(
-    //         ConcreteDataType::timestamp_millis_datatype(),
-    //         ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Millisecond)
-    //     );
-    //     assert_eq!(
-    //         ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
-    //         ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Microsecond)
-    //     );
-    //     assert_eq!(
-    //         ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
-    //         ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Nanosecond)
-    //     );
-    //     assert_eq!(
-    //         ConcreteDataType::timestamp_datatype(TimeUnit::Second),
-    //         ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Second)
-    //     );
-    // }
+    #[test]
+    fn test_from_arrow_timestamp() {
+        assert_eq!(
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            ConcreteDataType::from_arrow_time_unit(&ArrowTimeUnit::Millisecond)
+        );
+        assert_eq!(
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            ConcreteDataType::from_arrow_time_unit(&ArrowTimeUnit::Microsecond)
+        );
+        assert_eq!(
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+            ConcreteDataType::from_arrow_time_unit(&ArrowTimeUnit::Nanosecond)
+        );
+        assert_eq!(
+            ConcreteDataType::timestamp_second_datatype(),
+            ConcreteDataType::from_arrow_time_unit(&ArrowTimeUnit::Second)
+        );
+    }
 
     #[test]
     fn test_is_timestamp_compatible() {
@@ -387,8 +397,8 @@ mod tests {
         assert!(!ConcreteDataType::date_datatype().is_timestamp_compatible());
         assert!(!ConcreteDataType::datetime_datatype().is_timestamp_compatible());
         assert!(!ConcreteDataType::string_datatype().is_timestamp_compatible());
-        assert!(ConcreteDataType::int32_datatype().is_timestamp_compatible());
-        assert!(ConcreteDataType::uint64_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::int32_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::uint64_datatype().is_timestamp_compatible());
     }
 
     // #[test]
