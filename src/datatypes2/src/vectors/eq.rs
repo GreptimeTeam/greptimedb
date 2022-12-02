@@ -80,16 +80,16 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
         Date(_) => is_vector_eq!(DateVector, lhs, rhs),
         DateTime(_) => is_vector_eq!(DateTimeVector, lhs, rhs),
         Timestamp(t) => match t {
-            TimestampType::TimestampSecondType(_) => {
+            TimestampType::Second(_) => {
                 is_vector_eq!(TimestampSecondVector, lhs, rhs)
             }
-            TimestampType::TimestampMillisecondType(_) => {
+            TimestampType::Millisecond(_) => {
                 is_vector_eq!(TimestampMillisecondVector, lhs, rhs)
             }
-            TimestampType::TimestampMicrosecondType(_) => {
+            TimestampType::Microsecond(_) => {
                 is_vector_eq!(TimestampMicrosecondVector, lhs, rhs)
             }
-            TimestampType::TimestampNanosecondType(_) => {
+            TimestampType::Nanosecond(_) => {
                 is_vector_eq!(TimestampNanosecondVector, lhs, rhs)
             }
         },

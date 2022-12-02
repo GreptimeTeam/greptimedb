@@ -35,31 +35,31 @@ macro_rules! define_timestamp_with_unit {
 
             impl [<Timestamp $unit>] {
                 pub fn new(val: i64) -> Self {
-                 Self(Timestamp::new(val, TimeUnit::$unit))
+                    Self(Timestamp::new(val, TimeUnit::$unit))
                 }
             }
 
             impl Default for [<Timestamp $unit>] {
                 fn default() -> Self {
-                 Self::new(0)
+                    Self::new(0)
                 }
             }
 
             impl From<[<Timestamp $unit>]> for Value {
                 fn from(t: [<Timestamp $unit>]) -> Value {
-                 Value::Timestamp(t.0)
+                    Value::Timestamp(t.0)
                 }
             }
 
             impl From<[<Timestamp $unit>]> for serde_json::Value {
                 fn from(t: [<Timestamp $unit>]) -> Self {
-                 t.0.into()
+                    t.0.into()
                 }
             }
 
             impl From<[<Timestamp $unit>]> for ValueRef<'static> {
                 fn from(t: [<Timestamp $unit>]) -> Self {
-                 ValueRef::Timestamp(t.0)
+                    ValueRef::Timestamp(t.0)
                 }
             }
 

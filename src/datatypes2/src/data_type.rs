@@ -200,32 +200,24 @@ impl ConcreteDataType {
     //         ConcreteDataType::List(ListType::new(inner_type))
     //     }
 
-    //     pub fn timestamp_datatype(unit: TimeUnit) -> Self {
-    //         ConcreteDataType::Timestamp(TimestampType::new(unit))
-    //     }
-
     pub fn timestamp_second_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::TimestampSecondType(
-            TimestampSecondType::default(),
-        ))
+        ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType::default()))
     }
 
     pub fn timestamp_millisecond_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::TimestampMillisecondType(
+        ConcreteDataType::Timestamp(TimestampType::Millisecond(
             TimestampMillisecondType::default(),
         ))
     }
 
     pub fn timestamp_microsecond_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::TimestampMicrosecondType(
+        ConcreteDataType::Timestamp(TimestampType::Microsecond(
             TimestampMicrosecondType::default(),
         ))
     }
 
     pub fn timestamp_nanosecond_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::TimestampNanosecondType(
-            TimestampNanosecondType::default(),
-        ))
+        ConcreteDataType::Timestamp(TimestampType::Nanosecond(TimestampNanosecondType::default()))
     }
 
     //     /// Converts from arrow timestamp unit to

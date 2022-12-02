@@ -44,10 +44,10 @@ use crate::vectors::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[enum_dispatch(DataType)]
 pub enum TimestampType {
-    TimestampSecondType(TimestampSecondType),
-    TimestampMillisecondType(TimestampMillisecondType),
-    TimestampMicrosecondType(TimestampMicrosecondType),
-    TimestampNanosecondType(TimestampNanosecondType),
+    Second(TimestampSecondType),
+    Millisecond(TimestampMillisecondType),
+    Microsecond(TimestampMicrosecondType),
+    Nanosecond(TimestampNanosecondType),
 }
 
 macro_rules! impl_data_type_for_timestamp {
@@ -85,7 +85,7 @@ macro_rules! impl_data_type_for_timestamp {
                 type Wrapper = [<Timestamp $unit>];
 
                 fn build_data_type() -> ConcreteDataType {
-                    ConcreteDataType::Timestamp(TimestampType::[<Timestamp $unit Type>](
+                    ConcreteDataType::Timestamp(TimestampType::$unit(
                         [<Timestamp $unit Type>]::default(),
                     ))
                 }
