@@ -81,7 +81,6 @@ async fn test_shutdown_pg_server(with_pwd: bool) -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
     let table = MemTable::default_numbers_table();
-
     let postgres_server = create_postgres_server(table, with_pwd, Default::default())?;
     let result = postgres_server.shutdown().await;
     assert!(result
@@ -137,14 +136,7 @@ async fn test_shutdown_pg_server(with_pwd: bool) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_query_pg_concurrently() -> Result<()> {
-    common_telemetry::init_default_ut_logging();
-
-    let table = MemTable::default_numbers_table();
-
-    let pg_server = create_postgres_server(table, false, Default::default())?;
-    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = pg_server.start(listening).await.unwrap();
-    let server_port = server_addr.port();
+    let server_port = start_test_server(Default::default()).await?;
 
     let threads = 4;
     let expect_executed_queries_per_worker = 300;
@@ -212,13 +204,7 @@ async fn test_server_secure_require_client_plain() -> Result<()> {
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server.key".to_owned(),
     });
-
-    let table = MemTable::default_numbers_table();
-    let pg_server = create_postgres_server(table, false, server_tls)?;
-    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = pg_server.start(listening).await.unwrap();
-    let server_port = server_addr.port();
-
+    let server_port = start_test_server(server_tls).await?;
     let r = create_plain_connection(server_port, false).await;
     assert!(r.is_err());
     Ok(())
@@ -241,12 +227,7 @@ async fn test_server_secure_require_client_secure() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_using_db() -> Result<()> {
-    common_telemetry::init_default_ut_logging();
-    let table = MemTable::default_numbers_table();
-    let pg_server = create_postgres_server(table, false, Arc::new(TlsOption::default()))?;
-    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
-    let server_addr = pg_server.start(listening).await.unwrap();
-    let server_port = server_addr.port();
+    let server_port = start_test_server(Arc::new(TlsOption::default())).await?;
 
     let client = create_connection_with_given_db(server_port, "testdb")
         .await
@@ -262,12 +243,17 @@ async fn test_using_db() -> Result<()> {
     Ok(())
 }
 
-async fn do_simple_query(server_tls: Arc<TlsOption>, client_tls: bool) -> Result<()> {
+async fn start_test_server(server_tls: Arc<TlsOption>) -> Result<u16> {
+    common_telemetry::init_default_ut_logging();
     let table = MemTable::default_numbers_table();
     let pg_server = create_postgres_server(table, false, server_tls)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = pg_server.start(listening).await.unwrap();
-    let server_port = server_addr.port();
+    Ok(server_addr.port())
+}
+
+async fn do_simple_query(server_tls: Arc<TlsOption>, client_tls: bool) -> Result<()> {
+    let server_port = start_test_server(server_tls).await?;
 
     if !client_tls {
         let client = create_plain_connection(server_port, false).await.unwrap();
