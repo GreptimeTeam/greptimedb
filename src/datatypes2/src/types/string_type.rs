@@ -53,4 +53,8 @@ impl DataType for StringType {
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(StringVectorBuilder::with_capacity(capacity))
     }
+
+    fn is_timestamp_compatible(&self) -> bool {
+        false
+    }
 }

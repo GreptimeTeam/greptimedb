@@ -236,6 +236,12 @@ macro_rules! define_logical_primitive_type {
                 }
             }
         }
+    };
+}
+
+macro_rules! define_non_timestamp_primitive {
+    ($Native: ident, $TypeId: ident, $DataType: ident) => {
+        define_logical_primitive_type!($Native, $TypeId, $DataType);
 
         impl DataType for $DataType {
             fn name(&self) -> &str {
@@ -257,20 +263,52 @@ macro_rules! define_logical_primitive_type {
             fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
                 Box::new(PrimitiveVectorBuilder::<$DataType>::with_capacity(capacity))
             }
+
+            fn is_timestamp_compatible(&self) -> bool {
+                false
+            }
         }
     };
 }
 
-define_logical_primitive_type!(u8, UInt8, UInt8Type);
-define_logical_primitive_type!(u16, UInt16, UInt16Type);
-define_logical_primitive_type!(u32, UInt32, UInt32Type);
-define_logical_primitive_type!(u64, UInt64, UInt64Type);
-define_logical_primitive_type!(i8, Int8, Int8Type);
-define_logical_primitive_type!(i16, Int16, Int16Type);
-define_logical_primitive_type!(i32, Int32, Int32Type);
+define_non_timestamp_primitive!(u8, UInt8, UInt8Type);
+define_non_timestamp_primitive!(u16, UInt16, UInt16Type);
+define_non_timestamp_primitive!(u32, UInt32, UInt32Type);
+define_non_timestamp_primitive!(u64, UInt64, UInt64Type);
+define_non_timestamp_primitive!(i8, Int8, Int8Type);
+define_non_timestamp_primitive!(i16, Int16, Int16Type);
+define_non_timestamp_primitive!(i32, Int32, Int32Type);
+define_non_timestamp_primitive!(f32, Float32, Float32Type);
+define_non_timestamp_primitive!(f64, Float64, Float64Type);
+
+// Timestamp primitive:
 define_logical_primitive_type!(i64, Int64, Int64Type);
-define_logical_primitive_type!(f32, Float32, Float32Type);
-define_logical_primitive_type!(f64, Float64, Float64Type);
+
+impl DataType for Int64Type {
+    fn name(&self) -> &str {
+        "Int64"
+    }
+
+    fn logical_type_id(&self) -> LogicalTypeId {
+        LogicalTypeId::Int64
+    }
+
+    fn default_value(&self) -> Value {
+        Value::Int64(0)
+    }
+
+    fn as_arrow_type(&self) -> ArrowDataType {
+        ArrowDataType::Int64
+    }
+
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+        Box::new(PrimitiveVectorBuilder::<Int64Type>::with_capacity(capacity))
+    }
+
+    fn is_timestamp_compatible(&self) -> bool {
+        true
+    }
+}
 
 #[cfg(test)]
 mod tests {
