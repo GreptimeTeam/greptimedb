@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
+use common_time::timestamp::TimeUnit;
 use paste::paste;
 use serde::{Deserialize, Serialize};
 
@@ -22,8 +23,9 @@ use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, Float32Type, Float64Type, Int16Type,
-    Int32Type, Int64Type, Int8Type, NullType, StringType, UInt16Type, UInt32Type, UInt64Type,
-    UInt8Type,
+    Int32Type, Int64Type, Int8Type, NullType, StringType, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -53,8 +55,7 @@ pub enum ConcreteDataType {
     // Date types:
     Date(DateType),
     DateTime(DateTimeType),
-    // Timestamp(TimestampType),
-
+    Timestamp(TimestampType),
     // List(ListType),
 }
 
@@ -195,36 +196,40 @@ impl_new_concrete_type_functions!(
     Binary, Date, DateTime, String
 );
 
-// impl ConcreteDataType {
-//     pub fn list_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
-//         ConcreteDataType::List(ListType::new(inner_type))
-//     }
+impl ConcreteDataType {
+    //     pub fn list_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
+    //         ConcreteDataType::List(ListType::new(inner_type))
+    //     }
 
-//     pub fn timestamp_datatype(unit: TimeUnit) -> Self {
-//         ConcreteDataType::Timestamp(TimestampType::new(unit))
-//     }
+    pub fn timestamp_second_datatype() -> Self {
+        ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType::default()))
+    }
 
-//     pub fn timestamp_millis_datatype() -> Self {
-//         ConcreteDataType::Timestamp(TimestampType::new(TimeUnit::Millisecond))
-//     }
+    pub fn timestamp_millisecond_datatype() -> Self {
+        ConcreteDataType::Timestamp(TimestampType::Millisecond(
+            TimestampMillisecondType::default(),
+        ))
+    }
 
-//     /// Converts from arrow timestamp unit to
-//     // TODO(hl): maybe impl From<ArrowTimestamp> for our timestamp ?
-//     pub fn from_arrow_time_unit(t: &arrow::datatypes::TimeUnit) -> Self {
-//         match t {
-//             arrow::datatypes::TimeUnit::Second => Self::timestamp_datatype(TimeUnit::Second),
-//             arrow::datatypes::TimeUnit::Millisecond => {
-//                 Self::timestamp_datatype(TimeUnit::Millisecond)
-//             }
-//             arrow::datatypes::TimeUnit::Microsecond => {
-//                 Self::timestamp_datatype(TimeUnit::Microsecond)
-//             }
-//             arrow::datatypes::TimeUnit::Nanosecond => {
-//                 Self::timestamp_datatype(TimeUnit::Nanosecond)
-//             }
-//         }
-//     }
-// }
+    pub fn timestamp_microsecond_datatype() -> Self {
+        ConcreteDataType::Timestamp(TimestampType::Microsecond(
+            TimestampMicrosecondType::default(),
+        ))
+    }
+
+    pub fn timestamp_nanosecond_datatype() -> Self {
+        ConcreteDataType::Timestamp(TimestampType::Nanosecond(TimestampNanosecondType::default()))
+    }
+
+    pub fn timestamp_datatype(unit: TimeUnit) -> Self {
+        match unit {
+            TimeUnit::Second => Self::timestamp_second_datatype(),
+            TimeUnit::Millisecond => Self::timestamp_millisecond_datatype(),
+            TimeUnit::Microsecond => Self::timestamp_microsecond_datatype(),
+            TimeUnit::Nanosecond => Self::timestamp_nanosecond_datatype(),
+        }
+    }
+}
 
 /// Data type abstraction.
 #[enum_dispatch::enum_dispatch]

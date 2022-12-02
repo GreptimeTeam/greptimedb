@@ -14,6 +14,8 @@
 
 use arrow::array::Array;
 use arrow::datatypes::DataType;
+use common_time::timestamp::TimeUnit;
+use common_time::Timestamp;
 use snafu::OptionExt;
 
 use crate::error::{ConversionSnafu, Result};
@@ -62,14 +64,24 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
         // DataType::Utf8 | DataType::LargeUtf8 => {
         //     Value::String(cast_array!(array, StringArray).value(idx).into())
         // }
-        // DataType::Timestamp(t, _) => {
-        //     let value = cast_array!(array, PrimitiveArray::<i64>).value(idx);
-        //     let unit = match ConcreteDataType::from_arrow_time_unit(t) {
-        //         ConcreteDataType::Timestamp(t) => t.unit,
-        //         _ => unreachable!(),
-        //     };
-        //     Value::Timestamp(Timestamp::new(value, unit))
-        // }
+        DataType::Timestamp(t, _) => match t {
+            arrow::datatypes::TimeUnit::Second => Value::Timestamp(Timestamp::new(
+                cast_array!(array, arrow::array::TimestampSecondArray).value(idx),
+                TimeUnit::Second,
+            )),
+            arrow::datatypes::TimeUnit::Millisecond => Value::Timestamp(Timestamp::new(
+                cast_array!(array, arrow::array::TimestampMillisecondArray).value(idx),
+                TimeUnit::Millisecond,
+            )),
+            arrow::datatypes::TimeUnit::Microsecond => Value::Timestamp(Timestamp::new(
+                cast_array!(array, arrow::array::TimestampMicrosecondArray).value(idx),
+                TimeUnit::Microsecond,
+            )),
+            arrow::datatypes::TimeUnit::Nanosecond => Value::Timestamp(Timestamp::new(
+                cast_array!(array, arrow::array::TimestampNanosecondArray).value(idx),
+                TimeUnit::Nanosecond,
+            )),
+        },
         // DataType::List(_) => {
         //     let array = cast_array!(array, ListArray::<i32>).value(idx);
         //     let inner_datatype = ConcreteDataType::try_from(array.data_type())?;
@@ -213,3 +225,40 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
 //         // }
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use paste::paste;
+
+    use super::*;
+    use crate::prelude::ConcreteDataType;
+    use crate::types::TimestampType;
+
+    macro_rules! test_arrow_array_get_for_timestamps {
+        ( $($unit: ident), *) => {
+            $(
+                paste! {
+                    let mut builder = arrow::array::[<Timestamp $unit Array>]::builder(3);
+                    builder.append_value(1);
+                    builder.append_value(0);
+                    builder.append_value(-1);
+                    let ts_array = Arc::new(builder.finish()) as Arc<dyn Array>;
+                    let v = arrow_array_get(&ts_array, 1).unwrap();
+                    assert_eq!(
+                        ConcreteDataType::Timestamp(TimestampType::$unit(
+                            $crate::types::[<Timestamp $unit Type>]::default(),
+                        )),
+                        v.data_type()
+                    );
+                }
+            )*
+        };
+    }
+
+    #[test]
+    fn test_timestamp_array() {
+        test_arrow_array_get_for_timestamps![Second, Millisecond, Microsecond, Nanosecond];
+    }
+}

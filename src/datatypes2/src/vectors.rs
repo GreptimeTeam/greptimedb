@@ -36,6 +36,7 @@ pub mod null;
 pub mod operations;
 pub mod primitive;
 pub mod string;
+mod timestamp;
 
 pub use binary::*;
 pub use boolean::*;
@@ -45,6 +46,7 @@ pub use helper::Helper;
 pub use null::*;
 pub use primitive::*;
 pub use string::*;
+pub use timestamp::*;
 
 // TODO(yingwen): We need to reimplement Validity as arrow's Bitmap doesn't support null_count().
 #[derive(Debug, PartialEq)]
