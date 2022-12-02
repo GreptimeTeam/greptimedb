@@ -23,10 +23,10 @@ use snafu::{Backtrace, ErrorCompat, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Unsupported physical expr: {}", name))]
+    #[snafu(display("Unsupported physical plan: {}", name))]
     UnsupportedPlan { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Unsupported physical plan: {}", name))]
+    #[snafu(display("Unsupported expr: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
 
     #[snafu(display("Unsupported concrete type: {:?}", ty))]
