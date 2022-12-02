@@ -17,7 +17,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef};
-use arrow::bitmap::Bitmap;
 use snafu::ensure;
 
 use crate::data_type::ConcreteDataType;
@@ -26,19 +25,20 @@ use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
 use crate::vectors::operations::VectorOp;
 
-pub mod binary;
-pub mod boolean;
-pub mod constant;
-pub mod date;
-pub mod datetime;
+mod binary;
+mod boolean;
+mod constant;
+mod date;
+mod datetime;
 mod eq;
 mod helper;
-pub mod list;
-pub mod null;
-pub mod operations;
-pub mod primitive;
-pub mod string;
+mod list;
+mod null;
+mod operations;
+mod primitive;
+mod string;
 mod timestamp;
+mod validity;
 
 pub use binary::*;
 pub use boolean::*;
@@ -50,35 +50,7 @@ pub use null::*;
 pub use primitive::*;
 pub use string::*;
 pub use timestamp::*;
-
-// TODO(yingwen): We need to reimplement Validity as arrow's Bitmap doesn't support null_count().
-#[derive(Debug, PartialEq)]
-pub enum Validity<'a> {
-    /// Whether the array slot is valid or not (null).
-    Slots(&'a Bitmap),
-    /// All slots are valid.
-    AllValid,
-    /// All slots are null.
-    AllNull,
-}
-
-impl<'a> Validity<'a> {
-    pub fn slots(&self) -> Option<&Bitmap> {
-        match self {
-            Validity::Slots(bitmap) => Some(bitmap),
-            _ => None,
-        }
-    }
-
-    /// Returns whether `i-th` bit is set.
-    pub fn is_set(&self, i: usize) -> bool {
-        match self {
-            Validity::Slots(bitmap) => bitmap.is_set(i),
-            Validity::AllValid => true,
-            Validity::AllNull => false,
-        }
-    }
-}
+pub use validity::Validity;
 
 // TODO(yingwen): arrow 28.0 implements Clone for all arrays, we could upgrade to it and simplify
 // some codes in methods such as `to_arrow_array()` and `to_boxed_arrow_array()`.
@@ -231,10 +203,7 @@ macro_rules! impl_try_from_arrow_array_for_vector {
 
 macro_rules! impl_validity_for_vector {
     ($array: expr) => {
-        match $array.data().null_bitmap() {
-            Some(bitmap) => Validity::Slots(bitmap),
-            None => Validity::AllValid,
-        }
+        Validity::from_array_data($array.data())
     };
 }
 

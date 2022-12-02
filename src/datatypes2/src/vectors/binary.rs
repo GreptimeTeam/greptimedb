@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(2, v.len());
         assert_eq!("BinaryVector", v.vector_type_name());
         assert!(!v.is_const());
-        assert_eq!(Validity::AllValid, v.validity());
+        assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
         assert_eq!(128, v.memory_size());
 
@@ -317,7 +317,7 @@ mod tests {
         builder.push(Some(b"world"));
         let vector = builder.finish();
         assert_eq!(0, vector.null_count());
-        assert_eq!(Validity::AllValid, vector.validity());
+        assert!(vector.validity().is_all_valid());
 
         let mut builder = BinaryVectorBuilder::with_capacity(3);
         builder.push(Some(b"hello"));
@@ -328,10 +328,8 @@ mod tests {
         let validity = vector.validity();
         assert!(!validity.is_set(1));
 
-        // TODO(yingwen): arrow's Bitmap doesn't support null_count().
-        // let slots = validity.slots().unwrap();
-        // assert_eq!(1, slots.null_count());
-        // assert!(!slots.get_bit(1));
+        assert_eq!(1, validity.null_count());
+        assert!(!validity.is_set(1));
     }
 
     #[test]

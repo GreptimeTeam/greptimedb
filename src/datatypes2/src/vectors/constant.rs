@@ -111,9 +111,9 @@ impl Vector for ConstantVector {
 
     fn validity(&self) -> Validity {
         if self.vector.is_null(0) {
-            Validity::AllNull
+            Validity::all_null(self.length)
         } else {
-            Validity::AllValid
+            Validity::all_valid(self.length)
         }
     }
 
@@ -184,7 +184,7 @@ mod tests {
         assert_eq!("ConstantVector", c.vector_type_name());
         assert!(c.is_const());
         assert_eq!(10, c.len());
-        assert_eq!(Validity::AllValid, c.validity());
+        assert!(c.validity().is_all_valid());
         assert!(!c.only_null());
         assert_eq!(64, c.memory_size());
 
