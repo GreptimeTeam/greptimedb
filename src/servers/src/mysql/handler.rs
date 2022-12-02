@@ -27,7 +27,7 @@ use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
 
 use crate::auth::MysqlAuthPlugin::MysqlNativePwd;
-use crate::auth::{auth_mysql, Certificate, UserInfo, UserProviderRef};
+use crate::auth::{auth_mysql, Identity, UserInfo, UserProviderRef};
 use crate::context::Channel::MYSQL;
 use crate::context::{Context, CtxBuilder};
 use crate::error::{self, Result};
@@ -126,12 +126,18 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let mut user_info = UserInfo::default();
 
         if let Some(user_provider) = &self.user_provider {
-            let user_id = Certificate::UserId(username.to_string(), client_addr.clone());
+            let user_id = Identity::UserId(username.to_string(), Some(client_addr.clone()));
 
             match user_provider.get_user_info(user_id).await {
                 Ok(Some(userinfo)) => {
-                    let auth_methods = userinfo.auth_methods();
-                    if !auth_mysql(auth_plugin, auth_data, salt, auth_methods) {
+                    let auth_method =
+                        if let Some(auth_method) = userinfo.mysql_auth_method(&auth_plugin) {
+                            auth_method
+                        } else {
+                            return false;
+                        };
+
+                    if !auth_mysql(auth_plugin, auth_data, salt, auth_method) {
                         return false;
                     }
                     user_info = userinfo;

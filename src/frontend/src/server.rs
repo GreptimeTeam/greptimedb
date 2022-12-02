@@ -78,7 +78,7 @@ impl Services {
                 instance.clone(),
                 mysql_io_runtime,
                 opts.tls.clone(),
-                user_provider,
+                user_provider.clone(),
             );
 
             Some((mysql_server, mysql_addr))
@@ -102,6 +102,7 @@ impl Services {
                 opts.check_pwd,
                 opts.tls.clone(),
                 pg_io_runtime,
+                user_provider,
             )) as Box<dyn Server>;
 
             Some((pg_server, pg_addr))

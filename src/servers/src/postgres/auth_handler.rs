@@ -24,10 +24,41 @@ use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 
-struct PgPwdVerifier;
+use crate::auth::{auth_pg, Identity, PgAuthPlugin, UserProviderRef};
+use crate::error::Result;
+
+struct PgPwdVerifier {
+    user_provider: Option<UserProviderRef>,
+}
 
 impl PgPwdVerifier {
-    async fn verify_pwd(&self, _pwd: &str, _meta: HashMap<String, String>) -> PgWireResult<bool> {
+    async fn verify_pwd(&self, pwd: &str, meta: HashMap<String, String>) -> Result<bool> {
+        let user_name = match meta.get("user") {
+            Some(name) => name,
+            None => return Ok(false),
+        };
+
+        if let Some(user_provider) = &self.user_provider {
+            match user_provider
+                .get_user_info(Identity::UserId(user_name.to_string(), None))
+                .await?
+            {
+                Some(user_info) => {
+                    let auth_method = match user_info.pg_auth_method(&PgAuthPlugin::PlainText) {
+                        Some(auth_method) => auth_method,
+                        None => return Ok(false),
+                    };
+
+                    return Ok(auth_pg(
+                        PgAuthPlugin::PlainText,
+                        pwd.as_bytes(),
+                        &[],
+                        auth_method,
+                    ));
+                }
+                None => return Ok(false),
+            }
+        }
         Ok(true)
     }
 }
@@ -67,9 +98,9 @@ pub struct PgAuthStartupHandler {
 }
 
 impl PgAuthStartupHandler {
-    pub fn new(with_pwd: bool, force_tls: bool) -> Self {
+    pub fn new(with_pwd: bool, user_provider: Option<UserProviderRef>, force_tls: bool) -> Self {
         PgAuthStartupHandler {
-            verifier: PgPwdVerifier,
+            verifier: PgPwdVerifier { user_provider },
             param_provider: GreptimeDBStartupParameters::new(),
             with_pwd,
             force_tls,

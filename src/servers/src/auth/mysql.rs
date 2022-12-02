@@ -12,9 +12,10 @@ pub fn mysql_native_pwd_auth1(hashed_value: &[u8], salt: &[u8], hashed_stage2: &
 }
 
 // hashed_value: passed from client, calculated by "sha1(pwd) xor sha1(salt + sha1(sha1(pwd)))"
-pub fn mysql_native_pwd_auth2(hashed_value: &[u8], salt: &[u8], pwd: &[u8]) -> bool {
+
+pub fn mysql_native_pwd_auth2(hashed_value: &[u8], salt: &[u8], plain_text: &[u8]) -> bool {
     // hashed_value == sha1(pwd) xor sha1(salt + sha1(sha1(pwd)))
-    let mut hash_stage1 = sha1(pwd);
+    let mut hash_stage1 = sha1(plain_text);
     let hash_stage2 = sha1(&hash_stage1);
     hashed_value == simple_xor(&mut hash_stage1, &sha1_multi(salt, &hash_stage2))
 }

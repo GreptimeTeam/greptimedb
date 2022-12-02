@@ -119,7 +119,11 @@ mod test {
                 client_host: Default::default(),
                 channel: Channel::GRPC,
             },
-            user_info: UserInfo::new("greptime".to_string(), vec![AuthMethod::PlainPwd(b"123456".to_vec())]),
+
+            user_info: UserInfo::new(
+                "greptime".to_string(),
+                vec![AuthMethod::PlainText(b"123456".to_vec())],
+            ),
             quota: Default::default(),
             predicates: vec![],
         };
@@ -144,7 +148,7 @@ mod test {
             .set_channel(HTTP)
             .set_user_info(UserInfo::new(
                 "greptime".to_string(),
-                vec![AuthMethod::PlainPwd(b"123456".to_vec())],
+                vec![AuthMethod::PlainText(b"123456".to_vec())],
             ))
             .build()
             .unwrap();
