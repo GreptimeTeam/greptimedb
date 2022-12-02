@@ -470,7 +470,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64]):
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
-    # test if using white list for stdlib damage unrelated module
+    # test if using allow list for stdlib damage unrelated module
     from collections import deque
     import math
     math.ceil(0.2)
@@ -507,12 +507,27 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
-    # test if module not in whtile list can't be imported
+    # test if module not in allow list can't be imported
     import fcntl
     return cpu + mem, 1
 "#,
         predicate: ExecIsErr(
             reason: "No module named 'fcntl'"
+        )
+    ),
+    (
+        // constant column(int)
+        name: "test_neg_import_depend_stdlib",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
+    vector[f32]):
+    # test if module not in allow list can't be imported
+    import mailbox
+    return cpu + mem, 1
+"#,
+        predicate: ExecIsErr(
+            reason: "ModuleNotFoundError: No module named"
         )
     ),
 ]

@@ -431,7 +431,7 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
         i.borrow_mut()
             .get_or_insert_with(|| {
                 // we limit stdlib imports for safety reason, i.e `fcntl` is not allowed here
-                let native_module_white_list = HashSet::from([
+                let native_module_allow_list = HashSet::from([
                     "array", "cmath", "gc", "hashlib", "_json", "_random", "math",
                 ]);
                 let interpreter = Arc::new(vm::Interpreter::with_init(Default::default(), |vm| {
@@ -440,7 +440,7 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     vm.add_native_modules(
                         rustpython_stdlib::get_module_inits()
                             .into_iter()
-                            .filter(|(k, _)| native_module_white_list.contains(k.as_ref())),
+                            .filter(|(k, _)| native_module_allow_list.contains(k.as_ref())),
                     );
 
                     // We are freezing the stdlib to include the standard library inside the binary.
