@@ -127,7 +127,7 @@ pub fn compile_script(name: &str, deco_args: &DecoratorArgs, script: &str) -> Re
         &top,
         "<embedded>".to_owned(),
         Mode::BlockExpr,
-        CompileOpts { optimize: 0 },
+        CompileOpts { optimize: 1 },
     )
     .context(PyCompileSnafu)
 }

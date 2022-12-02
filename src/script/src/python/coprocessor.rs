@@ -436,7 +436,6 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                 ]);
                 let interpreter = Arc::new(vm::Interpreter::with_init(Default::default(), |vm| {
                     // not using full stdlib to prevent security issue, instead filter out a few simple util module
-                    // vm.add_native_modules(rustpython_stdlib::get_module_inits());
                     vm.add_native_modules(
                         rustpython_stdlib::get_module_inits()
                             .into_iter()
