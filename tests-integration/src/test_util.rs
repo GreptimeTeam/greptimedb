@@ -193,7 +193,7 @@ pub async fn create_test_table(
                         .expect("ts is expected to be timestamp column"),
                 ),
                 create_if_not_exists: true,
-                primary_key_indices: vec![3, 0], // "host" and "ts" are primary keys
+                primary_key_indices: vec![0], // "host" is in primary keys
                 table_options: HashMap::new(),
                 region_numbers: vec![0],
             },
