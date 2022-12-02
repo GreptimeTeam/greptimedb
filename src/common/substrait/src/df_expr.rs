@@ -111,7 +111,7 @@ pub fn convert_scalar_function(
         Ok(())
     };
 
-    // onstruct DataFusion expr
+    // construct DataFusion expr
     let expr = match fn_name {
         // begin binary exprs, with the same order of DF `Operator`'s definition.
         "eq" | "equal" => {
