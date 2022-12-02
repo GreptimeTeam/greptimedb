@@ -14,6 +14,7 @@
 
 mod column_schema;
 mod constraint;
+mod raw;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,9 +24,9 @@ use snafu::{ensure, ResultExt};
 
 use crate::data_type::DataType;
 use crate::error::{self, Error, Result};
-// pub use crate::schema::raw::RawSchema;
 pub use crate::schema::column_schema::{ColumnSchema, Metadata};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
+pub use crate::schema::raw::RawSchema;
 
 /// Key used to store version number of the schema in metadata.
 const VERSION_KEY: &str = "greptime:version";
