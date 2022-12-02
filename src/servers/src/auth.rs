@@ -24,6 +24,8 @@ use self::mysql::MysqlAuthPlugin;
 use self::postgres::PgAuthPlugin;
 use crate::error::Result;
 
+pub const DEFAULT_USERNAME: &str = "greptime";
+
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
     fn name(&self) -> String;
@@ -41,7 +43,7 @@ pub enum Identity {
     UserId(Username, Option<HostOrIp>),
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UserInfo {
     username: String,
     auth_methods: Vec<AuthMethod>,

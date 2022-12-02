@@ -27,7 +27,7 @@ use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
 
 use crate::auth::mysql::{auth_mysql, MysqlAuthPlugin};
-use crate::auth::{Identity, UserInfo, UserProviderRef};
+use crate::auth::{Identity, UserInfo, UserProviderRef, DEFAULT_USERNAME};
 use crate::context::Channel::MYSQL;
 use crate::context::{Context, CtxBuilder};
 use crate::error::{self, Result};
@@ -123,8 +123,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             _ => return false,
         };
 
-        // TODO(fys): default user_info maybe read from configuration
-        let mut user_info = UserInfo::default();
+        let mut user_info = None;
 
         if let Some(user_provider) = &self.user_provider {
             let user_id = Identity::UserId(username.to_string(), Some(client_addr.clone()));
@@ -149,7 +148,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                         info!("Failed to auth, channel: mysql, user_id: {:?}", user_id);
                         return false;
                     }
-                    user_info = userinfo;
+                    user_info = Some(userinfo);
                 }
                 Ok(None) => {
                     error!(
@@ -165,6 +164,8 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             }
         }
 
+        let user_info =
+            user_info.unwrap_or_else(|| UserInfo::new(DEFAULT_USERNAME.to_string(), vec![]));
         return match CtxBuilder::new()
             .client_addr(client_addr)
             .set_channel(MYSQL)
