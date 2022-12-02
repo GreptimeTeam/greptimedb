@@ -280,7 +280,6 @@ mod tests {
         assert_matches!(error, Error::MissingTimestampColumn { .. });
     }
 
-    /// If primary key is not specified, time index should be used as primary key.
     #[tokio::test]
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;
@@ -297,6 +296,7 @@ mod tests {
             .create_to_request(42, parsed_stmt, TableReference::bare("demo_table"))
             .unwrap();
         assert!(c.primary_key_indices.is_empty());
+        assert_eq!(c.schema.timestamp_index(), Some(1));
     }
 
     /// Constraints specified, not column cannot be found.
