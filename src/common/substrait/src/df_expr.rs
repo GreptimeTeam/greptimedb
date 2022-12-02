@@ -62,11 +62,11 @@ pub fn to_df_expr(ctx: &ConvertorContext, expression: Expression, schema: &Schem
 /// `Column` expr.
 pub fn convert_selection_rex(selection: FieldReference, schema: &Schema) -> Result<Expr> {
     if let Some(FieldReferenceType::DirectReference(direct_ref)) = selection.reference_type
-    && let Some(SegReferenceType::StructField(field))  = direct_ref.reference_type{
+    && let Some(SegReferenceType::StructField(field)) = direct_ref.reference_type {
         let column_name = schema.column_name_by_index(field.field as _).to_string();
-         Ok(Expr::Column(Column{ relation: None, name: column_name }))
+        Ok(Expr::Column(Column { relation: None, name: column_name }))
     } else {
-        InvalidParametersSnafu{reason:"Only support direct struct reference in Selection Rex"}.fail()
+        InvalidParametersSnafu { reason:"Only support direct struct reference in Selection Rex" }.fail()
     }
 }
 
@@ -603,7 +603,9 @@ mod utils {
     }
 
     /// Convert list of [Expression] to [FunctionArgument] vector.
-    pub(crate) fn expression_to_argument(expressions: Vec<Expression>) -> Vec<FunctionArgument> {
+    pub(crate) fn expression_to_argument<I: IntoIterator<Item = Expression>>(
+        expressions: I,
+    ) -> Vec<FunctionArgument> {
         expressions
             .into_iter()
             .map(|expr| FunctionArgument {
