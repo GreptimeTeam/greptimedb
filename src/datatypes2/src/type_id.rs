@@ -42,7 +42,10 @@ pub enum LogicalTypeId {
     /// seconds/milliseconds/microseconds/nanoseconds, determined by precision.
     DateTime,
 
-    Timestamp,
+    TimestampSecond,
+    TimestampMillisecond,
+    TimestampMicrosecond,
+    TimestampNanosecond,
 
     List,
 }
