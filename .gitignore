@@ -18,6 +18,7 @@ debug/
 
 # JetBrains IDE config directory
 .idea/
+*.iml
 
 # VSCode IDE config directory
 .vscode/
@@ -31,3 +32,6 @@ logs/
 
 # Benchmark dataset
 benchmarks/data
+
+# dotenv
+.env

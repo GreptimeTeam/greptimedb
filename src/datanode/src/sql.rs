@@ -1,18 +1,36 @@
-//! sql handler
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
-use query::sql::{show_databases, show_tables};
+use common_telemetry::error;
+use query::query_engine::QueryEngineRef;
+use query::sql::{describe_table, explain, show_databases, show_tables};
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use sql::statements::describe::DescribeTable;
+use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowTables};
 use table::engine::{EngineContext, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
-use crate::error::{self, GetTableSnafu, Result, TableNotFoundSnafu};
+use crate::error::{ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu};
 
 mod alter;
 mod create;
+mod drop_table;
 mod insert;
 
 #[derive(Debug)]
@@ -21,37 +39,61 @@ pub enum SqlRequest {
     CreateTable(CreateTableRequest),
     CreateDatabase(CreateDatabaseRequest),
     Alter(AlterTableRequest),
+    DropTable(DropTableRequest),
     ShowDatabases(ShowDatabases),
     ShowTables(ShowTables),
+    DescribeTable(DescribeTable),
+    Explain(Box<Explain>),
 }
 
 // Handler to execute SQL except query
 pub struct SqlHandler {
     table_engine: TableEngineRef,
     catalog_manager: CatalogManagerRef,
+    query_engine: QueryEngineRef,
 }
 
 impl SqlHandler {
-    pub fn new(table_engine: TableEngineRef, catalog_manager: CatalogManagerRef) -> Self {
+    pub fn new(
+        table_engine: TableEngineRef,
+        catalog_manager: CatalogManagerRef,
+        query_engine: QueryEngineRef,
+    ) -> Self {
         Self {
             table_engine,
             catalog_manager,
+            query_engine,
         }
     }
 
-    pub async fn execute(&self, request: SqlRequest) -> Result<Output> {
-        match request {
+    // TODO(LFC): Refactor consideration: a context awareness "Planner".
+    // Now we have some query related state (like current using database in session context), maybe
+    // we could create a new struct called `Planner` that stores context and handle these queries
+    // there, instead of executing here in a "static" fashion.
+    pub async fn execute(&self, request: SqlRequest, query_ctx: QueryContextRef) -> Result<Output> {
+        let result = match request {
             SqlRequest::Insert(req) => self.insert(req).await,
             SqlRequest::CreateTable(req) => self.create_table(req).await,
             SqlRequest::CreateDatabase(req) => self.create_database(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
+            SqlRequest::DropTable(req) => self.drop_table(req).await,
             SqlRequest::ShowDatabases(stmt) => {
-                show_databases(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+                show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
             SqlRequest::ShowTables(stmt) => {
-                show_tables(stmt, self.catalog_manager.clone()).context(error::ExecuteSqlSnafu)
+                show_tables(stmt, self.catalog_manager.clone(), query_ctx).context(ExecuteSqlSnafu)
             }
+            SqlRequest::DescribeTable(stmt) => {
+                describe_table(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
+            }
+            SqlRequest::Explain(stmt) => explain(stmt, self.query_engine.clone(), query_ctx)
+                .await
+                .context(ExecuteSqlSnafu),
+        };
+        if let Err(e) = &result {
+            error!("Datanode execution error: {:?}", e);
         }
+        result
     }
 
     pub(crate) fn get_table<'a>(&self, table_ref: &'a TableReference) -> Result<TableRef> {
@@ -75,7 +117,8 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
-    use catalog::SchemaProvider;
+    use catalog::{CatalogList, SchemaProvider};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::logical_plan::Expr;
     use common_query::physical_plan::PhysicalPlanRef;
     use common_time::timestamp::Timestamp;
@@ -83,7 +126,10 @@ mod tests {
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
     use log_store::fs::noop::NoopLogStore;
-    use object_store::{services::fs::Builder, ObjectStore};
+    use mito::config::EngineConfig as TableEngineConfig;
+    use mito::engine::MitoEngine;
+    use object_store::services::fs::Builder;
+    use object_store::ObjectStore;
     use query::QueryEngineFactory;
     use sql::statements::statement::Statement;
     use storage::config::EngineConfig as StorageEngineConfig;
@@ -91,8 +137,6 @@ mod tests {
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
     use table::{Table, TableRef};
-    use table_engine::config::EngineConfig as TableEngineConfig;
-    use table_engine::engine::MitoEngine;
     use tempdir::TempDir;
 
     use super::*;
@@ -194,9 +238,17 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        let catalog_provider = catalog_list.catalog(DEFAULT_CATALOG_NAME).unwrap().unwrap();
+        catalog_provider
+            .register_schema(
+                DEFAULT_SCHEMA_NAME.to_string(),
+                Arc::new(MockSchemaProvider {}),
+            )
+            .unwrap();
+
         let factory = QueryEngineFactory::new(catalog_list.clone());
         let query_engine = factory.query_engine();
-        let sql_handler = SqlHandler::new(table_engine, catalog_list);
+        let sql_handler = SqlHandler::new(table_engine, catalog_list.clone(), query_engine.clone());
 
         let stmt = match query_engine.sql_to_statement(sql).unwrap() {
             Statement::Insert(i) => i,
@@ -204,9 +256,8 @@ mod tests {
                 unreachable!()
             }
         };
-        let schema_provider = Arc::new(MockSchemaProvider {});
         let request = sql_handler
-            .insert_to_request(schema_provider, *stmt)
+            .insert_to_request(catalog_list.clone(), *stmt, TableReference::bare("demo"))
             .unwrap();
 
         match request {

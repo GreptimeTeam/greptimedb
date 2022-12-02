@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #[cfg(test)]
 mod tests;
 mod writer;
@@ -16,18 +30,19 @@ use store_api::storage::{
 
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
-use crate::manifest::{
-    action::{RawRegionMetadata, RegionChange, RegionMetaAction, RegionMetaActionList},
-    region::RegionManifest,
+use crate::manifest::action::{
+    RawRegionMetadata, RegionChange, RegionMetaAction, RegionMetaActionList,
 };
+use crate::manifest::region::RegionManifest;
 use crate::memtable::MemtableBuilderRef;
 use crate::metadata::{RegionMetaImpl, RegionMetadata, RegionMetadataRef};
 pub use crate::region::writer::{AlterContext, RegionWriter, RegionWriterRef, WriterContext};
 use crate::schema::compat::CompatWrite;
 use crate::snapshot::SnapshotImpl;
 use crate::sst::AccessLayerRef;
-use crate::version::VersionEdit;
-use crate::version::{Version, VersionControl, VersionControlRef, INIT_COMMITTED_SEQUENCE};
+use crate::version::{
+    Version, VersionControl, VersionControlRef, VersionEdit, INIT_COMMITTED_SEQUENCE,
+};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
@@ -155,7 +170,7 @@ impl<S: LogStore> RegionImpl<S> {
         RegionImpl { inner }
     }
 
-    /// Open an exsiting region and recover its data.
+    /// Open an existing region and recover its data.
     ///
     /// The caller should avoid calling this method simultaneously.
     pub async fn open(

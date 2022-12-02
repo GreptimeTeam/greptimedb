@@ -1,6 +1,12 @@
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
   push:
     branches:
       - develop
@@ -8,11 +14,10 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'config/**'
-      - '.github/**'
       - '**.md'
-      - '**.yml'
       - '.dockerignore'
       - 'docker/**'
+      - '.gitignore'
   workflow_dispatch:
 
 name: CI
@@ -21,6 +26,13 @@ env:
   RUST_TOOLCHAIN: nightly-2022-07-14
 
 jobs:
+  typos:
+    name: Spell Check with Typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: crate-ci/typos@v1.0.4
+
   check:
     name: Check
     if: github.event.pull_request.draft == false

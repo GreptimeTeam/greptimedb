@@ -1,27 +1,33 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::codec;
-use api::v1::codec::InsertBatch;
 use api::v1::column::SemanticType;
-use api::v1::insert_expr;
-use api::v1::insert_expr::Expr;
-use api::v1::Column;
-use api::v1::InsertExpr;
-use api::v1::MutateResult;
+use api::v1::{Column, InsertExpr, MutateResult};
 use client::{Database, ObjectResult};
 use datatypes::prelude::ConcreteDataType;
-use snafu::ensure;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::requests::InsertRequest;
 
 use super::DistTable;
 use crate::error;
 use crate::error::Result;
-use crate::mock::DatanodeInstance;
+use crate::table::scan::DatanodeInstance;
 
 impl DistTable {
     pub async fn dist_insert(
@@ -76,7 +82,7 @@ impl DistTable {
     }
 }
 
-pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<InsertBatch> {
+pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<(Vec<Column>, u32)> {
     let mut row_count = None;
 
     let columns = insert
@@ -119,24 +125,20 @@ pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<InsertBa
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let insert_batch = codec::InsertBatch {
-        columns,
-        row_count: row_count.map(|rows| rows as u32).unwrap_or(0),
-    };
-    Ok(insert_batch)
+    let row_count = row_count.unwrap_or(0) as u32;
+
+    Ok((columns, row_count))
 }
 
 fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<InsertExpr> {
     let table_name = insert.table_name.clone();
-    let insert_batch = insert_request_to_insert_batch(&insert)?;
+    let (columns, row_count) = insert_request_to_insert_batch(&insert)?;
     Ok(InsertExpr {
         schema_name: insert.schema_name,
         table_name,
-        expr: Some(Expr::Values(insert_expr::Values {
-            values: vec![insert_batch.into()],
-        })),
         region_number,
-        options: Default::default(),
+        columns,
+        row_count,
     })
 }
 
@@ -144,9 +146,11 @@ fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<
 mod tests {
     use std::collections::HashMap;
 
-    use api::v1::{codec::InsertBatch, insert_expr::Expr, ColumnDataType, InsertExpr};
+    use api::v1::{ColumnDataType, InsertExpr};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datatypes::{prelude::ConcreteDataType, types::StringType, vectors::VectorBuilder};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::types::StringType;
+    use datatypes::vectors::VectorBuilder;
     use table::requests::InsertRequest;
 
     use super::to_insert_expr;
@@ -187,16 +191,7 @@ mod tests {
         let table_name = insert_expr.table_name;
         assert_eq!("demo", table_name);
 
-        let expr = insert_expr.expr.as_ref().unwrap();
-        let vals = match expr {
-            Expr::Values(vals) => vals,
-            Expr::Sql(_) => unreachable!(),
-        };
-
-        let batch: &[u8] = vals.values[0].as_ref();
-        let vals: InsertBatch = batch.try_into().unwrap();
-
-        for column in vals.columns {
+        for column in insert_expr.columns {
             let name = column.column_name;
             if name == "id" {
                 assert_eq!(0, column.null_mask[0]);

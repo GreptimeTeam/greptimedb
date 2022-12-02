@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #![feature(assert_matches)]
 
 mod mock;
@@ -188,7 +202,7 @@ mod tests {
             table_id,
             table,
         };
-        assert_eq!(1, catalog_manager.register_table(reg_req).await.unwrap());
+        assert!(catalog_manager.register_table(reg_req).await.unwrap());
         assert_eq!(
             HashSet::from([table_name, "numbers".to_string()]),
             default_schema
@@ -209,6 +223,7 @@ mod tests {
         let catalog = Arc::new(RemoteCatalogProvider::new(
             catalog_name.clone(),
             backend.clone(),
+            node_id,
         ));
 
         // register catalog to catalog manager
@@ -272,7 +287,7 @@ mod tests {
             .register_schema(schema_name.clone(), schema.clone())
             .expect("Register schema should not fail");
         assert!(prev.is_none());
-        assert_eq!(1, catalog_manager.register_table(reg_req).await.unwrap());
+        assert!(catalog_manager.register_table(reg_req).await.unwrap());
 
         assert_eq!(
             HashSet::from([schema_name.clone()]),

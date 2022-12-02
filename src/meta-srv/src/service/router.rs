@@ -1,31 +1,30 @@
-use api::v1::meta::router_server;
-use api::v1::meta::CreateRequest;
-use api::v1::meta::Error;
-use api::v1::meta::PeerDict;
-use api::v1::meta::PutRequest;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::Region;
-use api::v1::meta::RegionRoute;
-use api::v1::meta::ResponseHeader;
-use api::v1::meta::RouteRequest;
-use api::v1::meta::RouteResponse;
-use api::v1::meta::Table;
-use api::v1::meta::TableRoute;
-use api::v1::meta::TableRouteValue;
-use common_catalog::TableGlobalKey;
-use common_catalog::TableGlobalValue;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use api::v1::meta::{
+    router_server, CreateRequest, Error, PeerDict, PutRequest, RangeRequest, Region, RegionRoute,
+    ResponseHeader, RouteRequest, RouteResponse, Table, TableRoute, TableRouteValue,
+};
+use common_catalog::{TableGlobalKey, TableGlobalValue};
 use common_telemetry::warn;
-use snafu::OptionExt;
-use snafu::ResultExt;
-use tonic::Request;
-use tonic::Response;
+use snafu::{OptionExt, ResultExt};
+use tonic::{Request, Response};
 
 use crate::error;
 use crate::error::Result;
 use crate::keys::TableRouteKey;
-use crate::metasrv::Context;
-use crate::metasrv::MetaSrv;
-use crate::metasrv::SelectorRef;
+use crate::metasrv::{Context, MetaSrv, SelectorRef};
 use crate::sequence::SequenceRef;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::GrpcResult;
@@ -185,8 +184,7 @@ async fn fetch_tables(
         }
         let tv = tv.unwrap();
 
-        let table_id = tv.id as u64;
-        let tr_key = TableRouteKey::with_table_global_key(table_id, &tk);
+        let tr_key = TableRouteKey::with_table_global_key(tv.table_id() as u64, &tk);
         let tr = get_table_route_value(kv_store, &tr_key).await?;
 
         tables.push((tv, tr));
@@ -218,8 +216,7 @@ async fn get_table_global_value(
     let tv = get_from_store(kv_store, tg_key).await?;
     match tv {
         Some(tv) => {
-            let tv = TableGlobalValue::parse(&String::from_utf8_lossy(&tv))
-                .context(error::InvalidCatalogValueSnafu)?;
+            let tv = TableGlobalValue::from_bytes(&tv).context(error::InvalidCatalogValueSnafu)?;
             Ok(Some(tv))
         }
         None => Ok(None),

@@ -1,10 +1,24 @@
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
   push:
     branches:
       - "main"
       - "develop"
+    paths-ignore:
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
   workflow_dispatch:
 
 name: Code coverage
@@ -27,10 +41,6 @@ jobs:
           components: llvm-tools-preview
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-      - name: Cleanup disk
-        uses: curoky/cleanup-disk-action@v2.0
-        with:
-          retain: 'rust'
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov

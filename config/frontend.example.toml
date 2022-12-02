@@ -1,4 +1,12 @@
-http_addr = '0.0.0.0:4000'
-grpc_addr = '0.0.0.0:4001'
-mysql_addr = '0.0.0.0:4003'
-mysql_runtime_size = 4
+mode = 'distributed'
+datanode_rpc_addr = '127.0.0.1:3001'
+
+[http_options]
+addr = '127.0.0.1:4000'
+timeout = "30s"
+
+[meta_client_opts]
+metasrv_addrs = ['127.0.0.1:3002']
+timeout_millis = 3000
+connect_timeout_millis = 5000
+tcp_nodelay = false

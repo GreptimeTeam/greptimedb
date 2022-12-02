@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 mod function;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
@@ -6,8 +20,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
-use datafusion::field_util::FieldExt;
-use datafusion::field_util::SchemaExt;
+use datafusion::field_util::{FieldExt, SchemaExt};
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -17,6 +30,7 @@ use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
 use query::error::Result;
 use query::{QueryEngine, QueryEngineFactory};
+use session::context::QueryContext;
 use table::test_util::MemTable;
 
 #[tokio::test]
@@ -40,7 +54,9 @@ async fn test_percentile_aggregator() -> Result<()> {
 async fn test_percentile_correctness() -> Result<()> {
     let engine = create_correctness_engine();
     let sql = String::from("select PERCENTILE(corr_number,88.0) as percentile from corr_numbers");
-    let plan = engine.sql_to_plan(&sql).unwrap();
+    let plan = engine
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
+        .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
@@ -100,7 +116,9 @@ async fn execute_percentile<'a>(
         "select PERCENTILE({},50.0) as percentile from {}",
         column_name, table_name
     );
-    let plan = engine.sql_to_plan(&sql).unwrap();
+    let plan = engine
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
+        .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {

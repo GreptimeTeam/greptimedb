@@ -1,4 +1,18 @@
-use arrow::bitmap::MutableBitmap;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use common_base::BitVec;
 
 use crate::scalars::ScalarVector;
 use crate::vectors::{ConstantVector, NullVector, Vector};
@@ -8,7 +22,7 @@ use crate::vectors::{ConstantVector, NullVector, Vector};
 // in any other case.
 pub(crate) fn find_unique_scalar<'a, T: ScalarVector>(
     vector: &'a T,
-    selected: &'a mut MutableBitmap,
+    selected: &'a mut BitVec,
     prev_vector: Option<&'a T>,
 ) where
     T::RefItem<'a>: PartialEq,
@@ -30,7 +44,7 @@ pub(crate) fn find_unique_scalar<'a, T: ScalarVector>(
         }
     }
 
-    // Marks first element as selcted if it is different from previous element, otherwise
+    // Marks first element as selected if it is different from previous element, otherwise
     // keep selected bitmap unchanged.
     let is_first_not_duplicate = prev_vector
         .map(|pv| {
@@ -49,7 +63,7 @@ pub(crate) fn find_unique_scalar<'a, T: ScalarVector>(
 
 pub(crate) fn find_unique_null(
     vector: &NullVector,
-    selected: &mut MutableBitmap,
+    selected: &mut BitVec,
     prev_vector: Option<&NullVector>,
 ) {
     if vector.is_empty() {
@@ -64,7 +78,7 @@ pub(crate) fn find_unique_null(
 
 pub(crate) fn find_unique_constant(
     vector: &ConstantVector,
-    selected: &mut MutableBitmap,
+    selected: &mut BitVec,
     prev_vector: Option<&ConstantVector>,
 ) {
     if vector.is_empty() {
@@ -93,7 +107,7 @@ mod tests {
     use super::*;
     use crate::vectors::{Int32Vector, StringVector, VectorOp};
 
-    fn check_bitmap(expect: &[bool], selected: &MutableBitmap) {
+    fn check_bitmap(expect: &[bool], selected: &BitVec) {
         let actual = selected.iter().collect::<Vec<_>>();
         assert_eq!(expect, actual);
     }
@@ -110,7 +124,7 @@ mod tests {
         let input = Int32Vector::from_iter(input);
         let prev = prev.map(Int32Vector::from_slice);
 
-        let mut selected = MutableBitmap::from_len_zeroed(input.len());
+        let mut selected = BitVec::repeat(false, input.len());
         input.find_unique(&mut selected, prev.as_ref().map(|v| v as _));
 
         check_bitmap(expect, &selected);
@@ -150,7 +164,7 @@ mod tests {
         let prev = Int32Vector::from_slice(&[1]);
 
         let v1 = Int32Vector::from_slice(&[2, 3, 4]);
-        let mut selected = MutableBitmap::from_len_zeroed(v1.len());
+        let mut selected = BitVec::repeat(false, v1.len());
         v1.find_unique(&mut selected, Some(&prev));
 
         // Though element in v2 are the same as prev, but we should still keep them.
@@ -160,15 +174,8 @@ mod tests {
         check_bitmap(&[true, true, true], &selected);
     }
 
-    fn new_bitmap(bits: &[bool]) -> MutableBitmap {
-        let mut bitmap = MutableBitmap::from_len_zeroed(bits.len());
-        for (i, bit) in bits.iter().enumerate() {
-            if *bit {
-                bitmap.set(i, true);
-            }
-        }
-
-        bitmap
+    fn new_bitmap(bits: &[bool]) -> BitVec {
+        BitVec::from_iter(bits)
     }
 
     #[test]
@@ -208,7 +215,7 @@ mod tests {
 
     fn check_find_unique_null(len: usize) {
         let input = NullVector::new(len);
-        let mut selected = MutableBitmap::from_len_zeroed(input.len());
+        let mut selected = BitVec::repeat(false, input.len());
         input.find_unique(&mut selected, None);
 
         let mut expect = vec![false; len];
@@ -217,7 +224,7 @@ mod tests {
         }
         check_bitmap(&expect, &selected);
 
-        let mut selected = MutableBitmap::from_len_zeroed(input.len());
+        let mut selected = BitVec::repeat(false, input.len());
         let prev = Some(NullVector::new(1));
         input.find_unique(&mut selected, prev.as_ref().map(|v| v as _));
         let expect = vec![false; len];
@@ -259,7 +266,7 @@ mod tests {
 
     fn check_find_unique_constant(len: usize) {
         let input = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[8])), len);
-        let mut selected = MutableBitmap::from_len_zeroed(len);
+        let mut selected = BitVec::repeat(false, len);
         input.find_unique(&mut selected, None);
 
         let mut expect = vec![false; len];
@@ -268,7 +275,7 @@ mod tests {
         }
         check_bitmap(&expect, &selected);
 
-        let mut selected = MutableBitmap::from_len_zeroed(len);
+        let mut selected = BitVec::repeat(false, len);
         let prev = Some(ConstantVector::new(
             Arc::new(Int32Vector::from_slice(&[8])),
             1,
@@ -326,7 +333,7 @@ mod tests {
     #[test]
     fn test_find_unique_string() {
         let input = StringVector::from_slice(&["a", "a", "b", "c"]);
-        let mut selected = MutableBitmap::from_len_zeroed(4);
+        let mut selected = BitVec::repeat(false, 4);
         input.find_unique(&mut selected, None);
         let expect = vec![true, false, true, true];
         check_bitmap(&expect, &selected);
@@ -338,7 +345,7 @@ mod tests {
             use $crate::vectors::$VectorType;
 
             let v = $VectorType::from_iterator([8, 8, 9, 10].into_iter().map($ValueType::$method));
-            let mut selected = MutableBitmap::from_len_zeroed(4);
+            let mut selected = BitVec::repeat(false, 4);
             v.find_unique(&mut selected, None);
             let expect = vec![true, false, true, true];
             check_bitmap(&expect, &selected);

@@ -1,8 +1,24 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 
 use common_error::prelude::*;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
+
+use crate::datanode::ObjectStoreConfig;
 
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
@@ -59,6 +75,13 @@ pub enum Error {
         source: TableError,
     },
 
+    #[snafu(display("Failed to drop table {}, source: {}", table_name, source))]
+    DropTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
 
@@ -67,9 +90,6 @@ pub enum Error {
         column_name: String,
         table_name: String,
     },
-
-    #[snafu(display("Missing required field in protobuf, field: {}", field))]
-    MissingField { field: String, backtrace: Backtrace },
 
     #[snafu(display("Missing timestamp column in request"))]
     MissingTimestampColumn { backtrace: Backtrace },
@@ -124,15 +144,12 @@ pub enum Error {
     #[snafu(display("Failed to storage engine, source: {}", source))]
     OpenStorageEngine { source: StorageError },
 
-    #[snafu(display("Failed to init backend, dir: {}, source: {}", dir, source))]
+    #[snafu(display("Failed to init backend, config: {:#?}, source: {}", config, source))]
     InitBackend {
-        dir: String,
-        source: std::io::Error,
+        config: ObjectStoreConfig,
+        source: object_store::Error,
         backtrace: Backtrace,
     },
-
-    #[snafu(display("Failed to convert datafusion type: {}", from))]
-    Conversion { from: String },
 
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String },
@@ -191,16 +208,16 @@ pub enum Error {
         source: common_grpc::Error,
     },
 
-    #[snafu(display("Column datatype error, source: {}", source))]
-    ColumnDataType {
+    #[snafu(display("Failed to convert alter expr to request: {}", source))]
+    AlterExprToRequest {
         #[snafu(backtrace)]
-        source: api::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display("Invalid column default constraint, source: {}", source))]
-    ColumnDefaultConstraint {
+    #[snafu(display("Failed to convert create expr to request: {}", source))]
+    CreateExprToRequest {
         #[snafu(backtrace)]
-        source: datatypes::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to parse SQL, source: {}", source))]
@@ -213,12 +230,6 @@ pub enum Error {
     StartScriptManager {
         #[snafu(backtrace)]
         source: script::error::Error,
-    },
-
-    #[snafu(display("Failed to collect RecordBatches, source: {}", source))]
-    CollectRecordBatches {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
     },
 
     #[snafu(display(
@@ -253,7 +264,7 @@ pub enum Error {
     #[snafu(display("Failed to insert data, source: {}", source))]
     InsertData {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Insert batch is empty"))]
@@ -275,6 +286,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Missing node id option in distributed mode"))]
+    MissingNodeId { backtrace: Backtrace },
+
+    #[snafu(display("Missing node id option in distributed mode"))]
+    MissingMetasrvOpts { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -290,6 +307,7 @@ impl ErrorExt for Error {
             Error::CreateTable { source, .. }
             | Error::GetTable { source, .. }
             | Error::AlterTable { source, .. } => source.status_code(),
+            Error::DropTable { source, .. } => source.status_code(),
 
             Error::Insert { source, .. } => source.status_code(),
 
@@ -300,8 +318,9 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::ColumnDefaultConstraint { source, .. }
-            | Error::CreateSchema { source, .. }
+            Error::AlterExprToRequest { source, .. }
+            | Error::CreateExprToRequest { source, .. } => source.status_code(),
+            Error::CreateSchema { source, .. }
             | Error::ConvertSchema { source, .. }
             | Error::VectorComputation { source } => source.status_code(),
 
@@ -309,7 +328,6 @@ impl ErrorExt for Error {
             | Error::InvalidSql { .. }
             | Error::KeyColumnNotFound { .. }
             | Error::InvalidPrimaryKey { .. }
-            | Error::MissingField { .. }
             | Error::MissingTimestampColumn { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
@@ -324,10 +342,8 @@ impl ErrorExt for Error {
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
             | Error::RegisterSchema { .. }
-            | Error::Conversion { .. }
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }
-            | Error::ColumnDataType { .. }
             | Error::Catalog { .. } => StatusCode::Internal,
 
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
@@ -335,13 +351,13 @@ impl ErrorExt for Error {
             Error::StartScriptManager { source } => source.status_code(),
             Error::OpenStorageEngine { source } => source.status_code(),
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
-            Error::CollectRecordBatches { source } => source.status_code(),
-
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::InsertData { source, .. } => source.status_code(),
             Error::EmptyInsertBatch => StatusCode::InvalidArguments,
             Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
             Error::BumpTableId { source, .. } => source.status_code(),
+            Error::MissingNodeId { .. } => StatusCode::InvalidArguments,
+            Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
         }
     }
 

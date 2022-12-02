@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
@@ -10,6 +24,27 @@ pub struct TableReference<'a> {
     pub catalog: &'a str,
     pub schema: &'a str,
     pub table: &'a str,
+}
+
+// TODO(LFC): Find a better place for `TableReference`,
+// so that we can reuse the default catalog and schema consts.
+// Could be done together with issue #559.
+impl<'a> TableReference<'a> {
+    pub fn bare(table: &'a str) -> Self {
+        TableReference {
+            catalog: "greptime",
+            schema: "public",
+            table,
+        }
+    }
+
+    pub fn full(catalog: &'a str, schema: &'a str, table: &'a str) -> Self {
+        TableReference {
+            catalog,
+            schema,
+            table,
+        }
+    }
 }
 
 impl<'a> Display for TableReference<'a> {
@@ -60,8 +95,8 @@ pub trait TableEngine: Send + Sync {
     /// Returns true when the given table is exists.
     fn table_exists<'a>(&self, ctx: &EngineContext, table_ref: &'a TableReference) -> bool;
 
-    /// Drops the given table.
-    async fn drop_table(&self, ctx: &EngineContext, request: DropTableRequest) -> Result<()>;
+    /// Drops the given table. Return true if the table is dropped, or false if the table doesn't exist.
+    async fn drop_table(&self, ctx: &EngineContext, request: DropTableRequest) -> Result<bool>;
 }
 
 pub type TableEngineRef = Arc<dyn TableEngine>;

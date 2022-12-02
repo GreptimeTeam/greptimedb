@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use client::Client;
@@ -55,8 +69,8 @@ pub(crate) async fn create_datanode_client(
     // Move client to an option so we can _move_ the inner value
     // on the first attempt to connect. All other attempts will fail.
     let mut client = Some(client);
-    // "0.0.0.0:3001" is just a placeholder, does not actually connect to it.
-    let addr = "0.0.0.0:3001";
+    // "127.0.0.1:3001" is just a placeholder, does not actually connect to it.
+    let addr = "127.0.0.1:3001";
     let channel_manager = ChannelManager::new();
     channel_manager
         .reset_with_connector(

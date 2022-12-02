@@ -1,15 +1,32 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use snafu::{ensure, ResultExt};
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
-use sqlparser::parser::Parser;
-use sqlparser::parser::ParserError;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::error::{
     self, InvalidDatabaseNameSnafu, InvalidTableNameSnafu, Result, SyntaxSnafu, TokenizerSnafu,
 };
+use crate::statements::describe::DescribeTable;
+use crate::statements::drop::DropTable;
+use crate::statements::explain::Explain;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
+use crate::statements::table_idents_to_full_name;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
@@ -72,11 +89,33 @@ impl<'a> ParserContext<'a> {
                         self.parse_show()
                     }
 
+                    Keyword::DESCRIBE | Keyword::DESC => {
+                        self.parser.next_token();
+                        self.parse_describe()
+                    }
+
                     Keyword::INSERT => self.parse_insert(),
 
                     Keyword::SELECT | Keyword::WITH | Keyword::VALUES => self.parse_query(),
 
                     Keyword::ALTER => self.parse_alter(),
+
+                    Keyword::DROP => self.parse_drop(),
+
+                    // TODO(LFC): Use "Keyword::USE" when we can upgrade to newer version of crate sqlparser.
+                    Keyword::NoKeyword if w.value.to_lowercase() == "use" => {
+                        self.parser.next_token();
+
+                        let database_name =
+                            self.parser
+                                .parse_identifier()
+                                .context(error::UnexpectedSnafu {
+                                    sql: self.sql,
+                                    expected: "a database name",
+                                    actual: self.peek_token_as_string(),
+                                })?;
+                        Ok(Statement::Use(database_name.value))
+                    }
 
                     // todo(hl) support more statements.
                     _ => self.unsupported(self.peek_token_as_string()),
@@ -97,7 +136,7 @@ impl<'a> ParserContext<'a> {
     }
 
     /// Parses SHOW statements
-    /// todo(hl) support `show settings`/`show create`/`show users` ect.
+    /// todo(hl) support `show settings`/`show create`/`show users` etc.
     fn parse_show(&mut self) -> Result<Statement> {
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             self.parse_show_databases()
@@ -145,7 +184,7 @@ impl<'a> ParserContext<'a> {
                 }));
             }
 
-            // SHOW TABLES [in | FROM] [DATABSE]
+            // SHOW TABLES [in | FROM] [DATABASE]
             Token::Word(w) => match w.keyword {
                 Keyword::IN | Keyword::FROM => {
                     self.parser.next_token();
@@ -204,8 +243,80 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::ShowTables(ShowTables { kind, database }))
     }
 
+    /// Parses DESCRIBE statements
+    fn parse_describe(&mut self) -> Result<Statement> {
+        if self.matches_keyword(Keyword::TABLE) {
+            self.parser.next_token();
+            self.parse_describe_table()
+        } else {
+            self.unsupported(self.peek_token_as_string())
+        }
+    }
+
+    fn parse_describe_table(&mut self) -> Result<Statement> {
+        let table_idents =
+            self.parser
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a table name",
+                    actual: self.peek_token_as_string(),
+                })?;
+        ensure!(
+            !table_idents.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: table_idents.to_string(),
+            }
+        );
+        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_idents)?;
+        Ok(Statement::DescribeTable(DescribeTable {
+            catalog_name,
+            schema_name,
+            table_name,
+        }))
+    }
+
     fn parse_explain(&mut self) -> Result<Statement> {
-        todo!()
+        let explain_statement =
+            self.parser
+                .parse_explain(false)
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a query statement",
+                    actual: self.peek_token_as_string(),
+                })?;
+
+        Ok(Statement::Explain(Explain::try_from(explain_statement)?))
+    }
+
+    fn parse_drop(&mut self) -> Result<Statement> {
+        self.parser.next_token();
+        if !self.matches_keyword(Keyword::TABLE) {
+            return self.unsupported(self.peek_token_as_string());
+        }
+        self.parser.next_token();
+
+        let table_ident =
+            self.parser
+                .parse_object_name()
+                .with_context(|_| error::UnexpectedSnafu {
+                    sql: self.sql,
+                    expected: "a table name",
+                    actual: self.peek_token_as_string(),
+                })?;
+        ensure!(
+            !table_ident.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: table_ident.to_string()
+            }
+        );
+
+        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_ident)?;
+        Ok(Statement::DropTable(DropTable {
+            catalog_name,
+            schema_name,
+            table_name,
+        }))
     }
 
     // Report unexpected token
@@ -275,6 +386,8 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use sqlparser::ast::{Query as SpQuery, Statement as SpStatement};
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
@@ -417,5 +530,94 @@ mod tests {
                 database: Some(_),
             })
         );
+    }
+
+    #[test]
+    pub fn test_explain() {
+        let sql = "EXPLAIN select * from foo";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        let select = sqlparser::ast::Select {
+            distinct: false,
+            top: None,
+            projection: vec![sqlparser::ast::SelectItem::Wildcard],
+            from: vec![sqlparser::ast::TableWithJoins {
+                relation: sqlparser::ast::TableFactor::Table {
+                    name: sqlparser::ast::ObjectName(vec![sqlparser::ast::Ident::new("foo")]),
+                    alias: None,
+                    args: vec![],
+                    with_hints: vec![],
+                },
+                joins: vec![],
+            }],
+            lateral_views: vec![],
+            selection: None,
+            group_by: vec![],
+            cluster_by: vec![],
+            distribute_by: vec![],
+            sort_by: vec![],
+            having: None,
+        };
+
+        let sp_statement = SpStatement::Query(Box::new(SpQuery {
+            with: None,
+            body: sqlparser::ast::SetExpr::Select(Box::new(select)),
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            fetch: None,
+            lock: None,
+        }));
+
+        let explain = Explain::try_from(SpStatement::Explain {
+            describe_alias: false,
+            analyze: false,
+            verbose: false,
+            statement: Box::new(sp_statement),
+        })
+        .unwrap();
+
+        assert_eq!(stmts[0], Statement::Explain(explain))
+    }
+
+    #[test]
+    pub fn test_drop_table() {
+        let sql = "DROP TABLE foo";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropTable(DropTable {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "foo".to_string()
+            })
+        );
+
+        let sql = "DROP TABLE my_schema.foo";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropTable(DropTable {
+                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+                schema_name: "my_schema".to_string(),
+                table_name: "foo".to_string()
+            })
+        );
+
+        let sql = "DROP TABLE my_catalog.my_schema.foo";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropTable(DropTable {
+                catalog_name: "my_catalog".to_string(),
+                schema_name: "my_schema".to_string(),
+                table_name: "foo".to_string()
+            })
+        )
     }
 }

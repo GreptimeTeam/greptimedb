@@ -2,6 +2,7 @@
 name = "common-base"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
 
 [dependencies]
 bitvec = "1.0"
@@ -10,3 +11,4 @@ common-error = { path = "../error" }
 paste = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 snafu = { version = "0.7", features = ["backtraces"] }
+

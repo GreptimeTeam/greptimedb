@@ -1,16 +1,34 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::sync::Arc;
+
 use api::result::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use api::v1::{
-    admin_expr, insert_expr, object_expr, select_expr, AdminExpr, AdminResult, CreateDatabaseExpr,
+    admin_expr, object_expr, select_expr, AdminExpr, AdminResult, Column, CreateDatabaseExpr,
     ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_insert::insertion_expr_to_request;
+use common_grpc::select::to_object_result;
+use common_grpc_expr::insertion_expr_to_request;
 use common_query::Output;
 use query::plan::LogicalPlan;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
+use session::context::QueryContext;
 use snafu::prelude::*;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::CreateDatabaseRequest;
@@ -22,7 +40,6 @@ use crate::error::{
 };
 use crate::instance::Instance;
 use crate::server::grpc::plan::PhysicalPlanner;
-use crate::server::grpc::select::to_object_result;
 
 impl Instance {
     pub async fn execute_grpc_insert(
@@ -30,7 +47,7 @@ impl Instance {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        values: insert_expr::Values,
+        insert_batches: Vec<(Vec<Column>, u32)>,
     ) -> Result<Output> {
         let schema_provider = self
             .catalog_manager
@@ -41,11 +58,7 @@ impl Instance {
             .context(CatalogSnafu)?
             .context(SchemaNotFoundSnafu { name: schema_name })?;
 
-        let insert_batches =
-            common_insert::insert_batches(&values.values).context(InsertDataSnafu)?;
-
         ensure!(!insert_batches.is_empty(), EmptyInsertBatchSnafu);
-
         let table = schema_provider
             .table(table_name)
             .context(CatalogSnafu)?
@@ -73,10 +86,10 @@ impl Instance {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        values: insert_expr::Values,
+        insert_batches: Vec<(Vec<Column>, u32)>,
     ) -> ObjectResult {
         match self
-            .execute_grpc_insert(catalog_name, schema_name, table_name, values)
+            .execute_grpc_insert(catalog_name, schema_name, table_name, insert_batches)
             .await
         {
             Ok(Output::AffectedRows(rows)) => ObjectResultBuilder::new()
@@ -84,6 +97,7 @@ impl Instance {
                 .mutate_result(rows as u32, 0)
                 .build(),
             Err(err) => {
+                common_telemetry::error!(err; "Failed to handle insert, catalog name: {}, schema name: {}, table name: {}", catalog_name, schema_name, table_name);
                 // TODO(fys): failure count
                 build_err_result(&err)
             }
@@ -99,7 +113,9 @@ impl Instance {
     async fn do_handle_select(&self, select_expr: SelectExpr) -> Result<Output> {
         let expr = select_expr.expr;
         match expr {
-            Some(select_expr::Expr::Sql(sql)) => self.execute_sql(&sql).await,
+            Some(select_expr::Expr::Sql(sql)) => {
+                self.execute_sql(&sql, Arc::new(QueryContext::new())).await
+            }
             Some(select_expr::Expr::LogicalPlan(plan)) => self.execute_logical(plan).await,
             Some(select_expr::Expr::PhysicalPlan(api::v1::PhysicalPlan { original_ql, plan })) => {
                 self.physical_planner
@@ -155,25 +171,13 @@ impl GrpcQueryHandler for Instance {
                 let catalog_name = DEFAULT_CATALOG_NAME;
                 let schema_name = &insert_expr.schema_name;
                 let table_name = &insert_expr.table_name;
-                let expr = insert_expr
-                    .expr
-                    .context(servers::error::InvalidQuerySnafu {
-                        reason: "missing `expr` in `InsertExpr`",
-                    })?;
 
                 // TODO(fys): _region_number is for later use.
                 let _region_number: u32 = insert_expr.region_number;
 
-                match expr {
-                    insert_expr::Expr::Values(values) => {
-                        self.handle_insert(catalog_name, schema_name, table_name, values)
-                            .await
-                    }
-                    insert_expr::Expr::Sql(sql) => {
-                        let output = self.execute_sql(&sql).await;
-                        to_object_result(output).await
-                    }
-                }
+                let insert_batches = vec![(insert_expr.columns, insert_expr.row_count)];
+                self.handle_insert(catalog_name, schema_name, table_name, insert_batches)
+                    .await
             }
             Some(object_expr::Expr::Select(select_expr)) => self.handle_select(select_expr).await,
             other => {
@@ -195,6 +199,9 @@ impl GrpcAdminHandler for Instance {
             Some(admin_expr::Expr::Alter(alter_expr)) => self.handle_alter(alter_expr).await,
             Some(admin_expr::Expr::CreateDatabase(create_database_expr)) => {
                 self.execute_create_database(create_database_expr).await
+            }
+            Some(admin_expr::Expr::DropTable(drop_table_expr)) => {
+                self.handle_drop_table(drop_table_expr).await
             }
             other => {
                 return servers::error::NotSupportedSnafu {

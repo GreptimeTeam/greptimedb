@@ -1,20 +1,31 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::codec::InsertBatch;
-use api::v1::{ColumnDataType, CreateExpr};
+use api::v1::{Column, ColumnDataType, CreateExpr};
 use datatypes::schema::ColumnSchema;
 use snafu::{ensure, ResultExt};
 use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use sqlparser::ast::{ColumnDef, TableConstraint};
 
-use crate::error::InvalidSqlSnafu;
-use crate::error::Result;
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
-    ParseSqlSnafu,
+    InvalidSqlSnafu, ParseSqlSnafu, Result,
 };
 
 pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
@@ -23,12 +34,12 @@ pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
 pub trait CreateExprFactory {
     async fn create_expr_by_stmt(&self, stmt: &CreateTable) -> Result<CreateExpr>;
 
-    async fn create_expr_by_insert_batch(
+    async fn create_expr_by_columns(
         &self,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        batch: &[InsertBatch],
+        columns: &[Column],
     ) -> crate::error::Result<CreateExpr>;
 }
 
@@ -41,20 +52,20 @@ impl CreateExprFactory for DefaultCreateExprFactory {
         create_to_expr(None, vec![0], stmt)
     }
 
-    async fn create_expr_by_insert_batch(
+    async fn create_expr_by_columns(
         &self,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        batch: &[InsertBatch],
+        columns: &[Column],
     ) -> Result<CreateExpr> {
         let table_id = None;
-        let create_expr = common_insert::build_create_expr_from_insertion(
+        let create_expr = common_grpc_expr::build_create_expr_from_insertion(
             catalog_name,
             schema_name,
             table_id,
             table_name,
-            batch,
+            columns,
         )
         .context(BuildCreateExprOnInsertionSnafu)?;
 

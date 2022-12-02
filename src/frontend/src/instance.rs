@@ -1,19 +1,32 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 pub(crate) mod distributed;
 mod influxdb;
 mod opentsdb;
 mod prometheus;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::result::ObjectResultBuilder;
 use api::v1::alter_expr::Kind;
-use api::v1::codec::InsertBatch;
 use api::v1::object_expr::Expr;
 use api::v1::{
-    admin_expr, insert_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr,
-    CreateExpr, InsertExpr, ObjectExpr, ObjectResult as GrpcObjectResult,
+    admin_expr, select_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, Column,
+    CreateDatabaseExpr, CreateExpr, DropTableExpr, InsertExpr, ObjectExpr,
+    ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
@@ -23,32 +36,39 @@ use client::{Client, Database, Select};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::{BoxedError, StatusCode};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_grpc::select::to_object_result;
 use common_query::Output;
+use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, error, info};
 use distributed::DistInstance;
 use meta_client::client::MetaClientBuilder;
 use meta_client::MetaClientOpts;
-use servers::error as server_error;
 use servers::query_handler::{
     GrpcAdminHandler, GrpcQueryHandler, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
     PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
 };
+use servers::{error as server_error, Mode};
+use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
+use sql::dialect::GenericDialect;
+use sql::parser::ParserContext;
 use sql::statements::create::Partitions;
+use sql::statements::explain::Explain;
 use sql::statements::insert::Insert;
 use sql::statements::statement::Statement;
-use sql::{dialect::GenericDialect, parser::ParserContext};
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterTableOnInsertionSnafu, AlterTableSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    CreateTableSnafu, DeserializeInsertBatchSnafu, FindNewColumnsOnInsertionSnafu, InsertSnafu,
-    Result, SchemaNotFoundSnafu, SelectSnafu,
+    CreateDatabaseSnafu, CreateTableSnafu, DropTableSnafu, FindNewColumnsOnInsertionSnafu,
+    InsertSnafu, MissingMetasrvOptsSnafu, Result, SchemaNotFoundSnafu, SelectSnafu,
+    UnsupportedExprSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
-use crate::frontend::{FrontendOptions, Mode};
+use crate::frontend::FrontendOptions;
 use crate::sql::insert_to_request;
+use crate::table::insert::insert_request_to_insert_batch;
 use crate::table::route::TableRoutes;
 
 #[async_trait]
@@ -112,7 +132,12 @@ impl Instance {
 
         instance.dist_instance = match &opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed(metasrv_addr) => {
+            Mode::Distributed => {
+                let metasrv_addr = &opts
+                    .meta_client_opts
+                    .as_ref()
+                    .context(MissingMetasrvOptsSnafu)?
+                    .metasrv_addrs;
                 info!(
                     "Creating Frontend instance in distributed mode with Meta server addr {:?}",
                     metasrv_addr
@@ -188,10 +213,15 @@ impl Instance {
         self.script_handler = Some(handler);
     }
 
-    pub async fn handle_select(&self, expr: Select, stmt: Statement) -> Result<Output> {
+    async fn handle_select(
+        &self,
+        expr: Select,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         if let Some(dist_instance) = &self.dist_instance {
             let Select::Sql(sql) = expr;
-            dist_instance.handle_sql(&sql, stmt).await
+            dist_instance.handle_sql(&sql, stmt, query_ctx).await
         } else {
             // TODO(LFC): Refactor consideration: Datanode should directly execute statement in standalone mode to avoid parse SQL again.
             // Find a better way to execute query between Frontend and Datanode in standalone mode.
@@ -229,24 +259,69 @@ impl Instance {
 
     /// Handle create database expr.
     pub async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
-        self.admin(DEFAULT_SCHEMA_NAME)
-            .create_database(expr)
-            .await
-            .and_then(admin_result_to_output)
-            .context(CreateTableSnafu)
+        let database_name = expr.database_name.clone();
+        if let Some(dist_instance) = &self.dist_instance {
+            dist_instance.handle_create_database(expr).await
+        } else {
+            // FIXME(hl): In order to get admin client to create schema, we need to use the default schema admin
+            self.admin(DEFAULT_SCHEMA_NAME)
+                .create_database(expr)
+                .await
+                .and_then(admin_result_to_output)
+                .context(CreateDatabaseSnafu {
+                    name: database_name,
+                })
+        }
     }
 
     /// Handle alter expr
     pub async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
-        self.admin(expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME))
-            .alter(expr)
-            .await
-            .and_then(admin_result_to_output)
-            .context(AlterTableSnafu)
+        match &self.dist_instance {
+            Some(dist_instance) => dist_instance.handle_alter_table(expr).await,
+            None => self
+                .admin(expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME))
+                .alter(expr)
+                .await
+                .and_then(admin_result_to_output)
+                .context(AlterTableSnafu),
+        }
+    }
+
+    /// Handle drop table expr
+    pub async fn handle_drop_table(&self, expr: DropTableExpr) -> Result<Output> {
+        match self.mode {
+            Mode::Standalone => self
+                .admin(&expr.schema_name)
+                .drop_table(expr)
+                .await
+                .and_then(admin_result_to_output)
+                .context(DropTableSnafu),
+            // TODO(ruihang): support drop table in distributed mode
+            Mode::Distributed => UnsupportedExprSnafu {
+                name: "Distributed DROP TABLE",
+            }
+            .fail(),
+        }
+    }
+
+    /// Handle explain expr
+    pub async fn handle_explain(
+        &self,
+        sql: &str,
+        explain_stmt: Explain,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        if let Some(dist_instance) = &self.dist_instance {
+            dist_instance
+                .handle_sql(sql, Statement::Explain(explain_stmt), query_ctx)
+                .await
+        } else {
+            Ok(Output::AffectedRows(0))
+        }
     }
 
     /// Handle batch inserts
-    pub async fn handle_inserts(&self, insert_expr: &[InsertExpr]) -> Result<Output> {
+    pub async fn handle_inserts(&self, insert_expr: Vec<InsertExpr>) -> Result<Output> {
         let mut success = 0;
         for expr in insert_expr {
             match self.handle_insert(expr).await? {
@@ -258,68 +333,20 @@ impl Instance {
     }
 
     /// Handle insert. for 'values' insertion, create/alter the destination table on demand.
-    pub async fn handle_insert(&self, insert_expr: &InsertExpr) -> Result<Output> {
+    pub async fn handle_insert(&self, mut insert_expr: InsertExpr) -> Result<Output> {
         let table_name = &insert_expr.table_name;
         let catalog_name = DEFAULT_CATALOG_NAME;
         let schema_name = &insert_expr.schema_name;
 
-        if let Some(expr) = &insert_expr.expr {
-            match expr {
-                api::v1::insert_expr::Expr::Values(values) => {
-                    // TODO(hl): gRPC should also support partitioning.
-                    let region_number = 0;
-                    self.handle_insert_values(
-                        catalog_name,
-                        schema_name,
-                        table_name,
-                        region_number,
-                        values,
-                    )
-                    .await
-                }
-                api::v1::insert_expr::Expr::Sql(_) => {
-                    // Frontend does not comprehend insert request that is raw SQL string
-                    self.database(schema_name)
-                        .insert(insert_expr.clone())
-                        .await
-                        .and_then(Output::try_from)
-                        .context(InsertSnafu)
-                }
-            }
-        } else {
-            // expr is empty
-            Ok(Output::AffectedRows(0))
-        }
-    }
+        let columns = &insert_expr.columns;
 
-    /// Handle insert requests in frontend
-    /// If insert is SQL string flavor, just forward to datanode
-    /// If insert is parsed InsertExpr, frontend should comprehend the schema and create/alter table on demand.
-    pub async fn handle_insert_values(
-        &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
-        region_number: u32,
-        values: &insert_expr::Values,
-    ) -> Result<Output> {
-        let insert_batches =
-            common_insert::insert_batches(&values.values).context(DeserializeInsertBatchSnafu)?;
-        self.create_or_alter_table_on_demand(
-            catalog_name,
-            schema_name,
-            table_name,
-            &insert_batches,
-        )
-        .await?;
+        self.create_or_alter_table_on_demand(catalog_name, schema_name, table_name, columns)
+            .await?;
+
+        insert_expr.region_number = 0;
+
         self.database(schema_name)
-            .insert(InsertExpr {
-                schema_name: schema_name.to_string(),
-                table_name: table_name.to_string(),
-                region_number,
-                options: Default::default(),
-                expr: Some(insert_expr::Expr::Values(values.clone())),
-            })
+            .insert(insert_expr)
             .await
             .and_then(Output::try_from)
             .context(InsertSnafu)
@@ -333,7 +360,7 @@ impl Instance {
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        insert_batches: &[InsertBatch],
+        columns: &[Column],
     ) -> Result<()> {
         match self
             .catalog_manager
@@ -355,13 +382,8 @@ impl Instance {
                     "Table {}.{}.{} does not exist, try create table",
                     catalog_name, schema_name, table_name,
                 );
-                self.create_table_by_insert_batches(
-                    catalog_name,
-                    schema_name,
-                    table_name,
-                    insert_batches,
-                )
-                .await?;
+                self.create_table_by_columns(catalog_name, schema_name, table_name, columns)
+                    .await?;
                 info!(
                     "Successfully created table on insertion: {}.{}.{}",
                     catalog_name, schema_name, table_name
@@ -369,7 +391,8 @@ impl Instance {
             }
             Some(table) => {
                 let schema = table.schema();
-                if let Some(add_columns) = common_insert::find_new_columns(&schema, insert_batches)
+
+                if let Some(add_columns) = common_grpc_expr::find_new_columns(&schema, columns)
                     .context(FindNewColumnsOnInsertionSnafu)?
                 {
                     info!(
@@ -394,17 +417,17 @@ impl Instance {
     }
 
     /// Infer create table expr from inserting data
-    async fn create_table_by_insert_batches(
+    async fn create_table_by_columns(
         &self,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
-        insert_batches: &[InsertBatch],
+        columns: &[Column],
     ) -> Result<Output> {
         // Create table automatically, build schema from data.
         let create_expr = self
             .create_expr_factory
-            .create_expr_by_insert_batch(catalog_name, schema_name, table_name, insert_batches)
+            .create_expr_by_columns(catalog_name, schema_name, table_name, columns)
             .await?;
 
         info!(
@@ -465,9 +488,10 @@ impl Instance {
 
         let insert_request = insert_to_request(&schema_provider, *insert)?;
 
-        let batch = crate::table::insert::insert_request_to_insert_batch(&insert_request)?;
+        let (columns, _row_count) =
+            crate::table::insert::insert_request_to_insert_batch(&insert_request)?;
 
-        self.create_or_alter_table_on_demand(&catalog, &schema, &table, &[batch])
+        self.create_or_alter_table_on_demand(&catalog, &schema, &table, &columns)
             .await?;
 
         let table = schema_provider
@@ -479,6 +503,39 @@ impl Instance {
             .insert(insert_request)
             .await
             .context(error::TableSnafu)
+    }
+
+    fn stmt_to_insert_batch(
+        &self,
+        catalog: &str,
+        schema: &str,
+        insert: Box<Insert>,
+    ) -> Result<(Vec<Column>, u32)> {
+        let catalog_provider = self.get_catalog(catalog)?;
+        let schema_provider = Self::get_schema(catalog_provider, schema)?;
+
+        let insert_request = insert_to_request(&schema_provider, *insert)?;
+        insert_request_to_insert_batch(&insert_request)
+    }
+
+    fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
+        let catalog_manager = &self.catalog_manager;
+        if let Some(catalog_manager) = catalog_manager {
+            ensure!(
+                catalog_manager
+                    .schema(DEFAULT_CATALOG_NAME, &db)
+                    .context(error::CatalogSnafu)?
+                    .is_some(),
+                error::SchemaNotFoundSnafu { schema_info: &db }
+            );
+
+            query_ctx.set_current_schema(&db);
+
+            Ok(Output::RecordBatches(RecordBatches::empty()))
+        } else {
+            // TODO(LFC): Handle "use" stmt here.
+            unimplemented!()
+        }
     }
 }
 
@@ -504,31 +561,42 @@ impl Instance {
     }
 }
 
+fn parse_stmt(sql: &str) -> Result<Statement> {
+    let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+        .context(error::ParseSqlSnafu)?;
+    // TODO(LFC): Support executing multiple SQL queries,
+    // which seems to be a major change to our whole server framework?
+    ensure!(
+        stmt.len() == 1,
+        error::InvalidSqlSnafu {
+            err_msg: "Currently executing multiple SQL queries are not supported."
+        }
+    );
+    Ok(stmt.remove(0))
+}
+
 #[async_trait]
 impl SqlQueryHandler for Instance {
-    async fn do_query(&self, query: &str) -> server_error::Result<Output> {
-        let mut stmt = ParserContext::create_with_dialect(query, &GenericDialect {})
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        let stmt = parse_stmt(query)
             .map_err(BoxedError::new)
             .context(server_error::ExecuteQuerySnafu { query })?;
-        if stmt.len() != 1 {
-            // TODO(LFC): Support executing multiple SQLs,
-            // which seems to be a major change to our whole server framework?
-            return server_error::NotSupportedSnafu {
-                feat: "Only one SQL is allowed to be executed at one time.",
-            }
-            .fail();
-        }
-        let stmt = stmt.remove(0);
 
         match stmt {
-            Statement::Query(_) => self
-                .handle_select(Select::Sql(query.to_string()), stmt)
-                .await
-                .map_err(BoxedError::new)
-                .context(server_error::ExecuteQuerySnafu { query }),
+            Statement::ShowDatabases(_)
+            | Statement::ShowTables(_)
+            | Statement::DescribeTable(_)
+            | Statement::Query(_) => {
+                self.handle_select(Select::Sql(query.to_string()), stmt, query_ctx)
+                    .await
+            }
             Statement::Insert(insert) => match self.mode {
                 Mode::Standalone => {
-                    let (_, schema_name, table_name) = insert
+                    let (catalog_name, schema_name, table_name) = insert
                         .full_table_name()
                         .context(error::ParseSqlSnafu)
                         .map_err(BoxedError::new)
@@ -536,19 +604,21 @@ impl SqlQueryHandler for Instance {
                             msg: "Failed to get table name",
                         })?;
 
+                    let (columns, row_count) = self
+                        .stmt_to_insert_batch(&catalog_name, &schema_name, insert)
+                        .map_err(BoxedError::new)
+                        .context(server_error::ExecuteQuerySnafu { query })?;
+
                     let expr = InsertExpr {
                         schema_name,
                         table_name,
-                        expr: Some(insert_expr::Expr::Sql(query.to_string())),
                         region_number: 0,
-                        options: HashMap::default(),
+                        columns,
+                        row_count,
                     };
-                    self.handle_insert(&expr)
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(server_error::ExecuteQuerySnafu { query })
+                    self.handle_insert(expr).await
                 }
-                Mode::Distributed(_) => {
+                Mode::Distributed => {
                     let affected = self
                         .sql_dist_insert(insert)
                         .await
@@ -569,37 +639,36 @@ impl SqlQueryHandler for Instance {
 
                 self.handle_create_table(create_expr, create.partitions)
                     .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })
             }
-
-            Statement::ShowDatabases(_) | Statement::ShowTables(_) => self
-                .handle_select(Select::Sql(query.to_string()), stmt)
-                .await
-                .map_err(BoxedError::new)
-                .context(server_error::ExecuteQuerySnafu { query }),
-
             Statement::CreateDatabase(c) => {
                 let expr = CreateDatabaseExpr {
                     database_name: c.name.to_string(),
                 };
-                self.handle_create_database(expr)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })
+                self.handle_create_database(expr).await
             }
-            Statement::Alter(alter_stmt) => self
-                .handle_alter(
+            Statement::Alter(alter_stmt) => {
+                self.handle_alter(
                     AlterExpr::try_from(alter_stmt)
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteAlterSnafu { query })?,
                 )
                 .await
-                .map_err(BoxedError::new)
-                .context(server_error::ExecuteQuerySnafu { query }),
-            Statement::ShowCreateTable(_) => {
-                return server_error::NotSupportedSnafu { feat: query }.fail()
             }
+            Statement::DropTable(drop_stmt) => {
+                let expr = DropTableExpr {
+                    catalog_name: drop_stmt.catalog_name,
+                    schema_name: drop_stmt.schema_name,
+                    table_name: drop_stmt.table_name,
+                };
+                self.handle_drop_table(expr).await
+            }
+            Statement::Explain(explain_stmt) => {
+                self.handle_explain(query, explain_stmt, query_ctx).await
+            }
+            Statement::ShowCreateTable(_) => {
+                return server_error::NotSupportedSnafu { feat: query }.fail();
+            }
+            Statement::Use(db) => self.handle_use(db, query_ctx),
         }
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu { query })
@@ -637,7 +706,8 @@ impl GrpcQueryHandler for Instance {
         if let Some(expr) = &query.expr {
             match expr {
                 Expr::Insert(insert) => {
-                    let result = self.handle_insert(insert).await;
+                    // TODO(fys): refactor, avoid clone
+                    let result = self.handle_insert(insert.clone()).await;
                     result
                         .map(|o| match o {
                             Output::AffectedRows(rows) => ObjectResultBuilder::new()
@@ -653,16 +723,41 @@ impl GrpcQueryHandler for Instance {
                             query: format!("{:?}", query),
                         })
                 }
-
-                // FIXME(hl): refactor
-                _ => self
-                    .database(DEFAULT_SCHEMA_NAME)
-                    .object(query.clone())
-                    .await
-                    .map_err(BoxedError::new)
-                    .with_context(|_| server_error::ExecuteQuerySnafu {
-                        query: format!("{:?}", query),
-                    }),
+                Expr::Select(select) => {
+                    let select = select
+                        .expr
+                        .as_ref()
+                        .context(server_error::InvalidQuerySnafu {
+                            reason: "empty query",
+                        })?;
+                    match select {
+                        select_expr::Expr::Sql(sql) => {
+                            let query_ctx = Arc::new(QueryContext::new());
+                            let output = SqlQueryHandler::do_query(self, sql, query_ctx).await;
+                            Ok(to_object_result(output).await)
+                        }
+                        _ => {
+                            if self.dist_instance.is_some() {
+                                return server_error::NotSupportedSnafu {
+                                    feat: "Executing plan directly in Frontend.",
+                                }
+                                .fail();
+                            }
+                            // FIXME(hl): refactor
+                            self.database(DEFAULT_SCHEMA_NAME)
+                                .object(query.clone())
+                                .await
+                                .map_err(BoxedError::new)
+                                .with_context(|_| server_error::ExecuteQuerySnafu {
+                                    query: format!("{:?}", query),
+                                })
+                        }
+                    }
+                }
+                _ => server_error::NotSupportedSnafu {
+                    feat: "Currently only insert and select is supported in GRPC service.",
+                }
+                .fail(),
             }
         } else {
             server_error::InvalidQuerySnafu {
@@ -678,6 +773,7 @@ fn get_schema_name(expr: &AdminExpr) -> &str {
         Some(admin_expr::Expr::Create(expr)) => expr.schema_name.as_deref(),
         Some(admin_expr::Expr::Alter(expr)) => expr.schema_name.as_deref(),
         Some(admin_expr::Expr::CreateDatabase(_)) | None => Some(DEFAULT_SCHEMA_NAME),
+        Some(admin_expr::Expr::DropTable(expr)) => Some(expr.schema_name.as_ref()),
     };
     schema_name.unwrap_or(DEFAULT_SCHEMA_NAME)
 }
@@ -704,11 +800,11 @@ impl GrpcAdminHandler for Instance {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::codec::{InsertBatch, SelectResult};
+    use api::v1::codec::SelectResult;
+    use api::v1::column::SemanticType;
     use api::v1::{
-        admin_expr, admin_result, column, column::SemanticType, object_expr, object_result,
-        select_expr, Column, ColumnDataType, ColumnDef as GrpcColumnDef, ExprHeader, MutateResult,
-        SelectExpr,
+        admin_expr, admin_result, column, object_expr, object_result, select_expr, Column,
+        ColumnDataType, ColumnDef as GrpcColumnDef, ExprHeader, MutateResult, SelectExpr,
     };
     use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;
@@ -718,6 +814,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_sql() {
+        let query_ctx = Arc::new(QueryContext::new());
+
         let instance = tests::create_frontend_instance().await;
 
         let sql = r#"CREATE TABLE demo(
@@ -729,7 +827,9 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(ts, host)
                         ) engine=mito with(regions=1);"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
             _ => unreachable!(),
@@ -740,14 +840,18 @@ mod tests {
                                 ('frontend.host2', null, null, 2000),
                                 ('frontend.host3', 3.3, 300, 3000)
                                 "#;
-        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 3),
             _ => unreachable!(),
         }
 
         let sql = "select * from demo";
-        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .unwrap();
         match output {
             Output::RecordBatches(recordbatches) => {
                 let pretty_print = recordbatches.pretty_print();
@@ -767,7 +871,9 @@ mod tests {
         };
 
         let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
-        let output = SqlQueryHandler::do_query(&*instance, sql).await.unwrap();
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .unwrap();
         match output {
             Output::RecordBatches(recordbatches) => {
                 let pretty_print = recordbatches.pretty_print();
@@ -863,22 +969,19 @@ mod tests {
         );
 
         // insert
-        let values = vec![InsertBatch {
-            columns: vec![
-                expected_host_col.clone(),
-                expected_cpu_col.clone(),
-                expected_mem_col.clone(),
-                expected_ts_col.clone(),
-            ],
-            row_count: 4,
-        }
-        .into()];
+        let columns = vec![
+            expected_host_col.clone(),
+            expected_cpu_col.clone(),
+            expected_mem_col.clone(),
+            expected_ts_col.clone(),
+        ];
+        let row_count = 4;
         let insert_expr = InsertExpr {
             schema_name: "public".to_string(),
             table_name: "demo".to_string(),
-            expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
-            options: HashMap::default(),
             region_number: 0,
+            columns,
+            row_count,
         };
         let object_expr = ObjectExpr {
             header: Some(ExprHeader::default()),

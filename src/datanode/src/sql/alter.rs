@@ -1,8 +1,22 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
-use sql::statements::{column_def_to_schema, table_idents_to_full_name};
+use sql::statements::column_def_to_schema;
 use table::engine::{EngineContext, TableReference};
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
 
@@ -39,10 +53,11 @@ impl SqlHandler {
         Ok(Output::AffectedRows(0))
     }
 
-    pub(crate) fn alter_to_request(&self, alter_table: AlterTable) -> Result<AlterTableRequest> {
-        let (catalog_name, schema_name, table_name) =
-            table_idents_to_full_name(alter_table.table_name()).context(error::ParseSqlSnafu)?;
-
+    pub(crate) fn alter_to_request(
+        &self,
+        alter_table: AlterTable,
+        table_ref: TableReference,
+    ) -> Result<AlterTableRequest> {
         let alter_kind = match alter_table.alter_operation() {
             AlterTableOperation::AddConstraint(table_constraint) => {
                 return error::InvalidSqlSnafu {
@@ -58,11 +73,14 @@ impl SqlHandler {
                     is_key: false,
                 }],
             },
+            AlterTableOperation::DropColumn { name } => AlterKind::DropColumns {
+                names: vec![name.value.clone()],
+            },
         };
         Ok(AlterTableRequest {
-            catalog_name: Some(catalog_name),
-            schema_name: Some(schema_name),
-            table_name,
+            catalog_name: Some(table_ref.catalog.to_string()),
+            schema_name: Some(table_ref.schema.to_string()),
+            table_name: table_ref.table.to_string(),
             alter_kind,
         })
     }
@@ -95,7 +113,9 @@ mod tests {
     async fn test_alter_to_request_with_adding_column() {
         let handler = create_mock_sql_handler().await;
         let alter_table = parse_sql("ALTER TABLE my_metric_1 ADD tagk_i STRING Null;");
-        let req = handler.alter_to_request(alter_table).unwrap();
+        let req = handler
+            .alter_to_request(alter_table, TableReference::bare("my_metric_1"))
+            .unwrap();
         assert_eq!(req.catalog_name, Some("greptime".to_string()));
         assert_eq!(req.schema_name, Some("public".to_string()));
         assert_eq!(req.table_name, "my_metric_1");

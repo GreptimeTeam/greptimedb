@@ -1,18 +1,28 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 
 use datatypes::value::Value;
-use datatypes::vectors::VectorBuilder;
-use datatypes::vectors::VectorRef;
-use snafu::ensure;
-use snafu::OptionExt;
+use datatypes::vectors::{VectorBuilder, VectorRef};
+use snafu::{ensure, OptionExt};
 use store_api::storage::RegionNumber;
 use table::requests::InsertRequest;
 
-use crate::error::Error;
-use crate::error::FindPartitionColumnSnafu;
-use crate::error::FindRegionSnafu;
-use crate::error::InvalidInsertRequestSnafu;
-use crate::error::Result;
+use crate::error::{
+    Error, FindPartitionColumnSnafu, FindRegionSnafu, InvalidInsertRequestSnafu, Result,
+};
 use crate::partitioning::PartitionRuleRef;
 
 pub type DistInsertRequest = HashMap<RegionNumber, InsertRequest>;
@@ -22,7 +32,7 @@ pub struct WriteSpliter {
 }
 
 impl WriteSpliter {
-    pub fn with_patition_rule(rule: PartitionRuleRef<Error>) -> Self {
+    pub fn with_partition_rule(rule: PartitionRuleRef<Error>) -> Self {
         Self {
             partition_rule: rule,
         }
@@ -159,15 +169,15 @@ fn partition_insert_request(
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-    use std::{collections::HashMap, result::Result, sync::Arc};
+    use std::collections::HashMap;
+    use std::result::Result;
+    use std::sync::Arc;
 
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datatypes::{
-        data_type::ConcreteDataType,
-        types::{BooleanType, StringType},
-        value::Value,
-        vectors::VectorBuilder,
-    };
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::types::{BooleanType, StringType};
+    use datatypes::value::Value;
+    use datatypes::vectors::VectorBuilder;
     use serde::{Deserialize, Serialize};
     use store_api::storage::RegionNumber;
     use table::requests::InsertRequest;
@@ -176,10 +186,8 @@ mod tests {
         check_req, find_partitioning_values, partition_insert_request, partition_values,
         WriteSpliter,
     };
-    use crate::{
-        error::Error,
-        partitioning::{PartitionExpr, PartitionRule, PartitionRuleRef},
-    };
+    use crate::error::Error;
+    use crate::partitioning::{PartitionExpr, PartitionRule, PartitionRuleRef};
 
     #[test]
     fn test_insert_req_check() {
@@ -196,7 +204,7 @@ mod tests {
     fn test_writer_spliter() {
         let insert = mock_insert_request();
         let rule = Arc::new(MockPartitionRule) as PartitionRuleRef<Error>;
-        let spliter = WriteSpliter::with_patition_rule(rule);
+        let spliter = WriteSpliter::with_partition_rule(rule);
         let ret = spliter.split(insert).unwrap();
 
         assert_eq!(2, ret.len());
@@ -346,16 +354,16 @@ mod tests {
         let vectors = vec![v1, v2];
 
         let row_0_vals = partition_values(&vectors, 0);
-        let expeted: Vec<Value> = vec![true.into(), "host1".into()];
-        assert_eq!(expeted, row_0_vals);
+        let expected: Vec<Value> = vec![true.into(), "host1".into()];
+        assert_eq!(expected, row_0_vals);
 
         let row_1_vals = partition_values(&vectors, 1);
-        let expeted: Vec<Value> = vec![false.into(), Value::Null];
-        assert_eq!(expeted, row_1_vals);
+        let expected: Vec<Value> = vec![false.into(), Value::Null];
+        assert_eq!(expected, row_1_vals);
 
         let row_2_vals = partition_values(&vectors, 2);
-        let expeted: Vec<Value> = vec![true.into(), "host3".into()];
-        assert_eq!(expeted, row_2_vals);
+        let expected: Vec<Value> = vec![true.into(), "host3".into()];
+        assert_eq!(expected, row_2_vals);
     }
 
     fn mock_insert_request() -> InsertRequest {

@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Common structs and utilities for read.
 
 mod dedup;
@@ -6,7 +20,7 @@ mod merge;
 use std::cmp::Ordering;
 
 use async_trait::async_trait;
-use datatypes::arrow::bitmap::MutableBitmap;
+use common_base::BitVec;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{BooleanVector, MutableVector, VectorRef};
@@ -113,7 +127,7 @@ pub trait BatchOp {
     /// - `batch` and `prev` have different number of columns (unless `prev` is
     /// empty).
     /// - `selected.len()` is less than the number of rows.
-    fn find_unique(&self, batch: &Batch, selected: &mut MutableBitmap, prev: Option<&Batch>);
+    fn find_unique(&self, batch: &Batch, selected: &mut BitVec, prev: Option<&Batch>);
 
     /// Filters the `batch`, returns elements matching the `filter` (i.e. where the values
     /// are true).

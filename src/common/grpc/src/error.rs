@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 
 use api::DecodeError;
@@ -55,6 +69,21 @@ pub enum Error {
         source: tonic::transport::Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to collect RecordBatches, source: {}", source))]
+    CollectRecordBatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to convert Arrow type: {}", from))]
+    Conversion { from: String, backtrace: Backtrace },
+
+    #[snafu(display("Column datatype error, source: {}", source))]
+    ColumnDataType {
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -69,7 +98,10 @@ impl ErrorExt for Error {
             }
             Error::NewProjection { .. }
             | Error::DecodePhysicalPlanNode { .. }
-            | Error::CreateChannel { .. } => StatusCode::Internal,
+            | Error::CreateChannel { .. }
+            | Error::Conversion { .. } => StatusCode::Internal,
+            Error::CollectRecordBatches { source } => source.status_code(),
+            Error::ColumnDataType { source } => source.status_code(),
         }
     }
 
@@ -84,8 +116,7 @@ impl ErrorExt for Error {
 
 #[cfg(test)]
 mod tests {
-    use snafu::OptionExt;
-    use snafu::ResultExt;
+    use snafu::{OptionExt, ResultExt};
 
     use super::*;
 

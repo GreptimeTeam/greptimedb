@@ -1,15 +1,26 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
-use common_grpc::channel_manager::ChannelConfig;
-use common_grpc::channel_manager::ChannelManager;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use tower::service_fn;
 
-use crate::metasrv::MetaSrv;
-use crate::metasrv::MetaSrvOptions;
-use crate::metasrv::SelectorRef;
+use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
 use crate::service::store::etcd::EtcdStore;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::store::memory::MemStore;

@@ -1,11 +1,23 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::net::SocketAddr;
 
 use axum::http::StatusCode as HttpStatusCode;
-use axum::{
-    response::{IntoResponse, Response},
-    Json,
-};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use common_error::prelude::*;
 use serde_json::json;
 
@@ -180,6 +192,9 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Tls is required for {}, plain connection is rejected", server))]
+    TlsRequired { server: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -222,6 +237,7 @@ impl ErrorExt for Error {
 
             InfluxdbLinesWrite { source, .. } => source.status_code(),
             Hyper { .. } => StatusCode::Unknown,
+            TlsRequired { .. } => StatusCode::Unknown,
             StartFrontend { source, .. } => source.status_code(),
         }
     }

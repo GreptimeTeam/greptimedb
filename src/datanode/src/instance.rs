@@ -1,25 +1,48 @@
-use std::time::Duration;
-use std::{fs, path, sync::Arc};
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
+use std::sync::Arc;
+use std::time::Duration;
+use std::{fs, path};
+
+use backon::ExponentialBackoff;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
-use frontend::frontend::Mode;
-use log_store::fs::{config::LogConfig, log::LocalFileLogStore};
+use log_store::fs::config::LogConfig;
+use log_store::fs::log::LocalFileLogStore;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
-use object_store::layers::LoggingLayer;
-use object_store::{services::fs::Builder, util, ObjectStore};
+use mito::config::EngineConfig as TableEngineConfig;
+use mito::engine::MitoEngine;
+use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
+use object_store::services::fs::Builder as FsBuilder;
+use object_store::services::s3::Builder as S3Builder;
+use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
+use servers::Mode;
 use snafu::prelude::*;
-use storage::{config::EngineConfig as StorageEngineConfig, EngineImpl};
+use storage::config::EngineConfig as StorageEngineConfig;
+use storage::EngineImpl;
 use table::table::TableIdProviderRef;
-use table_engine::config::EngineConfig as TableEngineConfig;
-use table_engine::engine::MitoEngine;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
-use crate::error::{self, CatalogSnafu, MetaClientInitSnafu, NewCatalogSnafu, Result};
+use crate::error::{
+    self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
+    NewCatalogSnafu, Result,
+};
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
 use crate::server::grpc::plan::PhysicalPlanner;
@@ -53,8 +76,14 @@ impl Instance {
 
         let meta_client = match opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed(_) => {
-                let meta_client = new_metasrv_client(opts.node_id, &opts.meta_client_opts).await?;
+            Mode::Distributed => {
+                let meta_client = new_metasrv_client(
+                    opts.node_id.context(MissingNodeIdSnafu)?,
+                    opts.meta_client_opts
+                        .as_ref()
+                        .context(MissingMetasrvOptsSnafu)?,
+                )
+                .await?;
                 Some(Arc::new(meta_client))
             }
         };
@@ -72,23 +101,35 @@ impl Instance {
         // create remote catalog manager
         let (catalog_manager, factory, table_id_provider) = match opts.mode {
             Mode::Standalone => {
-                let catalog = Arc::new(
-                    catalog::local::LocalCatalogManager::try_new(table_engine.clone())
-                        .await
-                        .context(CatalogSnafu)?,
-                );
-                let factory = QueryEngineFactory::new(catalog.clone());
-                (
-                    catalog.clone() as CatalogManagerRef,
-                    factory,
-                    Some(catalog as TableIdProviderRef),
-                )
+                if opts.enable_memory_catalog {
+                    let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
+                    let factory = QueryEngineFactory::new(catalog.clone());
+
+                    (
+                        catalog.clone() as CatalogManagerRef,
+                        factory,
+                        Some(catalog as TableIdProviderRef),
+                    )
+                } else {
+                    let catalog = Arc::new(
+                        catalog::local::LocalCatalogManager::try_new(table_engine.clone())
+                            .await
+                            .context(CatalogSnafu)?,
+                    );
+                    let factory = QueryEngineFactory::new(catalog.clone());
+
+                    (
+                        catalog.clone() as CatalogManagerRef,
+                        factory,
+                        Some(catalog as TableIdProviderRef),
+                    )
+                }
             }
 
-            Mode::Distributed(_) => {
+            Mode::Distributed => {
                 let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
                     table_engine.clone(),
-                    opts.node_id,
+                    opts.node_id.context(MissingNodeIdSnafu)?,
                     Arc::new(MetaKvBackend {
                         client: meta_client.as_ref().unwrap().clone(),
                     }),
@@ -104,15 +145,19 @@ impl Instance {
 
         let heartbeat_task = match opts.mode {
             Mode::Standalone => None,
-            Mode::Distributed(_) => Some(HeartbeatTask::new(
-                opts.node_id, /*node id not set*/
+            Mode::Distributed => Some(HeartbeatTask::new(
+                opts.node_id.context(MissingNodeIdSnafu)?,
                 opts.rpc_addr.clone(),
                 meta_client.as_ref().unwrap().clone(),
             )),
         };
         Ok(Self {
             query_engine: query_engine.clone(),
-            sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
+            sql_handler: SqlHandler::new(
+                table_engine,
+                catalog_manager.clone(),
+                query_engine.clone(),
+            ),
             catalog_manager,
             physical_planner: PhysicalPlanner::new(query_engine),
             script_executor,
@@ -143,24 +188,64 @@ impl Instance {
 }
 
 pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
-    // TODO(dennis): supports other backend
-    let data_dir = util::normalize_dir(match store_config {
-        ObjectStoreConfig::File { data_dir } => data_dir,
-    });
+    let object_store = match store_config {
+        ObjectStoreConfig::File { data_dir } => new_fs_object_store(data_dir).await,
+        ObjectStoreConfig::S3 { .. } => new_s3_object_store(store_config).await,
+    };
 
+    object_store.map(|object_store| {
+        object_store
+            .layer(RetryLayer::new(ExponentialBackoff::default().with_jitter()))
+            .layer(MetricsLayer)
+            .layer(LoggingLayer)
+            .layer(TracingLayer)
+    })
+}
+
+pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
+    let (root, secret_key, key_id, bucket) = match store_config {
+        ObjectStoreConfig::S3 {
+            bucket,
+            root,
+            access_key_id,
+            secret_access_key,
+        } => (root, secret_access_key, access_key_id, bucket),
+        _ => unreachable!(),
+    };
+
+    let root = util::normalize_dir(root);
+    info!("The s3 storage bucket is: {}, root is: {}", bucket, &root);
+
+    let accessor = S3Builder::default()
+        .root(&root)
+        .bucket(bucket)
+        .access_key_id(key_id)
+        .secret_access_key(secret_key)
+        .build()
+        .with_context(|_| error::InitBackendSnafu {
+            config: store_config.clone(),
+        })?;
+
+    Ok(ObjectStore::new(accessor))
+}
+
+pub(crate) async fn new_fs_object_store(data_dir: &str) -> Result<ObjectStore> {
+    let data_dir = util::normalize_dir(data_dir);
     fs::create_dir_all(path::Path::new(&data_dir))
         .context(error::CreateDirSnafu { dir: &data_dir })?;
+    info!("The file storage directory is: {}", &data_dir);
 
-    info!("The storage directory is: {}", &data_dir);
+    let atomic_write_dir = format!("{}/.tmp/", data_dir);
 
-    let accessor = Builder::default()
+    let accessor = FsBuilder::default()
         .root(&data_dir)
+        .atomic_write_dir(&atomic_write_dir)
         .build()
-        .context(error::InitBackendSnafu { dir: &data_dir })?;
+        .context(error::InitBackendSnafu {
+            config: ObjectStoreConfig::File { data_dir },
+        })?;
 
-    let object_store = ObjectStore::new(accessor).layer(LoggingLayer); // Add logging
-
-    Ok(object_store)
+    Ok(ObjectStore::new(accessor))
 }
 
 /// Create metasrv client instance and spawn heartbeat loop.
@@ -180,7 +265,7 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Resul
         .channel_manager(channel_manager)
         .build();
     meta_client
-        .start(&[&meta_config.metasrv_addr])
+        .start(&meta_config.metasrv_addrs)
         .await
         .context(MetaClientInitSnafu)?;
 

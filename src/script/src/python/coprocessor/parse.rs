@@ -1,18 +1,27 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashSet;
 
 use datatypes::arrow::datatypes::DataType;
-use rustpython_parser::{
-    ast,
-    ast::{Arguments, Location},
-    parser,
-};
+use rustpython_parser::ast::{Arguments, Location};
+use rustpython_parser::{ast, parser};
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
 
-use crate::python::coprocessor::compile;
-use crate::python::coprocessor::AnnotationInfo;
-use crate::python::coprocessor::Coprocessor;
+use crate::python::coprocessor::{compile, AnnotationInfo, Coprocessor};
 use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
 
 #[cfg_attr(test, derive(Deserialize))]
@@ -277,7 +286,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                 let s = s.as_str();
                 if visited_key.contains(s) {
                     return fail_parse_error!(
-                        format!("`{s}` occur multiple times in decorator's arguements' list."),
+                        format!("`{s}` occur multiple times in decorator's arguments' list."),
                         Some(kw.location),
                     );
                 }
@@ -299,7 +308,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
             None => {
                 return fail_parse_error!(
                     format!(
-                        "Expect explictly set both `args` and `returns`, found \n{:#?}",
+                        "Expect explicitly set both `args` and `returns`, found \n{:#?}",
                         &kw.node
                     ),
                     Some(kw.location),
@@ -356,14 +365,14 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<DecoratorArgs> {
     }
 }
 
-// get type annotaion in arguments
+// get type annotation in arguments
 fn get_arg_annotations(args: &Arguments) -> Result<Vec<Option<AnnotationInfo>>> {
     // get arg types from type annotation>
     args.args
         .iter()
         .map(|arg| {
             if let Some(anno) = &arg.node.annotation {
-                // for there is erro handling for parse_annotation
+                // for there is error handling for parse_annotation
                 parse_annotation(anno).map(Some)
             } else {
                 Ok(None)
@@ -463,7 +472,7 @@ pub fn parse_and_compile_copr(script: &str) -> Result<Coprocessor> {
                         .collect()
                 };
 
-                // make sure both arguments&returns in fucntion
+                // make sure both arguments&returns in function
                 // and in decorator have same length
                 ensure!(
                     deco_args.arg_names.len() == arg_types.len(),

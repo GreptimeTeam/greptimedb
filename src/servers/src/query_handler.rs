@@ -1,9 +1,24 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use api::prometheus::remote::{ReadRequest, WriteRequest};
 use api::v1::{AdminExpr, AdminResult, ObjectExpr, ObjectResult};
 use async_trait::async_trait;
 use common_query::Output;
+use session::context::QueryContextRef;
 
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
@@ -30,7 +45,7 @@ pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 
 #[async_trait]
 pub trait SqlQueryHandler {
-    async fn do_query(&self, query: &str) -> Result<Output>;
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Result<Output>;
 }
 
 #[async_trait]

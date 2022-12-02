@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Planner, QueryEngine implementations based on DataFusion.
 
 mod catalog_adapter;
@@ -10,32 +24,31 @@ use catalog::CatalogListRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
-use common_query::physical_plan::PhysicalPlanAdapter;
-use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan};
-use common_query::{prelude::ScalarUdf, Output};
+use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
+use common_query::prelude::ScalarUdf;
+use common_query::Output;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use sql::dialect::GenericDialect;
+use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
-use sql::{dialect::GenericDialect, parser::ParserContext};
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
-use crate::metric;
-use crate::query_engine::{QueryContext, QueryEngineState};
-use crate::{
-    datafusion::planner::{DfContextProviderAdapter, DfPlanner},
-    error::Result,
-    executor::QueryExecutor,
-    logical_optimizer::LogicalOptimizer,
-    physical_optimizer::PhysicalOptimizer,
-    physical_planner::PhysicalPlanner,
-    plan::LogicalPlan,
-    planner::Planner,
-    QueryEngine,
-};
+use crate::datafusion::planner::{DfContextProviderAdapter, DfPlanner};
+use crate::error::Result;
+use crate::executor::QueryExecutor;
+use crate::logical_optimizer::LogicalOptimizer;
+use crate::physical_optimizer::PhysicalOptimizer;
+use crate::physical_planner::PhysicalPlanner;
+use crate::plan::LogicalPlan;
+use crate::planner::Planner;
+use crate::query_engine::{QueryEngineContext, QueryEngineState};
+use crate::{metric, QueryEngine};
 
 pub(crate) struct DatafusionQueryEngine {
     state: QueryEngineState,
@@ -49,6 +62,7 @@ impl DatafusionQueryEngine {
     }
 }
 
+// TODO(LFC): Refactor consideration: extract a "Planner" that stores query context and execute queries inside.
 #[async_trait::async_trait]
 impl QueryEngine for DatafusionQueryEngine {
     fn name(&self) -> &str {
@@ -63,21 +77,25 @@ impl QueryEngine for DatafusionQueryEngine {
         Ok(statement.remove(0))
     }
 
-    fn statement_to_plan(&self, stmt: Statement) -> Result<LogicalPlan> {
-        let context_provider = DfContextProviderAdapter::new(self.state.clone());
+    fn statement_to_plan(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan> {
+        let context_provider = DfContextProviderAdapter::new(self.state.clone(), query_ctx);
         let planner = DfPlanner::new(&context_provider);
 
         planner.statement_to_plan(stmt)
     }
 
-    fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan> {
+    fn sql_to_plan(&self, sql: &str, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
         let stmt = self.sql_to_statement(sql)?;
-        self.statement_to_plan(stmt)
+        self.statement_to_plan(stmt, query_ctx)
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
-        let mut ctx = QueryContext::new(self.state.clone());
+        let mut ctx = QueryEngineContext::new(self.state.clone());
         let logical_plan = self.optimize_logical_plan(&mut ctx, plan)?;
         let physical_plan = self.create_physical_plan(&mut ctx, &logical_plan).await?;
         let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
@@ -88,7 +106,7 @@ impl QueryEngine for DatafusionQueryEngine {
     }
 
     async fn execute_physical(&self, plan: &Arc<dyn PhysicalPlan>) -> Result<Output> {
-        let ctx = QueryContext::new(self.state.clone());
+        let ctx = QueryEngineContext::new(self.state.clone());
         Ok(Output::Stream(self.execute_stream(&ctx, plan).await?))
     }
 
@@ -115,7 +133,7 @@ impl QueryEngine for DatafusionQueryEngine {
 impl LogicalOptimizer for DatafusionQueryEngine {
     fn optimize_logical_plan(
         &self,
-        _ctx: &mut QueryContext,
+        _: &mut QueryEngineContext,
         plan: &LogicalPlan,
     ) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
@@ -139,7 +157,7 @@ impl LogicalOptimizer for DatafusionQueryEngine {
 impl PhysicalPlanner for DatafusionQueryEngine {
     async fn create_physical_plan(
         &self,
-        _ctx: &mut QueryContext,
+        _: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
         let _timer = timer!(metric::METRIC_CREATE_PHYSICAL_ELAPSED);
@@ -171,7 +189,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
 impl PhysicalOptimizer for DatafusionQueryEngine {
     fn optimize_physical_plan(
         &self,
-        _ctx: &mut QueryContext,
+        _: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
         let _timer = timer!(metric::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
@@ -199,7 +217,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
 impl QueryExecutor for DatafusionQueryEngine {
     async fn execute_stream(
         &self,
-        ctx: &QueryContext,
+        ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
         let _timer = timer!(metric::METRIC_EXEC_PLAN_ELAPSED);
@@ -207,7 +225,6 @@ impl QueryExecutor for DatafusionQueryEngine {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan
                 .execute(0, ctx.state().runtime())
-                .await
                 .context(error::ExecutePhysicalPlanSnafu)?),
             _ => {
                 // merge into a single partition
@@ -232,14 +249,14 @@ impl QueryExecutor for DatafusionQueryEngine {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::UInt64Array;
     use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
     use catalog::{CatalogList, CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
-    use datafusion::field_util::FieldExt;
-    use datafusion::field_util::SchemaExt;
+    use datafusion::field_util::{FieldExt, SchemaExt};
+    use datatypes::arrow::array::UInt64Array;
+    use session::context::QueryContext;
     use table::table::numbers::NumbersTable;
 
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
@@ -267,7 +284,9 @@ mod tests {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
-        let plan = engine.sql_to_plan(sql).unwrap();
+        let plan = engine
+            .sql_to_plan(sql, Arc::new(QueryContext::new()))
+            .unwrap();
 
         assert_eq!(
             format!("{:?}", plan),
@@ -283,7 +302,9 @@ mod tests {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
-        let plan = engine.sql_to_plan(sql).unwrap();
+        let plan = engine
+            .sql_to_plan(sql, Arc::new(QueryContext::new()))
+            .unwrap();
         let output = engine.execute(&plan).await.unwrap();
 
         match output {

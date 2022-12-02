@@ -1,21 +1,29 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 
-use api::v1::meta::CreateRequest as PbCreateRequest;
-use api::v1::meta::Partition as PbPartition;
-use api::v1::meta::Region as PbRegion;
-use api::v1::meta::RouteRequest as PbRouteRequest;
-use api::v1::meta::RouteResponse as PbRouteResponse;
-use api::v1::meta::Table as PbTable;
-use serde::Deserialize;
-use serde::Serialize;
-use serde::Serializer;
+use api::v1::meta::{
+    CreateRequest as PbCreateRequest, Partition as PbPartition, Region as PbRegion,
+    RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
+};
+use serde::{Deserialize, Serialize, Serializer};
 use snafu::OptionExt;
 
 use crate::error;
 use crate::error::Result;
-use crate::rpc::util;
-use crate::rpc::Peer;
-use crate::rpc::TableName;
+use crate::rpc::{util, Peer, TableName};
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteRequest {
@@ -178,7 +186,7 @@ impl TryFrom<PbTable> for Table {
         let table_name = t
             .table_name
             .context(error::RouteInfoCorruptedSnafu {
-                err_msg: "table name requied",
+                err_msg: "table name required",
             })?
             .into();
         Ok(Self {
@@ -266,15 +274,11 @@ impl From<PbPartition> for Partition {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::Partition as PbPartition;
-    use api::v1::meta::Peer as PbPeer;
-    use api::v1::meta::Region as PbRegion;
-    use api::v1::meta::RegionRoute as PbRegionRoute;
-    use api::v1::meta::RouteRequest as PbRouteRequest;
-    use api::v1::meta::RouteResponse as PbRouteResponse;
-    use api::v1::meta::Table as PbTable;
-    use api::v1::meta::TableName as PbTableName;
-    use api::v1::meta::TableRoute as PbTableRoute;
+    use api::v1::meta::{
+        Partition as PbPartition, Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
+        RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
+        TableName as PbTableName, TableRoute as PbTableRoute,
+    };
 
     use super::*;
 

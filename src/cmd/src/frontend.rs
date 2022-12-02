@@ -1,11 +1,28 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use clap::Parser;
-use frontend::frontend::{Frontend, FrontendOptions, Mode};
+use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
+use meta_client::MetaClientOpts;
+use servers::http::HttpOptions;
+use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -80,7 +97,10 @@ impl TryFrom<StartCommand> for FrontendOptions {
         };
 
         if let Some(addr) = cmd.http_addr {
-            opts.http_addr = Some(addr);
+            opts.http_options = Some(HttpOptions {
+                addr,
+                ..Default::default()
+            });
         }
         if let Some(addr) = cmd.grpc_addr {
             opts.grpc_options = Some(GrpcOptions {
@@ -110,13 +130,14 @@ impl TryFrom<StartCommand> for FrontendOptions {
             opts.influxdb_options = Some(InfluxdbOptions { enable });
         }
         if let Some(metasrv_addr) = cmd.metasrv_addr {
-            opts.mode = Mode::Distributed(
-                metasrv_addr
-                    .split(',')
-                    .into_iter()
-                    .map(|x| x.trim().to_string())
-                    .collect::<Vec<String>>(),
-            );
+            opts.meta_client_opts
+                .get_or_insert_with(MetaClientOpts::default)
+                .metasrv_addrs = metasrv_addr
+                .split(',')
+                .map(&str::trim)
+                .map(&str::to_string)
+                .collect::<Vec<_>>();
+            opts.mode = Mode::Distributed;
         }
         Ok(opts)
     }
@@ -124,6 +145,8 @@ impl TryFrom<StartCommand> for FrontendOptions {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -140,7 +163,7 @@ mod tests {
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();
-        assert_eq!(opts.http_addr, Some("127.0.0.1:1234".to_string()));
+        assert_eq!(opts.http_options.as_ref().unwrap().addr, "127.0.0.1:1234");
         assert_eq!(opts.mysql_options.as_ref().unwrap().addr, "127.0.0.1:5678");
         assert_eq!(
             opts.postgres_options.as_ref().unwrap().addr,
@@ -170,5 +193,34 @@ mod tests {
         );
 
         assert!(!opts.influxdb_options.unwrap().enable);
+    }
+
+    #[test]
+    fn test_read_from_config_file() {
+        let command = StartCommand {
+            http_addr: None,
+            grpc_addr: None,
+            mysql_addr: None,
+            postgres_addr: None,
+            opentsdb_addr: None,
+            influxdb_enable: None,
+            config_file: Some(format!(
+                "{}/../../config/frontend.example.toml",
+                std::env::current_dir().unwrap().as_path().to_str().unwrap()
+            )),
+            metasrv_addr: None,
+        };
+
+        let fe_opts = FrontendOptions::try_from(command).unwrap();
+        assert_eq!(Mode::Distributed, fe_opts.mode);
+        assert_eq!("127.0.0.1:3001".to_string(), fe_opts.datanode_rpc_addr);
+        assert_eq!(
+            "127.0.0.1:4000".to_string(),
+            fe_opts.http_options.as_ref().unwrap().addr
+        );
+        assert_eq!(
+            Duration::from_secs(30),
+            fe_opts.http_options.as_ref().unwrap().timeout
+        );
     }
 }

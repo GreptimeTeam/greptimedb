@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Use regex to filter out some MySQL federated components' emitted statements.
 //! Inspired by Databend's "[mysql_federated.rs](https://github.com/datafuselabs/databend/blob/ac706bf65845e6895141c96c0a10bad6fdc2d367/src/query/service/src/servers/mysql/mysql_federated.rs)".
 
@@ -12,21 +26,25 @@ use datatypes::vectors::StringVector;
 use once_cell::sync::Lazy;
 use regex::bytes::RegexSet;
 use regex::Regex;
+use session::context::QueryContextRef;
 
 // TODO(LFC): Include GreptimeDB's version and git commit tag etc.
 const MYSQL_VERSION: &str = "8.0.26";
 
 static SELECT_VAR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^(SELECT @@(.*))").unwrap());
 static MYSQL_CONN_JAVA_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(/\\* mysql-connector-java(.*))").unwrap());
+    Lazy::new(|| Regex::new("(?i)^(/\\* mysql-connector-j(.*))").unwrap());
 static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'lower_case_table_names'(.*))").unwrap());
 static SHOW_COLLATION_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(show collation where(.*))").unwrap());
 static SHOW_VARIABLES_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES(.*))").unwrap());
+
 static SELECT_VERSION_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(SELECT VERSION\(\s*\))").unwrap());
+static SELECT_DATABASE_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^(SELECT DATABASE\(\s*\))").unwrap());
 
 // SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP());
 static SELECT_TIME_DIFF_FUNC_PATTERN: Lazy<Regex> =
@@ -234,13 +252,18 @@ fn check_show_variables(query: &str) -> Option<Output> {
 }
 
 // Check for SET or others query, this is the final check of the federated query.
-fn check_others(query: &str) -> Option<Output> {
+fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     if OTHER_NOT_SUPPORTED_STMT.is_match(query.as_bytes()) {
         return Some(Output::RecordBatches(RecordBatches::empty()));
     }
 
     let recordbatches = if SELECT_VERSION_PATTERN.is_match(query) {
         Some(select_function("version()", MYSQL_VERSION))
+    } else if SELECT_DATABASE_PATTERN.is_match(query) {
+        let schema = query_ctx
+            .current_schema()
+            .unwrap_or_else(|| "NULL".to_string());
+        Some(select_function("database()", &schema))
     } else if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
         Some(select_function(
             "TIMEDIFF(NOW(), UTC_TIMESTAMP())",
@@ -254,7 +277,7 @@ fn check_others(query: &str) -> Option<Output> {
 
 // Check whether the query is a federated or driver setup command,
 // and return some faked results if there are any.
-pub fn check(query: &str) -> Option<Output> {
+pub(crate) fn check(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     // First to check the query is like "select @@variables".
     let output = check_select_variable(query);
     if output.is_some() {
@@ -268,25 +291,27 @@ pub fn check(query: &str) -> Option<Output> {
     }
 
     // Last check.
-    check_others(query)
+    check_others(query, query_ctx)
 }
 
 #[cfg(test)]
 mod test {
+    use session::context::QueryContext;
+
     use super::*;
 
     #[test]
     fn test_check() {
         let query = "select 1";
-        let result = check(query);
+        let result = check(query, Arc::new(QueryContext::new()));
         assert!(result.is_none());
 
         let query = "select versiona";
-        let output = check(query);
+        let output = check(query, Arc::new(QueryContext::new()));
         assert!(output.is_none());
 
         fn test(query: &str, expected: Vec<&str>) {
-            let output = check(query);
+            let output = check(query, Arc::new(QueryContext::new()));
             match output.unwrap() {
                 Output::RecordBatches(r) => {
                     assert_eq!(r.pretty_print().lines().collect::<Vec<_>>(), expected)

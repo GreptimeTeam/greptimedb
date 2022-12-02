@@ -1,15 +1,27 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use crate::engine::{EngineContext, TableEngine, TableReference};
+use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::test_util::EmptyTable;
-use crate::{
-    engine::{EngineContext, TableEngine, TableReference},
-    requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest},
-    Result, TableRef,
-};
+use crate::{Result, TableRef};
 
 #[derive(Default)]
 pub struct MockTableEngine {
@@ -85,7 +97,7 @@ impl TableEngine for MockTableEngine {
         unimplemented!()
     }
 
-    async fn drop_table(&self, _ctx: &EngineContext, _request: DropTableRequest) -> Result<()> {
+    async fn drop_table(&self, _ctx: &EngineContext, _request: DropTableRequest) -> Result<bool> {
         unimplemented!()
     }
 }

@@ -1,19 +1,28 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::router_client::RouterClient;
-use api::v1::meta::CreateRequest;
-use api::v1::meta::RouteRequest;
-use api::v1::meta::RouteResponse;
+use api::v1::meta::{CreateRequest, RouteRequest, RouteResponse};
 use common_grpc::channel_manager::ChannelManager;
-use snafu::ensure;
-use snafu::OptionExt;
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
-use crate::client::load_balance as lb;
-use crate::client::Id;
+use crate::client::{load_balance as lb, Id};
 use crate::error;
 use crate::error::Result;
 

@@ -1,15 +1,28 @@
-//! Methods that perform convertion between Substrait's type ([Type](SType)) and GreptimeDB's type ([ConcreteDataType]).
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Methods that perform conversion between Substrait's type ([Type](SType)) and GreptimeDB's type ([ConcreteDataType]).
 //!
 //! Substrait use [type variation](https://substrait.io/types/type_variations/) to express different "logical types".
-//! Current we only have variations on integer types. Variation 0 (system prefered) are the same with base types, which
+//! Current we only have variations on integer types. Variation 0 (system preferred) are the same with base types, which
 //! are signed integer (i.e. I8 -> [i8]), and Variation 1 stands for unsigned integer (i.e. I8 -> [u8]).
 
 use datatypes::prelude::ConcreteDataType;
 use substrait_proto::protobuf::r#type::{self as s_type, Kind, Nullability};
 use substrait_proto::protobuf::Type as SType;
 
-use crate::error::Result;
-use crate::error::{UnsupportedConcreteTypeSnafu, UnsupportedSubstraitTypeSnafu};
+use crate::error::{Result, UnsupportedConcreteTypeSnafu, UnsupportedSubstraitTypeSnafu};
 
 macro_rules! substrait_kind {
     ($desc:ident, $concrete_ty:ident) => {{

@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 mod context;
 mod state;
 
@@ -9,12 +23,13 @@ use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::physical_plan::PhysicalPlan;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
+use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
 use crate::datafusion::DatafusionQueryEngine;
 use crate::error::Result;
 use crate::plan::LogicalPlan;
-pub use crate::query_engine::context::QueryContext;
+pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
 
 #[async_trait::async_trait]
@@ -23,9 +38,10 @@ pub trait QueryEngine: Send + Sync {
 
     fn sql_to_statement(&self, sql: &str) -> Result<Statement>;
 
-    fn statement_to_plan(&self, stmt: Statement) -> Result<LogicalPlan>;
+    fn statement_to_plan(&self, stmt: Statement, query_ctx: QueryContextRef)
+        -> Result<LogicalPlan>;
 
-    fn sql_to_plan(&self, sql: &str) -> Result<LogicalPlan>;
+    fn sql_to_plan(&self, sql: &str, query_ctx: QueryContextRef) -> Result<LogicalPlan>;
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
 

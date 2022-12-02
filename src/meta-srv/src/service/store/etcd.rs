@@ -1,32 +1,32 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
-use api::v1::meta::BatchPutRequest;
-use api::v1::meta::BatchPutResponse;
-use api::v1::meta::CompareAndPutRequest;
-use api::v1::meta::CompareAndPutResponse;
-use api::v1::meta::DeleteRangeRequest;
-use api::v1::meta::DeleteRangeResponse;
-use api::v1::meta::KeyValue;
-use api::v1::meta::PutRequest;
-use api::v1::meta::PutResponse;
-use api::v1::meta::RangeRequest;
-use api::v1::meta::RangeResponse;
-use api::v1::meta::ResponseHeader;
+use api::v1::meta::{
+    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
+    DeleteRangeRequest, DeleteRangeResponse, KeyValue, PutRequest, PutResponse, RangeRequest,
+    RangeResponse, ResponseHeader,
+};
 use common_error::prelude::*;
-use etcd_client::Client;
-use etcd_client::Compare;
-use etcd_client::CompareOp;
-use etcd_client::DeleteOptions;
-use etcd_client::GetOptions;
-use etcd_client::PutOptions;
-use etcd_client::Txn;
-use etcd_client::TxnOp;
-use etcd_client::TxnOpResponse;
+use etcd_client::{
+    Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
+};
 
 use crate::error;
 use crate::error::Result;
-use crate::service::store::kv::KvStore;
-use crate::service::store::kv::KvStoreRef;
+use crate::service::store::kv::{KvStore, KvStoreRef};
 
 #[derive(Clone)]
 pub struct EtcdStore {

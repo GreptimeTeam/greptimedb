@@ -2,6 +2,7 @@
 edition = "2021"
 name = "script"
 version = "0.1.0"
+license = "Apache-2.0"
 
 [features]
 default = ["python"]
@@ -15,7 +16,7 @@ python = [
   "dep:rustpython-compiler-core",
   "dep:rustpython-bytecode",
   "dep:rustpython-ast",
-  "dep:paste"
+  "dep:paste",
 ]
 
 [dependencies]
@@ -43,7 +44,11 @@ rustpython-bytecode = { git = "https://github.com/RustPython/RustPython", option
 rustpython-compiler = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
 rustpython-compiler-core = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
 rustpython-parser = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
-rustpython-vm = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
+rustpython-vm = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d", features = [
+  "default",
+  "freeze-stdlib",
+] }
+session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
 table = { path = "../table" }
@@ -51,10 +56,10 @@ tokio = { version = "1.0", features = ["full"] }
 
 [dev-dependencies]
 log-store = { path = "../log-store" }
+mito = { path = "../mito", features = ["test"] }
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 storage = { path = "../storage" }
-table-engine = { path = "../table-engine", features = ["test"] }
 tempdir = "0.3"
 tokio = { version = "1.18", features = ["full"] }
 tokio-test = "0.4"

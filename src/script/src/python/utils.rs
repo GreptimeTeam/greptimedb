@@ -1,19 +1,30 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use datafusion::arrow::array::{ArrayRef, BooleanArray, NullArray, PrimitiveArray, Utf8Array};
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue as DFColValue;
 use datatypes::arrow::datatypes::DataType;
-use rustpython_vm::builtins::{PyBool, PyFloat, PyInt, PyList, PyStr};
-use rustpython_vm::{builtins::PyBaseExceptionRef, PyObjectRef, PyPayload, PyRef, VirtualMachine};
-use snafu::OptionExt;
-use snafu::ResultExt;
-use snafu::{Backtrace, GenerateImplicitData};
+use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
+use rustpython_vm::{PyObjectRef, PyPayload, PyRef, VirtualMachine};
+use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
 
 use crate::python::builtins::try_into_columnar_value;
-use crate::python::error;
 use crate::python::error::ret_other_error_with;
-use crate::python::PyVector;
+use crate::python::{error, PyVector};
 
 pub(crate) type PyVectorRef = PyRef<PyVector>;
 

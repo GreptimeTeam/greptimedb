@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::iter::Iterator;
 
@@ -5,7 +19,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{util, DirEntry, ObjectStore};
+use object_store::{util, Object, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -49,7 +63,7 @@ pub fn is_delta_file(file_name: &str) -> bool {
 }
 
 pub struct ObjectStoreLogIterator {
-    iter: Box<dyn Iterator<Item = (ManifestVersion, DirEntry)> + Send + Sync>,
+    iter: Box<dyn Iterator<Item = (ManifestVersion, Object)> + Send + Sync>,
 }
 
 #[async_trait]
@@ -58,8 +72,7 @@ impl LogIterator for ObjectStoreLogIterator {
 
     async fn next_log(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         match self.iter.next() {
-            Some((v, e)) => {
-                let object = e.into_object();
+            Some((v, object)) => {
                 let bytes = object.read().await.context(ReadObjectSnafu {
                     path: object.path(),
                 })?;
@@ -142,7 +155,7 @@ impl ManifestLogStorage for ManifestObjectStore {
             .await
             .context(ListObjectsSnafu { path: &self.path })?;
 
-        let mut entries: Vec<(ManifestVersion, DirEntry)> = streamer
+        let mut entries: Vec<(ManifestVersion, Object)> = streamer
             .try_filter_map(|e| async move {
                 let file_name = e.name();
                 if is_delta_file(file_name) {
@@ -264,7 +277,8 @@ impl ManifestLogStorage for ManifestObjectStore {
 
 #[cfg(test)]
 mod tests {
-    use object_store::{backend::fs, ObjectStore};
+    use object_store::backend::fs;
+    use object_store::ObjectStore;
     use tempdir::TempDir;
 
     use super::*;

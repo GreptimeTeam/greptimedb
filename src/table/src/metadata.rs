@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -116,7 +130,7 @@ impl TableMeta {
     ) -> Result<TableMetaBuilder> {
         match alter_kind {
             AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
-            AlterKind::RemoveColumns { names } => self.remove_columns(table_name, names),
+            AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
         }
     }
 
@@ -562,7 +576,7 @@ mod tests {
         // Add more columns so we have enough candidate columns to remove.
         let meta = add_columns_to_meta(&meta);
 
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("col2"), String::from("my_field")],
         };
         let new_meta = meta
@@ -611,7 +625,7 @@ mod tests {
             .unwrap();
 
         // Remove columns in reverse order to test whether timestamp index is valid.
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("col3"), String::from("col1")],
         };
         let new_meta = meta
@@ -671,7 +685,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("unknown")],
         };
 
@@ -694,7 +708,7 @@ mod tests {
             .unwrap();
 
         // Remove column in primary key.
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("col1")],
         };
 
@@ -705,7 +719,7 @@ mod tests {
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
 
         // Remove timestamp column.
-        let alter_kind = AlterKind::RemoveColumns {
+        let alter_kind = AlterKind::DropColumns {
             names: vec![String::from("ts")],
         };
 

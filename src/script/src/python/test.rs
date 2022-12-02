@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 // for debug purpose, also this is already a
 // test module so allow print_stdout shouldn't be a problem?
@@ -15,11 +29,10 @@ use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
 
 use super::error::{get_error_reason_loc, visualize_loc};
-use crate::python::coprocessor::AnnotationInfo;
-use crate::python::error::pretty_print_error_in_src;
-use crate::python::{
-    coprocessor, coprocessor::parse::parse_and_compile_copr, coprocessor::Coprocessor, error::Error,
-};
+use crate::python::coprocessor;
+use crate::python::coprocessor::parse::parse_and_compile_copr;
+use crate::python::coprocessor::{AnnotationInfo, Coprocessor};
+use crate::python::error::{pretty_print_error_in_src, Error};
 
 #[derive(Deserialize, Debug)]
 struct TestCase {

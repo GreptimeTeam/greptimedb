@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Parquet sst format.
 
 use std::collections::HashMap;
@@ -108,9 +122,19 @@ impl<'a> ParquetWriter<'a> {
                 sink.close().await.context(error::WriteParquetSnafu)?;
                 drop(sink);
 
-                writer.close().await.context(error::WriteObjectSnafu {
-                    path: self.file_path,
-                })
+                writer
+                    .close()
+                    .await
+                    .map_err(|err| {
+                        object_store::Error::new(
+                            object_store::ErrorKind::Unexpected,
+                            "writer close failed",
+                        )
+                        .set_source(err)
+                    })
+                    .context(error::WriteObjectSnafu {
+                        path: self.file_path,
+                    })
             }
         )
         .map(|_| ())
@@ -296,8 +320,9 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
-    use crate::memtable::tests as memtable_tests;
-    use crate::memtable::{DefaultMemtableBuilder, IterContext, MemtableBuilder};
+    use crate::memtable::{
+        tests as memtable_tests, DefaultMemtableBuilder, IterContext, MemtableBuilder,
+    };
 
     #[tokio::test]
     async fn test_parquet_writer() {

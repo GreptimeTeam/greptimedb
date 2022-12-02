@@ -1,12 +1,23 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! compile script to code object
 
 use rustpython_bytecode::CodeObject;
 use rustpython_compiler_core::compile as python_compile;
-use rustpython_parser::{
-    ast,
-    ast::{Located, Location},
-    parser,
-};
+use rustpython_parser::ast::{Located, Location};
+use rustpython_parser::{ast, parser};
 use snafu::ResultExt;
 
 use crate::fail_parse_error;
@@ -56,7 +67,7 @@ fn gen_call(name: &str, deco_args: &DecoratorArgs, loc: &Location) -> ast::Stmt<
 
 /// stripe the decorator(`@xxxx`) and type annotation(for type checker is done in rust function), add one line in the ast for call function with given parameter, and compiler into `CodeObject`
 ///
-/// The rationale is that rustpython's vm is not very efficient according to [offical benchmark](https://rustpython.github.io/benchmarks),
+/// The rationale is that rustpython's vm is not very efficient according to [official benchmark](https://rustpython.github.io/benchmarks),
 /// So we should avoid running too much Python Bytecode, hence in this function we delete `@` decorator(instead of actually write a decorator in python)
 /// And add a function call in the end and also
 /// strip type annotation
@@ -97,8 +108,8 @@ pub fn compile_script(name: &str, deco_args: &DecoratorArgs, script: &str) -> Re
             }
             loc = Some(stmt.location);
 
-            // This manually construct ast has no corrsponding code
-            // in the script, so just give it a location that don't exist in orginal script
+            // This manually construct ast has no corresponding code
+            // in the script, so just give it a location that don't exist in original script
             // (which doesn't matter because Location usually only used in pretty print errors)
         }
         // Append statement which calling coprocessor function.

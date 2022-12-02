@@ -1,8 +1,21 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 mod pow;
 
 use std::sync::Arc;
 
-use arrow::array::UInt32Array;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -10,9 +23,9 @@ use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
-use datafusion::field_util::FieldExt;
-use datafusion::field_util::SchemaExt;
+use datafusion::field_util::{FieldExt, SchemaExt};
 use datafusion::logical_plan::LogicalPlanBuilder;
+use datatypes::arrow::array::UInt32Array;
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -24,6 +37,7 @@ use query::plan::LogicalPlan;
 use query::query_engine::QueryEngineFactory;
 use query::QueryEngine;
 use rand::Rng;
+use session::context::QueryContext;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
 use table::test_util::MemTable;
@@ -121,7 +135,10 @@ async fn test_udf() -> Result<()> {
 
     engine.register_udf(udf);
 
-    let plan = engine.sql_to_plan("select pow(number, number) as p from numbers limit 10")?;
+    let plan = engine.sql_to_plan(
+        "select pow(number, number) as p from numbers limit 10",
+        Arc::new(QueryContext::new()),
+    )?;
 
     let output = engine.execute(&plan).await?;
     let recordbatch = match output {
@@ -229,7 +246,9 @@ where
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     let sql = format!("SELECT {} FROM {}", column_name, table_name);
-    let plan = engine.sql_to_plan(&sql).unwrap();
+    let plan = engine
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
+        .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
@@ -317,7 +336,9 @@ async fn execute_median<'a>(
         "select MEDIAN({}) as median from {}",
         column_name, table_name
     );
-    let plan = engine.sql_to_plan(&sql).unwrap();
+    let plan = engine
+        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
+        .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {

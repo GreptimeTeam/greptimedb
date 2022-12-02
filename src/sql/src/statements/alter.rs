@@ -1,5 +1,19 @@
-use api::v1::{alter_expr, AddColumn, AlterExpr};
-use sqlparser::ast::{ColumnDef, ObjectName, TableConstraint};
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use api::v1::{alter_expr, AddColumn, AlterExpr, DropColumn};
+use sqlparser::ast::{ColumnDef, Ident, ObjectName, TableConstraint};
 
 use crate::error::UnsupportedAlterTableStatementSnafu;
 use crate::statements::{sql_column_def_to_grpc_column_def, table_idents_to_full_name};
@@ -33,7 +47,8 @@ pub enum AlterTableOperation {
     AddConstraint(TableConstraint),
     /// `ADD [ COLUMN ] <column_def>`
     AddColumn { column_def: ColumnDef },
-    // TODO(hl): support remove column
+    /// `DROP COLUMN <name>`
+    DropColumn { name: Ident },
 }
 
 /// Convert `AlterTable` statement to `AlterExpr` for gRPC
@@ -56,6 +71,11 @@ impl TryFrom<AlterTable> for AlterExpr {
                         column_def: Some(sql_column_def_to_grpc_column_def(column_def)?),
                         is_key: false,
                     }],
+                })
+            }
+            AlterTableOperation::DropColumn { name } => {
+                alter_expr::Kind::DropColumns(api::v1::DropColumns {
+                    drop_columns: vec![DropColumn { name: name.value }],
                 })
             }
         };

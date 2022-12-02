@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 
 use common_error::prelude::*;
@@ -47,6 +61,17 @@ pub enum Error {
 
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
+        #[snafu(backtrace)]
+        source: api::error::Error,
+    },
+
+    #[snafu(display(
+        "Invalid column proto definition, column: {}, source: {}",
+        column,
+        source
+    ))]
+    InvalidColumnDef {
+        column: String,
         #[snafu(backtrace)]
         source: api::error::Error,
     },
@@ -212,8 +237,21 @@ pub enum Error {
         source: client::Error,
     },
 
+    #[snafu(display("Failed to create database: {}, source: {}", name, source))]
+    CreateDatabase {
+        name: String,
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
     #[snafu(display("Failed to alter table, source: {}", source))]
     AlterTable {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
+    #[snafu(display("Failed to drop table, source: {}", source))]
+    DropTable {
         #[snafu(backtrace)]
         source: client::Error,
     },
@@ -245,25 +283,25 @@ pub enum Error {
     #[snafu(display("Failed to build CreateExpr on insertion: {}", source))]
     BuildCreateExprOnInsertion {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to find new columns on insertion: {}", source))]
     FindNewColumnsOnInsertion {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to deserialize insert batching: {}", source))]
     DeserializeInsertBatch {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to deserialize insert batching: {}", source))]
     InsertBatchToRequest {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
@@ -363,17 +401,50 @@ pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to create a RecordBatch, source: {}", source))]
-    NewRecordBatch {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
-    },
-
     #[snafu(display("Failed to do vector computation, source: {}", source))]
     VectorComputation {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Failed to build DataFusion logical plan, source: {}", source))]
+    BuildDfLogicalPlan {
+        source: datafusion_common::DataFusionError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to convert Arrow schema, source: {}", source))]
+    ConvertArrowSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display("Failed to collect Recordbatch stream, source: {}", source))]
+    CollectRecordbatchStream {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Failed to create Recordbatches, source: {}", source))]
+    CreateRecordbatches {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Missing meta_client_opts section in config"))]
+    MissingMetasrvOpts { backtrace: Backtrace },
+
+    #[snafu(display("Failed to convert AlterExpr to AlterRequest, source: {}", source))]
+    AlterExprToRequest {
+        #[snafu(backtrace)]
+        source: common_grpc_expr::error::Error,
+    },
+
+    #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
+    LeaderNotFound { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Table already exists: `{}`", table))]
+    TableAlreadyExist { table: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -403,14 +474,18 @@ impl ErrorExt for Error {
 
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::ConvertScalarValue { source, .. }
-            | Error::VectorComputation { source } => source.status_code(),
+            | Error::VectorComputation { source }
+            | Error::ConvertArrowSchema { source } => source.status_code(),
 
             Error::ConnectDatanode { source, .. }
             | Error::RequestDatanode { source }
             | Error::InvalidAdminResult { source } => source.status_code(),
 
-            Error::ColumnDataType { .. }
-            | Error::FindDatanode { .. }
+            Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
+                source.status_code()
+            }
+
+            Error::FindDatanode { .. }
             | Error::GetCache { .. }
             | Error::FindTableRoutes { .. }
             | Error::SerializeJson { .. }
@@ -419,7 +494,8 @@ impl ErrorExt for Error {
             | Error::FindLeaderPeer { .. }
             | Error::FindRegionPartition { .. }
             | Error::IllegalTableRoutesData { .. }
-            | Error::UnsupportedExpr { .. } => StatusCode::Internal,
+            | Error::UnsupportedExpr { .. }
+            | Error::BuildDfLogicalPlan { .. } => StatusCode::Internal,
 
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
                 StatusCode::Unexpected
@@ -439,19 +515,27 @@ impl ErrorExt for Error {
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
             Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
-            Error::CreateTable { source, .. } => source.status_code(),
-            Error::AlterTable { source, .. } => source.status_code(),
-            Error::Insert { source, .. } => source.status_code(),
+            Error::CreateTable { source, .. }
+            | Error::AlterTable { source, .. }
+            | Error::DropTable { source }
+            | Error::Select { source, .. }
+            | Error::CreateDatabase { source, .. }
+            | Error::CreateTableOnInsertion { source, .. }
+            | Error::AlterTableOnInsertion { source, .. }
+            | Error::Insert { source, .. } => source.status_code(),
             Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
-            Error::CreateTableOnInsertion { source, .. } => source.status_code(),
-            Error::AlterTableOnInsertion { source, .. } => source.status_code(),
-            Error::Select { source, .. } => source.status_code(),
             Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
             Error::DeserializeInsertBatch { source, .. } => source.status_code(),
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
             Error::InsertBatchToRequest { source, .. } => source.status_code(),
-            Error::NewRecordBatch { source } => source.status_code(),
+            Error::CollectRecordbatchStream { source } | Error::CreateRecordbatches { source } => {
+                source.status_code()
+            }
+            Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
+            Error::AlterExprToRequest { source, .. } => source.status_code(),
+            Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
+            Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
         }
     }
 

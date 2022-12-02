@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -5,19 +19,15 @@ use common_time::Timestamp;
 use datatypes::prelude::*;
 use datatypes::vectors::{Int64Vector, TimestampVector};
 use log_store::fs::log::LocalFileLogStore;
-use store_api::storage::PutOperation;
-use store_api::storage::WriteRequest;
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
-    ColumnDescriptorBuilder, ColumnId, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot,
-    WriteResponse,
+    ColumnDescriptorBuilder, ColumnId, PutOperation, Region, RegionMeta, ScanRequest, SchemaRef,
+    Snapshot, WriteRequest, WriteResponse,
 };
 use tempdir::TempDir;
 
 use crate::region::tests::{self, FileTesterBase};
-use crate::region::OpenOptions;
-use crate::region::RegionImpl;
-use crate::region::{RawRegionMetadata, RegionMetadata};
+use crate::region::{OpenOptions, RawRegionMetadata, RegionImpl, RegionMetadata};
 use crate::test_util;
 use crate::test_util::config_util;
 use crate::test_util::descriptor_util::RegionDescBuilder;

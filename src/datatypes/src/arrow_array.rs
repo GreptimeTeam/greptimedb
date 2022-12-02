@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use arrow::array::{
     self, Array, BinaryArray as ArrowBinaryArray, ListArray,
     MutableBinaryArray as ArrowMutableBinaryArray, MutableUtf8Array, PrimitiveArray, Utf8Array,
@@ -85,9 +99,11 @@ pub fn arrow_array_get(array: &dyn Array, idx: usize) -> Result<Value> {
 
 #[cfg(test)]
 mod test {
-    use arrow::array::Int64Array as ArrowI64Array;
-    use arrow::array::*;
-    use arrow::array::{MutableListArray, MutablePrimitiveArray, TryExtend};
+    use arrow::array::{
+        BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+        MutableListArray, MutablePrimitiveArray, TryExtend, UInt16Array, UInt32Array, UInt64Array,
+        UInt8Array,
+    };
     use arrow::buffer::Buffer;
     use arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
     use common_time::timestamp::{TimeUnit, Timestamp};
@@ -112,7 +128,7 @@ mod test {
         assert_eq!(Value::Int32(2), arrow_array_get(&array1, 1).unwrap());
         let array1 = UInt32Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(Value::UInt32(2), arrow_array_get(&array1, 1).unwrap());
-        let array = ArrowI64Array::from_vec(vec![1, 2, 3, 4]);
+        let array = Int64Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(Value::Int64(2), arrow_array_get(&array, 1).unwrap());
         let array1 = UInt64Array::from_vec(vec![1, 2, 3, 4]);
         assert_eq!(Value::UInt64(2), arrow_array_get(&array1, 1).unwrap());
@@ -145,7 +161,7 @@ mod test {
         );
         assert_eq!(Value::Null, arrow_array_get(&array3, 1).unwrap());
 
-        let vector = TimestampVector::new(ArrowI64Array::from_vec(vec![1, 2, 3, 4]));
+        let vector = TimestampVector::new(Int64Array::from_vec(vec![1, 2, 3, 4]));
         let array = vector.to_boxed_arrow_array();
         let value = arrow_array_get(&*array, 1).unwrap();
         assert_eq!(

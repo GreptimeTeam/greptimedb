@@ -1,15 +1,27 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{
-    INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID,
-    SYSTEM_CATALOG_TABLE_NAME,
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, SYSTEM_CATALOG_NAME,
+    SYSTEM_CATALOG_TABLE_ID, SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_query::logical_plan::Expr;
-use common_query::physical_plan::PhysicalPlanRef;
-use common_query::physical_plan::RuntimeEnv;
+use common_query::physical_plan::{PhysicalPlanRef, RuntimeEnv};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::timestamp::Timestamp;
@@ -75,6 +87,7 @@ impl SystemCatalogTable {
             schema_name: INFORMATION_SCHEMA_NAME.to_string(),
             table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
             table_id: SYSTEM_CATALOG_TABLE_ID,
+            region_numbers: vec![0],
         };
         let schema = Arc::new(build_system_catalog_schema());
         let ctx = EngineContext::default();
@@ -122,7 +135,6 @@ impl SystemCatalogTable {
             .context(error::SystemCatalogTableScanSnafu)?;
         let stream = scan
             .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
             .context(error::SystemCatalogTableScanExecSnafu)?;
         Ok(stream)
     }
@@ -360,19 +372,19 @@ pub struct TableEntryValue {
 #[cfg(test)]
 mod tests {
     use log_store::fs::noop::NoopLogStore;
+    use mito::config::EngineConfig;
+    use mito::engine::MitoEngine;
     use object_store::ObjectStore;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use table::metadata::TableType;
     use table::metadata::TableType::Base;
-    use table_engine::config::EngineConfig;
-    use table_engine::engine::MitoEngine;
     use tempdir::TempDir;
 
     use super::*;
 
     #[test]
-    pub fn test_decode_catalog_enrty() {
+    pub fn test_decode_catalog_entry() {
         let entry = decode_system_catalog(
             Some(EntryType::Catalog as u8),
             Some("some_catalog".as_bytes()),
@@ -444,7 +456,7 @@ mod tests {
     pub async fn prepare_table_engine() -> (TempDir, TableEngineRef) {
         let dir = TempDir::new("system-table-test").unwrap();
         let store_dir = dir.path().to_string_lossy();
-        let accessor = opendal::services::fs::Builder::default()
+        let accessor = object_store::backend::fs::Builder::default()
             .root(&store_dir)
             .build()
             .unwrap();

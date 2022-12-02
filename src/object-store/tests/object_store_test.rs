@@ -1,11 +1,24 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::env;
 
 use anyhow::Result;
 use common_telemetry::logging;
-use object_store::{
-    backend::{fs, s3},
-    util, DirStreamer, Object, ObjectMode, ObjectStore,
-};
+use object_store::backend::{fs, s3};
+use object_store::test_util::TempFolder;
+use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore};
 use tempdir::TempDir;
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
@@ -49,7 +62,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 
     // List objects
     let o: Object = store.object("/");
-    let obs: DirStreamer = o.list().await?;
+    let obs: ObjectLister = o.list().await?;
     let objects = util::collect(obs).await?;
     assert_eq!(3, objects.len());
 
@@ -62,7 +75,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     assert_eq!(1, objects.len());
 
     // Only o2 is exists
-    let o2 = &objects[0].clone().into_object();
+    let o2 = &objects[0].clone();
     let bs = o2.read().await?;
     assert_eq!("Hello, object2!", String::from_utf8(bs)?);
     // Delete o2
@@ -76,10 +89,12 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 
 #[tokio::test]
 async fn test_fs_backend() -> Result<()> {
+    let data_dir = TempDir::new("test_fs_backend")?;
     let tmp_dir = TempDir::new("test_fs_backend")?;
     let store = ObjectStore::new(
         fs::Builder::default()
-            .root(&tmp_dir.path().to_string_lossy())
+            .root(&data_dir.path().to_string_lossy())
+            .atomic_write_dir(&tmp_dir.path().to_string_lossy())
             .build()?,
     );
 
@@ -92,18 +107,26 @@ async fn test_fs_backend() -> Result<()> {
 #[tokio::test]
 async fn test_s3_backend() -> Result<()> {
     logging::init_default_ut_logging();
-    if env::var("GT_S3_BUCKET").is_ok() {
-        logging::info!("Running s3 test.");
+    if let Ok(bucket) = env::var("GT_S3_BUCKET") {
+        if !bucket.is_empty() {
+            logging::info!("Running s3 test.");
 
-        let accessor = s3::Builder::default()
-            .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
-            .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
-            .bucket(&env::var("GT_S3_BUCKET")?)
-            .build()?;
+            let root = uuid::Uuid::new_v4().to_string();
 
-        let store = ObjectStore::new(accessor);
-        test_object_crud(&store).await?;
-        test_object_list(&store).await?;
+            let accessor = s3::Builder::default()
+                .root(&root)
+                .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
+                .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
+                .bucket(&bucket)
+                .build()?;
+
+            let store = ObjectStore::new(accessor);
+
+            let mut guard = TempFolder::new(&store, "/");
+            test_object_crud(&store).await?;
+            test_object_list(&store).await?;
+            guard.remove_all().await?;
+        }
     }
 
     Ok(())

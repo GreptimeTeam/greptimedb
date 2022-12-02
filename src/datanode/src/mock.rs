@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -5,12 +19,12 @@ use catalog::remote::MetaKvBackend;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_srv::mocks::MockInfo;
+use mito::config::EngineConfig as TableEngineConfig;
 use query::QueryEngineFactory;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::metadata::TableId;
 use table::table::{TableIdProvider, TableIdProviderRef};
-use table_engine::config::EngineConfig as TableEngineConfig;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::Result;
@@ -24,9 +38,7 @@ impl Instance {
     // This method is used in other crate's testing codes, so move it out of "cfg(test)".
     // TODO(LFC): Delete it when callers no longer need it.
     pub async fn new_mock() -> Result<Self> {
-        use table_engine::table::test_util::new_test_object_store;
-        use table_engine::table::test_util::MockEngine;
-        use table_engine::table::test_util::MockMitoEngine;
+        use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 
         let mock_info = meta_srv::mocks::mock_with_memstore().await;
         let meta_client = Some(Arc::new(mock_meta_client(mock_info, 0).await));
@@ -46,7 +58,11 @@ impl Instance {
         let factory = QueryEngineFactory::new(catalog_manager.clone());
         let query_engine = factory.query_engine();
 
-        let sql_handler = SqlHandler::new(mock_engine.clone(), catalog_manager.clone());
+        let sql_handler = SqlHandler::new(
+            mock_engine.clone(),
+            catalog_manager.clone(),
+            query_engine.clone(),
+        );
         let physical_planner = PhysicalPlanner::new(query_engine.clone());
         let script_executor = ScriptExecutor::new(catalog_manager.clone(), query_engine.clone())
             .await
@@ -79,7 +95,7 @@ impl Instance {
     pub async fn with_mock_meta_server(opts: &DatanodeOptions, meta_srv: MockInfo) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
         let log_store = create_local_file_log_store(opts).await?;
-        let meta_client = Arc::new(mock_meta_client(meta_srv, opts.node_id).await);
+        let meta_client = Arc::new(mock_meta_client(meta_srv, opts.node_id.unwrap_or(42)).await);
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
@@ -93,7 +109,7 @@ impl Instance {
         // create remote catalog manager
         let catalog_manager = Arc::new(catalog::remote::RemoteCatalogManager::new(
             table_engine.clone(),
-            opts.node_id,
+            opts.node_id.unwrap_or(42),
             Arc::new(MetaKvBackend {
                 client: meta_client.clone(),
             }),
@@ -104,11 +120,18 @@ impl Instance {
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;
 
-        let heartbeat_task =
-            HeartbeatTask::new(opts.node_id, opts.rpc_addr.clone(), meta_client.clone());
+        let heartbeat_task = HeartbeatTask::new(
+            opts.node_id.unwrap_or(42),
+            opts.rpc_addr.clone(),
+            meta_client.clone(),
+        );
         Ok(Self {
             query_engine: query_engine.clone(),
-            sql_handler: SqlHandler::new(table_engine, catalog_manager.clone()),
+            sql_handler: SqlHandler::new(
+                table_engine,
+                catalog_manager.clone(),
+                query_engine.clone(),
+            ),
             catalog_manager,
             physical_planner: PhysicalPlanner::new(query_engine),
             script_executor,

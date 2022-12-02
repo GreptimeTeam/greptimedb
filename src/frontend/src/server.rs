@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -55,7 +69,8 @@ impl Services {
                     .context(error::RuntimeResourceSnafu)?,
             );
 
-            let mysql_server = MysqlServer::create_server(instance.clone(), mysql_io_runtime);
+            let mysql_server =
+                MysqlServer::create_server(instance.clone(), mysql_io_runtime, opts.tls.clone());
 
             Some((mysql_server, mysql_addr))
         } else {
@@ -76,6 +91,7 @@ impl Services {
             let pg_server = Box::new(PostgresServer::new(
                 instance.clone(),
                 opts.check_pwd,
+                opts.tls.clone(),
                 pg_io_runtime,
             )) as Box<dyn Server>;
 
@@ -102,10 +118,10 @@ impl Services {
             None
         };
 
-        let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
-            let http_addr = parse_addr(http_addr)?;
+        let http_server_and_addr = if let Some(http_options) = &opts.http_options {
+            let http_addr = parse_addr(&http_options.addr)?;
 
-            let mut http_server = HttpServer::new(instance.clone());
+            let mut http_server = HttpServer::new(instance.clone(), http_options.clone());
             if opentsdb_server_and_addr.is_some() {
                 http_server.set_opentsdb_handler(instance.clone());
             }

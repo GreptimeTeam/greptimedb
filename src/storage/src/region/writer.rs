@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use common_telemetry::logging;
@@ -5,8 +19,7 @@ use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
-use store_api::storage::SequenceNumber;
-use store_api::storage::{AlterRequest, WriteContext, WriteResponse};
+use store_api::storage::{AlterRequest, SequenceNumber, WriteContext, WriteResponse};
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
@@ -21,8 +34,7 @@ use crate::proto::wal::WalHeader;
 use crate::region::{RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef};
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
-use crate::version::VersionControl;
-use crate::version::{VersionControlRef, VersionEdit};
+use crate::version::{VersionControl, VersionControlRef, VersionEdit};
 use crate::wal::{Payload, Wal};
 use crate::write_batch::WriteBatch;
 
@@ -535,7 +547,7 @@ impl WriterInner {
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
-            // In write thread, safe to use current commited sequence.
+            // In write thread, safe to use current committed sequence.
             flush_sequence: version_control.committed_sequence(),
             shared: ctx.shared.clone(),
             sst_layer: ctx.sst_layer.clone(),

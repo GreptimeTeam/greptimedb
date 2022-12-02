@@ -1,7 +1,20 @@
-use std::collections::HashMap;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use api::v1::{codec::InsertBatch, *};
+use api::v1::*;
 use client::{Client, Database};
+
 fn main() {
     tracing::subscriber::set_global_default(tracing_subscriber::FmtSubscriber::builder().finish())
         .unwrap();
@@ -14,21 +27,21 @@ async fn run() {
     let client = Client::with_urls(vec!["127.0.0.1:3001"]);
     let db = Database::new("greptime", client);
 
+    let (columns, row_count) = insert_data();
+
     let expr = InsertExpr {
         schema_name: "public".to_string(),
         table_name: "demo".to_string(),
-        expr: Some(insert_expr::Expr::Values(insert_expr::Values {
-            values: insert_batches(),
-        })),
-        options: HashMap::default(),
         region_number: 0,
+        columns,
+        row_count,
     };
     db.insert(expr).await.unwrap();
 }
 
-fn insert_batches() -> Vec<Vec<u8>> {
+fn insert_data() -> (Vec<Column>, u32) {
     const SEMANTIC_TAG: i32 = 0;
-    const SEMANTIC_FEILD: i32 = 1;
+    const SEMANTIC_FIELD: i32 = 1;
     const SEMANTIC_TS: i32 = 2;
 
     let row_count = 4;
@@ -56,7 +69,7 @@ fn insert_batches() -> Vec<Vec<u8>> {
     };
     let cpu_column = Column {
         column_name: "cpu".to_string(),
-        semantic_type: SEMANTIC_FEILD,
+        semantic_type: SEMANTIC_FIELD,
         values: Some(cpu_vals),
         null_mask: vec![2],
         ..Default::default()
@@ -68,7 +81,7 @@ fn insert_batches() -> Vec<Vec<u8>> {
     };
     let mem_column = Column {
         column_name: "memory".to_string(),
-        semantic_type: SEMANTIC_FEILD,
+        semantic_type: SEMANTIC_FIELD,
         values: Some(mem_vals),
         null_mask: vec![4],
         ..Default::default()
@@ -86,9 +99,8 @@ fn insert_batches() -> Vec<Vec<u8>> {
         ..Default::default()
     };
 
-    let insert_batch = InsertBatch {
-        columns: vec![host_column, cpu_column, mem_column, ts_column],
+    (
+        vec![host_column, cpu_column, mem_column, ts_column],
         row_count,
-    };
-    vec![insert_batch.into()]
+    )
 }

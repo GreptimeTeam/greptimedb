@@ -1,14 +1,27 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_grpc::writer::{to_ms_ts, Precision};
-use common_time::{timestamp::TimeUnit::Millisecond, Timestamp};
-use datatypes::{
-    prelude::ConcreteDataType,
-    types::TimestampType,
-    value::Value,
-    vectors::{VectorBuilder, VectorRef},
-};
+use common_time::timestamp::TimeUnit::Millisecond;
+use common_time::Timestamp;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::types::TimestampType;
+use datatypes::value::Value;
+use datatypes::vectors::{VectorBuilder, VectorRef};
 use table::requests::InsertRequest;
 
 type ColumnLen = usize;
@@ -137,7 +150,8 @@ mod tests {
 
     use common_catalog::consts::DEFAULT_SCHEMA_NAME;
     use common_time::Timestamp;
-    use datatypes::{value::Value, vectors::Vector};
+    use datatypes::value::Value;
+    use datatypes::vectors::Vector;
 
     use crate::line_writer::{LineWriter, Precision};
 

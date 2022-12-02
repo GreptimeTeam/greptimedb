@@ -1,4 +1,18 @@
-use sqlparser::ast::{SetExpr, Statement, UnaryOperator, Values};
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use sqlparser::ast::{ObjectName, SetExpr, Statement, UnaryOperator, Values};
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value};
@@ -15,6 +29,13 @@ impl Insert {
     pub fn full_table_name(&self) -> Result<(String, String, String)> {
         match &self.inner {
             Statement::Insert { table_name, .. } => table_idents_to_full_name(table_name),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn table_name(&self) -> &ObjectName {
+        match &self.inner {
+            Statement::Insert { table_name, .. } => table_name,
             _ => unreachable!(),
         }
     }
@@ -95,15 +116,6 @@ mod tests {
 
     use super::*;
     use crate::parser::ParserContext;
-
-    #[test]
-    pub fn test_insert_convert() {
-        let sql = r"INSERT INTO tables_0 VALUES ( 'field_0', 0) ";
-        let mut stmts = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        assert_eq!(1, stmts.len());
-        let insert = stmts.pop().unwrap();
-        let _stmt: Statement = insert.try_into().unwrap();
-    }
 
     #[test]
     fn test_insert_value_with_unary_op() {

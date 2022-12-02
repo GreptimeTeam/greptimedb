@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -5,13 +19,13 @@ use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
-use frontend::frontend::Mode;
+use mito::config::EngineConfig;
+use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
+use query::QueryEngineFactory;
+use servers::Mode;
 use snafu::ResultExt;
-use table::engine::EngineContext;
-use table::engine::TableEngineRef;
+use table::engine::{EngineContext, TableEngineRef};
 use table::requests::CreateTableRequest;
-use table_engine::config::EngineConfig;
-use table_engine::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use tempdir::TempDir;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
@@ -108,5 +122,9 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
             .await
             .unwrap(),
     );
-    SqlHandler::new(mock_engine, catalog_manager)
+
+    let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
+    let factory = QueryEngineFactory::new(catalog_list);
+
+    SqlHandler::new(mock_engine, catalog_manager, factory.query_engine())
 }

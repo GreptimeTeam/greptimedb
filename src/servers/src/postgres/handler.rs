@@ -1,4 +1,19 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::ops::Deref;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::Output;
@@ -12,6 +27,7 @@ use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{text_query_response, FieldInfo, Response, Tag, TextDataRowEncoder};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{PgWireError, PgWireResult};
+use session::context::QueryContext;
 
 use crate::error::{self, Error, Result};
 use crate::query_handler::SqlQueryHandlerRef;
@@ -26,15 +42,30 @@ impl PostgresServerHandler {
     }
 }
 
+const CLIENT_METADATA_DATABASE: &str = "database";
+
+fn query_context_from_client_info<C>(client: &C) -> Arc<QueryContext>
+where
+    C: ClientInfo,
+{
+    let query_context = QueryContext::new();
+    if let Some(current_schema) = client.metadata().get(CLIENT_METADATA_DATABASE) {
+        query_context.set_current_schema(current_schema);
+    }
+
+    Arc::new(query_context)
+}
+
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandler {
-    async fn do_query<C>(&self, _client: &C, query: &str) -> PgWireResult<Vec<Response>>
+    async fn do_query<C>(&self, client: &C, query: &str) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        let query_ctx = query_context_from_client_info(client);
         let output = self
             .query_handler
-            .do_query(query)
+            .do_query(query, query_ctx)
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 

@@ -1,11 +1,24 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamAdapter};
-use common_recordbatch::DfSendableRecordBatchStream;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::adapter::{AsyncRecordBatchStreamAdapter, DfRecordBatchStreamAdapter};
+use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
 pub use datafusion::execution::runtime_env::RuntimeEnv;
@@ -26,7 +39,6 @@ pub type PhysicalPlanRef = Arc<dyn PhysicalPlan>;
 /// creating the actual `async` [`SendableRecordBatchStream`]s
 /// of [`RecordBatch`] that incrementally compute the operator's
 /// output from its input partition.
-#[async_trait]
 pub trait PhysicalPlan: Debug + Send + Sync {
     /// Returns the physical plan as [`Any`](std::any::Any) so that it can be
     /// downcast to a specific implementation.
@@ -48,7 +60,7 @@ pub trait PhysicalPlan: Debug + Send + Sync {
     fn with_new_children(&self, children: Vec<PhysicalPlanRef>) -> Result<PhysicalPlanRef>;
 
     /// Creates an RecordBatch stream.
-    async fn execute(
+    fn execute(
         &self,
         partition: usize,
         runtime: Arc<RuntimeEnv>,
@@ -71,7 +83,6 @@ impl PhysicalPlanAdapter {
     }
 }
 
-#[async_trait]
 impl PhysicalPlan for PhysicalPlanAdapter {
     fn as_any(&self) -> &dyn Any {
         self
@@ -105,18 +116,15 @@ impl PhysicalPlan for PhysicalPlanAdapter {
         Ok(Arc::new(PhysicalPlanAdapter::new(self.schema(), plan)))
     }
 
-    async fn execute(
+    fn execute(
         &self,
         partition: usize,
         runtime: Arc<RuntimeEnv>,
     ) -> Result<SendableRecordBatchStream> {
-        let stream = self
-            .df_plan
-            .execute(partition, runtime)
-            .await
-            .context(error::DataFusionExecutionPlanSnafu)?;
-        let stream = RecordBatchStreamAdapter::try_new(stream)
-            .context(error::ConvertDfRecordBatchStreamSnafu)?;
+        let df_plan = self.df_plan.clone();
+        let stream = Box::pin(async move { df_plan.execute(partition, runtime).await });
+        let stream = AsyncRecordBatchStreamAdapter::new(self.schema(), stream);
+
         Ok(Box::pin(stream))
     }
 }
@@ -174,7 +182,7 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
         partition: usize,
         runtime: Arc<RuntimeEnv>,
     ) -> DfResult<DfSendableRecordBatchStream> {
-        let stream = self.0.execute(partition, runtime).await?;
+        let stream = self.0.execute(partition, runtime)?;
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream)))
     }
 
@@ -186,7 +194,6 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
 
 #[cfg(test)]
 mod test {
-    use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datafusion::arrow_print;
     use datafusion::datasource::TableProvider as DfTableProvider;
@@ -196,6 +203,7 @@ mod test {
     use datafusion::prelude::ExecutionContext;
     use datafusion_common::field_util::SchemaExt;
     use datafusion_expr::Expr;
+    use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datatypes::schema::Schema;
     use datatypes::vectors::Int32Vector;
 
@@ -237,7 +245,6 @@ mod test {
         schema: SchemaRef,
     }
 
-    #[async_trait]
     impl PhysicalPlan for MyExecutionPlan {
         fn as_any(&self) -> &dyn Any {
             self
@@ -259,7 +266,7 @@ mod test {
             unimplemented!()
         }
 
-        async fn execute(
+        fn execute(
             &self,
             _partition: usize,
             _runtime: Arc<RuntimeEnv>,

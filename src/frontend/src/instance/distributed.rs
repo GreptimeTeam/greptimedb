@@ -1,36 +1,55 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::CreateExpr;
+use api::v1::{AlterExpr, CreateDatabaseExpr, CreateExpr};
+use catalog::CatalogList;
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::{TableGlobalKey, TableGlobalValue};
+use common_catalog::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use common_query::Output;
-use common_telemetry::debug;
+use common_telemetry::{debug, error, info};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
+use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
 use meta_client::rpc::{
-    CreateRequest as MetaCreateRequest, Partition as MetaPartition, RouteResponse, TableName,
-    TableRoute,
+    CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
+    TableName, TableRoute,
 };
-use query::sql::{show_databases, show_tables};
+use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 use sqlparser::ast::Value as SqlValue;
-use table::metadata::RawTableMeta;
+use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu, PrimaryKeyNotFoundSnafu, Result,
+    self, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu, ColumnDataTypeSnafu,
+    PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
+    TableNotFoundSnafu,
 };
 use crate::partitioning::{PartitionBound, PartitionDef};
+use crate::table::DistTable;
 
 #[derive(Clone)]
 pub(crate) struct DistInstance {
@@ -69,7 +88,13 @@ impl DistInstance {
             }
         );
         let table_route = table_routes.first().unwrap();
-
+        info!(
+            "Create table {:?}.{:?}.{}, table routes: {:?}",
+            create_table.catalog_name,
+            create_table.schema_name,
+            create_table.table_name,
+            table_route
+        );
         let region_routes = &table_route.region_routes;
         ensure!(
             !region_routes.is_empty(),
@@ -104,24 +129,78 @@ impl DistInstance {
         Ok(Output::AffectedRows(region_routes.len()))
     }
 
-    pub(crate) async fn handle_sql(&self, sql: &str, stmt: Statement) -> Result<Output> {
+    pub(crate) async fn handle_sql(
+        &self,
+        sql: &str,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {
                 let plan = self
                     .query_engine
-                    .statement_to_plan(stmt)
+                    .statement_to_plan(stmt, query_ctx)
                     .context(error::ExecuteSqlSnafu { sql })?;
-                self.query_engine
-                    .execute(&plan)
-                    .await
-                    .context(error::ExecuteSqlSnafu { sql })
+                self.query_engine.execute(&plan).await
             }
-            Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone())
-                .context(error::ExecuteSqlSnafu { sql }),
-            Statement::ShowTables(stmt) => show_tables(stmt, self.catalog_manager.clone())
-                .context(error::ExecuteSqlSnafu { sql }),
+            Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
+            Statement::ShowTables(stmt) => {
+                show_tables(stmt, self.catalog_manager.clone(), query_ctx)
+            }
+            Statement::DescribeTable(stmt) => describe_table(stmt, self.catalog_manager.clone()),
+            Statement::Explain(stmt) => {
+                explain(Box::new(stmt), self.query_engine.clone(), query_ctx).await
+            }
             _ => unreachable!(),
         }
+        .context(error::ExecuteSqlSnafu { sql })
+    }
+
+    /// Handles distributed database creation
+    pub(crate) async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
+        let key = SchemaKey {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: expr.database_name,
+        };
+        let value = SchemaValue {};
+        let client = self
+            .meta_client
+            .store_client()
+            .context(StartMetaClientSnafu)?;
+
+        let request = PutRequest::default()
+            .with_key(key.to_string())
+            .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
+        client.put(request.into()).await.context(RequestMetaSnafu)?;
+        Ok(Output::AffectedRows(1))
+    }
+
+    pub async fn handle_alter_table(&self, expr: AlterExpr) -> Result<Output> {
+        let catalog_name = expr.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
+        let schema_name = expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
+        let table_name = expr.table_name.as_str();
+        let table = self
+            .catalog_manager
+            .catalog(catalog_name)
+            .context(CatalogSnafu)?
+            .context(CatalogNotFoundSnafu { catalog_name })?
+            .schema(schema_name)
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", catalog_name, schema_name),
+            })?
+            .table(table_name)
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu {
+                table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+            })?;
+
+        let dist_table = table
+            .as_any()
+            .downcast_ref::<DistTable>()
+            .expect("Table impl must be DistTable in distributed mode");
+        dist_table.alter_by_expr(expr).await?;
+        Ok(Output::AffectedRows(0))
     }
 
     async fn create_table_in_meta(
@@ -163,17 +242,32 @@ impl DistInstance {
             catalog_name: table_name.catalog_name.clone(),
             schema_name: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
-        };
+        }
+        .to_string();
 
         let value = create_table_global_value(create_table, table_route)?
             .as_bytes()
             .context(error::CatalogEntrySerdeSnafu)?;
 
-        self.catalog_manager
+        if let Err(existing) = self
+            .catalog_manager
             .backend()
-            .set(key.to_string().as_bytes(), &value)
+            .compare_and_set(key.as_bytes(), &[], &value)
             .await
-            .context(error::CatalogSnafu)
+            .context(CatalogSnafu)?
+        {
+            let existing_bytes = existing.unwrap(); //this unwrap is safe since we compare with empty bytes and failed
+            let existing_value =
+                TableGlobalValue::from_bytes(&existing_bytes).context(CatalogEntrySerdeSnafu)?;
+            if existing_value.table_info.ident.table_id != create_table.table_id.unwrap() {
+                error!(
+                    "Table with name {} already exists, value in catalog: {:?}",
+                    key, existing_bytes
+                );
+                return error::TableAlreadyExistSnafu { table: key }.fail();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -187,17 +281,40 @@ fn create_table_global_value(
     let node_id = region_routes[0]
         .leader_peer
         .as_ref()
-        .context(error::FindLeaderPeerSnafu {
+        .with_context(|| error::FindLeaderPeerSnafu {
             region: region_routes[0].region.id,
             table_name: table_name.to_string(),
         })?
         .id;
 
+    let mut regions_id_map = HashMap::new();
+    for route in region_routes.iter() {
+        let node_id = route
+            .leader_peer
+            .as_ref()
+            .with_context(|| error::FindLeaderPeerSnafu {
+                region: route.region.id,
+                table_name: table_name.to_string(),
+            })?
+            .id;
+        regions_id_map
+            .entry(node_id)
+            .or_insert_with(Vec::new)
+            .push(route.region.id as u32);
+    }
+
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
 
     for (idx, column) in create_table.column_defs.iter().enumerate() {
-        column_schemas.push(create_column_schema(column)?);
+        let schema = column
+            .try_as_column_schema()
+            .context(error::InvalidColumnDefSnafu {
+                column: &column.name,
+            })?;
+        let schema = schema.with_time_index(column.name == create_table.time_index);
+
+        column_schemas.push(schema);
         column_name_to_index_map.insert(column.name.clone(), idx);
     }
 
@@ -234,34 +351,23 @@ fn create_table_global_value(
         created_on: DateTime::default(),
     };
 
-    Ok(TableGlobalValue {
-        id: table_route.table.id as u32,
-        node_id,
-        regions_id_map: HashMap::new(),
+    let table_info = RawTableInfo {
+        ident: TableIdent {
+            table_id: table_route.table.id as u32,
+            version: 0,
+        },
+        name: table_name.table_name.clone(),
+        desc: create_table.desc.clone(),
+        catalog_name: table_name.catalog_name.clone(),
+        schema_name: table_name.schema_name.clone(),
         meta,
-    })
-}
-
-// Remove this duplication in the future
-fn create_column_schema(column_def: &api::v1::ColumnDef) -> Result<ColumnSchema> {
-    let data_type =
-        ColumnDataTypeWrapper::try_new(column_def.datatype).context(error::ColumnDataTypeSnafu)?;
-    let default_constraint = match &column_def.default_constraint {
-        None => None,
-        Some(v) => Some(ColumnDefaultConstraint::try_from(&v[..]).context(
-            ConvertColumnDefaultConstraintSnafu {
-                column_name: &column_def.name,
-            },
-        )?),
+        table_type: TableType::Base,
     };
-    ColumnSchema::new(
-        column_def.name.clone(),
-        data_type.into(),
-        column_def.is_nullable,
-    )
-    .with_default_constraint(default_constraint)
-    .context(ConvertColumnDefaultConstraintSnafu {
-        column_name: &column_def.name,
+
+    Ok(TableGlobalValue {
+        node_id,
+        regions_id_map,
+        table_info,
     })
 }
 

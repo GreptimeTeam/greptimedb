@@ -1,8 +1,20 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::marker::PhantomData;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -13,8 +25,7 @@ use store_api::manifest::action::{self, ProtocolAction, ProtocolVersion};
 use store_api::manifest::*;
 
 use crate::error::{Error, ManifestProtocolForbidWriteSnafu, Result};
-use crate::manifest::storage::ManifestObjectStore;
-use crate::manifest::storage::ObjectStoreLogIterator;
+use crate::manifest::storage::{ManifestObjectStore, ObjectStoreLogIterator};
 
 #[derive(Clone, Debug)]
 pub struct ManifestImpl<M: MetaAction<Error = Error>> {

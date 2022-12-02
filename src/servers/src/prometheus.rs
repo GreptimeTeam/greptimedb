@@ -1,16 +1,27 @@
-//! promethues protcol supportings
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! prometheus protocol supportings
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
-use api::prometheus::remote::{
-    label_matcher::Type as MatcherType, Label, Query, Sample, TimeSeries, WriteRequest,
-};
-use api::v1::codec::InsertBatch;
-use api::v1::{
-    codec::SelectResult, column, column::SemanticType, insert_expr, Column, ColumnDataType,
-    InsertExpr,
-};
+use api::prometheus::remote::label_matcher::Type as MatcherType;
+use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
+use api::v1::codec::SelectResult;
+use api::v1::column::SemanticType;
+use api::v1::{column, Column, ColumnDataType, InsertExpr};
 use common_grpc::writer::Precision::MILLISECOND;
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt};
@@ -66,7 +77,7 @@ pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
         let value = &m.value;
         let m_type =
             MatcherType::from_i32(m.r#type).context(error::InvalidPromRemoteRequestSnafu {
-                msg: format!("invaid LabelMatcher type: {}", m.r#type),
+                msg: format!("invalid LabelMatcher type: {}", m.r#type),
             })?;
 
         match m_type {
@@ -76,11 +87,11 @@ pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
             MatcherType::Neq => {
                 conditions.push(format!("{}!='{}'", name, value));
             }
-            // Case senstive regexp match
+            // Case sensitive regexp match
             MatcherType::Re => {
                 conditions.push(format!("{}~'{}'", name, value));
             }
-            // Case senstive regexp not match
+            // Case sensitive regexp not match
             MatcherType::Nre => {
                 conditions.push(format!("{}!~'{}'", name, value));
             }
@@ -402,21 +413,14 @@ fn timeseries_to_insert_expr(database: &str, mut timeseries: TimeSeries) -> Resu
         });
     }
 
-    let batch = InsertBatch {
-        columns,
-        row_count: row_count as u32,
-    };
     Ok(InsertExpr {
         schema_name,
         table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
         })?,
-
-        expr: Some(insert_expr::Expr::Values(insert_expr::Values {
-            values: vec![batch.into()],
-        })),
-        options: HashMap::default(),
         region_number: 0,
+        columns,
+        row_count: row_count as u32,
     })
 }
 
@@ -507,7 +511,8 @@ mod tests {
     use api::prometheus::remote::LabelMatcher;
     use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
-    use datatypes::{value::Value, vectors::Vector};
+    use datatypes::value::Value;
+    use datatypes::vectors::Vector;
 
     use super::*;
 
@@ -671,105 +676,93 @@ mod tests {
         assert_eq!("metric2", exprs[1].table_name);
         assert_eq!("metric3", exprs[2].table_name);
 
-        let values = exprs[0].clone().expr.unwrap();
-        match values {
-            insert_expr::Expr::Values(insert_expr::Values { values }) => {
-                assert_eq!(1, values.len());
-                let batch = InsertBatch::try_from(values[0].as_slice()).unwrap();
-                assert_eq!(2, batch.row_count);
-                let columns = batch.columns;
-                assert_eq!(columns.len(), 3);
+        let expr = exprs.get(0).unwrap();
 
-                assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
-                assert_eq!(
-                    columns[0].values.as_ref().unwrap().ts_millis_values,
-                    vec![1000, 2000]
-                );
+        let columns = &expr.columns;
+        let row_count = expr.row_count;
 
-                assert_eq!(columns[1].column_name, VALUE_COLUMN_NAME);
-                assert_eq!(
-                    columns[1].values.as_ref().unwrap().f64_values,
-                    vec![1.0, 2.0]
-                );
+        assert_eq!(2, row_count);
+        assert_eq!(columns.len(), 3);
 
-                assert_eq!(columns[2].column_name, "job");
-                assert_eq!(
-                    columns[2].values.as_ref().unwrap().string_values,
-                    vec!["spark", "spark"]
-                );
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
+        assert_eq!(
+            columns[0].values.as_ref().unwrap().ts_millis_values,
+            vec![1000, 2000]
+        );
 
-        let values = exprs[1].clone().expr.unwrap();
-        match values {
-            insert_expr::Expr::Values(insert_expr::Values { values }) => {
-                assert_eq!(1, values.len());
-                let batch = InsertBatch::try_from(values[0].as_slice()).unwrap();
-                assert_eq!(2, batch.row_count);
-                let columns = batch.columns;
-                assert_eq!(columns.len(), 4);
+        assert_eq!(columns[1].column_name, VALUE_COLUMN_NAME);
+        assert_eq!(
+            columns[1].values.as_ref().unwrap().f64_values,
+            vec![1.0, 2.0]
+        );
 
-                assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
-                assert_eq!(
-                    columns[0].values.as_ref().unwrap().ts_millis_values,
-                    vec![1000, 2000]
-                );
+        assert_eq!(columns[2].column_name, "job");
+        assert_eq!(
+            columns[2].values.as_ref().unwrap().string_values,
+            vec!["spark", "spark"]
+        );
 
-                assert_eq!(columns[1].column_name, VALUE_COLUMN_NAME);
-                assert_eq!(
-                    columns[1].values.as_ref().unwrap().f64_values,
-                    vec![3.0, 4.0]
-                );
+        let expr = exprs.get(1).unwrap();
 
-                assert_eq!(columns[2].column_name, "instance");
-                assert_eq!(
-                    columns[2].values.as_ref().unwrap().string_values,
-                    vec!["test_host1", "test_host1"]
-                );
-                assert_eq!(columns[3].column_name, "idc");
-                assert_eq!(
-                    columns[3].values.as_ref().unwrap().string_values,
-                    vec!["z001", "z001"]
-                );
-            }
-            _ => unreachable!(),
-        }
+        let columns = &expr.columns;
+        let row_count = expr.row_count;
 
-        let values = exprs[2].clone().expr.unwrap();
-        match values {
-            insert_expr::Expr::Values(insert_expr::Values { values }) => {
-                assert_eq!(1, values.len());
-                let batch = InsertBatch::try_from(values[0].as_slice()).unwrap();
-                assert_eq!(3, batch.row_count);
-                let columns = batch.columns;
-                assert_eq!(columns.len(), 4);
+        assert_eq!(2, row_count);
+        assert_eq!(columns.len(), 4);
 
-                assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
-                assert_eq!(
-                    columns[0].values.as_ref().unwrap().ts_millis_values,
-                    vec![1000, 2000, 3000]
-                );
+        assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
+        assert_eq!(
+            columns[0].values.as_ref().unwrap().ts_millis_values,
+            vec![1000, 2000]
+        );
 
-                assert_eq!(columns[1].column_name, VALUE_COLUMN_NAME);
-                assert_eq!(
-                    columns[1].values.as_ref().unwrap().f64_values,
-                    vec![5.0, 6.0, 7.0]
-                );
+        assert_eq!(columns[1].column_name, VALUE_COLUMN_NAME);
+        assert_eq!(
+            columns[1].values.as_ref().unwrap().f64_values,
+            vec![3.0, 4.0]
+        );
 
-                assert_eq!(columns[2].column_name, "idc");
-                assert_eq!(
-                    columns[2].values.as_ref().unwrap().string_values,
-                    vec!["z002", "z002", "z002"]
-                );
-                assert_eq!(columns[3].column_name, "app");
-                assert_eq!(
-                    columns[3].values.as_ref().unwrap().string_values,
-                    vec!["biz", "biz", "biz"]
-                );
-            }
-            _ => unreachable!(),
-        }
+        assert_eq!(columns[2].column_name, "instance");
+        assert_eq!(
+            columns[2].values.as_ref().unwrap().string_values,
+            vec!["test_host1", "test_host1"]
+        );
+        assert_eq!(columns[3].column_name, "idc");
+        assert_eq!(
+            columns[3].values.as_ref().unwrap().string_values,
+            vec!["z001", "z001"]
+        );
+
+        let expr = exprs.get(2).unwrap();
+
+        let columns = &expr.columns;
+        let row_count = expr.row_count;
+
+        assert_eq!(3, row_count);
+        assert_eq!(columns.len(), 4);
+
+        assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
+        assert_eq!(
+            columns[0].values.as_ref().unwrap().ts_millis_values,
+            vec![1000, 2000, 3000]
+        );
+
+        assert_eq!(columns[1].column_name, VALUE_COLUMN_NAME);
+        assert_eq!(
+            columns[1].values.as_ref().unwrap().f64_values,
+            vec![5.0, 6.0, 7.0]
+        );
+
+        assert_eq!(columns[2].column_name, "idc");
+        assert_eq!(
+            columns[2].values.as_ref().unwrap().string_values,
+            vec!["z002", "z002", "z002"]
+        );
+        assert_eq!(columns[3].column_name, "app");
+        assert_eq!(
+            columns[3].values.as_ref().unwrap().string_values,
+            vec!["biz", "biz", "biz"]
+        );
     }
 
     #[test]

@@ -1,10 +1,20 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::str::FromStr;
 use std::sync::Arc;
 
-use arrow::compute;
-use arrow::compute::cast::CastOptions;
-use arrow::datatypes::DataType;
-use common_telemetry::debug;
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::execution::context::ExecutionProps;
 use datafusion::logical_plan::plan::Filter;
@@ -13,8 +23,10 @@ use datafusion::logical_plan::{
 };
 use datafusion::optimizer::optimizer::OptimizerRule;
 use datafusion::optimizer::utils;
-use datafusion_common::Result;
-use datafusion_common::{DFSchemaRef, DataFusionError, ScalarValue};
+use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
+use datatypes::arrow::compute;
+use datatypes::arrow::compute::cast::CastOptions;
+use datatypes::arrow::datatypes::DataType;
 
 /// TypeConversionRule converts some literal values in logical plan to other types according
 /// to data type of corresponding columns.
@@ -156,10 +168,6 @@ impl<'a> TypeConverter<'a> {
         match (left, right) {
             (Expr::Column(col), Expr::Literal(value)) => {
                 let casted_right = Self::cast_scalar_value(value, left_type)?;
-                debug!(
-                    "Converting type, origin_left:{:?}, type:{:?}, right:{:?}, casted_right:{:?}",
-                    col, left_type, value, casted_right
-                );
                 if casted_right.is_null() {
                     return Err(DataFusionError::Plan(format!(
                         "column:{:?} value:{:?} is invalid",
@@ -330,12 +338,14 @@ mod tests {
 
     #[test]
     fn test_convert_timestamp_str() {
+        use datatypes::arrow::datatypes::TimeUnit as ArrowTimeUnit;
+
         let schema_ref = Arc::new(
             DFSchema::new_with_metadata(
                 vec![DFField::new(
                     None,
                     "ts",
-                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
                     true,
                 )],
                 HashMap::new(),

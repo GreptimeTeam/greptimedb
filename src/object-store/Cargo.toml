@@ -2,14 +2,15 @@
 name = "object-store"
 version = "0.1.0"
 edition = "2021"
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "Apache-2.0"
 
 [dependencies]
 futures = { version = "0.3" }
-opendal = "0.17"
+opendal = { version = "0.21", features = ["layers-tracing", "layers-metrics"] }
 tokio = { version = "1.0", features = ["full"] }
 
 [dev-dependencies]
 anyhow = "1.0"
 common-telemetry = { path = "../common/telemetry" }
 tempdir = "0.3"
+uuid = { version = "1", features = ["serde", "v4"] }

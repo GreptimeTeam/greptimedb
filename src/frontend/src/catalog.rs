@@ -1,12 +1,27 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use catalog::error::{InvalidCatalogValueSnafu, InvalidSchemaInCatalogSnafu};
+use catalog::error::{self as catalog_err, InvalidCatalogValueSnafu};
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider,
+    SchemaProviderRef,
 };
 use common_catalog::{CatalogKey, SchemaKey, TableGlobalKey, TableGlobalValue};
 use futures::StreamExt;
@@ -51,17 +66,21 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(())
     }
 
-    async fn register_table(
+    async fn register_table(&self, _request: RegisterTableRequest) -> catalog::error::Result<bool> {
+        unimplemented!()
+    }
+
+    async fn deregister_table(
         &self,
-        _request: RegisterTableRequest,
-    ) -> catalog::error::Result<usize> {
+        _request: DeregisterTableRequest,
+    ) -> catalog::error::Result<bool> {
         unimplemented!()
     }
 
     async fn register_schema(
         &self,
         _request: RegisterSchemaRequest,
-    ) -> catalog::error::Result<usize> {
+    ) -> catalog::error::Result<bool> {
         unimplemented!()
     }
 
@@ -259,20 +278,18 @@ impl SchemaProvider for FrontendSchemaProvider {
                     }
                     Some(r) => r,
                 };
-                let val = TableGlobalValue::parse(String::from_utf8_lossy(&res.1))
-                    .context(InvalidCatalogValueSnafu)?;
+                let val = TableGlobalValue::from_bytes(&res.1).context(InvalidCatalogValueSnafu)?;
 
-                let table = Arc::new(DistTable {
+                let table = Arc::new(DistTable::new(
                     table_name,
-                    schema: Arc::new(
-                        val.meta
-                            .schema
+                    Arc::new(
+                        val.table_info
                             .try_into()
-                            .context(InvalidSchemaInCatalogSnafu)?,
+                            .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
                     ),
                     table_routes,
                     datanode_clients,
-                });
+                ));
                 Ok(Some(table as _))
             })
         })

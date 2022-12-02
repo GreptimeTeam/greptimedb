@@ -1,11 +1,23 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::borrow::Borrow;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, BooleanArray, MutableArray, MutableBooleanArray};
 use arrow::bitmap::utils::{BitmapIter, ZipValidity};
-use arrow::bitmap::MutableBitmap;
-use arrow::datatypes::DataType as ArrowDataType;
 use snafu::{OptionExt, ResultExt};
 
 use crate::data_type::ConcreteDataType;
@@ -57,14 +69,6 @@ impl<Ptr: Borrow<Option<bool>>> FromIterator<Ptr> for BooleanVector {
     fn from_iter<I: IntoIterator<Item = Ptr>>(iter: I) -> Self {
         BooleanVector {
             array: BooleanArray::from_iter(iter),
-        }
-    }
-}
-
-impl From<MutableBitmap> for BooleanVector {
-    fn from(bitmap: MutableBitmap) -> BooleanVector {
-        BooleanVector {
-            array: BooleanArray::new(ArrowDataType::Boolean, bitmap.into(), None),
         }
     }
 }
@@ -335,18 +339,6 @@ mod tests {
         let vector = builder.to_vector();
 
         let expect: VectorRef = Arc::new(BooleanVector::from_slice(&[true, false, true]));
-        assert_eq!(expect, vector);
-    }
-
-    #[test]
-    fn test_from_mutable_bitmap() {
-        let mut bitmap = MutableBitmap::new();
-        let values = [false, true, true, false, true];
-        for v in values {
-            bitmap.push(v);
-        }
-        let vector = BooleanVector::from(bitmap);
-        let expect = BooleanVector::from_slice(&values);
         assert_eq!(expect, vector);
     }
 }

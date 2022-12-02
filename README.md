@@ -22,18 +22,18 @@
 
 ## What is GreptimeDB
 
-GreptimeDB is an open-source time-series database with special focus on
+GreptimeDB is an open-source time-series database with a special focus on
 scalability, analytical capabilities and efficiency. It's designed to work on
-infrastructure of cloud era, and benefits from its elasticity and commodity
+infrastructure of the cloud era, and users benefit from its elasticity and commodity
 storage.
 
-The core developers of GreptimeDB have been building time-series data platform
+Our core developers have been building time-series data platform
 for years. Based on their best-practices, GreptimeDB is born to give you:
 
-- A standalone binary that scales to highly-available distributed cluster, with transparent experience from user's perspective
-- Columnar data layout optimised for time-series, compacted, compressed, stored on various storage backends
+- A standalone binary that scales to highly-available distributed cluster, providing a transparent experience for cluster users
+- Optimized columnar layout for handling time-series data; compacted, compressed, stored on various storage backends
 - Flexible index options, tackling high cardinality issues down
-- Distributed parallel query execution, leveraging elastic computing resource
+- Distributed, parallel query execution, leveraging elastic computing resource
 - Native SQL, and Python scripting for advanced analytical scenarios
 - Widely adopted database protocols and APIs
 - Extensible table engine architecture for extensive workloads
@@ -53,8 +53,9 @@ To compile GreptimeDB from source, you'll need:
   install correct Rust version for you.
 - Protobuf: `protoc` is required for compiling `.proto` files. `protobuf` is
   available from major package manager on macos and linux distributions. You can
-  find an installation instructions
-  [here](https://grpc.io/docs/protoc-installation/).
+  find an installation instructions [here](https://grpc.io/docs/protoc-installation/).
+  **Note that `protoc` version needs to be >= 3.15** because we have used the `optional`
+  keyword. You can check it with `protoc --version`.
 
 #### Build with Docker
 
@@ -79,7 +80,7 @@ docker run -p 4002:4002 -v "$(pwd):/tmp/greptimedb" greptime/greptimedb standalo
 ```
 
 For more startup options, greptimedb's **distributed mode** and information
-about Kubernetes deployment, check our [docs](https://greptime.com/docs).
+about Kubernetes deployment, check our [docs](https://docs.greptime.com/).
 
 ### Connect
 
@@ -103,7 +104,7 @@ about Kubernetes deployment, check our [docs](https://greptime.com/docs).
      PRIMARY KEY(host)) ENGINE=mito WITH(regions=1);
    ```
 
-3. Insert data:
+3. Insert some data:
 
    ```SQL
    INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host1', 66.6, 1024, 1660897955000);
@@ -111,10 +112,13 @@ about Kubernetes deployment, check our [docs](https://greptime.com/docs).
    INSERT INTO monitor(host, cpu, memory, ts) VALUES ('host3', 88.8, 4096, 1660897957000);
    ```
 
-4. Query data:
+4. Query the data:
 
    ```SQL
-   mysql> SELECT * FROM monitor;
+   SELECT * FROM monitor;
+   ```
+
+   ```TEXT
    +-------+---------------------+------+--------+
    | host  | ts                  | cpu  | memory |
    +-------+---------------------+------+--------+
@@ -129,12 +133,23 @@ You can always cleanup test database by removing `/tmp/greptimedb`.
 
 ## Resources
 
+### Installation
+
 - [Pre-built Binaries](https://github.com/GreptimeTeam/greptimedb/releases):
   downloadable pre-built binaries for Linux and MacOS
 - [Docker Images](https://hub.docker.com/r/greptime/greptimedb): pre-built
   Docker images
 - [`gtctl`](https://github.com/GreptimeTeam/gtctl): the command-line tool for
   Kubernetes deployment
+
+### Documentation
+
+- GreptimeDB [User Guide](https://docs.greptime.com/user-guide/concepts.html)
+- GreptimeDB [Developer
+  Guide](https://docs.greptime.com/developer-guide/overview.html)
+
+### SDK
+
 - [GreptimeDB Java
   Client](https://github.com/GreptimeTeam/greptimedb-client-java)
 
@@ -145,10 +160,12 @@ break things. Benchmark on development branch may not represent its potential
 performance. We release pre-built binaries constantly for functional
 evaluation. Do not use it in production at the moment.
 
+For future plans, check out [GreptimeDB roadmap](https://github.com/GreptimeTeam/greptimedb/issues/669).
+
 ## Community
 
-The core team will be thrilled if you participate in any way you like. When you are stuck, try
-asking for help by filing an issue with a detailed description of what you were trying to do
+Our core team is thrilled too see you participate in any ways you like. When you are stuck, try to
+ask for help by filling an issue with a detailed description of what you were trying to do
 and what went wrong. If you have any questions or if you would like to get involved in our
 community, please check out:
 
@@ -158,14 +175,9 @@ community, please check out:
 
 In addition, you may:
 
-- View our official [Blog](https://greptime.com/blog)
+- View our official [Blog](https://greptime.com/blogs/index)
 - Connect us with [Linkedin](https://www.linkedin.com/company/greptime/)
 - Follow us on [Twitter](https://twitter.com/greptime)
-
-## Documentation
-
-- GreptimeDB [User Guide](https://greptime.com/docs/user-guide)
-- GreptimeDB [Developer Guide](https://greptime.com/docs/developer-guide)
 
 ## License
 
@@ -177,3 +189,10 @@ open contributions and allowing you to use the software however you want.
 ## Contributing
 
 Please refer to [contribution guidelines](CONTRIBUTING.md) for more information.
+
+## Acknowledgement
+- GreptimeDB uses [Apache Arrow](https://arrow.apache.org/) as the memory model and [Apache Parquet](https://parquet.apache.org/) as the persistent file format.
+- GreptimeDB's query engine is powered by [Apache Arrow DataFusion](https://github.com/apache/arrow-datafusion).
+- [OpenDAL](https://github.com/datafuselabs/opendal) from [Datafuse Labs](https://github.com/datafuselabs) gives GreptimeDB a very general and elegant data access abstraction layer.
+- GreptimeDB’s meta service is based on [etcd](https://etcd.io/).
+- GreptimeDB uses [RustPython](https://github.com/RustPython/RustPython) for experimental embedded python scripting.

@@ -1,30 +1,34 @@
-use std::io::ErrorKind;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use api::v1::meta::heartbeat_server;
-use api::v1::meta::AskLeaderRequest;
-use api::v1::meta::AskLeaderResponse;
-use api::v1::meta::HeartbeatRequest;
-use api::v1::meta::HeartbeatResponse;
-use api::v1::meta::Peer;
-use api::v1::meta::ResponseHeader;
-use common_telemetry::error;
-use common_telemetry::info;
-use common_telemetry::warn;
+use std::io::ErrorKind;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use api::v1::meta::{
+    heartbeat_server, AskLeaderRequest, AskLeaderResponse, HeartbeatRequest, HeartbeatResponse,
+    Peer, ResponseHeader,
+};
+use common_telemetry::{error, info, warn};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::Request;
-use tonic::Response;
-use tonic::Streaming;
+use tonic::{Request, Response, Streaming};
 
 use crate::error;
 use crate::error::Result;
-use crate::metasrv::Context;
-use crate::metasrv::MetaSrv;
-use crate::service::GrpcResult;
-use crate::service::GrpcStream;
+use crate::metasrv::{Context, MetaSrv};
+use crate::service::{GrpcResult, GrpcStream};
 
 static PUSHER_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -81,7 +85,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
 
                         match tx.send(Err(err)).await {
                             Ok(_) => (),
-                            Err(_err) => break, // response was droped
+                            Err(_err) => break, // response was dropped
                         }
                     }
                 }

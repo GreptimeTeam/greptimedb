@@ -1,13 +1,29 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 mod filter;
 mod find_unique;
 mod replicate;
 
-use arrow::bitmap::MutableBitmap;
+use common_base::BitVec;
 
 use crate::error::Result;
 use crate::types::PrimitiveElement;
-use crate::vectors::all::*;
-use crate::vectors::{Vector, VectorRef};
+use crate::vectors::{
+    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, ListVector,
+    NullVector, PrimitiveVector, StringVector, TimestampVector, Vector, VectorRef,
+};
 
 /// Vector compute operations.
 pub trait VectorOp {
@@ -34,7 +50,7 @@ pub trait VectorOp {
     /// Panics if
     /// - `selected.len() < self.len()`.
     /// - `prev_vector` and `self` have different data types.
-    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>);
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>);
 
     /// Filters the vector, returns elements matching the `filter` (i.e. where the values are true).
     ///
@@ -49,7 +65,7 @@ macro_rules! impl_scalar_vector_op {
                 replicate::$replicate(self, offsets)
             }
 
-            fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+            fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
                 let prev_vector = prev_vector.map(|pv| pv.as_any().downcast_ref::<$VectorType>().unwrap());
                 find_unique::find_unique_scalar(self, selected, prev_vector);
             }
@@ -76,7 +92,7 @@ impl VectorOp for ConstantVector {
         replicate::replicate_constant(self, offsets)
     }
 
-    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
         let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<ConstantVector>());
         find_unique::find_unique_constant(self, selected, prev_vector);
     }
@@ -91,7 +107,7 @@ impl VectorOp for NullVector {
         replicate::replicate_null(self, offsets)
     }
 
-    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
         let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<NullVector>());
         find_unique::find_unique_null(self, selected, prev_vector);
     }
@@ -109,7 +125,7 @@ where
         replicate::replicate_primitive(self, offsets)
     }
 
-    fn find_unique(&self, selected: &mut MutableBitmap, prev_vector: Option<&dyn Vector>) {
+    fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
         let prev_vector =
             prev_vector.and_then(|pv| pv.as_any().downcast_ref::<PrimitiveVector<T>>());
         find_unique::find_unique_scalar(self, selected, prev_vector);

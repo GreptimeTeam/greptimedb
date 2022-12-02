@@ -1,19 +1,31 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 pub mod bench_memtable_read;
 pub mod bench_memtable_read_write_ratio;
 pub mod bench_memtable_write;
 pub mod util;
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use common_time::Timestamp;
-use datatypes::{
-    prelude::ScalarVectorBuilder,
-    vectors::{StringVectorBuilder, TimestampVectorBuilder, UInt64VectorBuilder},
-};
-use rand::{distributions::Alphanumeric, prelude::ThreadRng, Rng};
+use datatypes::prelude::ScalarVectorBuilder;
+use datatypes::vectors::{StringVectorBuilder, TimestampVectorBuilder, UInt64VectorBuilder};
+use rand::distributions::Alphanumeric;
+use rand::prelude::ThreadRng;
+use rand::Rng;
 use storage::memtable::KeyValues;
 use store_api::storage::{OpType, SequenceNumber};
 

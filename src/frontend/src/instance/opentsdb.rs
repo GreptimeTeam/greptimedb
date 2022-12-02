@@ -1,12 +1,25 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
-use servers::error as server_error;
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;
+use servers::{error as server_error, Mode};
 use snafu::prelude::*;
 
 use crate::error::Result;
-use crate::frontend::Mode;
 use crate::instance::Instance;
 
 #[async_trait]
@@ -23,7 +36,7 @@ impl OpentsdbProtocolHandler for Instance {
                         data_point: format!("{:?}", data_point),
                     })?;
             }
-            Mode::Distributed(_) => {
+            Mode::Distributed => {
                 self.dist_insert(vec![data_point.as_grpc_insert()])
                     .await
                     .map_err(BoxedError::new)
@@ -40,16 +53,19 @@ impl OpentsdbProtocolHandler for Instance {
 impl Instance {
     async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> Result<()> {
         let expr = data_point.as_grpc_insert();
-        self.handle_insert(&expr).await?;
+        self.handle_insert(expr).await?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use common_query::Output;
     use datafusion::arrow_print;
     use servers::query_handler::SqlQueryHandler;
+    use session::context::QueryContext;
 
     use super::*;
     use crate::tests;
@@ -108,7 +124,7 @@ mod tests {
         assert!(result.is_ok());
 
         let output = instance
-            .do_query("select * from my_metric_1")
+            .do_query("select * from my_metric_1", Arc::new(QueryContext::new()))
             .await
             .unwrap();
         match output {

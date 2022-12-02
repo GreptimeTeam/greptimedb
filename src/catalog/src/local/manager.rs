@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -7,7 +21,7 @@ use common_catalog::consts::{
     SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{BinaryVector, UInt8Vector};
 use futures_util::lock::Mutex;
@@ -20,10 +34,10 @@ use table::table::TableIdProvider;
 use table::TableRef;
 
 use crate::error::{
-    CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, SchemaNotFoundSnafu,
-    SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, Result,
+    SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu,
+    TableExistsSnafu, TableNotFoundSnafu, UnimplementedSnafu,
 };
-use crate::error::{ReadSystemCatalogSnafu, Result, SchemaExistsSnafu};
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
     decode_system_catalog, Entry, SystemCatalogTable, TableEntry, ENTRY_TYPE_INDEX, KEY_INDEX,
@@ -32,8 +46,8 @@ use crate::system::{
 use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
-    CatalogProvider, CatalogProviderRef, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
+    CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest,
+    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -43,6 +57,7 @@ pub struct LocalCatalogManager {
     engine: TableEngineRef,
     next_table_id: AtomicU32,
     init_lock: Mutex<bool>,
+    register_lock: Mutex<()>,
     system_table_requests: Mutex<Vec<RegisterSystemTableRequest>>,
 }
 
@@ -62,6 +77,7 @@ impl LocalCatalogManager {
             engine,
             next_table_id: AtomicU32::new(MIN_USER_TABLE_ID),
             init_lock: Mutex::new(false),
+            register_lock: Mutex::new(()),
             system_table_requests: Mutex::new(Vec::default()),
         })
     }
@@ -227,6 +243,7 @@ impl LocalCatalogManager {
             schema_name: t.schema_name.clone(),
             table_name: t.table_name.clone(),
             table_id: t.table_id,
+            region_numbers: vec![0],
         };
 
         let option = self
@@ -294,7 +311,7 @@ impl CatalogManager for LocalCatalogManager {
         self.init().await
     }
 
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let started = self.init_lock.lock().await;
 
         ensure!(
@@ -317,27 +334,50 @@ impl CatalogManager for LocalCatalogManager {
                 schema_info: format!("{}.{}", catalog_name, schema_name),
             })?;
 
-        if schema.table_exist(&request.table_name)? {
-            return TableExistsSnafu {
-                table: format_full_table_name(catalog_name, schema_name, &request.table_name),
+        {
+            let _lock = self.register_lock.lock().await;
+            if let Some(existing) = schema.table(&request.table_name)? {
+                if existing.table_info().ident.table_id != request.table_id {
+                    error!(
+                        "Unexpected table register request: {:?}, existing: {:?}",
+                        request,
+                        existing.table_info()
+                    );
+                    return TableExistsSnafu {
+                        table: format_full_table_name(
+                            catalog_name,
+                            schema_name,
+                            &request.table_name,
+                        ),
+                    }
+                    .fail();
+                }
+                // Try to register table with same table id, just ignore.
+                Ok(false)
+            } else {
+                // table does not exist
+                self.system
+                    .register_table(
+                        catalog_name.clone(),
+                        schema_name.clone(),
+                        request.table_name.clone(),
+                        request.table_id,
+                    )
+                    .await?;
+                schema.register_table(request.table_name, request.table)?;
+                Ok(true)
             }
-            .fail();
         }
-
-        self.system
-            .register_table(
-                catalog_name.clone(),
-                schema_name.clone(),
-                request.table_name.clone(),
-                request.table_id,
-            )
-            .await?;
-
-        schema.register_table(request.table_name, request.table)?;
-        Ok(1)
     }
 
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {
+        UnimplementedSnafu {
+            operation: "deregister table",
+        }
+        .fail()
+    }
+
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let started = self.init_lock.lock().await;
         ensure!(
             *started,
@@ -352,17 +392,21 @@ impl CatalogManager for LocalCatalogManager {
             .catalogs
             .catalog(catalog_name)?
             .context(CatalogNotFoundSnafu { catalog_name })?;
-        if catalog.schema(schema_name)?.is_some() {
-            return SchemaExistsSnafu {
-                schema: schema_name,
-            }
-            .fail();
+
+        {
+            let _lock = self.register_lock.lock().await;
+            ensure!(
+                catalog.schema(schema_name)?.is_none(),
+                SchemaExistsSnafu {
+                    schema: schema_name,
+                }
+            );
+            self.system
+                .register_schema(request.catalog, schema_name.clone())
+                .await?;
+            catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
+            Ok(true)
         }
-        self.system
-            .register_schema(request.catalog, schema_name.clone())
-            .await?;
-        catalog.register_schema(request.schema, Arc::new(MemorySchemaProvider::new()))?;
-        Ok(1)
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {

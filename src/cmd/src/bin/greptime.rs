@@ -1,15 +1,26 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::fmt;
 
 use clap::Parser;
 use cmd::error::Result;
-use cmd::frontend;
-use cmd::metasrv;
-use cmd::{datanode, standalone};
-use common_telemetry::logging::error;
-use common_telemetry::logging::info;
+use cmd::{datanode, frontend, metasrv, standalone};
+use common_telemetry::logging::{error, info};
 
 #[derive(Parser)]
-#[clap(name = "greptimedb")]
+#[clap(name = "greptimedb", version = print_version())]
 struct Command {
     #[clap(long, default_value = "/tmp/greptimedb/logs")]
     log_dir: String,
@@ -57,6 +68,17 @@ impl fmt::Display for SubCommand {
             SubCommand::Standalone(..) => write!(f, "greptime-standalone"),
         }
     }
+}
+
+fn print_version() -> &'static str {
+    concat!(
+        "\nbranch: ",
+        env!("GIT_BRANCH"),
+        "\ncommit: ",
+        env!("GIT_COMMIT"),
+        "\ndirty: ",
+        env!("GIT_DIRTY")
+    )
 }
 
 #[tokio::main]

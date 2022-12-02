@@ -1,15 +1,29 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::sync::Arc;
 
 use api::v1::codec::SelectResult as GrpcSelectResult;
+use api::v1::column::SemanticType;
 use api::v1::{
     object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr,
     MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, PhysicalPlan,
     SelectExpr,
 };
 use common_error::status_code::StatusCode;
-use common_grpc::AsExcutionPlan;
-use common_grpc::DefaultAsPlanImpl;
-use common_insert::column_to_vector;
+use common_grpc::{AsExecutionPlan, DefaultAsPlanImpl};
+use common_grpc_expr::column_to_vector;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datafusion::physical_plan::ExecutionPlan;
@@ -17,12 +31,10 @@ use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error;
-use crate::error::ColumnToVectorSnafu;
-use crate::{
-    error::{ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu},
-    Client, Result,
+use crate::error::{
+    ColumnToVectorSnafu, ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu,
 };
+use crate::{error, Client, Result};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -208,7 +220,12 @@ impl TryFrom<ObjectResult> for Output {
                     .map(|(column, vector)| {
                         let datatype = vector.data_type();
                         // nullable or not, does not affect the output
-                        ColumnSchema::new(&column.column_name, datatype, true)
+                        let mut column_schema =
+                            ColumnSchema::new(&column.column_name, datatype, true);
+                        if column.semantic_type == SemanticType::Timestamp as i32 {
+                            column_schema = column_schema.with_time_index(true);
+                        }
+                        column_schema
                     })
                     .collect::<Vec<ColumnSchema>>();
 
@@ -240,7 +257,7 @@ impl TryFrom<ObjectResult> for Output {
 mod tests {
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::Column;
-    use datanode::server::grpc::select::{null_mask, values};
+    use common_grpc::select::{null_mask, values};
     use datatypes::vectors::{
         BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
         Int16Vector, Int32Vector, Int64Vector, Int8Vector, StringVector, UInt16Vector,

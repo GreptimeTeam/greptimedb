@@ -2,12 +2,21 @@ on:
   push:
     tags:
       - "v*.*.*"
+  schedule:
+    # At 00:00 on Monday.
+    - cron: '0 0 * * 1'
   workflow_dispatch:
 
 name: Release
 
 env:
   RUST_TOOLCHAIN: nightly-2022-07-14
+
+  # FIXME(zyy17): Would be better to use `gh release list -L 1 | cut -f 3` to get the latest release version tag, but for a long time, we will stay at 'v0.1.0-alpha-*'.
+  SCHEDULED_BUILD_VERSION_PREFIX: v0.1.0-alpha
+
+  # In the future, we can change SCHEDULED_PERIOD to nightly.
+  SCHEDULED_PERIOD: weekly
 
 jobs:
   build:
@@ -106,8 +115,32 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v3
 
+      - name: Configure scheduled build version # the version would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}, like v0.1.0-alpha-20221119-weekly.
+        shell: bash
+        if: github.event_name == 'schedule'
+        run: |
+          buildTime=`date "+%Y%m%d"`
+          SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
+          echo "SCHEDULED_BUILD_VERSION=${SCHEDULED_BUILD_VERSION}" >> $GITHUB_ENV
+
+      - name: Create scheduled build git tag
+        if: github.event_name == 'schedule'
+        run: |
+          git tag ${{ env.SCHEDULED_BUILD_VERSION }}
+
+      - name: Publish scheduled release # configure the different release title and tags.
+        uses: softprops/action-gh-release@v1
+        if: github.event_name == 'schedule'
+        with:
+          name: "Release ${{ env.SCHEDULED_BUILD_VERSION }}"
+          tag_name: ${{ env.SCHEDULED_BUILD_VERSION }}
+          generate_release_notes: true
+          files: |
+            **/greptime-*
+
       - name: Publish release
         uses: softprops/action-gh-release@v1
+        if: github.event_name != 'schedule'
         with:
           name: "Release ${{ github.ref_name }}"
           files: |
@@ -145,12 +178,12 @@ jobs:
           tar xvf greptime-linux-arm64.tgz
           rm greptime-linux-arm64.tgz
 
-      - name: Login to GitHub Container Registry
+      - name: Login to UCloud Container Registry
         uses: docker/login-action@v2
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: uhub.service.ucloud.cn
+          username: ${{ secrets.UCLOUD_USERNAME }}
+          password: ${{ secrets.UCLOUD_PASSWORD }}
 
       - name: Login to Dockerhub
         uses: docker/login-action@v2
@@ -158,11 +191,20 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Configure scheduled build image tag # the tag would be ${SCHEDULED_BUILD_VERSION_PREFIX}-YYYYMMDD-${SCHEDULED_PERIOD}
+        shell: bash
+        if: github.event_name == 'schedule'
+        run: |
+          buildTime=`date "+%Y%m%d"`
+          SCHEDULED_BUILD_VERSION=${{ env.SCHEDULED_BUILD_VERSION_PREFIX }}-$buildTime-${{ env.SCHEDULED_PERIOD }}
+          echo "IMAGE_TAG=${SCHEDULED_BUILD_VERSION:1}" >> $GITHUB_ENV
+
       - name: Configure tag # If the release tag is v0.1.0, then the image version tag will be 0.1.0.
         shell: bash
+        if: github.event_name != 'schedule'
         run: |
           VERSION=${{ github.ref_name }}
-          echo "VERSION=${VERSION:1}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=${VERSION:1}" >> $GITHUB_ENV
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
@@ -179,5 +221,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: |
             greptime/greptimedb:latest
-            greptime/greptimedb:${{ env.VERSION }}
-            ghcr.io/greptimeteam/greptimedb:${{ env.VERSION }}
+            greptime/greptimedb:${{ env.IMAGE_TAG }}
+            uhub.service.ucloud.cn/greptime/greptimedb:latest
+            uhub.service.ucloud.cn/greptime/greptimedb:${{ env.IMAGE_TAG }}

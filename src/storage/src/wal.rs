@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -5,24 +19,18 @@ use common_error::prelude::BoxedError;
 use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
-use store_api::storage::RegionId;
-use store_api::{
-    logstore::{entry::Entry, AppendResponse, LogStore},
-    storage::SequenceNumber,
-};
+use store_api::logstore::entry::Entry;
+use store_api::logstore::{AppendResponse, LogStore};
+use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::{
-    codec::{Decoder, Encoder},
-    error::{self, Error, Result},
-    proto::wal::{self, PayloadType, WalHeader},
-    write_batch::{
-        codec::{
-            WriteBatchArrowDecoder, WriteBatchArrowEncoder, WriteBatchProtobufDecoder,
-            WriteBatchProtobufEncoder,
-        },
-        WriteBatch,
-    },
+use crate::codec::{Decoder, Encoder};
+use crate::error::{self, Error, Result};
+use crate::proto::wal::{self, PayloadType, WalHeader};
+use crate::write_batch::codec::{
+    WriteBatchArrowDecoder, WriteBatchArrowEncoder, WriteBatchProtobufDecoder,
+    WriteBatchProtobufEncoder,
 };
+use crate::write_batch::WriteBatch;
 
 #[derive(Debug)]
 pub struct Wal<S: LogStore> {

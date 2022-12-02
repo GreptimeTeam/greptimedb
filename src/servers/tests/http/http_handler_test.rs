@@ -1,12 +1,24 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 
 use axum::body::Body;
 use axum::extract::{Json, Query, RawBody, State};
 use common_telemetry::metric;
 use metrics::counter;
-use servers::http::handler as http_handler;
-use servers::http::script as script_handler;
-use servers::http::{ApiState, JsonOutput};
+use servers::http::{handler as http_handler, script as script_handler, ApiState, JsonOutput};
 use table::test_util::MemTable;
 
 use crate::{create_testing_script_handler, create_testing_sql_query_handler};
@@ -122,4 +134,19 @@ fn create_query() -> Query<http_handler::SqlQuery> {
         sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
         database: None,
     })
+}
+
+/// Currently the payload of response should be simply an empty json "{}";
+#[tokio::test]
+async fn test_health() {
+    let expected_json = http_handler::HealthResponse {};
+    let expected_json_str = "{}".to_string();
+
+    let query = http_handler::HealthQuery {};
+    let Json(json) = http_handler::health(Query(query)).await;
+    assert_eq!(json, expected_json);
+    assert_eq!(
+        serde_json::ser::to_string(&json).unwrap(),
+        expected_json_str
+    );
 }

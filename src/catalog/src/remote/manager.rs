@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -22,15 +36,14 @@ use table::TableRef;
 use tokio::sync::Mutex;
 
 use crate::error::{
-    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu,
-    SchemaNotFoundSnafu, TableExistsSnafu,
+    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu,
+    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
 };
-use crate::error::{InvalidTableSchemaSnafu, Result};
 use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
-    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider,
-    SchemaProviderRef,
+    DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
+    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
 };
 
 /// Catalog manager based on metasrv.
@@ -63,6 +76,7 @@ impl RemoteCatalogManager {
 
     fn new_catalog_provider(&self, catalog_name: &str) -> CatalogProviderRef {
         Arc::new(RemoteCatalogProvider {
+            node_id: self.node_id,
             catalog_name: catalog_name.to_string(),
             backend: self.backend.clone(),
             schemas: Default::default(),
@@ -124,8 +138,6 @@ impl RemoteCatalogManager {
     }
 
     /// Iterate over all table entries on metasrv
-    /// TODO(hl): table entries with different version is not currently considered.
-    /// Ideally deprecated table entry must be deleted when deregistering from catalog.
     async fn iter_remote_tables(
         &self,
         catalog_name: &str,
@@ -142,10 +154,10 @@ impl RemoteCatalogManager {
                 }
                 let table_key = TableGlobalKey::parse(&String::from_utf8_lossy(&k))
                     .context(InvalidCatalogValueSnafu)?;
-                let table_value = TableGlobalValue::parse(&String::from_utf8_lossy(&v))
-                    .context(InvalidCatalogValueSnafu)?;
+                let table_value =
+                    TableGlobalValue::from_bytes(&v).context(InvalidCatalogValueSnafu)?;
 
-                debug!(
+                info!(
                     "Found catalog table entry, key: {}, value: {:?}",
                     table_key, table_value
                 );
@@ -230,17 +242,21 @@ impl RemoteCatalogManager {
         schema: SchemaProviderRef,
         mut max_table_id: TableId,
     ) -> Result<()> {
+        info!("initializing tables in {}.{}", catalog_name, schema_name);
+        let mut table_num = 0;
         let mut tables = self.iter_remote_tables(catalog_name, schema_name).await;
         while let Some(r) = tables.next().await {
             let (table_key, table_value) = r?;
             let table_ref = self.open_or_create_table(&table_key, &table_value).await?;
             schema.register_table(table_key.table_name.to_string(), table_ref)?;
             info!("Registered table {}", &table_key.table_name);
-            if table_value.id > max_table_id {
-                info!("Max table id: {} -> {}", max_table_id, table_value.id);
-                max_table_id = table_value.id;
-            }
+            max_table_id = max_table_id.max(table_value.table_id());
+            table_num += 1;
         }
+        info!(
+            "initialized tables in {}.{}, total: {}",
+            catalog_name, schema_name, table_num
+        );
         Ok(())
     }
 
@@ -292,28 +308,48 @@ impl RemoteCatalogManager {
             ..
         } = table_key;
 
+        let table_id = table_value.table_id();
+
         let TableGlobalValue {
-            id,
-            meta,
+            table_info,
             regions_id_map,
             ..
         } = table_value;
+
+        // unwrap safety: checked in yielding this table when `iter_remote_tables`
+        let region_numbers = regions_id_map.get(&self.node_id).unwrap();
 
         let request = OpenTableRequest {
             catalog_name: catalog_name.clone(),
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
-            table_id: *id,
+            table_id,
+            region_numbers: region_numbers.clone(),
         };
         match self
             .engine
             .open_table(&context, request)
             .await
             .with_context(|_| OpenTableSnafu {
-                table_info: format!("{}.{}.{}, id:{}", catalog_name, schema_name, table_name, id,),
+                table_info: format!(
+                    "{}.{}.{}, id:{}",
+                    catalog_name, schema_name, table_name, table_id
+                ),
             })? {
-            Some(table) => Ok(table),
+            Some(table) => {
+                info!(
+                    "Table opened: {}.{}.{}",
+                    catalog_name, schema_name, table_name
+                );
+                Ok(table)
+            }
             None => {
+                info!(
+                    "Try create table: {}.{}.{}",
+                    catalog_name, schema_name, table_name
+                );
+
+                let meta = &table_info.meta;
                 let schema = meta
                     .schema
                     .clone()
@@ -323,13 +359,13 @@ impl RemoteCatalogManager {
                         schema: meta.schema.clone(),
                     })?;
                 let req = CreateTableRequest {
-                    id: *id,
+                    id: table_id,
                     catalog_name: catalog_name.clone(),
                     schema_name: schema_name.clone(),
                     table_name: table_name.clone(),
                     desc: None,
                     schema: Arc::new(schema),
-                    region_numbers: regions_id_map.get(&self.node_id).unwrap().clone(), // this unwrap is safe because region_id_map is checked in `iter_remote_tables`
+                    region_numbers: region_numbers.clone(),
                     primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,
                     table_options: meta.options.clone(),
@@ -341,7 +377,7 @@ impl RemoteCatalogManager {
                     .context(CreateTableSnafu {
                         table_info: format!(
                             "{}.{}.{}, id:{}",
-                            &catalog_name, &schema_name, &table_name, id
+                            &catalog_name, &schema_name, &table_name, table_id
                         ),
                     })
             }
@@ -375,7 +411,7 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(())
     }
 
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<usize> {
+    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
@@ -394,10 +430,17 @@ impl CatalogManager for RemoteCatalogManager {
             .fail();
         }
         schema_provider.register_table(request.table_name, request.table)?;
-        Ok(1)
+        Ok(true)
     }
 
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<usize> {
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {
+        UnimplementedSnafu {
+            operation: "deregister table",
+        }
+        .fail()
+    }
+
+    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
         let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
@@ -405,7 +448,7 @@ impl CatalogManager for RemoteCatalogManager {
         })?;
         let schema_provider = self.new_schema_provider(&catalog_name, &schema_name);
         catalog_provider.register_schema(schema_name, schema_provider)?;
-        Ok(1)
+        Ok(true)
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
@@ -490,6 +533,7 @@ impl CatalogList for RemoteCatalogManager {
 }
 
 pub struct RemoteCatalogProvider {
+    node_id: u64,
     catalog_name: String,
     backend: KvBackendRef,
     schemas: Arc<ArcSwap<HashMap<String, SchemaProviderRef>>>,
@@ -497,13 +541,56 @@ pub struct RemoteCatalogProvider {
 }
 
 impl RemoteCatalogProvider {
-    pub fn new(catalog_name: String, backend: KvBackendRef) -> Self {
+    pub fn new(catalog_name: String, backend: KvBackendRef, node_id: u64) -> Self {
         Self {
+            node_id,
             catalog_name,
             backend,
             schemas: Default::default(),
             mutex: Default::default(),
         }
+    }
+
+    pub fn refresh_schemas(&self) -> Result<()> {
+        let schemas = self.schemas.clone();
+        let schema_prefix = build_schema_prefix(&self.catalog_name);
+        let catalog_name = self.catalog_name.clone();
+        let mutex = self.mutex.clone();
+        let backend = self.backend.clone();
+        let node_id = self.node_id;
+
+        std::thread::spawn(move || {
+            common_runtime::block_on_write(async move {
+                let _guard = mutex.lock().await;
+                let prev_schemas = schemas.load();
+                let mut new_schemas = HashMap::with_capacity(prev_schemas.len() + 1);
+                new_schemas.clone_from(&prev_schemas);
+
+                let mut remote_schemas = backend.range(schema_prefix.as_bytes());
+                while let Some(r) = remote_schemas.next().await {
+                    let Kv(k, _) = r?;
+                    let schema_key = SchemaKey::parse(&String::from_utf8_lossy(&k))
+                        .context(InvalidCatalogValueSnafu)?;
+                    if !new_schemas.contains_key(&schema_key.schema_name) {
+                        new_schemas.insert(
+                            schema_key.schema_name.clone(),
+                            Arc::new(RemoteSchemaProvider::new(
+                                catalog_name.clone(),
+                                schema_key.schema_name,
+                                node_id,
+                                backend.clone(),
+                            )),
+                        );
+                    }
+                }
+                schemas.store(Arc::new(new_schemas));
+                Ok(())
+            })
+        })
+        .join()
+        .unwrap()?;
+
+        Ok(())
     }
 
     fn build_schema_key(&self, schema_name: impl AsRef<str>) -> SchemaKey {
@@ -520,6 +607,7 @@ impl CatalogProvider for RemoteCatalogProvider {
     }
 
     fn schema_names(&self) -> Result<Vec<String>> {
+        self.refresh_schemas()?;
         Ok(self.schemas.load().keys().cloned().collect::<Vec<_>>())
     }
 
@@ -558,6 +646,8 @@ impl CatalogProvider for RemoteCatalogProvider {
     }
 
     fn schema(&self, name: &str) -> Result<Option<Arc<dyn SchemaProvider>>> {
+        // TODO(hl): We should refresh whole catalog before calling datafusion's query engine.
+        self.refresh_schemas()?;
         Ok(self.schemas.load().get(name).cloned())
     }
 }

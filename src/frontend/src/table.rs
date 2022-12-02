@@ -1,18 +1,40 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 pub(crate) mod route;
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::v1::AlterExpr;
 use async_trait::async_trait;
+use client::admin::Admin;
 use client::Database;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
+use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use common_telemetry::debug;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::Expr as DfExpr;
-use datafusion::physical_plan::Partitioning;
+use datafusion::physical_plan::{
+    Partitioning, SendableRecordBatchStream as DfSendableRecordBatchStream,
+};
+use datafusion_common::DataFusionError;
 use datatypes::prelude::Value;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::{Peer, TableName};
@@ -25,8 +47,7 @@ use table::Table;
 use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Error, Result};
-use crate::mock::{DatanodeInstance, TableScanPlan};
+use crate::error::{self, Error, LeaderNotFoundSnafu, RequestDatanodeSnafu, Result};
 use crate::partitioning::columns::RangeColumnsPartitionRule;
 use crate::partitioning::range::RangePartitionRule;
 use crate::partitioning::{
@@ -34,14 +55,17 @@ use crate::partitioning::{
 };
 use crate::spliter::WriteSpliter;
 use crate::table::route::TableRoutes;
+use crate::table::scan::{DatanodeInstance, TableScanPlan};
+
 pub mod insert;
+pub(crate) mod scan;
 
 #[derive(Clone)]
 pub struct DistTable {
-    pub(crate) table_name: TableName,
-    pub(crate) schema: SchemaRef,
-    pub(crate) table_routes: Arc<TableRoutes>,
-    pub(crate) datanode_clients: Arc<DatanodeClients>,
+    table_name: TableName,
+    table_info: TableInfoRef,
+    table_routes: Arc<TableRoutes>,
+    datanode_clients: Arc<DatanodeClients>,
 }
 
 #[async_trait]
@@ -51,17 +75,17 @@ impl Table for DistTable {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.schema.clone()
+        self.table_info.meta.schema.clone()
     }
 
     fn table_info(&self) -> TableInfoRef {
-        unimplemented!()
+        self.table_info.clone()
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
         let partition_rule = self.find_partition_rule().await.map_err(TableError::new)?;
 
-        let spliter = WriteSpliter::with_patition_rule(partition_rule);
+        let spliter = WriteSpliter::with_partition_rule(partition_rule);
         let inserts = spliter.split(request).map_err(TableError::new)?;
         let result = match self.dist_insert(inserts).await.map_err(TableError::new)? {
             client::ObjectResult::Select(_) => unreachable!(),
@@ -93,14 +117,14 @@ impl Table for DistTable {
             let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 
             // TODO(LFC): Pass in "regions" when Datanode supports multi regions for a table.
-            partition_execs.push(PartitionExec {
+            partition_execs.push(Arc::new(PartitionExec {
                 table_name: self.table_name.clone(),
                 datanode_instance,
                 projection: projection.clone(),
                 filters: filters.to_vec(),
                 limit,
                 batches: Arc::new(RwLock::new(None)),
-            })
+            }));
         }
 
         let dist_scan = DistTableScan {
@@ -116,6 +140,20 @@ impl Table for DistTable {
 }
 
 impl DistTable {
+    pub(crate) fn new(
+        table_name: TableName,
+        table_info: TableInfoRef,
+        table_routes: Arc<TableRoutes>,
+        datanode_clients: Arc<DatanodeClients>,
+    ) -> Self {
+        Self {
+            table_name,
+            table_info,
+            table_routes,
+            datanode_clients,
+        }
+    }
+
     // TODO(LFC): Finding regions now seems less efficient, should be further looked into.
     fn find_regions(
         &self,
@@ -314,6 +352,36 @@ impl DistTable {
         };
         Ok(partition_rule)
     }
+
+    /// Define a `alter_by_expr` instead of impl [`Table::alter`] to avoid redundant conversion between  
+    /// [`table::requests::AlterTableRequest`] and [`AlterExpr`].
+    pub(crate) async fn alter_by_expr(&self, expr: AlterExpr) -> Result<()> {
+        let table_routes = self.table_routes.get_route(&self.table_name).await?;
+        let leaders = table_routes.find_leaders();
+        ensure!(
+            !leaders.is_empty(),
+            LeaderNotFoundSnafu {
+                table: format!(
+                    "{:?}.{:?}.{}",
+                    expr.catalog_name, expr.schema_name, expr.table_name
+                )
+            }
+        );
+        for datanode in leaders {
+            let admin = Admin::new(
+                DEFAULT_CATALOG_NAME,
+                self.datanode_clients.get_client(&datanode).await,
+            );
+            debug!("Sent alter table {:?} to {:?}", expr, admin);
+            let result = admin
+                .alter(expr.clone())
+                .await
+                .context(RequestDatanodeSnafu)?;
+            debug!("Alter table result: {:?}", result);
+            // TODO(hl): We should further check and track alter result in some global DDL task tracker
+        }
+        Ok(())
+    }
 }
 
 fn project_schema(table_schema: SchemaRef, projection: &Option<Vec<usize>>) -> SchemaRef {
@@ -354,10 +422,9 @@ fn reverse_operator(op: &Operator) -> Operator {
 #[derive(Debug)]
 struct DistTableScan {
     schema: SchemaRef,
-    partition_execs: Vec<PartitionExec>,
+    partition_execs: Vec<Arc<PartitionExec>>,
 }
 
-#[async_trait]
 impl PhysicalPlan for DistTableScan {
     fn as_any(&self) -> &dyn Any {
         self
@@ -379,14 +446,20 @@ impl PhysicalPlan for DistTableScan {
         unimplemented!()
     }
 
-    async fn execute(
+    fn execute(
         &self,
         partition: usize,
         _runtime: Arc<RuntimeEnv>,
     ) -> QueryResult<SendableRecordBatchStream> {
-        let exec = &self.partition_execs[partition];
-        exec.maybe_init().await;
-        Ok(exec.as_stream().await)
+        let exec = self.partition_execs[partition].clone();
+        let stream = Box::pin(async move {
+            exec.maybe_init()
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            exec.as_stream().await
+        });
+        let stream = AsyncRecordBatchStreamAdapter::new(self.schema(), stream);
+        Ok(Box::pin(stream))
     }
 }
 
@@ -401,14 +474,14 @@ struct PartitionExec {
 }
 
 impl PartitionExec {
-    async fn maybe_init(&self) {
+    async fn maybe_init(&self) -> Result<()> {
         if self.batches.read().await.is_some() {
-            return;
+            return Ok(());
         }
 
         let mut batches = self.batches.write().await;
         if batches.is_some() {
-            return;
+            return Ok(());
         }
 
         let plan = TableScanPlan {
@@ -417,16 +490,18 @@ impl PartitionExec {
             filters: self.filters.clone(),
             limit: self.limit,
         };
-        let result = self.datanode_instance.grpc_table_scan(plan).await;
+        let result = self.datanode_instance.grpc_table_scan(plan).await?;
         let _ = batches.insert(result);
+        Ok(())
     }
 
-    async fn as_stream(&self) -> SendableRecordBatchStream {
-        let batches = self.batches.read().await;
-        batches
-            .as_ref()
+    /// Notice: the record batch will be consumed.
+    async fn as_stream(&self) -> std::result::Result<DfSendableRecordBatchStream, DataFusionError> {
+        let mut batches = self.batches.write().await;
+        Ok(batches
+            .take()
             .expect("should have been initialized in \"maybe_init\"")
-            .as_stream()
+            .into_df_stream())
     }
 }
 
@@ -436,15 +511,13 @@ impl PartitionExec {
 mod test {
     use std::time::Duration;
 
-    use api::v1::codec::InsertBatch;
     use api::v1::column::SemanticType;
-    use api::v1::{column, insert_expr, Column, ColumnDataType};
+    use api::v1::{column, Column, ColumnDataType};
     use catalog::remote::MetaKvBackend;
     use common_recordbatch::util;
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-    use datafusion_expr::expr_fn::col;
-    use datafusion_expr::expr_fn::{and, binary_expr, or};
+    use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::lit;
     use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
     use datanode::instance::Instance;
@@ -460,6 +533,7 @@ mod test {
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
     use sqlparser::dialect::GenericDialect;
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::TableRef;
     use tempdir::TempDir;
 
@@ -479,11 +553,22 @@ mod test {
             ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
         ];
         let schema = Arc::new(Schema::new(column_schemas.clone()));
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .next_column_id(1)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(&table_name.table_name)
+            .meta(meta)
+            .build()
+            .unwrap();
 
         let table_routes = Arc::new(TableRoutes::new(Arc::new(MetaClient::default())));
         let table = DistTable {
             table_name: table_name.clone(),
-            schema,
+            table_info: Arc::new(table_info),
             table_routes: table_routes.clone(),
             datanode_clients: Arc::new(DatanodeClients::new()),
         };
@@ -655,8 +740,6 @@ mod test {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    // FIXME(LFC): Remove ignore.
-    #[ignore]
     async fn test_dist_table_scan() {
         common_telemetry::init_default_ut_logging();
         let table = Arc::new(new_dist_table().await);
@@ -718,7 +801,6 @@ mod test {
         for partition in 0..table_scan.output_partitioning().partition_count() {
             let result = table_scan
                 .execute(partition, Arc::new(RuntimeEnv::default()))
-                .await
                 .unwrap();
             let recordbatches = util::collect(result).await.unwrap();
 
@@ -847,9 +929,20 @@ mod test {
             insert_testing_data(&table_name, instance.clone(), numbers, start_ts).await;
         }
 
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .next_column_id(1)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(&table_name.table_name)
+            .meta(meta)
+            .build()
+            .unwrap();
         DistTable {
             table_name,
-            schema,
+            table_info: Arc::new(table_info),
             table_routes,
             datanode_clients,
         }
@@ -876,8 +969,8 @@ mod test {
         start_ts: i64,
     ) {
         let rows = data.len() as u32;
-        let values = vec![InsertBatch {
-            columns: vec![
+        let values = vec![(
+            vec![
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(column::Values {
@@ -907,10 +1000,8 @@ mod test {
                     ..Default::default()
                 },
             ],
-            row_count: rows,
-        }
-        .into()];
-        let values = insert_expr::Values { values };
+            rows,
+        )];
         dn_instance
             .execute_grpc_insert(
                 &table_name.catalog_name,
@@ -929,7 +1020,7 @@ mod test {
         let data_tmp_dir =
             TempDir::new_in("/tmp", &format!("dist_table_test-data-{}", current)).unwrap();
         let opts = DatanodeOptions {
-            node_id: datanode_id,
+            node_id: Some(datanode_id),
             wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             storage: ObjectStoreConfig::File {
                 data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
@@ -953,9 +1044,21 @@ mod test {
             ConcreteDataType::int32_datatype(),
             true,
         )]));
+        let table_name = TableName::new("greptime", "public", "foo");
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .next_column_id(1)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(&table_name.table_name)
+            .meta(meta)
+            .build()
+            .unwrap();
         let table = DistTable {
-            table_name: TableName::new("greptime", "public", "foo"),
-            schema,
+            table_name,
+            table_info: Arc::new(table_info),
             table_routes: Arc::new(TableRoutes::new(Arc::new(MetaClient::default()))),
             datanode_clients: Arc::new(DatanodeClients::new()),
         };

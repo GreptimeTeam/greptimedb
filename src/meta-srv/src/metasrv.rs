@@ -1,12 +1,23 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use api::v1::meta::Peer;
-use common_telemetry::info;
-use common_telemetry::warn;
-use serde::Deserialize;
-use serde::Serialize;
+use common_telemetry::{info, warn};
+use serde::{Deserialize, Serialize};
 
 use crate::election::Election;
 use crate::handler::check_leader::CheckLeaderHandler;
@@ -15,8 +26,7 @@ use crate::handler::response_header::ResponseHeaderHandler;
 use crate::handler::HeartbeatHandlerGroup;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::Selector;
-use crate::sequence::Sequence;
-use crate::sequence::SequenceRef;
+use crate::sequence::{Sequence, SequenceRef};
 use crate::service::store::kv::KvStoreRef;
 
 pub const TABLE_ID_SEQ: &str = "table_id";
@@ -32,9 +42,9 @@ pub struct MetaSrvOptions {
 impl Default for MetaSrvOptions {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:3002".to_string(),
-            server_addr: "0.0.0.0:3002".to_string(),
-            store_addr: "0.0.0.0:2379".to_string(),
+            bind_addr: "127.0.0.1:3002".to_string(),
+            server_addr: "127.0.0.1:3002".to_string(),
+            store_addr: "127.0.0.1:2379".to_string(),
             datanode_lease_secs: 15,
         }
     }
@@ -83,7 +93,7 @@ impl MetaSrv {
         election: Option<ElectionRef>,
     ) -> Self {
         let started = Arc::new(AtomicBool::new(false));
-        let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 10, kv_store.clone()));
+        let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector {}));
         let handler_group = HeartbeatHandlerGroup::default();
         handler_group.add_handler(ResponseHeaderHandler).await;

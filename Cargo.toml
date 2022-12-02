@@ -11,11 +11,11 @@ members = [
     "src/common/function",
     "src/common/function-macro",
     "src/common/grpc",
+    "src/common/grpc-expr",
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",
     "src/common/substrait",
-    "src/common/insert",
     "src/common/telemetry",
     "src/common/time",
     "src/datanode",
@@ -24,16 +24,19 @@ members = [
     "src/log-store",
     "src/meta-client",
     "src/meta-srv",
+    "src/mito",
     "src/object-store",
     "src/query",
     "src/script",
     "src/servers",
+    "src/session",
     "src/sql",
     "src/storage",
     "src/store-api",
     "src/table",
-    "src/table-engine",
-]
+    "tests-integration"
+,
+    "tests/runner"]
 
 [profile.release]
 debug = true

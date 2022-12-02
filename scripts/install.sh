@@ -7,7 +7,7 @@ ARCH_TYPE=
 VERSION=${1:-latest}
 GITHUB_ORG=GreptimeTeam
 GITHUB_REPO=greptimedb
-BIN=greptimedb
+BIN=greptime
 
 get_os_type() {
     os_type="$(uname -s)"

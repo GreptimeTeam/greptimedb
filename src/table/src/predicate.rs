@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 mod stats;
 
 use common_query::logical_plan::Expr;
@@ -58,9 +72,7 @@ mod tests {
 
     pub use datafusion::parquet::schema::types::{BasicTypeInfo, PhysicalType};
     use datafusion_common::Column;
-    use datafusion_expr::Expr;
-    use datafusion_expr::Literal;
-    use datafusion_expr::Operator;
+    use datafusion_expr::{Expr, Literal, Operator};
     use datatypes::arrow::array::{Int32Array, Utf8Array};
     use datatypes::arrow::chunk::Chunk;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
@@ -68,8 +80,7 @@ mod tests {
     use datatypes::arrow::io::parquet::write::{
         Compression, Encoding, FileSink, Version, WriteOptions,
     };
-    use futures::AsyncWriteExt;
-    use futures::SinkExt;
+    use futures::{AsyncWriteExt, SinkExt};
     use tempdir::TempDir;
     use tokio_util::compat::TokioAsyncWriteCompatExt;
 

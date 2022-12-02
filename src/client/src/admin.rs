@@ -1,12 +1,24 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use api::v1::*;
 use common_error::prelude::StatusCode;
 use common_query::Output;
 use snafu::prelude::*;
 
 use crate::database::PROTOCOL_VERSION;
-use crate::error;
-use crate::Client;
-use crate::Result;
+use crate::{error, Client, Result};
 
 #[derive(Clone, Debug)]
 pub struct Admin {
@@ -46,7 +58,19 @@ impl Admin {
             header: Some(header),
             expr: Some(admin_expr::Expr::Alter(expr)),
         };
-        Ok(self.do_requests(vec![expr]).await?.remove(0))
+        self.do_request(expr).await
+    }
+
+    pub async fn drop_table(&self, expr: DropTableExpr) -> Result<AdminResult> {
+        let header = ExprHeader {
+            version: PROTOCOL_VERSION,
+        };
+        let expr = AdminExpr {
+            header: Some(header),
+            expr: Some(admin_expr::Expr::DropTable(expr)),
+        };
+
+        self.do_request(expr).await
     }
 
     /// Invariants: the lengths of input vec (`Vec<AdminExpr>`) and output vec (`Vec<AdminResult>`) are equal.
