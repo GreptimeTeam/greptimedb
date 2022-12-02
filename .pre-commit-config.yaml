@@ -9,7 +9,7 @@ repos:
     rev: e6a795bc6b2c0958f9ef52af4863bbd7cc17238f
     hooks:
     -    id: cargo-sort
-         args: ["--workspace", "--print"]
+         args: ["--workspace"]
 
 -   repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0

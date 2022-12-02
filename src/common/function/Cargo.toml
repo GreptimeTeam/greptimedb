@@ -9,8 +9,8 @@ arc-swap = "1.0"
 chrono-tz = "0.6"
 common-error = { path = "../error" }
 common-function-macro = { path = "../function-macro" }
-common-time = { path = "../time" }
 common-query = { path = "../query" }
+common-time = { path = "../time" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../../datatypes" }
 libc = "0.2"
