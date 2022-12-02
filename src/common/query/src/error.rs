@@ -17,6 +17,7 @@ use std::any::Any;
 use arrow::error::ArrowError;
 use common_error::prelude::*;
 use datafusion_common::DataFusionError;
+use datatypes::arrow;
 use datatypes::arrow::datatypes::DataType as ArrowDatatype;
 use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;

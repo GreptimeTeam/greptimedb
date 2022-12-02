@@ -17,6 +17,7 @@ use std::fmt;
 use arrow::array::Array;
 use common_query::error::{FromArrowArraySnafu, Result, TypeCastSnafu};
 use common_query::prelude::{Signature, Volatility};
+use datatypes::arrow;
 use datatypes::prelude::*;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::ResultExt;
