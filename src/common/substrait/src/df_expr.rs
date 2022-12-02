@@ -97,9 +97,11 @@ pub fn convert_scalar_function(
     // convert this scalar function
     // map function name
     let anchor = scalar_fn.function_reference;
-    let fn_name = ctx.find_scalar_fn(anchor).context(InvalidParametersSnafu {
-        reason: format!("Unregistered scalar function reference: {}", anchor),
-    })?;
+    let fn_name = ctx
+        .find_scalar_fn(anchor)
+        .with_context(|| InvalidParametersSnafu {
+            reason: format!("Unregistered scalar function reference: {}", anchor),
+        })?;
 
     // convenient util
     let ensure_arg_len = |expected: usize| -> Result<()> {
@@ -555,12 +557,13 @@ pub fn expression_from_df_expr(
 /// `DirectReference` - `StructField`.
 pub fn convert_column(column: &Column, schema: &Schema) -> Result<FieldReference> {
     let column_name = &column.name;
-    let field_index = schema
-        .column_index_by_name(column_name)
-        .context(MissingFieldSnafu {
-            field: format!("{:?}", column),
-            plan: format!("schema: {:?}", schema),
-        })?;
+    let field_index =
+        schema
+            .column_index_by_name(column_name)
+            .with_context(|| MissingFieldSnafu {
+                field: format!("{:?}", column),
+                plan: format!("schema: {:?}", schema),
+            })?;
 
     Ok(FieldReference {
         reference_type: Some(FieldReferenceType::DirectReference(ReferenceSegment {
