@@ -24,6 +24,7 @@ use crate::vectors::{ListVectorBuilder, MutableVector};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListType {
     /// The type of List's item.
+    // Use Box to avoid recursive dependency, as enum ConcreteDataType depends on ListType.
     item_type: Box<ConcreteDataType>,
 }
 
