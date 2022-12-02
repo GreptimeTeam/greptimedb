@@ -128,8 +128,8 @@ impl Value {
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
             // Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
             Value::Date(_) => ConcreteDataType::date_datatype(),
-            // Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
-            // Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
+            Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
+            Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
             _ => todo!(),
         }
     }

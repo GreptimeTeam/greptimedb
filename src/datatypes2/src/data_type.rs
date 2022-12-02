@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
+use common_time::timestamp::TimeUnit;
 use paste::paste;
 use serde::{Deserialize, Serialize};
 
@@ -220,22 +221,14 @@ impl ConcreteDataType {
         ConcreteDataType::Timestamp(TimestampType::Nanosecond(TimestampNanosecondType::default()))
     }
 
-    //     /// Converts from arrow timestamp unit to
-    //     // TODO(hl): maybe impl From<ArrowTimestamp> for our timestamp ?
-    //     pub fn from_arrow_time_unit(t: &arrow::datatypes::TimeUnit) -> Self {
-    //         match t {
-    //             arrow::datatypes::TimeUnit::Second => Self::timestamp_datatype(TimeUnit::Second),
-    //             arrow::datatypes::TimeUnit::Millisecond => {
-    //                 Self::timestamp_datatype(TimeUnit::Millisecond)
-    //             }
-    //             arrow::datatypes::TimeUnit::Microsecond => {
-    //                 Self::timestamp_datatype(TimeUnit::Microsecond)
-    //             }
-    //             arrow::datatypes::TimeUnit::Nanosecond => {
-    //                 Self::timestamp_datatype(TimeUnit::Nanosecond)
-    //             }
-    //         }
-    //     }
+    pub fn timestamp_datatype(unit: TimeUnit) -> Self {
+        match unit {
+            TimeUnit::Second => Self::timestamp_second_datatype(),
+            TimeUnit::Millisecond => Self::timestamp_millisecond_datatype(),
+            TimeUnit::Microsecond => Self::timestamp_microsecond_datatype(),
+            TimeUnit::Nanosecond => Self::timestamp_nanosecond_datatype(),
+        }
+    }
 }
 
 /// Data type abstraction.
