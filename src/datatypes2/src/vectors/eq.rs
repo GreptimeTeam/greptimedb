@@ -17,9 +17,9 @@ use std::sync::Arc;
 use crate::data_type::DataType;
 use crate::types::TimestampType;
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, PrimitiveVector, StringVector,
-    TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, Vector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, ListVector, PrimitiveVector,
+    StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, Vector,
 };
 use crate::with_match_primitive_type_id;
 
@@ -93,7 +93,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 is_vector_eq!(TimestampNanosecondVector, lhs, rhs)
             }
         },
-        // List(_) => is_vector_eq!(ListVector, lhs, rhs),
+        List(_) => is_vector_eq!(ListVector, lhs, rhs),
         UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
         | Float32(_) | Float64(_) => {
             with_match_primitive_type_id!(lhs_type.logical_type_id(), |$T| {

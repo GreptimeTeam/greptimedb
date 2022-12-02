@@ -25,8 +25,8 @@ use crate::error::{self, Result};
 use crate::scalars::Scalar;
 use crate::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
-    Int16Vector, Int32Vector, Int64Vector, Int8Vector, MutableVector, UInt16Vector, UInt32Vector,
-    UInt64Vector, UInt8Vector, Vector, VectorRef,
+    Int16Vector, Int32Vector, Int64Vector, Int8Vector, ListVector, MutableVector, NullVector,
+    StringVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
 };
 
 pub struct Helper;
@@ -177,7 +177,7 @@ impl Helper {
     /// Panic if given arrow data type is not supported.
     pub fn try_into_vector(array: impl AsRef<dyn Array>) -> Result<VectorRef> {
         Ok(match array.as_ref().data_type() {
-            // ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
+            ArrowDataType::Null => Arc::new(NullVector::try_from_arrow_array(array)?),
             ArrowDataType::Boolean => Arc::new(BooleanVector::try_from_arrow_array(array)?),
             ArrowDataType::Binary | ArrowDataType::LargeBinary => {
                 Arc::new(BinaryVector::try_from_arrow_array(array)?)
@@ -192,12 +192,12 @@ impl Helper {
             ArrowDataType::UInt64 => Arc::new(UInt64Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float32 => Arc::new(Float32Vector::try_from_arrow_array(array)?),
             ArrowDataType::Float64 => Arc::new(Float64Vector::try_from_arrow_array(array)?),
-            // ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
-            //     Arc::new(StringVector::try_from_arrow_array(array)?)
-            // }
+            ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => {
+                Arc::new(StringVector::try_from_arrow_array(array)?)
+            }
             ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
             ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
-            // ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
+            ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             // ArrowDataType::Timestamp(_, _) => {
             //     Arc::new(TimestampVector::try_from_arrow_array(array)?)
             // }
