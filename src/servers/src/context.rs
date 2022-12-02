@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -25,7 +24,6 @@ type CtxFnRef = Arc<dyn Fn(&Context) -> bool + Send + Sync>;
 
 #[derive(Serialize, Deserialize)]
 pub struct Context {
-    pub exec_info: ExecInfo,
     pub client_info: ClientInfo,
     pub user_info: UserInfo,
     pub quota: Quota,
@@ -79,31 +77,9 @@ impl CtxBuilder {
             user_info: self.user_info.context(BuildingContextSnafu {
                 err_msg: "missing user info while building ctx",
             })?,
-
-            exec_info: ExecInfo::default(),
             quota: Quota::default(),
             predicates: vec![],
         })
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ExecInfo {
-    pub catalog: Option<String>,
-    pub schema: Option<String>,
-    // should opts to be thread safe?
-    pub extra_opts: HashMap<String, String>,
-    pub trace_id: Option<String>,
-}
-
-impl Default for ExecInfo {
-    fn default() -> Self {
-        ExecInfo {
-            catalog: Some("greptime".to_string()),
-            schema: Some("public".to_string()),
-            extra_opts: HashMap::new(),
-            trace_id: None,
-        }
     }
 }
 
@@ -139,12 +115,11 @@ mod test {
     #[test]
     fn test_predicate() {
         let mut ctx = Context {
-            exec_info: Default::default(),
             client_info: ClientInfo {
                 client_host: Default::default(),
                 channel: Channel::GRPC,
             },
-            user_info: UserInfo::new(None, vec![AuthMethod::PlainPwd(b"123456".to_vec())]),
+            user_info: UserInfo::new("greptime".to_string(), vec![AuthMethod::PlainPwd(b"123456".to_vec())]),
             quota: Default::default(),
             predicates: vec![],
         };
@@ -168,16 +143,11 @@ mod test {
             .client_addr("127.0.0.1:4001".to_string())
             .set_channel(HTTP)
             .set_user_info(UserInfo::new(
-                None,
+                "greptime".to_string(),
                 vec![AuthMethod::PlainPwd(b"123456".to_vec())],
             ))
             .build()
             .unwrap();
-
-        assert_eq!(ctx.exec_info.catalog.unwrap(), String::from("greptime"));
-        assert_eq!(ctx.exec_info.schema.unwrap(), String::from("public"));
-        assert_eq!(ctx.exec_info.extra_opts.len(), 0);
-        assert_eq!(ctx.exec_info.trace_id, None);
 
         assert_eq!(ctx.client_info.client_host, String::from("127.0.0.1:4001"));
 

@@ -16,7 +16,7 @@ pub trait UserProvider: Send + Sync {
 
 pub type UserProviderRef = Arc<dyn UserProvider>;
 
-type UserName = String;
+type Username = String;
 type HostOrIp = String;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -26,25 +26,25 @@ pub enum AuthMethod {
 }
 
 pub enum Certificate {
-    UserId(UserName, HostOrIp),
+    UserId(Username, HostOrIp),
 }
 
 // When auth_methods.len() == 0, it means that no authentication is required.
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct UserInfo {
-    username: Option<String>,
+    username: String,
     auth_methods: Vec<AuthMethod>,
 }
 
 impl UserInfo {
-    pub fn new(username: Option<String>, auth_methods: Vec<AuthMethod>) -> Self {
+    pub fn new(username: String, auth_methods: Vec<AuthMethod>) -> Self {
         Self {
             username,
             auth_methods,
         }
     }
 
-    pub fn get_username(&self) -> Option<String> {
+    pub fn get_username(&self) -> String {
         self.username.clone()
     }
 
@@ -74,18 +74,18 @@ pub fn auth_mysql(
         {
             #[allow(clippy::never_loop)]
             for method in auth_methods {
-                match method {
+                return match method {
                     AuthMethod::PlainPwd(pwd) => {
-                        return mysql_native_pwd_auth2(hashed_value, salt, pwd)
+                        mysql_native_pwd_auth2(hashed_value, salt, pwd)
                     }
                     AuthMethod::DoubleSha1(hashed_stage2) => {
-                        return mysql_native_pwd_auth1(hashed_value, salt, hashed_stage2)
+                        mysql_native_pwd_auth1(hashed_value, salt, hashed_stage2)
                     }
                 }
             }
         }
     }
-    true
+    false
 }
 
 #[cfg(test)]
@@ -113,7 +113,7 @@ mod tests {
     }
 
     // mock hashed value passes from mysql client
-    // sha1(pwd) xor sha1(slat + sha1(sha1(pwd)))
+    // sha1(pwd) xor sha1(salt + sha1(sha1(pwd)))
     // pwd = b"123456"
     // salt = b"1213hjkasdhjkashdjka"
     fn mock_hashed_val() -> Vec<u8> {
