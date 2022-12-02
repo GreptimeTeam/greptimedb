@@ -12,15 +12,15 @@ catalog = { path = "../catalog" }
 chrono = "0.4"
 client = { path = "../client" }
 common-base = { path = "../common/base" }
+common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
+common-grpc-expr = { path = "../common/grpc-expr" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
-common-catalog = { path = "../common/catalog" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-common-grpc-expr = { path = "../common/grpc-expr" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
     "simd",
 ] }
@@ -36,17 +36,17 @@ moka = { version = "0.9", features = ["future"] }
 openmetrics-parser = "0.4"
 prost = "0.11"
 query = { path = "../query" }
+rustls = "0.20"
 serde = "1.0"
 serde_json = "1.0"
-session = { path = "../session" }
-sqlparser = "0.15"
 servers = { path = "../servers" }
+session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
+sqlparser = "0.15"
 store-api = { path = "../store-api" }
 table = { path = "../table" }
 tokio = { version = "1.18", features = ["full"] }
-rustls = "0.20"
 
 [dev-dependencies]
 datanode = { path = "../datanode" }

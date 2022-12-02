@@ -38,8 +38,8 @@ tokio = { version = "1.18", features = ["full"] }
 [dev-dependencies]
 chrono = "0.4"
 log-store = { path = "../log-store" }
+mito = { path = "../mito", features = ["test"] }
 object-store = { path = "../object-store" }
 storage = { path = "../storage" }
-mito = { path = "../mito", features = ["test"] }
 tempdir = "0.3"
 tokio = { version = "1.0", features = ["full"] }
