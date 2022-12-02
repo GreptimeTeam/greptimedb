@@ -52,7 +52,7 @@ impl DataType for BooleanType {
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(BooleanVectorBuilder::with_capacity(capacity))
     }
-    
+
     fn is_timestamp_compatible(&self) -> bool {
         false
     }

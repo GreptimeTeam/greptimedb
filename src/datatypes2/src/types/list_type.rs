@@ -67,6 +67,10 @@ impl DataType for ListType {
             capacity,
         ))
     }
+
+    fn is_timestamp_compatible(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

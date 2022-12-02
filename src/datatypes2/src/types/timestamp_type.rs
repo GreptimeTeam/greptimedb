@@ -76,7 +76,7 @@ macro_rules! impl_data_type_for_timestamp {
                 fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
                     Box::new([<Timestamp $unit Vector Builder>]::with_capacity(capacity))
                 }
-                
+
                 fn is_timestamp_compatible(&self) -> bool {
                     true
                 }

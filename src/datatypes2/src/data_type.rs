@@ -372,9 +372,15 @@ mod tests {
     #[test]
     fn test_is_timestamp_compatible() {
         assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Second).is_timestamp_compatible());
-        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond).is_timestamp_compatible());
-        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond).is_timestamp_compatible());
-        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond).is_timestamp_compatible());
+        assert!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond).is_timestamp_compatible()
+        );
+        assert!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond).is_timestamp_compatible()
+        );
+        assert!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond).is_timestamp_compatible()
+        );
         assert!(ConcreteDataType::timestamp_second_datatype().is_timestamp_compatible());
         assert!(ConcreteDataType::timestamp_millisecond_datatype().is_timestamp_compatible());
         assert!(ConcreteDataType::timestamp_microsecond_datatype().is_timestamp_compatible());
