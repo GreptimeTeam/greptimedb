@@ -5326,7 +5326,7 @@ name = "rustpython-codegen"
 version = "0.1.2"
 source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
 dependencies = [
- "ahash",
+ "ahash 0.7.6",
  "indexmap",
  "itertools",
  "log",
@@ -5421,7 +5421,7 @@ name = "rustpython-parser"
 version = "0.1.2"
 source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
 dependencies = [
- "ahash",
+ "ahash 0.7.6",
  "anyhow",
  "itertools",
  "lalrpop",
@@ -5456,7 +5456,7 @@ version = "0.1.2"
 source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
 dependencies = [
  "adler32",
- "ahash",
+ "ahash 0.7.6",
  "ascii",
  "base64",
  "blake2",
@@ -5533,7 +5533,7 @@ dependencies = [
  "flate2",
  "getrandom 0.2.7",
  "glob",
- "half",
+ "half 1.8.2",
  "hex",
  "hexf-parse",
  "indexmap",
