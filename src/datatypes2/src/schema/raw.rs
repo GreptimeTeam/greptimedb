@@ -20,7 +20,7 @@ use crate::schema::{ColumnSchema, Schema, SchemaBuilder};
 /// Struct used to serialize and deserialize [`Schema`](crate::schema::Schema).
 ///
 /// This struct only contains necessary data to recover the Schema.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawSchema {
     pub column_schemas: Vec<ColumnSchema>,
     pub timestamp_index: Option<usize>,

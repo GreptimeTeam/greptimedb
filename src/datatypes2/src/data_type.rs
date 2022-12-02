@@ -254,8 +254,9 @@ pub type DataTypeRef = Arc<dyn DataType>;
 // TODO(yingwen): Pass all tests.
 #[cfg(test)]
 mod tests {
-    use super::*;
     use arrow::datatypes::Field;
+
+    use super::*;
 
     #[test]
     fn test_concrete_type_as_datatype_trait() {

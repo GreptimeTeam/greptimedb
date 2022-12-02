@@ -31,7 +31,7 @@ const TIME_INDEX_KEY: &str = "greptime:time_index";
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 
 /// Schema of a column, used as an immutable struct.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnSchema {
     pub name: String,
     pub data_type: ConcreteDataType,

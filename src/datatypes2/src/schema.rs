@@ -32,7 +32,7 @@ pub use crate::schema::raw::RawSchema;
 const VERSION_KEY: &str = "greptime:version";
 
 /// A common schema, should be immutable.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schema {
     column_schemas: Vec<ColumnSchema>,
     name_to_index: HashMap<String, usize>,
