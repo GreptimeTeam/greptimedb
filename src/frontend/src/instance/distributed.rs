@@ -16,12 +16,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{AlterExpr, CreateDatabaseExpr, CreateExpr};
 use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
+use api::result::AdminResultBuilder;
+use api::v1::{
+    admin_expr, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr, CreateExpr, ObjectExpr,
+    ObjectResult,
+};
+use async_trait::async_trait;
 use catalog::CatalogList;
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::{debug, error, info};
 use datatypes::prelude::ConcreteDataType;
@@ -33,6 +39,8 @@ use meta_client::rpc::{
 };
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
+use servers::error as server_error;
+use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
@@ -48,6 +56,7 @@ use crate::error::{
     PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
     TableNotFoundSnafu,
 };
+use crate::instance::parse_stmt;
 use crate::partitioning::{PartitionBound, PartitionDef};
 use crate::table::DistTable;
 
@@ -129,12 +138,8 @@ impl DistInstance {
         Ok(Output::AffectedRows(region_routes.len()))
     }
 
-    pub(crate) async fn handle_sql(
-        &self,
-        sql: &str,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
+    async fn handle_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
+        let stmt = parse_stmt(sql)?;
         match stmt {
             Statement::Query(_) => {
                 let plan = self
@@ -157,7 +162,7 @@ impl DistInstance {
     }
 
     /// Handles distributed database creation
-    pub(crate) async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
+    async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<AdminResult> {
         let key = SchemaKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: expr.database_name,
@@ -172,10 +177,10 @@ impl DistInstance {
             .with_key(key.to_string())
             .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
         client.put(request.into()).await.context(RequestMetaSnafu)?;
-        Ok(Output::AffectedRows(1))
+        Ok(AdminResultBuilder::default().mutate_result(1, 0).build())
     }
 
-    pub async fn handle_alter_table(&self, expr: AlterExpr) -> Result<Output> {
+    async fn handle_alter_table(&self, expr: AlterExpr) -> Result<AdminResult> {
         let catalog_name = expr.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
         let schema_name = expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = expr.table_name.as_str();
@@ -200,7 +205,7 @@ impl DistInstance {
             .downcast_ref::<DistTable>()
             .expect("Table impl must be DistTable in distributed mode");
         dist_table.alter_by_expr(expr).await?;
-        Ok(Output::AffectedRows(0))
+        Ok(AdminResultBuilder::default().mutate_result(0, 0).build())
     }
 
     async fn create_table_in_meta(
@@ -268,6 +273,50 @@ impl DistInstance {
             }
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SqlQueryHandler for DistInstance {
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.handle_sql(query, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQuerySnafu { query })
+    }
+}
+
+#[async_trait]
+impl GrpcQueryHandler for DistInstance {
+    async fn do_query(&self, _: ObjectExpr) -> server_error::Result<ObjectResult> {
+        unimplemented!()
+    }
+}
+
+#[async_trait]
+impl GrpcAdminHandler for DistInstance {
+    async fn exec_admin_request(&self, query: AdminExpr) -> server_error::Result<AdminResult> {
+        let expr = query
+            .clone()
+            .expr
+            .context(server_error::InvalidQuerySnafu {
+                reason: "empty expr",
+            })?;
+        match expr {
+            admin_expr::Expr::CreateDatabase(create_database) => {
+                self.handle_create_database(create_database).await
+            }
+            admin_expr::Expr::Alter(alter) => self.handle_alter_table(alter).await,
+            _ => unimplemented!(),
+        }
+        .map_err(BoxedError::new)
+        .context(server_error::ExecuteQuerySnafu {
+            query: format!("{:?}", query),
+        })
     }
 }
 

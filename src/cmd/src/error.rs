@@ -25,12 +25,6 @@ pub enum Error {
         source: datanode::error::Error,
     },
 
-    #[snafu(display("Failed to build frontend, source: {}", source))]
-    BuildFrontend {
-        #[snafu(backtrace)]
-        source: frontend::error::Error,
-    },
-
     #[snafu(display("Failed to start frontend, source: {}", source))]
     StartFrontend {
         #[snafu(backtrace)]
@@ -75,7 +69,6 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             Error::IllegalConfig { .. } => StatusCode::InvalidArguments,
-            Error::BuildFrontend { source, .. } => source.status_code(),
         }
     }
 

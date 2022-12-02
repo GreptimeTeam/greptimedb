@@ -27,7 +27,7 @@ use datatypes::prelude::VectorRef;
 use datatypes::schema::{Schema, SchemaRef};
 use error::Result;
 use futures::task::{Context, Poll};
-use futures::Stream;
+use futures::{Stream, TryStreamExt};
 pub use recordbatch::RecordBatch;
 use snafu::ensure;
 
@@ -78,6 +78,16 @@ impl RecordBatches {
     ) -> Result<Self> {
         let batches = vec![RecordBatch::new(schema.clone(), columns)?];
         Ok(Self { schema, batches })
+    }
+
+    pub async fn try_collect(stream: SendableRecordBatchStream) -> Result<Self> {
+        let batches = stream.try_collect::<Vec<_>>().await?;
+        if batches.is_empty() {
+            Ok(Self::empty())
+        } else {
+            let schema = batches[0].schema.clone();
+            Self::try_new(schema, batches)
+        }
     }
 
     #[inline]

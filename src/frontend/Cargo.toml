@@ -26,7 +26,7 @@ datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = 
 ] }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
-
+datanode = { path = "../datanode" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"

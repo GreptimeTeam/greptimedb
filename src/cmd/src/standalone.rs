@@ -28,11 +28,8 @@ use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::Mode;
 use snafu::ResultExt;
-use tokio::try_join;
 
-use crate::error::{
-    BuildFrontendSnafu, Error, IllegalConfigSnafu, Result, StartDatanodeSnafu, StartFrontendSnafu,
-};
+use crate::error::{Error, IllegalConfigSnafu, Result, StartDatanodeSnafu, StartFrontendSnafu};
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -104,7 +101,6 @@ impl StandaloneOptions {
             influxdb_options: self.influxdb_options,
             prometheus_options: self.prometheus_options,
             mode: self.mode,
-            datanode_rpc_addr: "127.0.0.1:3001".to_string(),
             meta_client_opts: None,
         }
     }
@@ -162,7 +158,7 @@ impl StartCommand {
         let mut datanode = Datanode::new(dn_opts.clone())
             .await
             .context(StartDatanodeSnafu)?;
-        let mut frontend = build_frontend(fe_opts, &dn_opts, datanode.get_instance()).await?;
+        let mut frontend = build_frontend(fe_opts, datanode.get_instance()).await?;
 
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
         datanode
@@ -171,11 +167,7 @@ impl StartCommand {
             .context(StartDatanodeSnafu)?;
         info!("Datanode instance started");
 
-        try_join!(
-            async { datanode.start_services().await.context(StartDatanodeSnafu) },
-            async { frontend.start().await.context(StartFrontendSnafu) }
-        )?;
-
+        frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())
     }
 }
@@ -183,17 +175,9 @@ impl StartCommand {
 /// Build frontend instance in standalone mode
 async fn build_frontend(
     fe_opts: FrontendOptions,
-    dn_opts: &DatanodeOptions,
     datanode_instance: InstanceRef,
 ) -> Result<Frontend<FeInstance>> {
-    let grpc_server_addr = &dn_opts.rpc_addr;
-    info!(
-        "Build frontend with datanode gRPC addr: {}",
-        grpc_server_addr
-    );
-    let mut frontend_instance = FeInstance::try_new(&fe_opts)
-        .await
-        .context(BuildFrontendSnafu)?;
+    let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
     frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
     frontend_instance.set_script_handler(datanode_instance);
     Ok(Frontend::new(fe_opts, frontend_instance))
@@ -289,7 +273,6 @@ mod tests {
 
         let fe_opts = FrontendOptions::try_from(cmd).unwrap();
         assert_eq!(Mode::Standalone, fe_opts.mode);
-        assert_eq!("127.0.0.1:3001".to_string(), fe_opts.datanode_rpc_addr);
         assert_eq!(
             "127.0.0.1:4000".to_string(),
             fe_opts.http_options.as_ref().unwrap().addr
