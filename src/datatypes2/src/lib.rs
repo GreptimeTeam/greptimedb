@@ -21,7 +21,6 @@ pub mod error;
 pub mod macros;
 pub mod prelude;
 mod scalars;
-// TODO(yingwen): schema mod
 pub mod schema;
 pub mod serialize;
 mod timestamp;

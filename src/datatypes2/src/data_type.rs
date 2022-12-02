@@ -107,13 +107,6 @@ impl ConcreteDataType {
     //     )
     // }
 
-    // pub fn is_timestamp(&self) -> bool {
-    //     matches!(
-    //         self,
-    //         ConcreteDataType::Timestamp(_) | ConcreteDataType::Int64(_)
-    //     )
-    // }
-
     // pub fn numerics() -> Vec<ConcreteDataType> {
     //     vec![
     //         ConcreteDataType::int8_datatype(),
@@ -262,6 +255,7 @@ pub type DataTypeRef = Arc<dyn DataType>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::Field;
 
     #[test]
     fn test_concrete_type_as_datatype_trait() {
@@ -335,14 +329,14 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
             ConcreteDataType::String(_)
         ));
-        // assert_eq!(
-        //     ConcreteDataType::from_arrow_type(&ArrowDataType::List(Box::new(Field::new(
-        //         "item",
-        //         ArrowDataType::Int32,
-        //         true,
-        //     )))),
-        //     ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype()))
-        // );
+        assert_eq!(
+            ConcreteDataType::from_arrow_type(&ArrowDataType::List(Box::new(Field::new(
+                "item",
+                ArrowDataType::Int32,
+                true,
+            )))),
+            ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype()))
+        );
         assert!(matches!(
             ConcreteDataType::from_arrow_type(&ArrowDataType::Date32),
             ConcreteDataType::Date(_)
