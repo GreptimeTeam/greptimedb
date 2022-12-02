@@ -35,6 +35,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::scalars::ScalarVector;
+    use crate::vectors::constant::ConstantVector;
     use crate::vectors::{
         BooleanVector, Int32Vector, NullVector, StringVector, VectorOp, VectorRef,
     };
@@ -62,25 +63,25 @@ mod tests {
         check_filter_primitive(&[5, 7], &[5, 6, 7], &[true, false, true]);
     }
 
-    // fn check_filter_constant(expect_length: usize, input_length: usize, filter: &[bool]) {
-    //     let v = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[123])), input_length);
-    //     let filter = BooleanVector::from_slice(filter);
-    //     let out = v.filter(&filter).unwrap();
+    fn check_filter_constant(expect_length: usize, input_length: usize, filter: &[bool]) {
+        let v = ConstantVector::new(Arc::new(Int32Vector::from_slice(&[123])), input_length);
+        let filter = BooleanVector::from_slice(filter);
+        let out = v.filter(&filter).unwrap();
 
-    //     assert!(out.is_const());
-    //     assert_eq!(expect_length, out.len());
-    // }
+        assert!(out.is_const());
+        assert_eq!(expect_length, out.len());
+    }
 
-    // #[test]
-    // fn test_filter_constant() {
-    //     check_filter_constant(0, 0, &[]);
-    //     check_filter_constant(1, 1, &[true]);
-    //     check_filter_constant(0, 1, &[false]);
-    //     check_filter_constant(1, 2, &[false, true]);
-    //     check_filter_constant(2, 2, &[true, true]);
-    //     check_filter_constant(1, 4, &[false, false, false, true]);
-    //     check_filter_constant(2, 4, &[false, true, false, true]);
-    // }
+    #[test]
+    fn test_filter_constant() {
+        check_filter_constant(0, 0, &[]);
+        check_filter_constant(1, 1, &[true]);
+        check_filter_constant(0, 1, &[false]);
+        check_filter_constant(1, 2, &[false, true]);
+        check_filter_constant(2, 2, &[true, true]);
+        check_filter_constant(1, 4, &[false, false, false, true]);
+        check_filter_constant(2, 4, &[false, true, false, true]);
+    }
 
     #[test]
     fn test_filter_scalar() {
