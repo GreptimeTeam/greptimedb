@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_runtime::Builder as RuntimeBuilder;
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -238,6 +239,29 @@ async fn test_server_secure_require_client_secure() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_using_db() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    let table = MemTable::default_numbers_table();
+    let pg_server = create_postgres_server(table, false, Arc::new(TlsOption::default()))?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    let server_addr = pg_server.start(listening).await.unwrap();
+    let server_port = server_addr.port();
+
+    let client = create_connection_with_given_db(server_port, "testdb")
+        .await
+        .unwrap();
+    let result = client.simple_query("SELECT uint32s FROM numbers").await;
+    assert!(result.is_err());
+
+    let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)
+        .await
+        .unwrap();
+    let result = client.simple_query("SELECT uint32s FROM numbers").await;
+    assert!(result.is_ok());
+    Ok(())
+}
+
 async fn do_simple_query(server_tls: Arc<TlsOption>, client_tls: bool) -> Result<()> {
     let table = MemTable::default_numbers_table();
     let pg_server = create_postgres_server(table, false, server_tls)?;
@@ -298,6 +322,19 @@ async fn create_plain_connection(
     } else {
         format!("host=127.0.0.1 port={} connect_timeout=2", port)
     };
+    let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
+    tokio::spawn(conn);
+    Ok(client)
+}
+
+async fn create_connection_with_given_db(
+    port: u16,
+    db: &str,
+) -> std::result::Result<Client, PgError> {
+    let url = format!(
+        "host=127.0.0.1 port={} connect_timeout=2 dbname={}",
+        port, db
+    );
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     tokio::spawn(conn);
     Ok(client)
