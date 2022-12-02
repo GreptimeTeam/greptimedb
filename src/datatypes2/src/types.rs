@@ -20,6 +20,8 @@ mod null_type;
 mod primitive_type;
 mod string_type;
 
+mod timestamp_type;
+
 pub use binary_type::BinaryType;
 pub use boolean_type::BooleanType;
 pub use date_type::DateType;
@@ -30,3 +32,4 @@ pub use primitive_type::{
     NativeType, UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
 };
 pub use string_type::StringType;
+pub use timestamp_type::*;

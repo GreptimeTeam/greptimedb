@@ -23,6 +23,7 @@ pub mod prelude;
 mod scalars;
 // TODO(yingwen): schema mod
 pub mod serialize;
+mod timestamp;
 pub mod type_id;
 pub mod types;
 pub mod value;

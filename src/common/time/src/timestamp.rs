@@ -147,6 +147,18 @@ impl From<i64> for Timestamp {
     }
 }
 
+impl From<Timestamp> for i64 {
+    fn from(t: Timestamp) -> Self {
+        t.value
+    }
+}
+
+impl From<Timestamp> for serde_json::Value {
+    fn from(d: Timestamp) -> Self {
+        serde_json::Value::String(d.to_iso8601_string())
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeUnit {
     Second,
