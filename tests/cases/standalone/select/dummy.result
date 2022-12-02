@@ -24,13 +24,13 @@ select 4 + 0.5;
 
 select "a";
 
-Failed to execute, error: Datanode { code: 1003, msg: "Failed to execute query:  select \"a\";, source: Failed to execute query:  select \"a\";, source: Failed to select from table, source: Error occurred on the data node, code: 3000, msg: Failed to execute sql, source: Cannot plan SQL: SELECT \"a\", source: Error during planning: Invalid identifier '#a' for schema fields:[], metadata:{}" }
+Failed to execute, error: Datanode { code: 1003, msg: "Failed to execute query:  select \"a\";, source: Failed to select from table, source: Error occurred on the data node, code: 3000, msg: Failed to execute sql, source: Cannot plan SQL: SELECT \"a\", source: Error during planning: Invalid identifier '#a' for schema fields:[], metadata:{}" }
 
 select "A";
 
-Failed to execute, error: Datanode { code: 1003, msg: "Failed to execute query:  select \"A\";, source: Failed to execute query:  select \"A\";, source: Failed to select from table, source: Error occurred on the data node, code: 3000, msg: Failed to execute sql, source: Cannot plan SQL: SELECT \"A\", source: Error during planning: Invalid identifier '#A' for schema fields:[], metadata:{}" }
+Failed to execute, error: Datanode { code: 1003, msg: "Failed to execute query:  select \"A\";, source: Failed to select from table, source: Error occurred on the data node, code: 3000, msg: Failed to execute sql, source: Cannot plan SQL: SELECT \"A\", source: Error during planning: Invalid identifier '#A' for schema fields:[], metadata:{}" }
 
 select * where "a" = "A";
 
-Failed to execute, error: Datanode { code: 1003, msg: "Failed to execute query:  select * where \"a\" = \"A\";, source: Failed to execute query:  select * where \"a\" = \"A\";, source: Failed to select from table, source: Error occurred on the data node, code: 3000, msg: Failed to execute sql, source: Cannot plan SQL: SELECT * WHERE \"a\" = \"A\", source: Error during planning: Invalid identifier '#a' for schema fields:[], metadata:{}" }
+Failed to execute, error: Datanode { code: 1003, msg: "Failed to execute query:  select * where \"a\" = \"A\";, source: Failed to select from table, source: Error occurred on the data node, code: 3000, msg: Failed to execute sql, source: Cannot plan SQL: SELECT * WHERE \"a\" = \"A\", source: Error during planning: Invalid identifier '#a' for schema fields:[], metadata:{}" }
 
