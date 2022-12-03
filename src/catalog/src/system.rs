@@ -43,7 +43,6 @@ use crate::error::{
 
 pub const ENTRY_TYPE_INDEX: usize = 0;
 pub const KEY_INDEX: usize = 1;
-pub const TIMESTAMP_INDEX: usize = 2;
 pub const VALUE_INDEX: usize = 3;
 
 pub struct SystemCatalogTable {
