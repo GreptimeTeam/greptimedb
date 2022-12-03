@@ -18,7 +18,8 @@ use itertools::Itertools;
 use mito::engine;
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
-use sqlparser::ast::Value;
+use sqlparser::ast::ColumnOption::NotNull;
+use sqlparser::ast::{ColumnOptionDef, DataType, Value};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::tokenizer::{Token, Word};
@@ -220,11 +221,7 @@ impl<'a> ParserContext<'a> {
             if let Some(constraint) = self.parse_optional_table_constraint()? {
                 constraints.push(constraint);
             } else if let Token::Word(_) = self.parser.peek_token() {
-                columns.push(
-                    self.parser
-                        .parse_column_def()
-                        .context(SyntaxSnafu { sql: self.sql })?,
-                );
+                self.parse_column(&mut columns, &mut constraints)?;
             } else {
                 return self.expected(
                     "column name or constraint definition",
@@ -244,6 +241,62 @@ impl<'a> ParserContext<'a> {
         }
 
         Ok((columns, constraints))
+    }
+
+    fn parse_column(
+        &mut self,
+        columns: &mut Vec<ColumnDef>,
+        constraints: &mut Vec<TableConstraint>,
+    ) -> Result<()> {
+        let mut column = self
+            .parser
+            .parse_column_def()
+            .context(SyntaxSnafu { sql: self.sql })?;
+
+        if !matches!(column.data_type, DataType::Timestamp)
+            || matches!(self.parser.peek_token(), Token::Comma)
+        {
+            columns.push(column);
+            return Ok(());
+        }
+
+        // for supporting `ts TIMESTAMP TIME INDEX,` syntax.
+        self.parser
+            .expect_keyword(Keyword::TIME)
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "TIME",
+                actual: self.peek_token_as_string(),
+            })?;
+
+        self.parser
+            .expect_keyword(Keyword::INDEX)
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "INDEX",
+                actual: self.peek_token_as_string(),
+            })?;
+
+        let constraint = TableConstraint::Unique {
+            name: Some(Ident {
+                value: TIME_INDEX.to_owned(),
+                quote_style: None,
+            }),
+            columns: vec![Ident {
+                value: column.name.value.clone(),
+                quote_style: None,
+            }],
+            is_primary: false,
+        };
+
+        column.options = vec![ColumnOptionDef {
+            name: None,
+            option: NotNull,
+        }];
+        columns.push(column);
+        constraints.push(constraint);
+
+        Ok(())
     }
 
     // Copy from sqlparser by boyan
@@ -703,6 +756,54 @@ ENGINE=mito";
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_parse_create_table_with_timestamp_index() {
+        let sql1 = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  ts         TIMESTAMP TIME INDEX,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+        let result1 = ParserContext::create_with_dialect(sql1, &GenericDialect {}).unwrap();
+
+        // `TIME INDEX` should be in front of `PRIMARY KEY`
+        // in order to equal the `TIMESTAMP TIME INDEX` constraint options vector
+        let sql2 = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  ts         TIMESTAMP NOT NULL,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  TIME INDEX (ts),
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+        let result2 = ParserContext::create_with_dialect(sql2, &GenericDialect {}).unwrap();
+
+        assert_eq!(result1, result2);
+
+        let sql3 = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  ts         TIMESTAMP,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  TIME INDEX (ts),
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+
+        let result3 = ParserContext::create_with_dialect(sql3, &GenericDialect {}).unwrap();
+
+        assert_ne!(result1, result3);
     }
 
     #[test]
