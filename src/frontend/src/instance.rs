@@ -512,7 +512,9 @@ impl SqlQueryHandler for Instance {
             .context(server_error::ExecuteQuerySnafu { query })?;
 
         match stmt {
-            Statement::ShowDatabases(_)
+            Statement::CreateDatabase(_)
+            | Statement::ShowDatabases(_)
+            | Statement::CreateTable(_)
             | Statement::ShowTables(_)
             | Statement::DescribeTable(_)
             | Statement::Explain(_)
@@ -554,23 +556,6 @@ impl SqlQueryHandler for Instance {
                     Ok(Output::AffectedRows(affected))
                 }
             },
-            Statement::CreateTable(create) => {
-                let create_expr = self
-                    .create_expr_factory
-                    .create_expr_by_stmt(&create)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })?;
-
-                self.handle_create_table(create_expr, create.partitions)
-                    .await
-            }
-            Statement::CreateDatabase(c) => {
-                let expr = CreateDatabaseExpr {
-                    database_name: c.name.to_string(),
-                };
-                self.handle_create_database(expr).await
-            }
             Statement::Alter(alter_stmt) => {
                 let expr = AlterExpr::try_from(alter_stmt)
                     .map_err(BoxedError::new)

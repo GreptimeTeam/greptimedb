@@ -437,15 +437,6 @@ pub enum Error {
         source: substrait::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to invoke Datanode instance in standalone mode, source: {}",
-        source
-    ))]
-    InvokeDnInstance {
-        #[snafu(backtrace)]
-        source: datanode::error::Error,
-    },
-
     #[snafu(display("Failed to invoke GRPC server, source: {}", source))]
     InvokeGrpcServer {
         #[snafu(backtrace)]
@@ -542,7 +533,6 @@ impl ErrorExt for Error {
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
-            Error::InvokeDnInstance { source } => source.status_code(),
         }
     }
 

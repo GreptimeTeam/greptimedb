@@ -59,6 +59,16 @@ impl FrontendCatalogManager {
     pub(crate) fn backend(&self) -> KvBackendRef {
         self.backend.clone()
     }
+
+    #[cfg(test)]
+    pub(crate) fn table_routes(&self) -> Arc<TableRoutes> {
+        self.table_routes.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn datanode_clients(&self) -> Arc<DatanodeClients> {
+        self.datanode_clients.clone()
+    }
 }
 
 // FIXME(hl): Frontend only needs a CatalogList, should replace with trait upcasting

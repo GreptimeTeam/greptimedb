@@ -30,6 +30,10 @@ impl Default for QueryContext {
 }
 
 impl QueryContext {
+    pub fn new_ref() -> QueryContextRef {
+        Arc::new(QueryContext::new())
+    }
+
     pub fn new() -> Self {
         Self {
             current_schema: ArcSwapOption::new(None),

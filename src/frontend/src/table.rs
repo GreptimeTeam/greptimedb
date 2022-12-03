@@ -509,38 +509,27 @@ impl PartitionExec {
 #[allow(clippy::print_stdout)]
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
-
     use api::v1::column::SemanticType;
     use api::v1::{column, Column, ColumnDataType};
-    use catalog::remote::MetaKvBackend;
     use common_recordbatch::util;
     use datafusion::arrow_print;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::lit;
-    use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
     use datanode::instance::Instance;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use meta_client::client::{MetaClient, MetaClientBuilder};
+    use meta_client::client::MetaClient;
     use meta_client::rpc::router::RegionRoute;
     use meta_client::rpc::{Region, Table, TableRoute};
-    use meta_srv::metasrv::MetaSrvOptions;
-    use meta_srv::mocks::MockInfo;
-    use meta_srv::service::store::kv::KvStoreRef;
-    use meta_srv::service::store::memory::MemStore;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
     use sqlparser::dialect::GenericDialect;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::TableRef;
-    use tempdir::TempDir;
 
     use super::*;
-    use crate::catalog::FrontendCatalogManager;
     use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
-    use crate::instance::distributed::DistInstance;
     use crate::partitioning::range::RangePartitionRule;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -824,51 +813,12 @@ mod test {
         ];
         let schema = Arc::new(Schema::new(column_schemas.clone()));
 
-        let kv_store: KvStoreRef = Arc::new(MemStore::default()) as _;
-        let meta_srv =
-            meta_srv::mocks::mock(MetaSrvOptions::default(), kv_store.clone(), None).await;
-
-        let datanode_clients = Arc::new(DatanodeClients::new());
-
-        let mut datanode_instances = HashMap::new();
-        for datanode_id in 1..=4 {
-            let dn_instance = create_datanode_instance(datanode_id, meta_srv.clone()).await;
-            datanode_instances.insert(datanode_id, dn_instance.clone());
-
-            let (addr, client) = crate::tests::create_datanode_client(dn_instance).await;
-            datanode_clients
-                .insert_client(Peer::new(datanode_id, addr), client)
-                .await;
-        }
-
-        let MockInfo {
-            server_addr,
-            channel_manager,
-        } = meta_srv.clone();
-        let mut meta_client = MetaClientBuilder::new(1000, 0)
-            .enable_router()
-            .enable_store()
-            .channel_manager(channel_manager)
-            .build();
-        meta_client.start(&[&server_addr]).await.unwrap();
-        let meta_client = Arc::new(meta_client);
+        let (dist_instance, datanode_instances) = crate::tests::create_dist_instance().await;
+        let catalog_manager = dist_instance.catalog_manager();
+        let table_routes = catalog_manager.table_routes();
+        let datanode_clients = catalog_manager.datanode_clients();
 
         let table_name = TableName::new("greptime", "public", "dist_numbers");
-
-        let meta_backend = Arc::new(MetaKvBackend {
-            client: meta_client.clone(),
-        });
-        let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
-        let catalog_manager = Arc::new(FrontendCatalogManager::new(
-            meta_backend,
-            table_routes.clone(),
-            datanode_clients.clone(),
-        ));
-        let dist_instance = DistInstance::new(
-            meta_client.clone(),
-            catalog_manager,
-            datanode_clients.clone(),
-        );
 
         let sql = "
             CREATE TABLE greptime.public.dist_numbers (
@@ -892,8 +842,6 @@ mod test {
             Statement::CreateTable(c) => c,
             _ => unreachable!(),
         };
-
-        wait_datanodes_alive(kv_store).await;
 
         let factory = DefaultCreateExprFactory {};
         let mut expr = factory.create_expr_by_stmt(&create_table).await.unwrap();
@@ -948,20 +896,6 @@ mod test {
         }
     }
 
-    async fn wait_datanodes_alive(kv_store: KvStoreRef) {
-        let wait = 10;
-        for _ in 0..wait {
-            let datanodes = meta_srv::lease::alive_datanodes(1000, &kv_store, |_, _| true)
-                .await
-                .unwrap();
-            if datanodes.len() >= 4 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await
-        }
-        panic!()
-    }
-
     async fn insert_testing_data(
         table_name: &TableName,
         dn_instance: Arc<Instance>,
@@ -1011,30 +945,6 @@ mod test {
             )
             .await
             .unwrap();
-    }
-
-    async fn create_datanode_instance(datanode_id: u64, meta_srv: MockInfo) -> Arc<Instance> {
-        let current = common_time::util::current_time_millis();
-        let wal_tmp_dir =
-            TempDir::new_in("/tmp", &format!("dist_table_test-wal-{}", current)).unwrap();
-        let data_tmp_dir =
-            TempDir::new_in("/tmp", &format!("dist_table_test-data-{}", current)).unwrap();
-        let opts = DatanodeOptions {
-            node_id: Some(datanode_id),
-            wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
-            storage: ObjectStoreConfig::File {
-                data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
-            },
-            ..Default::default()
-        };
-
-        let instance = Arc::new(
-            Instance::with_mock_meta_server(&opts, meta_srv)
-                .await
-                .unwrap(),
-        );
-        instance.start().await.unwrap();
-        instance
     }
 
     #[tokio::test(flavor = "multi_thread")]
