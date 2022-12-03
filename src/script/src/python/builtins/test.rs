@@ -18,6 +18,7 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
+use common_telemetry::{error, info};
 use datatypes::arrow::array::{Float64Array, Int64Array, PrimitiveArray};
 use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::DataType;
@@ -331,6 +332,8 @@ impl PyValue {
 
 #[test]
 fn run_builtin_fn_testcases() {
+    common_telemetry::init_default_ut_logging();
+
     let loc = Path::new("src/python/builtins/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
@@ -343,7 +346,7 @@ fn run_builtin_fn_testcases() {
         PyVector::make_class(&vm.ctx);
     });
     for (idx, case) in testcases.into_iter().enumerate() {
-        print!("Testcase {idx} ...");
+        info!("Testcase {idx} ...");
         cached_vm
         .enter(|vm| {
             let scope = vm.new_scope_with_builtins();
@@ -368,7 +371,7 @@ fn run_builtin_fn_testcases() {
                     let err_res = format_py_error(e, vm).to_string();
                     match case.expect{
                         Ok(v) => {
-                            println!("\nError:\n{err_res}");
+                            error!("\nError:\n{err_res}");
                             panic!("Expect Ok: {v:?}, found Error");
                         },
                         Err(err) => {
@@ -397,7 +400,6 @@ fn run_builtin_fn_testcases() {
                 }
             };
         });
-        println!(" passed!");
     }
 }
 
@@ -443,6 +445,8 @@ fn set_lst_of_vecs_in_scope(
 #[allow(unused_must_use)]
 #[test]
 fn test_vm() {
+    common_telemetry::init_default_ut_logging();
+
     rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
         vm.add_native_module("udf_builtins", Box::new(greptime_builtin::make_module));
         // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
@@ -471,11 +475,10 @@ sin(values)"#,
             .map_err(|err| vm.new_syntax_error(&err))
             .unwrap();
         let res = vm.run_code_obj(code_obj, scope);
-        println!("{:#?}", res);
         match res {
             Err(e) => {
                 let err_res = format_py_error(e, vm).to_string();
-                println!("Error:\n{err_res}");
+                error!("Error:\n{err_res}");
             }
             Ok(obj) => {
                 let _ser = PyValue::from_py_obj(&obj, vm);

@@ -20,6 +20,7 @@ use std::io::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
 
+use common_telemetry::{error, info};
 use console::style;
 use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::array::PrimitiveArray;
@@ -82,6 +83,8 @@ fn create_sample_recordbatch() -> DfRecordBatch {
 /// and exec/parse (depending on the type of predicate) then decide if result is as expected
 #[test]
 fn run_ron_testcases() {
+    common_telemetry::init_default_ut_logging();
+
     let loc = Path::new("src/python/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
@@ -89,9 +92,9 @@ fn run_ron_testcases() {
     file.read_to_string(&mut buf)
         .expect("Fail to read to string");
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
-    println!("Read {} testcases from {}", testcases.len(), loc);
+    info!("Read {} testcases from {}", testcases.len(), loc);
     for testcase in testcases {
-        print!(".ron test {}", testcase.name);
+        info!(".ron test {}", testcase.name);
         match testcase.predicate {
             Predicate::ParseIsOk { result } => {
                 let copr = parse_and_compile_copr(&testcase.code);
@@ -101,21 +104,19 @@ fn run_ron_testcases() {
             }
             Predicate::ParseIsErr { reason } => {
                 let copr = parse_and_compile_copr(&testcase.code);
-                if copr.is_ok() {
-                    eprintln!("Expect to be err, found{copr:#?}");
-                    panic!()
-                }
+                assert!(copr.is_err(), "Expect to be err, actual {copr:#?}");
+
                 let res = &copr.unwrap_err();
-                println!(
+                error!(
                     "{}",
                     pretty_print_error_in_src(&testcase.code, res, 0, "<embedded>")
                 );
                 let (res, _) = get_error_reason_loc(res);
-                if !res.contains(&reason) {
-                    eprintln!("{}", testcase.code);
-                    eprintln!("Parse Error, expect \"{reason}\" in \"{res}\", but not found.");
-                    panic!()
-                }
+                assert!(
+                    res.contains(&reason),
+                    "{} Parse Error, expect \"{reason}\" in \"{res}\", actual not found.",
+                    testcase.code,
+                );
             }
             Predicate::ExecIsOk { fields, columns } => {
                 let rb = create_sample_recordbatch();
@@ -129,28 +130,25 @@ fn run_ron_testcases() {
                     .iter()
                     .zip(&res.schema.arrow_schema().fields)
                     .map(|(anno, real)| {
-                        if !(anno.datatype.clone().unwrap() == real.data_type
-                            && anno.is_nullable == real.is_nullable)
-                        {
-                            eprintln!("fields expect to be {anno:#?}, found to be {real:#?}.");
-                            panic!()
-                        }
+                        assert!(
+                            anno.datatype.clone().unwrap() == real.data_type
+                                && anno.is_nullable == real.is_nullable,
+                            "Fields expected to be {anno:#?}, actual {real:#?}"
+                        );
                     })
                     .count();
                 columns
                     .iter()
                     .zip(res.df_recordbatch.columns())
                     .map(|(anno, real)| {
-                        if !(&anno.ty == real.data_type() && anno.len == real.len()) {
-                            eprintln!(
-                                "Unmatch type or length!Expect [{:#?}; {}], found [{:#?}; {}]",
-                                anno.ty,
-                                anno.len,
-                                real.data_type(),
-                                real.len()
-                            );
-                            panic!()
-                        }
+                        assert!(
+                            &anno.ty == real.data_type() && anno.len == real.len(),
+                            "Type or length not match! Expect [{:#?}; {}], actual [{:#?}; {}]",
+                            anno.ty,
+                            anno.len,
+                            real.data_type(),
+                            real.len()
+                        );
                     })
                     .count();
             }
@@ -159,28 +157,24 @@ fn run_ron_testcases() {
             } => {
                 let rb = create_sample_recordbatch();
                 let res = coprocessor::exec_coprocessor(&testcase.code, &rb);
+                assert!(res.is_err(), "{:#?}\nExpect Err(...), actual Ok(...)", res);
                 if let Err(res) = res {
-                    println!(
+                    error!(
                         "{}",
                         pretty_print_error_in_src(&testcase.code, &res, 1120, "<embedded>")
                     );
                     let (reason, _) = get_error_reason_loc(&res);
-                    if !reason.contains(&part_reason) {
-                        eprintln!(
-                            "{}\nExecute error, expect \"{reason}\" in \"{res}\", but not found.",
-                            testcase.code,
-                            reason = style(reason).green(),
-                            res = style(res).red()
-                        );
-                        panic!()
-                    }
-                } else {
-                    eprintln!("{:#?}\nExpect Err(...), found Ok(...)", res);
-                    panic!();
+                    assert!(
+                        reason.contains(&part_reason),
+                        "{}\nExecute error, expect \"{reason}\" in \"{res}\", actual not found.",
+                        testcase.code,
+                        reason = style(reason).green(),
+                        res = style(res).red()
+                    )
                 }
             }
         }
-        println!(" ... {}", style("ok✅").green());
+        info!(" ... {}", style("ok✅").green());
     }
 }
 
@@ -275,7 +269,7 @@ def calc_rvs(open_time, close):
             0,
             "copr.py",
         );
-        println!("{res}");
+        info!("{res}");
     } else if let Ok(res) = ret {
         dbg!(&res);
     } else {
@@ -319,7 +313,7 @@ def a(cpu, mem):
             0,
             "copr.py",
         );
-        println!("{res}");
+        info!("{res}");
     } else if let Ok(res) = ret {
         dbg!(&res);
     } else {

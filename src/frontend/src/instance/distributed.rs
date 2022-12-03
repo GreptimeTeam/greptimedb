@@ -616,7 +616,7 @@ ENGINE=mito",
                 ];
                 let pretty = r.pretty_print();
                 let lines = pretty.lines().collect::<Vec<_>>();
-                assert!(&lines == &expected1 || &lines == &expected2)
+                assert!(lines == expected1 || lines == expected2)
             }
             _ => unreachable!(),
         }

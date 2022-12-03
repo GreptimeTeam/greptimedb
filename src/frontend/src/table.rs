@@ -505,18 +505,20 @@ impl PartitionExec {
     }
 }
 
-// FIXME(LFC): no allow, for clippy temporarily
-#[allow(clippy::print_stdout)]
 #[cfg(test)]
 mod test {
     use api::v1::column::SemanticType;
     use api::v1::{column, Column, ColumnDataType};
-    use common_recordbatch::util;
-    use datafusion::arrow_print;
-    use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+    use common_query::physical_plan::DfPhysicalPlanAdapter;
+    use common_recordbatch::adapter::RecordBatchStreamAdapter;
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+    use datafusion::physical_plan::expressions::{col as physical_col, PhysicalSortExpr};
+    use datafusion::physical_plan::sorts::sort::SortExec;
+    use datafusion::physical_plan::ExecutionPlan;
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::lit;
     use datanode::instance::Instance;
+    use datatypes::arrow::compute::sort::SortOptions;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use meta_client::client::MetaClient;
@@ -730,29 +732,78 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dist_table_scan() {
-        common_telemetry::init_default_ut_logging();
         let table = Arc::new(new_dist_table().await);
 
         // should scan all regions
-        // select * from numbers
-        let projection = None;
+        // select a, row_id from numbers
+        let projection = Some(vec![1, 2]);
         let filters = vec![];
-        exec_table_scan(table.clone(), projection, filters, None).await;
-        println!();
+        let expected_output = vec![
+            "+-----+--------+",
+            "| a   | row_id |",
+            "+-----+--------+",
+            "| 0   | 1      |",
+            "| 1   | 2      |",
+            "| 2   | 3      |",
+            "| 3   | 4      |",
+            "| 4   | 5      |",
+            "| 10  | 1      |",
+            "| 11  | 2      |",
+            "| 12  | 3      |",
+            "| 13  | 4      |",
+            "| 14  | 5      |",
+            "| 30  | 1      |",
+            "| 31  | 2      |",
+            "| 32  | 3      |",
+            "| 33  | 4      |",
+            "| 34  | 5      |",
+            "| 100 | 1      |",
+            "| 101 | 2      |",
+            "| 102 | 3      |",
+            "| 103 | 4      |",
+            "| 104 | 5      |",
+            "+-----+--------+",
+        ];
+        exec_table_scan(table.clone(), projection, filters, 4, expected_output).await;
 
         // should scan only region 1
         // select a, row_id from numbers where a < 10
         let projection = Some(vec![1, 2]);
         let filters = vec![binary_expr(col("a"), Operator::Lt, lit(10)).into()];
-        exec_table_scan(table.clone(), projection, filters, None).await;
-        println!();
+        let expected_output = vec![
+            "+---+--------+",
+            "| a | row_id |",
+            "+---+--------+",
+            "| 0 | 1      |",
+            "| 1 | 2      |",
+            "| 2 | 3      |",
+            "| 3 | 4      |",
+            "| 4 | 5      |",
+            "+---+--------+",
+        ];
+        exec_table_scan(table.clone(), projection, filters, 1, expected_output).await;
 
         // should scan region 1 and 2
         // select a, row_id from numbers where a < 15
         let projection = Some(vec![1, 2]);
         let filters = vec![binary_expr(col("a"), Operator::Lt, lit(15)).into()];
-        exec_table_scan(table.clone(), projection, filters, None).await;
-        println!();
+        let expected_output = vec![
+            "+----+--------+",
+            "| a  | row_id |",
+            "+----+--------+",
+            "| 0  | 1      |",
+            "| 1  | 2      |",
+            "| 2  | 3      |",
+            "| 3  | 4      |",
+            "| 4  | 5      |",
+            "| 10 | 1      |",
+            "| 11 | 2      |",
+            "| 12 | 3      |",
+            "| 13 | 4      |",
+            "| 14 | 5      |",
+            "+----+--------+",
+        ];
+        exec_table_scan(table.clone(), projection, filters, 2, expected_output).await;
 
         // should scan region 2 and 3
         // select a, row_id from numbers where a < 40 and a >= 10
@@ -762,8 +813,23 @@ mod test {
             binary_expr(col("a"), Operator::GtEq, lit(10)),
         )
         .into()];
-        exec_table_scan(table.clone(), projection, filters, None).await;
-        println!();
+        let expected_output = vec![
+            "+----+--------+",
+            "| a  | row_id |",
+            "+----+--------+",
+            "| 10 | 1      |",
+            "| 11 | 2      |",
+            "| 12 | 3      |",
+            "| 13 | 4      |",
+            "| 14 | 5      |",
+            "| 30 | 1      |",
+            "| 31 | 2      |",
+            "| 32 | 3      |",
+            "| 33 | 4      |",
+            "| 34 | 5      |",
+            "+----+--------+",
+        ];
+        exec_table_scan(table.clone(), projection, filters, 2, expected_output).await;
 
         // should scan all regions
         // select a, row_id from numbers where a < 1000 and row_id == 1
@@ -773,36 +839,59 @@ mod test {
             binary_expr(col("row_id"), Operator::Eq, lit(1)),
         )
         .into()];
-        exec_table_scan(table.clone(), projection, filters, None).await;
+        let expected_output = vec![
+            "+-----+--------+",
+            "| a   | row_id |",
+            "+-----+--------+",
+            "| 0   | 1      |",
+            "| 10  | 1      |",
+            "| 30  | 1      |",
+            "| 100 | 1      |",
+            "+-----+--------+",
+        ];
+        exec_table_scan(table.clone(), projection, filters, 4, expected_output).await;
     }
 
     async fn exec_table_scan(
         table: TableRef,
         projection: Option<Vec<usize>>,
         filters: Vec<Expr>,
-        limit: Option<usize>,
+        expected_partitions: usize,
+        expected_output: Vec<&str>,
     ) {
         let table_scan = table
-            .scan(&projection, filters.as_slice(), limit)
+            .scan(&projection, filters.as_slice(), None)
             .await
             .unwrap();
+        assert_eq!(
+            table_scan.output_partitioning().partition_count(),
+            expected_partitions
+        );
 
-        for partition in 0..table_scan.output_partitioning().partition_count() {
-            let result = table_scan
-                .execute(partition, Arc::new(RuntimeEnv::default()))
-                .unwrap();
-            let recordbatches = util::collect(result).await.unwrap();
+        let merge =
+            CoalescePartitionsExec::new(Arc::new(DfPhysicalPlanAdapter(table_scan.clone())));
 
-            let df_recordbatch = recordbatches
-                .into_iter()
-                .map(|r| r.df_recordbatch)
-                .collect::<Vec<DfRecordBatch>>();
+        let sort = SortExec::try_new(
+            vec![PhysicalSortExpr {
+                expr: physical_col("a", table_scan.schema().arrow_schema()).unwrap(),
+                options: SortOptions::default(),
+            }],
+            Arc::new(merge),
+        )
+        .unwrap();
+        assert_eq!(sort.output_partitioning().partition_count(), 1);
 
-            println!("DataFusion partition {}:", partition);
-            let pretty_print = arrow_print::write(&df_recordbatch);
-            let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
-            pretty_print.iter().for_each(|x| println!("{}", x));
-        }
+        let stream = sort
+            .execute(0, Arc::new(RuntimeEnv::default()))
+            .await
+            .unwrap();
+        let stream = Box::pin(RecordBatchStreamAdapter::try_new(stream).unwrap());
+
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            recordbatches.pretty_print().lines().collect::<Vec<_>>(),
+            expected_output
+        );
     }
 
     async fn new_dist_table() -> DistTable {
@@ -851,7 +940,6 @@ mod test {
             .unwrap();
 
         let table_route = table_routes.get_route(&table_name).await.unwrap();
-        println!("{}", serde_json::to_string_pretty(&table_route).unwrap());
 
         let mut region_to_datanode_mapping = HashMap::new();
         for region_route in table_route.region_routes.iter() {
