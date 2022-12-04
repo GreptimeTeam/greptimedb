@@ -569,7 +569,7 @@ impl SqlQueryHandler for Instance {
         let mut results = Vec::with_capacity(stmts.len());
 
         for stmt in stmts.into_iter() {
-            // TODO(sunng87): this query string has all statement
+            // FIXME(sunng87): this query string has all statement
             let output = self
                 .do_query_statement(query, stmt, query_ctx.clone())
                 .await?;
