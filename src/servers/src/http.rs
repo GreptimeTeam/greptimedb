@@ -232,23 +232,50 @@ impl JsonResponse {
     }
 
     /// Create a json response from query result
-    async fn from_output(output: Result<Output>) -> Self {
+    async fn from_output(output: Result<Vec<Output>>) -> Self {
         match output {
-            Ok(Output::AffectedRows(rows)) => {
-                Self::with_output(Some(vec![JsonOutput::AffectedRows(rows)]))
-            }
-            Ok(Output::Stream(stream)) => match util::collect(stream).await {
-                Ok(rows) => match HttpRecordsOutput::try_from(rows) {
-                    Ok(rows) => Self::with_output(Some(vec![JsonOutput::Records(rows)])),
-                    Err(err) => Self::with_error(err, StatusCode::Internal),
-                },
-                Err(e) => Self::with_error(format!("Recordbatch error: {}", e), e.status_code()),
-            },
-            Ok(Output::RecordBatches(recordbatches)) => {
-                match HttpRecordsOutput::try_from(recordbatches.take()) {
-                    Ok(rows) => Self::with_output(Some(vec![JsonOutput::Records(rows)])),
-                    Err(err) => Self::with_error(err, StatusCode::Internal),
+            Ok(outputs) => {
+                let mut results = Vec::with_capacity(outputs.len());
+
+                for out in outputs {
+                    match out {
+                        Output::AffectedRows(rows) => {
+                            results.push(JsonOutput::AffectedRows(rows));
+                        }
+                        Output::Stream(stream) => {
+                            // TODO(sunng87): streaming response
+                            match util::collect(stream).await {
+                                Ok(rows) => match HttpRecordsOutput::try_from(rows) {
+                                    Ok(rows) => {
+                                        results.push(JsonOutput::Records(rows));
+                                    }
+                                    Err(err) => {
+                                        return Self::with_error(err, StatusCode::Internal);
+                                    }
+                                },
+
+                                Err(e) => {
+                                    return Self::with_error(
+                                        format!("Recordbatch error: {}", e),
+                                        e.status_code(),
+                                    );
+                                }
+                            }
+                        }
+                        Output::RecordBatches(rbs) => {
+                            match HttpRecordsOutput::try_from(rbs.take()) {
+                                Ok(rows) => {
+                                    results.push(JsonOutput::Records(rows));
+                                }
+                                Err(err) => {
+                                    return Self::with_error(err, StatusCode::Internal);
+                                }
+                            }
+                        }
+                    }
                 }
+
+                Self::with_output(Some(results))
             }
             Err(e) => {
                 Self::with_error(format!("Query engine output error: {}", e), e.status_code())
@@ -519,7 +546,7 @@ mod test {
 
     #[async_trait]
     impl SqlQueryHandler for DummyInstance {
-        async fn do_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
+        async fn do_query(&self, _: &str, _: QueryContextRef) -> Result<Vec<Output>> {
             unimplemented!()
         }
     }
@@ -582,7 +609,8 @@ mod test {
         let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch]).unwrap();
 
-        let json_resp = JsonResponse::from_output(Ok(Output::RecordBatches(recordbatches))).await;
+        let json_resp =
+            JsonResponse::from_output(Ok(vec![Output::RecordBatches(recordbatches)])).await;
 
         let json_output = &json_resp.output.unwrap()[0];
         if let JsonOutput::Records(r) = json_output {

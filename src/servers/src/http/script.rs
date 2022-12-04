@@ -91,7 +91,7 @@ pub async fn run_script(
         }
 
         let output = script_handler.execute_script(name.unwrap()).await;
-        let resp = JsonResponse::from_output(output).await;
+        let resp = JsonResponse::from_output(output.map(|o| vec![o])).await;
 
         Json(resp.with_execution_time(start.elapsed().as_millis()))
     } else {

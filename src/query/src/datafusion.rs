@@ -69,12 +69,10 @@ impl QueryEngine for DatafusionQueryEngine {
         "datafusion"
     }
 
-    fn sql_to_statement(&self, sql: &str) -> Result<Statement> {
-        let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
+    fn sql_to_statement(&self, sql: &str) -> Result<Vec<Statement>> {
+        let stmts = ParserContext::create_with_dialect(sql, &GenericDialect {})
             .context(error::ParseSqlSnafu)?;
-        // TODO(dennis): supports multi statement in one sql?
-        assert!(1 == statement.len());
-        Ok(statement.remove(0))
+        Ok(stmts)
     }
 
     fn statement_to_plan(
@@ -88,10 +86,13 @@ impl QueryEngine for DatafusionQueryEngine {
         planner.statement_to_plan(stmt)
     }
 
-    fn sql_to_plan(&self, sql: &str, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+    fn sql_to_plan(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Vec<LogicalPlan>> {
         let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
-        let stmt = self.sql_to_statement(sql)?;
-        self.statement_to_plan(stmt, query_ctx)
+        let stmts = self.sql_to_statement(sql)?;
+        stmts
+            .into_iter()
+            .map(|stmt| self.statement_to_plan(stmt, query_ctx.clone()))
+            .collect()
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
@@ -284,10 +285,11 @@ mod tests {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
-        let plan = engine
+        let plan = &engine
             .sql_to_plan(sql, Arc::new(QueryContext::new()))
-            .unwrap();
+            .unwrap()[0];
 
+        // TODO(sunng87): do not rely on to_string for compare
         assert_eq!(
             format!("{:?}", plan),
             r#"DfPlan(Limit: 20
@@ -302,10 +304,11 @@ mod tests {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
-        let plan = engine
+        let plan = &engine
             .sql_to_plan(sql, Arc::new(QueryContext::new()))
-            .unwrap();
-        let output = engine.execute(&plan).await.unwrap();
+            .unwrap()[0];
+
+        let output = engine.execute(plan).await.unwrap();
 
         match output {
             Output::Stream(recordbatch) => {

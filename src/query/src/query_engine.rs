@@ -36,12 +36,12 @@ pub use crate::query_engine::state::QueryEngineState;
 pub trait QueryEngine: Send + Sync {
     fn name(&self) -> &str;
 
-    fn sql_to_statement(&self, sql: &str) -> Result<Statement>;
+    fn sql_to_statement(&self, sql: &str) -> Result<Vec<Statement>>;
 
     fn statement_to_plan(&self, stmt: Statement, query_ctx: QueryContextRef)
         -> Result<LogicalPlan>;
 
-    fn sql_to_plan(&self, sql: &str, query_ctx: QueryContextRef) -> Result<LogicalPlan>;
+    fn sql_to_plan(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Vec<LogicalPlan>>;
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
 

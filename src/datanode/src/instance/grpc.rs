@@ -112,9 +112,11 @@ impl Instance {
     async fn do_handle_select(&self, select_expr: SelectExpr) -> Result<Output> {
         let expr = select_expr.expr;
         match expr {
-            Some(select_expr::Expr::Sql(sql)) => {
-                self.execute_sql(&sql, Arc::new(QueryContext::new())).await
-            }
+            Some(select_expr::Expr::Sql(sql)) => self
+                .execute_sql(&sql, Arc::new(QueryContext::new()))
+                .await
+                // take the first result as we only support 1 statement per sql query
+                .map(|mut os| os.remove(0)),
             Some(select_expr::Expr::LogicalPlan(plan)) => self.execute_logical(plan).await,
             _ => UnsupportedExprSnafu {
                 name: format!("{:?}", expr),

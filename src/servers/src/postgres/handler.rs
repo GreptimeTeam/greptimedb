@@ -61,36 +61,42 @@ impl SimpleQueryHandler for PostgresServerHandler {
         C: ClientInfo + Unpin + Send + Sync,
     {
         let query_ctx = query_context_from_client_info(client);
-        let output = self
+        let outputs = self
             .query_handler
             .do_query(query, query_ctx)
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
-        match output {
-            Output::AffectedRows(rows) => Ok(vec![Response::Execution(Tag::new_for_execution(
-                "OK",
-                Some(rows),
-            ))]),
-            Output::Stream(record_stream) => {
-                let schema = record_stream.schema();
-                recordbatches_to_query_response(record_stream, schema)
-            }
-            Output::RecordBatches(recordbatches) => {
-                let schema = recordbatches.schema();
-                recordbatches_to_query_response(
-                    stream::iter(recordbatches.take().into_iter().map(Ok)),
-                    schema,
-                )
-            }
+        let mut results = Vec::with_capacity(outputs.len());
+
+        for output in outputs {
+            let resp = match output {
+                Output::AffectedRows(rows) => {
+                    Response::Execution(Tag::new_for_execution("OK", Some(rows)))
+                }
+                Output::Stream(record_stream) => {
+                    let schema = record_stream.schema();
+                    recordbatches_to_query_response(record_stream, schema)?
+                }
+                Output::RecordBatches(recordbatches) => {
+                    let schema = recordbatches.schema();
+                    recordbatches_to_query_response(
+                        stream::iter(recordbatches.take().into_iter().map(Ok)),
+                        schema,
+                    )?
+                }
+            };
+            results.push(resp);
         }
+
+        Ok(results)
     }
 }
 
 fn recordbatches_to_query_response<S>(
     recordbatches_stream: S,
     schema: SchemaRef,
-) -> PgWireResult<Vec<Response>>
+) -> PgWireResult<Response>
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
@@ -121,10 +127,10 @@ where
             })
         });
 
-    Ok(vec![Response::Query(text_query_response(
+    Ok(Response::Query(text_query_response(
         pg_schema,
         data_row_stream,
-    ))])
+    )))
 }
 
 fn schema_to_pg(origin: SchemaRef) -> Result<Vec<FieldInfo>> {

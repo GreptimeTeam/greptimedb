@@ -45,7 +45,7 @@ pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 
 #[async_trait]
 pub trait SqlQueryHandler {
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Result<Output>;
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Result<Vec<Output>>;
 }
 
 #[async_trait]

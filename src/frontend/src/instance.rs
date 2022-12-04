@@ -461,31 +461,17 @@ impl FrontendInstance for Instance {
     }
 }
 
-fn parse_stmt(sql: &str) -> Result<Statement> {
-    let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
-        .context(error::ParseSqlSnafu)?;
-    // TODO(LFC): Support executing multiple SQL queries,
-    // which seems to be a major change to our whole server framework?
-    ensure!(
-        stmt.len() == 1,
-        error::InvalidSqlSnafu {
-            err_msg: "Currently executing multiple SQL queries are not supported."
-        }
-    );
-    Ok(stmt.remove(0))
+fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
+    ParserContext::create_with_dialect(sql, &GenericDialect {}).context(error::ParseSqlSnafu)
 }
 
-#[async_trait]
-impl SqlQueryHandler for Instance {
-    async fn do_query(
+impl Instance {
+    async fn do_query_statement(
         &self,
         query: &str,
+        stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        let stmt = parse_stmt(query)
-            .map_err(BoxedError::new)
-            .context(server_error::ExecuteQuerySnafu { query })?;
-
         match stmt {
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
@@ -566,6 +552,31 @@ impl SqlQueryHandler for Instance {
         }
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu { query })
+    }
+}
+
+#[async_trait]
+impl SqlQueryHandler for Instance {
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Vec<Output>> {
+        let stmts = parse_stmt(query)
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQuerySnafu { query })?;
+
+        let mut results = Vec::with_capacity(stmts.len());
+
+        for stmt in stmts.into_iter() {
+            // TODO(sunng87): this query string has all statement
+            let output = self
+                .do_query_statement(query, stmt, query_ctx.clone())
+                .await?;
+            results.push(output);
+        }
+
+        Ok(results)
     }
 }
 
@@ -672,7 +683,7 @@ mod tests {
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .unwrap();
-        match output {
+        match output[0] {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
             _ => unreachable!(),
         }
@@ -685,7 +696,7 @@ mod tests {
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .unwrap();
-        match output {
+        match output[0] {
             Output::AffectedRows(rows) => assert_eq!(rows, 3),
             _ => unreachable!(),
         }
@@ -694,7 +705,7 @@ mod tests {
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .unwrap();
-        match output {
+        match output[0] {
             Output::Stream(stream) => {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let pretty_print = recordbatches.pretty_print();
@@ -717,7 +728,7 @@ mod tests {
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .unwrap();
-        match output {
+        match output[0] {
             Output::Stream(stream) => {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let pretty_print = recordbatches.pretty_print();

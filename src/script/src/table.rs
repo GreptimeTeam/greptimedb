@@ -150,10 +150,12 @@ impl ScriptsTable {
         //               such as `find_record_by_primary_key` in table_engine.
         let sql = format!("select script from {} where name='{}'", self.name(), name);
 
+        // take the first statment from parsed statements
         let plan = self
             .query_engine
             .sql_to_plan(&sql, Arc::new(QueryContext::new()))
-            .context(FindScriptSnafu { name })?;
+            .context(FindScriptSnafu { name })?
+            .remove(0);
 
         let stream = match self
             .query_engine

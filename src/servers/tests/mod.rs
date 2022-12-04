@@ -54,9 +54,15 @@ impl DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Result<Output> {
-        let plan = self.query_engine.sql_to_plan(query, query_ctx).unwrap();
-        Ok(self.query_engine.execute(&plan).await.unwrap())
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Result<Vec<Output>> {
+        let plans = self.query_engine.sql_to_plan(query, query_ctx).unwrap();
+
+        let mut results = Vec::with_capacity(plans.len());
+        for plan in plans {
+            let result = self.query_engine.execute(&plan).await.unwrap();
+            results.push(result);
+        }
+        Ok(results)
     }
 }
 

@@ -73,7 +73,7 @@ impl MysqlInstanceShim {
         }
     }
 
-    async fn do_query(&self, query: &str) -> Result<Output> {
+    async fn do_query(&self, query: &str) -> Result<Vec<Output>> {
         debug!("Start executing query: '{}'", query);
         let start = Instant::now();
 
@@ -82,7 +82,7 @@ impl MysqlInstanceShim {
         // components, this is quick and dirty, there must be a better way to do it.
         let output =
             if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
-                Ok(output)
+                Ok(vec![output])
             } else {
                 self.query_handler
                     .do_query(query, self.session.context())
@@ -193,9 +193,18 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        let output = self.do_query(query).await;
+        let outputs = self.do_query(query).await;
         let mut writer = MysqlResultWriter::new(writer);
-        writer.write(query, output).await
+        match outputs {
+            Ok(outputs) => {
+                for output in outputs {
+                    writer.write(query, Ok(output)).await?;
+                }
+            }
+            Err(e) => writer.write(query, Err(e)).await?,
+        }
+
+        Ok(())
     }
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {

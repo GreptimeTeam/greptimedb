@@ -135,12 +135,12 @@ async fn test_udf() -> Result<()> {
 
     engine.register_udf(udf);
 
-    let plan = engine.sql_to_plan(
+    let plan = &engine.sql_to_plan(
         "select pow(number, number) as p from numbers limit 10",
         Arc::new(QueryContext::new()),
-    )?;
+    )?[0];
 
-    let output = engine.execute(&plan).await?;
+    let output = engine.execute(plan).await?;
     let recordbatch = match output {
         Output::Stream(recordbatch) => recordbatch,
         _ => unreachable!(),
@@ -246,11 +246,11 @@ where
     for<'a> T: Scalar<RefType<'a> = T>,
 {
     let sql = format!("SELECT {} FROM {}", column_name, table_name);
-    let plan = engine
+    let plan = &engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
-        .unwrap();
+        .unwrap()[0];
 
-    let output = engine.execute(&plan).await.unwrap();
+    let output = engine.execute(plan).await.unwrap();
     let recordbatch_stream = match output {
         Output::Stream(batch) => batch,
         _ => unreachable!(),
@@ -336,11 +336,11 @@ async fn execute_median<'a>(
         "select MEDIAN({}) as median from {}",
         column_name, table_name
     );
-    let plan = engine
+    let plan = &engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
-        .unwrap();
+        .unwrap()[0];
 
-    let output = engine.execute(&plan).await.unwrap();
+    let output = engine.execute(plan).await.unwrap();
     let recordbatch_stream = match output {
         Output::Stream(batch) => batch,
         _ => unreachable!(),

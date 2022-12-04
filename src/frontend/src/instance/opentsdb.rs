@@ -130,7 +130,8 @@ mod tests {
                 Arc::new(QueryContext::new()),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .remove(0);
         match output {
             Output::Stream(stream) => {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
