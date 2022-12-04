@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y \
     protobuf-compiler \
     curl \
     build-essential \
-    pkg-config
+    pkg-config \
+    git
 
 # Install Rust.
 SHELL ["/bin/bash", "-c"]
@@ -18,7 +19,12 @@ ENV PATH /root/.cargo/bin/:$PATH
 
 # Build the project in release mode.
 COPY . .
-RUN cargo build --release
+# git used in build.rs seems need to be initialized first
+# TODO(discord9): find a better way to init git
+RUN git init && git config user.name "AnyName" \
+    && git config user.email "any@email.com" && \
+    git commit --allow-empty -n -m "Initial commit." && \
+    cargo build --release
 
 # Export the binary to the clean image.
 # TODO(zyy17): Maybe should use the more secure container image.
