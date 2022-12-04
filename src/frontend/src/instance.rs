@@ -555,6 +555,13 @@ impl Instance {
     }
 }
 
+// TODO(sunng87): temporary workaround to extract sql statements from string
+fn parse_statement_strings(sql: &str) -> Vec<String> {
+    Parser::parse_sql(&GenericDialect, sql)
+        .map(|stmts| stmts.iter().map(|s| s.to_string()).collect())
+        .unwrap()
+}
+
 #[async_trait]
 impl SqlQueryHandler for Instance {
     async fn do_query(
@@ -566,12 +573,18 @@ impl SqlQueryHandler for Instance {
             .map_err(BoxedError::new)
             .context(server_error::ExecuteQuerySnafu { query })?;
 
+        // TODO(sunng87): this is temporary solution to get sql query string for
+        // each statement.
+        // Currently we use sql query string for grpc select calls between
+        // frontend and datanode in standalone mode, so here we have to extract
+        // it. This is to be REMOVED when frontend-datanode calls refactored,
+        // which is expected soon, very soon.
+        let stmt_strings = parse_statement_strings(query);
         let mut results = Vec::with_capacity(stmts.len());
 
-        for stmt in stmts.into_iter() {
-            // FIXME(sunng87): this query string has all statement
+        for (idx, stmt) in stmts.into_iter().enumerate() {
             let output = self
-                .do_query_statement(query, stmt, query_ctx.clone())
+                .do_query_statement(&stmt_strings[idx], stmt, query_ctx.clone())
                 .await?;
             results.push(output);
         }
