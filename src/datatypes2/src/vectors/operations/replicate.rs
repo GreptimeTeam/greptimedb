@@ -13,11 +13,8 @@
 // limitations under the License.
 
 use crate::prelude::*;
-// pub(crate) use crate::vectors::date::replicate_date;
-// pub(crate) use crate::vectors::datetime::replicate_datetime;
 pub(crate) use crate::vectors::null::replicate_null;
 pub(crate) use crate::vectors::primitive::replicate_primitive;
-// pub(crate) use crate::vectors::timestamp::replicate_timestamp;
 
 pub(crate) fn replicate_scalar<C: ScalarVector>(c: &C, offsets: &[usize]) -> VectorRef {
     assert_eq!(offsets.len(), c.len());
@@ -48,7 +45,7 @@ mod tests {
 
     use super::*;
     use crate::vectors::constant::ConstantVector;
-    use crate::vectors::{Int32Vector, StringVector, VectorOp};
+    use crate::vectors::{Int32Vector, NullVector, StringVector, VectorOp};
 
     #[test]
     fn test_replicate_primitive() {
@@ -108,19 +105,19 @@ mod tests {
         assert_eq!(expect, cv);
     }
 
-    // #[test]
-    // fn test_replicate_null() {
-    //     let v = NullVector::new(0);
-    //     let offsets = [];
-    //     let v = v.replicate(&offsets);
-    //     assert!(v.is_empty());
+    #[test]
+    fn test_replicate_null() {
+        let v = NullVector::new(0);
+        let offsets = [];
+        let v = v.replicate(&offsets);
+        assert!(v.is_empty());
 
-    //     let v = NullVector::new(3);
-    //     let offsets = [1, 3, 5];
+        let v = NullVector::new(3);
+        let offsets = [1, 3, 5];
 
-    //     let v = v.replicate(&offsets);
-    //     assert_eq!(5, v.len());
-    // }
+        let v = v.replicate(&offsets);
+        assert_eq!(5, v.len());
+    }
 
     macro_rules! impl_replicate_date_like_test {
         ($VectorType: ident, $ValueType: ident, $method: ident) => {{

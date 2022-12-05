@@ -112,3 +112,24 @@ define_timestamp_with_unit!(Second);
 define_timestamp_with_unit!(Millisecond);
 define_timestamp_with_unit!(Microsecond);
 define_timestamp_with_unit!(Nanosecond);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timestamp_scalar() {
+        let ts = TimestampSecond::new(123);
+        assert_eq!(ts, ts.as_scalar_ref());
+        assert_eq!(ts, ts.to_owned_scalar());
+        let ts = TimestampMillisecond::new(123);
+        assert_eq!(ts, ts.as_scalar_ref());
+        assert_eq!(ts, ts.to_owned_scalar());
+        let ts = TimestampMicrosecond::new(123);
+        assert_eq!(ts, ts.as_scalar_ref());
+        assert_eq!(ts, ts.to_owned_scalar());
+        let ts = TimestampNanosecond::new(123);
+        assert_eq!(ts, ts.as_scalar_ref());
+        assert_eq!(ts, ts.to_owned_scalar());
+    }
+}

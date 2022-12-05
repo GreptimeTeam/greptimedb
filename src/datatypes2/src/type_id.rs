@@ -58,30 +58,36 @@ impl LogicalTypeId {
     /// Panics if data type is not supported.
     #[cfg(any(test, feature = "test"))]
     pub fn data_type(&self) -> crate::data_type::ConcreteDataType {
-        unimplemented!()
-        // use crate::data_type::ConcreteDataType;
+        use crate::data_type::ConcreteDataType;
 
-        // match self {
-        //     LogicalTypeId::Null => ConcreteDataType::null_datatype(),
-        //     LogicalTypeId::Boolean => ConcreteDataType::boolean_datatype(),
-        //     LogicalTypeId::Int8 => ConcreteDataType::int8_datatype(),
-        //     LogicalTypeId::Int16 => ConcreteDataType::int16_datatype(),
-        //     LogicalTypeId::Int32 => ConcreteDataType::int32_datatype(),
-        //     LogicalTypeId::Int64 => ConcreteDataType::int64_datatype(),
-        //     LogicalTypeId::UInt8 => ConcreteDataType::uint8_datatype(),
-        //     LogicalTypeId::UInt16 => ConcreteDataType::uint16_datatype(),
-        //     LogicalTypeId::UInt32 => ConcreteDataType::uint32_datatype(),
-        //     LogicalTypeId::UInt64 => ConcreteDataType::uint64_datatype(),
-        //     LogicalTypeId::Float32 => ConcreteDataType::float32_datatype(),
-        //     LogicalTypeId::Float64 => ConcreteDataType::float64_datatype(),
-        //     LogicalTypeId::String => ConcreteDataType::string_datatype(),
-        //     LogicalTypeId::Binary => ConcreteDataType::binary_datatype(),
-        //     LogicalTypeId::Date => ConcreteDataType::date_datatype(),
-        //     LogicalTypeId::DateTime => ConcreteDataType::datetime_datatype(),
-        //     LogicalTypeId::Timestamp => ConcreteDataType::timestamp_millis_datatype(), // to timestamp type with default time unit
-        //     LogicalTypeId::List => {
-        //         ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
-        //     }
-        // }
+        match self {
+            LogicalTypeId::Null => ConcreteDataType::null_datatype(),
+            LogicalTypeId::Boolean => ConcreteDataType::boolean_datatype(),
+            LogicalTypeId::Int8 => ConcreteDataType::int8_datatype(),
+            LogicalTypeId::Int16 => ConcreteDataType::int16_datatype(),
+            LogicalTypeId::Int32 => ConcreteDataType::int32_datatype(),
+            LogicalTypeId::Int64 => ConcreteDataType::int64_datatype(),
+            LogicalTypeId::UInt8 => ConcreteDataType::uint8_datatype(),
+            LogicalTypeId::UInt16 => ConcreteDataType::uint16_datatype(),
+            LogicalTypeId::UInt32 => ConcreteDataType::uint32_datatype(),
+            LogicalTypeId::UInt64 => ConcreteDataType::uint64_datatype(),
+            LogicalTypeId::Float32 => ConcreteDataType::float32_datatype(),
+            LogicalTypeId::Float64 => ConcreteDataType::float64_datatype(),
+            LogicalTypeId::String => ConcreteDataType::string_datatype(),
+            LogicalTypeId::Binary => ConcreteDataType::binary_datatype(),
+            LogicalTypeId::Date => ConcreteDataType::date_datatype(),
+            LogicalTypeId::DateTime => ConcreteDataType::datetime_datatype(),
+            LogicalTypeId::TimestampSecond => ConcreteDataType::timestamp_second_datatype(),
+            LogicalTypeId::TimestampMillisecond => {
+                ConcreteDataType::timestamp_millisecond_datatype()
+            }
+            LogicalTypeId::TimestampMicrosecond => {
+                ConcreteDataType::timestamp_microsecond_datatype()
+            }
+            LogicalTypeId::TimestampNanosecond => ConcreteDataType::timestamp_nanosecond_datatype(),
+            LogicalTypeId::List => {
+                ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
+            }
+        }
     }
 }

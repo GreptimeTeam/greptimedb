@@ -42,10 +42,11 @@ mod validity;
 
 pub use binary::*;
 pub use boolean::*;
+pub use constant::*;
 pub use date::*;
 pub use datetime::*;
 pub use helper::Helper;
-pub use list::*;
+pub use list::{ListIter, ListVector, ListVectorBuilder}; // Avoid re-exporting the test utils.
 pub use null::*;
 pub use primitive::*;
 pub use string::*;

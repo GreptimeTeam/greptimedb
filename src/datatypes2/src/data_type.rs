@@ -61,66 +61,67 @@ pub enum ConcreteDataType {
     List(ListType),
 }
 
-// TODO(yingwen): Consider moving these methods to the DataType trait.
+// TODO(yingwen): Refactor these `is_xxx()` methods, such as adding a `properties()` method
+// returning all these properties to the `DataType` trait
 impl ConcreteDataType {
-    // pub fn is_float(&self) -> bool {
-    //     matches!(
-    //         self,
-    //         ConcreteDataType::Float64(_) | ConcreteDataType::Float32(_)
-    //     )
-    // }
+    pub fn is_float(&self) -> bool {
+        matches!(
+            self,
+            ConcreteDataType::Float64(_) | ConcreteDataType::Float32(_)
+        )
+    }
 
-    // pub fn is_boolean(&self) -> bool {
-    //     matches!(self, ConcreteDataType::Boolean(_))
-    // }
+    pub fn is_boolean(&self) -> bool {
+        matches!(self, ConcreteDataType::Boolean(_))
+    }
 
-    // pub fn stringifiable(&self) -> bool {
-    //     matches!(
-    //         self,
-    //         ConcreteDataType::String(_)
-    //             | ConcreteDataType::Date(_)
-    //             | ConcreteDataType::DateTime(_)
-    //             | ConcreteDataType::Timestamp(_)
-    //     )
-    // }
+    pub fn stringifiable(&self) -> bool {
+        matches!(
+            self,
+            ConcreteDataType::String(_)
+                | ConcreteDataType::Date(_)
+                | ConcreteDataType::DateTime(_)
+                | ConcreteDataType::Timestamp(_)
+        )
+    }
 
-    // pub fn is_signed(&self) -> bool {
-    //     matches!(
-    //         self,
-    //         ConcreteDataType::Int8(_)
-    //             | ConcreteDataType::Int16(_)
-    //             | ConcreteDataType::Int32(_)
-    //             | ConcreteDataType::Int64(_)
-    //             | ConcreteDataType::Date(_)
-    //             | ConcreteDataType::DateTime(_)
-    //             | ConcreteDataType::Timestamp(_)
-    //     )
-    // }
+    pub fn is_signed(&self) -> bool {
+        matches!(
+            self,
+            ConcreteDataType::Int8(_)
+                | ConcreteDataType::Int16(_)
+                | ConcreteDataType::Int32(_)
+                | ConcreteDataType::Int64(_)
+                | ConcreteDataType::Date(_)
+                | ConcreteDataType::DateTime(_)
+                | ConcreteDataType::Timestamp(_)
+        )
+    }
 
-    // pub fn is_unsigned(&self) -> bool {
-    //     matches!(
-    //         self,
-    //         ConcreteDataType::UInt8(_)
-    //             | ConcreteDataType::UInt16(_)
-    //             | ConcreteDataType::UInt32(_)
-    //             | ConcreteDataType::UInt64(_)
-    //     )
-    // }
+    pub fn is_unsigned(&self) -> bool {
+        matches!(
+            self,
+            ConcreteDataType::UInt8(_)
+                | ConcreteDataType::UInt16(_)
+                | ConcreteDataType::UInt32(_)
+                | ConcreteDataType::UInt64(_)
+        )
+    }
 
-    // pub fn numerics() -> Vec<ConcreteDataType> {
-    //     vec![
-    //         ConcreteDataType::int8_datatype(),
-    //         ConcreteDataType::int16_datatype(),
-    //         ConcreteDataType::int32_datatype(),
-    //         ConcreteDataType::int64_datatype(),
-    //         ConcreteDataType::uint8_datatype(),
-    //         ConcreteDataType::uint16_datatype(),
-    //         ConcreteDataType::uint32_datatype(),
-    //         ConcreteDataType::uint64_datatype(),
-    //         ConcreteDataType::float32_datatype(),
-    //         ConcreteDataType::float64_datatype(),
-    //     ]
-    // }
+    pub fn numerics() -> Vec<ConcreteDataType> {
+        vec![
+            ConcreteDataType::int8_datatype(),
+            ConcreteDataType::int16_datatype(),
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::int64_datatype(),
+            ConcreteDataType::uint8_datatype(),
+            ConcreteDataType::uint16_datatype(),
+            ConcreteDataType::uint32_datatype(),
+            ConcreteDataType::uint64_datatype(),
+            ConcreteDataType::float32_datatype(),
+            ConcreteDataType::float64_datatype(),
+        ]
+    }
 
     /// Convert arrow data type to [ConcreteDataType].
     ///
@@ -130,9 +131,9 @@ impl ConcreteDataType {
         ConcreteDataType::try_from(dt).expect("Unimplemented type")
     }
 
-    // pub fn is_null(&self) -> bool {
-    //     matches!(self, ConcreteDataType::Null(NullType))
-    // }
+    pub fn is_null(&self) -> bool {
+        matches!(self, ConcreteDataType::Null(NullType))
+    }
 }
 
 impl TryFrom<&ArrowDataType> for ConcreteDataType {
@@ -261,7 +262,6 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
 
 pub type DataTypeRef = Arc<dyn DataType>;
 
-// TODO(yingwen): Pass all tests.
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::Field;
@@ -401,9 +401,9 @@ mod tests {
         assert!(!ConcreteDataType::uint64_datatype().is_timestamp_compatible());
     }
 
-    // #[test]
-    // fn test_is_null() {
-    //     assert!(ConcreteDataType::null_datatype().is_null());
-    //     assert!(!ConcreteDataType::int32_datatype().is_null());
-    // }
+    #[test]
+    fn test_is_null() {
+        assert!(ConcreteDataType::null_datatype().is_null());
+        assert!(!ConcreteDataType::int32_datatype().is_null());
+    }
 }
