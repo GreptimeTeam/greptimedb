@@ -23,6 +23,7 @@ use snafu::ResultExt;
 
 use crate::error::{self, Result};
 
+// TODO(yingwen): We should hold vectors in the RecordBatch.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordBatch {
     pub schema: SchemaRef,
@@ -103,6 +104,7 @@ impl<'a> Iterator for RecordBatchRowIterator<'a> {
         } else {
             let mut row = Vec::with_capacity(self.columns);
 
+            // TODO(yingwen): Get from the vector if RecordBatch also holds vectors.
             for col in 0..self.columns {
                 let column_array = self.record_batch.df_recordbatch.column(col);
                 match arrow_array_get(column_array.as_ref(), self.row_cursor)
