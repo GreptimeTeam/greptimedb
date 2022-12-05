@@ -64,7 +64,7 @@ jobs:
       - name: Install taplo
         run: cargo install taplo-cli --version ^0.8 --locked
       - name: Run taplo
-        run: taplo format --check
+        run: taplo format --check --option "indent_string=    "
 
   # Use coverage to run test.
   # test:
