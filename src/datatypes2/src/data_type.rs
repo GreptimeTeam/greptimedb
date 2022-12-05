@@ -75,7 +75,7 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Boolean(_))
     }
 
-    pub fn stringifiable(&self) -> bool {
+    pub fn is_stringifiable(&self) -> bool {
         matches!(
             self,
             ConcreteDataType::String(_)
@@ -405,5 +405,82 @@ mod tests {
     fn test_is_null() {
         assert!(ConcreteDataType::null_datatype().is_null());
         assert!(!ConcreteDataType::int32_datatype().is_null());
+    }
+
+    #[test]
+    fn test_is_float() {
+        assert!(!ConcreteDataType::int32_datatype().is_float());
+        assert!(ConcreteDataType::float32_datatype().is_float());
+        assert!(ConcreteDataType::float64_datatype().is_float());
+    }
+
+    #[test]
+    fn test_is_boolean() {
+        assert!(!ConcreteDataType::int32_datatype().is_boolean());
+        assert!(!ConcreteDataType::float32_datatype().is_boolean());
+        assert!(ConcreteDataType::boolean_datatype().is_boolean());
+    }
+
+    #[test]
+    fn test_is_stringifiable() {
+        assert!(!ConcreteDataType::int32_datatype().is_stringifiable());
+        assert!(!ConcreteDataType::float32_datatype().is_stringifiable());
+        assert!(ConcreteDataType::string_datatype().is_stringifiable());
+        assert!(ConcreteDataType::date_datatype().is_stringifiable());
+        assert!(ConcreteDataType::datetime_datatype().is_stringifiable());
+        assert!(ConcreteDataType::timestamp_second_datatype().is_stringifiable());
+        assert!(ConcreteDataType::timestamp_millisecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::timestamp_microsecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::timestamp_nanosecond_datatype().is_stringifiable());
+    }
+
+    #[test]
+    fn test_is_signed() {
+        assert!(ConcreteDataType::int8_datatype().is_signed());
+        assert!(ConcreteDataType::int16_datatype().is_signed());
+        assert!(ConcreteDataType::int32_datatype().is_signed());
+        assert!(ConcreteDataType::int64_datatype().is_signed());
+        assert!(ConcreteDataType::date_datatype().is_signed());
+        assert!(ConcreteDataType::datetime_datatype().is_signed());
+        assert!(ConcreteDataType::timestamp_second_datatype().is_signed());
+        assert!(ConcreteDataType::timestamp_millisecond_datatype().is_signed());
+        assert!(ConcreteDataType::timestamp_microsecond_datatype().is_signed());
+        assert!(ConcreteDataType::timestamp_nanosecond_datatype().is_signed());
+
+        assert!(!ConcreteDataType::uint8_datatype().is_signed());
+        assert!(!ConcreteDataType::uint16_datatype().is_signed());
+        assert!(!ConcreteDataType::uint32_datatype().is_signed());
+        assert!(!ConcreteDataType::uint64_datatype().is_signed());
+
+        assert!(!ConcreteDataType::float32_datatype().is_signed());
+        assert!(!ConcreteDataType::float64_datatype().is_signed());
+    }
+
+    #[test]
+    fn test_is_unsigned() {
+        assert!(!ConcreteDataType::int8_datatype().is_unsigned());
+        assert!(!ConcreteDataType::int16_datatype().is_unsigned());
+        assert!(!ConcreteDataType::int32_datatype().is_unsigned());
+        assert!(!ConcreteDataType::int64_datatype().is_unsigned());
+        assert!(!ConcreteDataType::date_datatype().is_unsigned());
+        assert!(!ConcreteDataType::datetime_datatype().is_unsigned());
+        assert!(!ConcreteDataType::timestamp_second_datatype().is_unsigned());
+        assert!(!ConcreteDataType::timestamp_millisecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::timestamp_microsecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::timestamp_nanosecond_datatype().is_unsigned());
+
+        assert!(ConcreteDataType::uint8_datatype().is_unsigned());
+        assert!(ConcreteDataType::uint16_datatype().is_unsigned());
+        assert!(ConcreteDataType::uint32_datatype().is_unsigned());
+        assert!(ConcreteDataType::uint64_datatype().is_unsigned());
+
+        assert!(!ConcreteDataType::float32_datatype().is_unsigned());
+        assert!(!ConcreteDataType::float64_datatype().is_unsigned());
+    }
+
+    #[test]
+    fn test_numerics() {
+        let nums = ConcreteDataType::numerics();
+        assert_eq!(10, nums.len());
     }
 }
