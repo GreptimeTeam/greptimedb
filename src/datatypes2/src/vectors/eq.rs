@@ -15,12 +15,9 @@
 use std::sync::Arc;
 
 use crate::data_type::DataType;
-use crate::types::TimestampType;
-use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, ListVector, PrimitiveVector,
-    StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
-    TimestampNanosecondVector, TimestampSecondVector, Vector,
+    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, ListVector,
+    PrimitiveVector, StringVector, TimestampVector, Vector,
 };
 use crate::with_match_primitive_type_id;
 
@@ -79,20 +76,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
         String(_) => is_vector_eq!(StringVector, lhs, rhs),
         Date(_) => is_vector_eq!(DateVector, lhs, rhs),
         DateTime(_) => is_vector_eq!(DateTimeVector, lhs, rhs),
-        Timestamp(t) => match t {
-            TimestampType::Second(_) => {
-                is_vector_eq!(TimestampSecondVector, lhs, rhs)
-            }
-            TimestampType::Millisecond(_) => {
-                is_vector_eq!(TimestampMillisecondVector, lhs, rhs)
-            }
-            TimestampType::Microsecond(_) => {
-                is_vector_eq!(TimestampMicrosecondVector, lhs, rhs)
-            }
-            TimestampType::Nanosecond(_) => {
-                is_vector_eq!(TimestampNanosecondVector, lhs, rhs)
-            }
-        },
+        Timestamp(_) => is_vector_eq!(TimestampVector, lhs, rhs),
         List(_) => is_vector_eq!(ListVector, lhs, rhs),
         UInt8(_) | UInt16(_) | UInt32(_) | UInt64(_) | Int8(_) | Int16(_) | Int32(_) | Int64(_)
         | Float32(_) | Float64(_) => {
@@ -111,10 +95,13 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use arrow::array::{ListArray, MutableListArray, MutablePrimitiveArray, TryExtend};
+
     use super::*;
     use crate::vectors::{
-        list, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector,
-        NullVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
+        Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector,
+        NullVector, TimestampVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector,
+        VectorRef,
     };
 
     fn assert_vector_ref_eq(vector: VectorRef) {
@@ -145,21 +132,14 @@ mod tests {
         assert_vector_ref_eq(Arc::new(BooleanVector::from(vec![true, false])));
         assert_vector_ref_eq(Arc::new(DateVector::from(vec![Some(100), Some(120)])));
         assert_vector_ref_eq(Arc::new(DateTimeVector::from(vec![Some(100), Some(120)])));
-        assert_vector_ref_eq(Arc::new(TimestampSecondVector::from_values([100, 120])));
-        assert_vector_ref_eq(Arc::new(TimestampMillisecondVector::from_values([
-            100, 120,
-        ])));
-        assert_vector_ref_eq(Arc::new(TimestampMicrosecondVector::from_values([
-            100, 120,
-        ])));
-        assert_vector_ref_eq(Arc::new(TimestampNanosecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimestampVector::from_values([100, 120])));
 
-        let list_vector = list::tests::new_list_vector(&[
-            Some(vec![Some(1), Some(2)]),
-            None,
-            Some(vec![Some(3), Some(4)]),
-        ]);
-        assert_vector_ref_eq(Arc::new(list_vector));
+        let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i64>>::new();
+        arrow_array
+            .try_extend(vec![Some(vec![Some(1), Some(2), Some(3)])])
+            .unwrap();
+        let arrow_array: ListArray<i32> = arrow_array.into();
+        assert_vector_ref_eq(Arc::new(ListVector::from(arrow_array)));
 
         assert_vector_ref_eq(Arc::new(NullVector::new(4)));
         assert_vector_ref_eq(Arc::new(StringVector::from(vec![

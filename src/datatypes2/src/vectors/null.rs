@@ -16,7 +16,8 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayData, ArrayRef, NullArray};
+use arrow::array::{Array, ArrayRef, NullArray};
+use arrow::datatypes::DataType as ArrowDataType;
 use snafu::{ensure, OptionExt};
 
 use crate::data_type::ConcreteDataType;
@@ -26,27 +27,20 @@ use crate::types::NullType;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
-/// A vector where all elements are nulls.
 #[derive(PartialEq)]
 pub struct NullVector {
     array: NullArray,
 }
 
-// TODO(yingwen): Support null vector with other logical types.
 impl NullVector {
-    /// Create a new `NullVector` with `n` elements.
     pub fn new(n: usize) -> Self {
         Self {
-            array: NullArray::new(n),
+            array: NullArray::new(ArrowDataType::Null, n),
         }
     }
 
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
-    }
-
-    fn to_array_data(&self) -> ArrayData {
-        self.array.data().clone()
     }
 }
 
@@ -74,26 +68,19 @@ impl Vector for NullVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        // TODO(yingwen): Replaced by clone after upgrading to arrow 28.0.
-        let data = self.to_array_data();
-        Arc::new(NullArray::from(data))
+        Arc::new(self.array.clone())
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        let data = self.to_array_data();
-        Box::new(NullArray::from(data))
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
-        Validity::all_null(self.array.len())
+        Validity::AllNull
     }
 
     fn memory_size(&self) -> usize {
         0
-    }
-
-    fn null_count(&self) -> usize {
-        self.array.null_count()
     }
 
     fn is_null(&self, _row: usize) -> bool {
@@ -230,7 +217,7 @@ mod tests {
 
         assert_eq!("NullVector", v.vector_type_name());
         assert!(!v.is_const());
-        assert!(v.validity().is_all_null());
+        assert_eq!(Validity::AllNull, v.validity());
         assert!(v.only_null());
 
         for i in 0..32 {
@@ -259,7 +246,7 @@ mod tests {
     #[test]
     fn test_null_vector_validity() {
         let vector = NullVector::new(5);
-        assert!(vector.validity().is_all_null());
+        assert_eq!(Validity::AllNull, vector.validity());
         assert_eq!(5, vector.null_count());
     }
 

@@ -2044,25 +2044,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "datatypes2"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "common-base",
- "common-error",
- "common-time",
- "datafusion-common",
- "enum_dispatch",
- "num",
- "num-traits",
- "ordered-float 3.4.0",
- "paste",
- "serde",
- "serde_json",
- "snafu",
-]
-
-[[package]]
 name = "derive-new"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -110,6 +110,7 @@ impl Value {
     /// # Panics
     /// Panics if the data type is not supported.
     pub fn data_type(&self) -> ConcreteDataType {
+        // TODO(yingwen): Implement this once all data types are implemented.
         match self {
             Value::Null => ConcreteDataType::null_datatype(),
             Value::Boolean(_) => ConcreteDataType::boolean_datatype(),
@@ -125,10 +126,10 @@ impl Value {
             Value::Float64(_) => ConcreteDataType::float64_datatype(),
             Value::String(_) => ConcreteDataType::string_datatype(),
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
-            Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
             Value::Date(_) => ConcreteDataType::date_datatype(),
             Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
+            Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
         }
     }
 
@@ -193,7 +194,12 @@ impl Value {
             Value::List(_) => LogicalTypeId::List,
             Value::Date(_) => LogicalTypeId::Date,
             Value::DateTime(_) => LogicalTypeId::DateTime,
-            Value::Timestamp(_) => LogicalTypeId::Timestamp,
+            Value::Timestamp(t) => match t.unit() {
+                TimeUnit::Second => LogicalTypeId::TimestampSecond,
+                TimeUnit::Millisecond => LogicalTypeId::TimestampMillisecond,
+                TimeUnit::Microsecond => LogicalTypeId::TimestampMicrosecond,
+                TimeUnit::Nanosecond => LogicalTypeId::TimestampNanosecond,
+            },
         }
     }
 }
@@ -277,6 +283,9 @@ impl_value_from!(Float32, f32);
 impl_value_from!(Float64, f64);
 impl_value_from!(String, StringBytes);
 impl_value_from!(Binary, Bytes);
+impl_value_from!(Date, Date);
+impl_value_from!(DateTime, DateTime);
+impl_value_from!(Timestamp, Timestamp);
 
 impl From<String> for Value {
     fn from(string: String) -> Value {
@@ -293,12 +302,6 @@ impl From<&str> for Value {
 impl From<Vec<u8>> for Value {
     fn from(bytes: Vec<u8>) -> Value {
         Value::Binary(bytes.into())
-    }
-}
-
-impl From<Timestamp> for Value {
-    fn from(v: Timestamp) -> Self {
-        Value::Timestamp(v)
     }
 }
 
@@ -337,6 +340,7 @@ impl TryFrom<Value> for serde_json::Value {
     }
 }
 
+// TODO(yingwen): Consider removing the `datatype` field from `ListValue`.
 /// List value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListValue {
@@ -391,6 +395,7 @@ impl TryFrom<ScalarValue> for Value {
 
     fn try_from(v: ScalarValue) -> Result<Self> {
         let v = match v {
+            ScalarValue::Null => Value::Null,
             ScalarValue::Boolean(b) => Value::from(b),
             ScalarValue::Float32(f) => Value::from(f),
             ScalarValue::Float64(f) => Value::from(f),
@@ -405,8 +410,10 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
                 Value::from(s.map(StringBytes::from))
             }
-            ScalarValue::Binary(b) | ScalarValue::LargeBinary(b) => Value::from(b.map(Bytes::from)),
-            ScalarValue::List(vs, t) => {
+            ScalarValue::Binary(b)
+            | ScalarValue::LargeBinary(b)
+            | ScalarValue::FixedSizeBinary(_, b) => Value::from(b.map(Bytes::from)),
+            ScalarValue::List(vs, field) => {
                 let items = if let Some(vs) = vs {
                     let vs = vs
                         .into_iter()
@@ -416,7 +423,7 @@ impl TryFrom<ScalarValue> for Value {
                 } else {
                     None
                 };
-                let datatype = t.as_ref().try_into()?;
+                let datatype = ConcreteDataType::try_from(field.data_type())?;
                 Value::List(ListValue::new(items, datatype))
             }
             ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
@@ -435,7 +442,13 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::TimestampNanosecond(t, _) => t
                 .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
-            _ => {
+            ScalarValue::Decimal128(_, _, _)
+            | ScalarValue::Time64(_)
+            | ScalarValue::IntervalYearMonth(_)
+            | ScalarValue::IntervalDayTime(_)
+            | ScalarValue::IntervalMonthDayNano(_)
+            | ScalarValue::Struct(_, _)
+            | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.get_datatype(),
                 }
@@ -545,15 +558,6 @@ impl<'a> Ord for ValueRef<'a> {
     }
 }
 
-/// A helper trait to convert copyable types to `ValueRef`.
-///
-/// It could replace the usage of `Into<ValueRef<'a>>`, thus avoid confusion between `Into<Value>`
-/// and `Into<ValueRef<'a>>` in generic codes. One typical usage is the [`Primitive`](crate::primitive_traits::Primitive) trait.
-pub trait IntoValueRef<'a> {
-    /// Convert itself to [ValueRef].
-    fn into_value_ref(self) -> ValueRef<'a>;
-}
-
 macro_rules! impl_value_ref_from {
     ($Variant:ident, $Type:ident) => {
         impl From<$Type> for ValueRef<'_> {
@@ -562,24 +566,9 @@ macro_rules! impl_value_ref_from {
             }
         }
 
-        impl<'a> IntoValueRef<'a> for $Type {
-            fn into_value_ref(self) -> ValueRef<'a> {
-                ValueRef::$Variant(self.into())
-            }
-        }
-
         impl From<Option<$Type>> for ValueRef<'_> {
             fn from(value: Option<$Type>) -> Self {
                 match value {
-                    Some(v) => ValueRef::$Variant(v.into()),
-                    None => ValueRef::Null,
-                }
-            }
-        }
-
-        impl<'a> IntoValueRef<'a> for Option<$Type> {
-            fn into_value_ref(self) -> ValueRef<'a> {
-                match self {
                     Some(v) => ValueRef::$Variant(v.into()),
                     None => ValueRef::Null,
                 }
@@ -599,6 +588,9 @@ impl_value_ref_from!(Int32, i32);
 impl_value_ref_from!(Int64, i64);
 impl_value_ref_from!(Float32, f32);
 impl_value_ref_from!(Float64, f64);
+impl_value_ref_from!(Date, Date);
+impl_value_ref_from!(DateTime, DateTime);
+impl_value_ref_from!(Timestamp, Timestamp);
 
 impl<'a> From<&'a str> for ValueRef<'a> {
     fn from(string: &'a str) -> ValueRef<'a> {
@@ -628,6 +620,7 @@ impl<'a> From<Option<ListValueRef<'a>>> for ValueRef<'a> {
 /// if it becomes bottleneck.
 #[derive(Debug, Clone, Copy)]
 pub enum ListValueRef<'a> {
+    // TODO(yingwen): Consider replace this by VectorRef.
     Indexed { vector: &'a ListVector, idx: usize },
     Ref { val: &'a ListValue },
 }
@@ -785,19 +778,16 @@ mod tests {
                 Some(Box::new(vec![Value::Int32(1), Value::Null])),
                 ConcreteDataType::int32_datatype()
             )),
-            ScalarValue::List(
-                Some(Box::new(vec![
-                    ScalarValue::Int32(Some(1)),
-                    ScalarValue::Int32(None)
-                ])),
-                Box::new(ArrowDataType::Int32)
+            ScalarValue::new_list(
+                Some(vec![ScalarValue::Int32(Some(1)), ScalarValue::Int32(None)]),
+                ArrowDataType::Int32,
             )
             .try_into()
             .unwrap()
         );
         assert_eq!(
             Value::List(ListValue::new(None, ConcreteDataType::uint32_datatype())),
-            ScalarValue::List(None, Box::new(ArrowDataType::UInt32))
+            ScalarValue::new_list(None, ArrowDataType::UInt32)
                 .try_into()
                 .unwrap()
         );
@@ -981,6 +971,10 @@ mod tests {
             )),
         );
         check_type_and_value(
+            &ConcreteDataType::list_datatype(ConcreteDataType::null_datatype()),
+            &Value::List(ListValue::default()),
+        );
+        check_type_and_value(
             &ConcreteDataType::date_datatype(),
             &Value::Date(Date::new(1)),
         );
@@ -989,7 +983,7 @@ mod tests {
             &Value::DateTime(DateTime::new(1)),
         );
         check_type_and_value(
-            &ConcreteDataType::timestamp_millis_datatype(),
+            &ConcreteDataType::timestamp_millisecond_datatype(),
             &Value::Timestamp(Timestamp::from_millis(1)),
         );
     }
@@ -1209,59 +1203,6 @@ mod tests {
     }
 
     #[test]
-    fn test_into_value_ref() {
-        macro_rules! check_into_value_ref {
-            ($Variant: ident, $data: expr, $PrimitiveType: ident, $Wrapper: ident) => {
-                let data: $PrimitiveType = $data;
-                assert_eq!(
-                    ValueRef::$Variant($Wrapper::from(data)),
-                    data.into_value_ref()
-                );
-                assert_eq!(
-                    ValueRef::$Variant($Wrapper::from(data)),
-                    ValueRef::from(data)
-                );
-                assert_eq!(
-                    ValueRef::$Variant($Wrapper::from(data)),
-                    Some(data).into_value_ref()
-                );
-                assert_eq!(
-                    ValueRef::$Variant($Wrapper::from(data)),
-                    ValueRef::from(Some(data))
-                );
-                let x: Option<$PrimitiveType> = None;
-                assert_eq!(ValueRef::Null, x.into_value_ref());
-                assert_eq!(ValueRef::Null, x.into());
-            };
-        }
-
-        macro_rules! check_primitive_into_value_ref {
-            ($Variant: ident, $data: expr, $PrimitiveType: ident) => {
-                check_into_value_ref!($Variant, $data, $PrimitiveType, $PrimitiveType)
-            };
-        }
-
-        check_primitive_into_value_ref!(Boolean, true, bool);
-        check_primitive_into_value_ref!(UInt8, 10, u8);
-        check_primitive_into_value_ref!(UInt16, 20, u16);
-        check_primitive_into_value_ref!(UInt32, 30, u32);
-        check_primitive_into_value_ref!(UInt64, 40, u64);
-        check_primitive_into_value_ref!(Int8, -10, i8);
-        check_primitive_into_value_ref!(Int16, -20, i16);
-        check_primitive_into_value_ref!(Int32, -30, i32);
-        check_primitive_into_value_ref!(Int64, -40, i64);
-        check_into_value_ref!(Float32, 10.0, f32, OrderedF32);
-        check_into_value_ref!(Float64, 10.0, f64, OrderedF64);
-
-        let hello = "hello";
-        assert_eq!(
-            ValueRef::Binary(hello.as_bytes()),
-            ValueRef::from(hello.as_bytes())
-        );
-        assert_eq!(ValueRef::String(hello), ValueRef::from(hello));
-    }
-
-    #[test]
     fn test_display() {
         assert_eq!(Value::Null.to_string(), "Null");
         assert_eq!(Value::UInt8(8).to_string(), "8");
@@ -1301,10 +1242,34 @@ mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 Some(Box::new(vec![])),
-                ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+                ConcreteDataType::timestamp_second_datatype(),
             ))
             .to_string(),
-            "Timestamp[]"
+            "TimestampSecondType[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ))
+            .to_string(),
+            "TimestampMillisecondType[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+            ))
+            .to_string(),
+            "TimestampMicrosecondType[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ))
+            .to_string(),
+            "TimestampNanosecondType[]"
         );
     }
 }

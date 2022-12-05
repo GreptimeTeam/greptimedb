@@ -14,17 +14,11 @@
 
 use std::any::Any;
 
-use common_time::{Date, DateTime};
+use common_time::{Date, DateTime, Timestamp};
 
-use crate::types::{
-    Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type,
-    UInt64Type, UInt8Type,
-};
-use crate::value::{ListValue, ListValueRef, Value};
-use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, ListVector, MutableVector,
-    PrimitiveVector, StringVector, Vector,
-};
+use crate::prelude::*;
+use crate::value::{ListValue, ListValueRef};
+use crate::vectors::*;
 
 fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
     match iter.size_hint() {
@@ -41,7 +35,7 @@ where
     for<'a> Self::VectorType: ScalarVector<RefItem<'a> = Self::RefType<'a>>,
 {
     type VectorType: ScalarVector<OwnedItem = Self>;
-    type RefType<'a>: ScalarRef<'a, ScalarType = Self>
+    type RefType<'a>: ScalarRef<'a, ScalarType = Self, VectorType = Self::VectorType>
     where
         Self: 'a;
     /// Get a reference of the current value.
@@ -52,6 +46,7 @@ where
 }
 
 pub trait ScalarRef<'a>: std::fmt::Debug + Clone + Copy + Send + 'a {
+    type VectorType: ScalarVector<RefItem<'a> = Self>;
     /// The corresponding [`Scalar`] type.
     type ScalarType: Scalar<RefType<'a> = Self>;
 
@@ -68,7 +63,7 @@ where
 {
     type OwnedItem: Scalar<VectorType = Self>;
     /// The reference item of this vector.
-    type RefItem<'a>: ScalarRef<'a, ScalarType = Self::OwnedItem>
+    type RefItem<'a>: ScalarRef<'a, ScalarType = Self::OwnedItem, VectorType = Self>
     where
         Self: 'a;
 
@@ -142,46 +137,47 @@ pub trait ScalarVectorBuilder: MutableVector {
     fn finish(&mut self) -> Self::VectorType;
 }
 
-macro_rules! impl_scalar_for_native {
-    ($Native: ident, $DataType: ident) => {
-        impl Scalar for $Native {
-            type VectorType = PrimitiveVector<$DataType>;
-            type RefType<'a> = $Native;
+macro_rules! impl_primitive_scalar_type {
+    ($native:ident) => {
+        impl Scalar for $native {
+            type VectorType = PrimitiveVector<$native>;
+            type RefType<'a> = $native;
 
             #[inline]
-            fn as_scalar_ref(&self) -> $Native {
+            fn as_scalar_ref(&self) -> $native {
                 *self
             }
 
             #[allow(clippy::needless_lifetimes)]
             #[inline]
-            fn upcast_gat<'short, 'long: 'short>(long: $Native) -> $Native {
+            fn upcast_gat<'short, 'long: 'short>(long: $native) -> $native {
                 long
             }
         }
 
         /// Implement [`ScalarRef`] for primitive types. Note that primitive types are both [`Scalar`] and [`ScalarRef`].
-        impl<'a> ScalarRef<'a> for $Native {
-            type ScalarType = $Native;
+        impl<'a> ScalarRef<'a> for $native {
+            type VectorType = PrimitiveVector<$native>;
+            type ScalarType = $native;
 
             #[inline]
-            fn to_owned_scalar(&self) -> $Native {
+            fn to_owned_scalar(&self) -> $native {
                 *self
             }
         }
     };
 }
 
-impl_scalar_for_native!(u8, UInt8Type);
-impl_scalar_for_native!(u16, UInt16Type);
-impl_scalar_for_native!(u32, UInt32Type);
-impl_scalar_for_native!(u64, UInt64Type);
-impl_scalar_for_native!(i8, Int8Type);
-impl_scalar_for_native!(i16, Int16Type);
-impl_scalar_for_native!(i32, Int32Type);
-impl_scalar_for_native!(i64, Int64Type);
-impl_scalar_for_native!(f32, Float32Type);
-impl_scalar_for_native!(f64, Float64Type);
+impl_primitive_scalar_type!(u8);
+impl_primitive_scalar_type!(u16);
+impl_primitive_scalar_type!(u32);
+impl_primitive_scalar_type!(u64);
+impl_primitive_scalar_type!(i8);
+impl_primitive_scalar_type!(i16);
+impl_primitive_scalar_type!(i32);
+impl_primitive_scalar_type!(i64);
+impl_primitive_scalar_type!(f32);
+impl_primitive_scalar_type!(f64);
 
 impl Scalar for bool {
     type VectorType = BooleanVector;
@@ -200,6 +196,7 @@ impl Scalar for bool {
 }
 
 impl<'a> ScalarRef<'a> for bool {
+    type VectorType = BooleanVector;
     type ScalarType = bool;
 
     #[inline]
@@ -224,6 +221,7 @@ impl Scalar for String {
 }
 
 impl<'a> ScalarRef<'a> for &'a str {
+    type VectorType = StringVector;
     type ScalarType = String;
 
     #[inline]
@@ -248,6 +246,7 @@ impl Scalar for Vec<u8> {
 }
 
 impl<'a> ScalarRef<'a> for &'a [u8] {
+    type VectorType = BinaryVector;
     type ScalarType = Vec<u8>;
 
     #[inline]
@@ -270,6 +269,7 @@ impl Scalar for Date {
 }
 
 impl<'a> ScalarRef<'a> for Date {
+    type VectorType = DateVector;
     type ScalarType = Date;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
@@ -291,6 +291,7 @@ impl Scalar for DateTime {
 }
 
 impl<'a> ScalarRef<'a> for DateTime {
+    type VectorType = DateTimeVector;
     type ScalarType = DateTime;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
@@ -298,7 +299,27 @@ impl<'a> ScalarRef<'a> for DateTime {
     }
 }
 
-// Timestamp types implement Scalar and ScalarRef in `src/timestamp.rs`.
+impl Scalar for Timestamp {
+    type VectorType = TimestampVector;
+    type RefType<'a> = Timestamp;
+
+    fn as_scalar_ref(&self) -> Self::RefType<'_> {
+        *self
+    }
+
+    fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
+        long
+    }
+}
+
+impl<'a> ScalarRef<'a> for Timestamp {
+    type VectorType = TimestampVector;
+    type ScalarType = Timestamp;
+
+    fn to_owned_scalar(&self) -> Self::ScalarType {
+        *self
+    }
+}
 
 impl Scalar for ListValue {
     type VectorType = ListVector;
@@ -314,6 +335,7 @@ impl Scalar for ListValue {
 }
 
 impl<'a> ScalarRef<'a> for ListValueRef<'a> {
+    type VectorType = ListVector;
     type ScalarType = ListValue;
 
     fn to_owned_scalar(&self) -> Self::ScalarType {
@@ -335,9 +357,8 @@ impl<'a> ScalarRef<'a> for ListValueRef<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data_type::ConcreteDataType;
-    use crate::timestamp::TimestampSecond;
-    use crate::vectors::{BinaryVector, Int32Vector, ListVectorBuilder, TimestampSecondVector};
+    use crate::vectors::binary::BinaryVector;
+    use crate::vectors::primitive::Int32Vector;
 
     fn build_vector_from_slice<T: ScalarVector>(items: &[Option<T::RefItem<'_>>]) -> T {
         let mut builder = T::Builder::with_capacity(items.len());
@@ -433,11 +454,11 @@ mod tests {
 
     #[test]
     fn test_build_timestamp_vector() {
-        let expect: Vec<Option<TimestampSecond>> = vec![Some(10.into()), None, Some(42.into())];
-        let vector: TimestampSecondVector = build_vector_from_slice(&expect);
+        let expect: Vec<Option<Timestamp>> = vec![Some(10.into()), None, Some(42.into())];
+        let vector: TimestampVector = build_vector_from_slice(&expect);
         assert_vector_eq(&expect, &vector);
         let val = vector.get_data(0).unwrap();
         assert_eq!(val, val.as_scalar_ref());
-        assert_eq!(TimestampSecond::from(10), val.to_owned_scalar());
+        assert_eq!(10, val.to_owned_scalar().value());
     }
 }

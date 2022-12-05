@@ -9,11 +9,10 @@ default = []
 test = []
 
 [dependencies]
-arrow = "26.0.0"
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
-datafusion-common = "14.0.0"
+datafusion-common = "14.0"
 enum_dispatch = "0.3"
 num = "0.4"
 num-traits = "0.2"
@@ -22,3 +21,4 @@ paste = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
+arrow = "26.0"

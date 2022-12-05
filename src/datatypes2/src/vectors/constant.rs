@@ -55,27 +55,6 @@ impl ConstantVector {
     pub fn get_constant_ref(&self) -> ValueRef {
         self.vector.get_ref(0)
     }
-
-    pub(crate) fn replicate_vector(&self, offsets: &[usize]) -> VectorRef {
-        assert_eq!(offsets.len(), self.len());
-
-        if offsets.is_empty() {
-            return self.slice(0, 0);
-        }
-
-        Arc::new(ConstantVector::new(
-            self.vector.clone(),
-            *offsets.last().unwrap(),
-        ))
-    }
-
-    pub(crate) fn filter_vector(&self, filter: &BooleanVector) -> Result<VectorRef> {
-        let length = self.len() - filter.false_count();
-        if length == self.len() {
-            return Ok(Arc::new(self.clone()));
-        }
-        Ok(Arc::new(ConstantVector::new(self.inner().clone(), length)))
-    }
 }
 
 impl Vector for ConstantVector {
@@ -111,9 +90,9 @@ impl Vector for ConstantVector {
 
     fn validity(&self) -> Validity {
         if self.vector.is_null(0) {
-            Validity::all_null(self.length)
+            Validity::AllNull
         } else {
-            Validity::all_valid(self.length)
+            Validity::AllValid
         }
     }
 
@@ -143,14 +122,6 @@ impl Vector for ConstantVector {
     fn get_ref(&self, _index: usize) -> ValueRef {
         self.vector.get_ref(0)
     }
-
-    fn null_count(&self) -> usize {
-        if self.only_null() {
-            self.len()
-        } else {
-            0
-        }
-    }
 }
 
 impl fmt::Debug for ConstantVector {
@@ -169,6 +140,33 @@ impl Serializable for ConstantVector {
     }
 }
 
+pub(crate) fn replicate_constant(vector: &ConstantVector, offsets: &[usize]) -> VectorRef {
+    assert_eq!(offsets.len(), vector.len());
+
+    if offsets.is_empty() {
+        return vector.slice(0, 0);
+    }
+
+    Arc::new(ConstantVector::new(
+        vector.vector.clone(),
+        *offsets.last().unwrap(),
+    ))
+}
+
+pub(crate) fn filter_constant(
+    vector: &ConstantVector,
+    filter: &BooleanVector,
+) -> Result<VectorRef> {
+    let length = filter.len() - filter.as_boolean_array().values().null_count();
+    if length == vector.len() {
+        return Ok(Arc::new(vector.clone()));
+    }
+    Ok(Arc::new(ConstantVector::new(
+        vector.inner().clone(),
+        length,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
@@ -184,9 +182,9 @@ mod tests {
         assert_eq!("ConstantVector", c.vector_type_name());
         assert!(c.is_const());
         assert_eq!(10, c.len());
-        assert!(c.validity().is_all_valid());
+        assert_eq!(Validity::AllValid, c.validity());
         assert!(!c.only_null());
-        assert_eq!(64, c.memory_size());
+        assert_eq!(4, c.memory_size());
 
         for i in 0..10 {
             assert!(!c.is_null(i));

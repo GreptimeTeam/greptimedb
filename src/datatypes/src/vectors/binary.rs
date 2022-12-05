@@ -15,9 +15,8 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef};
-use arrow::array::{ArrayIter, GenericByteArray};
-use snafu::{OptionExt, ResultExt};
+use arrow::array::{Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef};
+use snafu::ResultExt;
 
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};
 use crate::data_type::ConcreteDataType;
@@ -37,6 +36,16 @@ impl BinaryVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
+
+    fn to_array_data(&self) -> ArrayData {
+        self.array.data().clone()
+    }
+
+    fn from_array_data(data: ArrayData) -> BinaryVector {
+        BinaryVector {
+            array: BinaryArray::from(data),
+        }
+    }
 }
 
 impl From<BinaryArray> for BinaryVector {
@@ -48,7 +57,7 @@ impl From<BinaryArray> for BinaryVector {
 impl From<Vec<Option<Vec<u8>>>> for BinaryVector {
     fn from(data: Vec<Option<Vec<u8>>>) -> Self {
         Self {
-            array: BinaryArray::from(data),
+            array: BinaryArray::from_iter(data),
         }
     }
 }
@@ -71,11 +80,13 @@ impl Vector for BinaryVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        Arc::new(self.array.clone())
+        let data = self.to_array_data();
+        Arc::new(BinaryArray::from(data))
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        Box::new(self.array.clone())
+        let data = self.to_array_data();
+        Box::new(BinaryArray::from(data))
     }
 
     fn validity(&self) -> Validity {
@@ -83,7 +94,11 @@ impl Vector for BinaryVector {
     }
 
     fn memory_size(&self) -> usize {
-        self.array.values().len() + self.array.offsets().len() * std::mem::size_of::<i64>()
+        self.array.get_buffer_memory_size()
+    }
+
+    fn null_count(&self) -> usize {
+        self.array.null_count()
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -91,7 +106,8 @@ impl Vector for BinaryVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        Arc::new(Self::from(self.array.slice(offset, length)))
+        let data = self.array.data().slice(offset, length);
+        Arc::new(Self::from_array_data(data))
     }
 
     fn get(&self, index: usize) -> Value {
@@ -148,12 +164,15 @@ impl MutableVector for BinaryVectorBuilder {
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        self.mutable_array.push(value.as_binary()?);
+        match value.as_binary()? {
+            Some(v) => self.mutable_array.append_value(v),
+            None => self.mutable_array.append_null(),
+        }
         Ok(())
     }
 
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
-        vectors::impl_extend_for_builder!(self.mutable_array, vector, BinaryVector, offset, length)
+        vectors::impl_extend_for_builder!(self, vector, BinaryVector, offset, length)
     }
 }
 
@@ -162,17 +181,20 @@ impl ScalarVectorBuilder for BinaryVectorBuilder {
 
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            mutable_array: MutableBinaryArray::with_capacity(capacity),
+            mutable_array: MutableBinaryArray::with_capacity(capacity, 0),
         }
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        self.mutable_array.push(value);
+        match value {
+            Some(v) => self.mutable_array.append_value(v),
+            None => self.mutable_array.append_null(),
+        }
     }
 
     fn finish(&mut self) -> Self::VectorType {
         BinaryVector {
-            array: std::mem::take(&mut self.mutable_array).into(),
+            array: self.mutable_array.finish(),
         }
     }
 }
@@ -205,14 +227,17 @@ mod tests {
 
     #[test]
     fn test_binary_vector_misc() {
-        let v = BinaryVector::from(BinaryArray::from_slice(&[vec![1, 2, 3], vec![1, 2, 3]]));
+        let v = BinaryVector::from(BinaryArray::from_iter_values(&[
+            vec![1, 2, 3],
+            vec![1, 2, 3],
+        ]));
 
         assert_eq!(2, v.len());
         assert_eq!("BinaryVector", v.vector_type_name());
         assert!(!v.is_const());
-        assert_eq!(Validity::AllValid, v.validity());
+        assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
-        assert_eq!(30, v.memory_size());
+        assert_eq!(128, v.memory_size());
 
         for i in 0..2 {
             assert!(!v.is_null(i));
@@ -227,7 +252,10 @@ mod tests {
 
     #[test]
     fn test_serialize_binary_vector_to_json() {
-        let vector = BinaryVector::from(BinaryArray::from_slice(&[vec![1, 2, 3], vec![1, 2, 3]]));
+        let vector = BinaryVector::from(BinaryArray::from_iter_values(&[
+            vec![1, 2, 3],
+            vec![1, 2, 3],
+        ]));
 
         let json_value = vector.serialize_to_json().unwrap();
         assert_eq!(
@@ -253,8 +281,8 @@ mod tests {
 
     #[test]
     fn test_from_arrow_array() {
-        let arrow_array = BinaryArray::from_slice(&[vec![1, 2, 3], vec![1, 2, 3]]);
-        let original = arrow_array.clone();
+        let arrow_array = BinaryArray::from_iter_values(&[vec![1, 2, 3], vec![1, 2, 3]]);
+        let original = BinaryArray::from(arrow_array.data().clone());
         let vector = BinaryVector::from(arrow_array);
         assert_eq!(original, vector.array);
     }
@@ -289,7 +317,7 @@ mod tests {
         builder.push(Some(b"world"));
         let vector = builder.finish();
         assert_eq!(0, vector.null_count());
-        assert_eq!(Validity::AllValid, vector.validity());
+        assert!(vector.validity().is_all_valid());
 
         let mut builder = BinaryVectorBuilder::with_capacity(3);
         builder.push(Some(b"hello"));
@@ -298,9 +326,10 @@ mod tests {
         let vector = builder.finish();
         assert_eq!(1, vector.null_count());
         let validity = vector.validity();
-        let slots = validity.slots().unwrap();
-        assert_eq!(1, slots.null_count());
-        assert!(!slots.get_bit(1));
+        assert!(!validity.is_set(1));
+
+        assert_eq!(1, validity.null_count());
+        assert!(!validity.is_set(1));
     }
 
     #[test]

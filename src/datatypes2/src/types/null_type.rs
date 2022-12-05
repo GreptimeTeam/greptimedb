@@ -27,7 +27,7 @@ pub struct NullType;
 
 impl NullType {
     pub fn arc() -> DataTypeRef {
-        Arc::new(NullType)
+        Arc::new(Self)
     }
 }
 
@@ -50,9 +50,5 @@ impl DataType for NullType {
 
     fn create_mutable_vector(&self, _capacity: usize) -> Box<dyn MutableVector> {
         Box::new(NullVectorBuilder::default())
-    }
-
-    fn is_timestamp_compatible(&self) -> bool {
-        false
     }
 }

@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::TypeId;
-use std::marker::PhantomData;
+use std::cmp::Ordering;
 
-use arrow::array::PrimitiveArray;
-use arrow::datatypes::DataType as ArrowDataType;
-use paste::paste;
+use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
+use common_time::{Date, DateTime};
+use num::NumCast;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
@@ -25,92 +24,226 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
 use crate::type_id::LogicalTypeId;
-use crate::types::primitive_traits::Primitive;
+use crate::types::{DateTimeType, DateType};
 use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PrimitiveType<T: Primitive> {
-    #[serde(skip)]
-    _phantom: PhantomData<T>,
+/// Data types that can be used as arrow's native type.
+pub trait NativeType: ArrowNativeType + NumCast {
+    /// Largest numeric type this primitive type can be cast to.
+    type LargestType: NativeType;
 }
 
-impl<T: Primitive, U: Primitive> PartialEq<PrimitiveType<U>> for PrimitiveType<T> {
-    fn eq(&self, _other: &PrimitiveType<U>) -> bool {
-        TypeId::of::<T>() == TypeId::of::<U>()
-    }
+macro_rules! impl_native_type {
+    ($Type: ident, $LargestType: ident) => {
+        impl NativeType for $Type {
+            type LargestType = $LargestType;
+        }
+    };
 }
 
-impl<T: Primitive> Eq for PrimitiveType<T> {}
+impl_native_type!(u8, u64);
+impl_native_type!(u16, u64);
+impl_native_type!(u32, u64);
+impl_native_type!(u64, u64);
+impl_native_type!(i8, i64);
+impl_native_type!(i16, i64);
+impl_native_type!(i32, i64);
+impl_native_type!(i64, i64);
+impl_native_type!(f32, f64);
+impl_native_type!(f64, f64);
 
-/// A trait that provide helper methods for a primitive type to implementing the [PrimitiveVector].
-pub trait PrimitiveElement
-where
-    for<'a> Self: Primitive
-        + Scalar<VectorType = PrimitiveVector<Self>>
-        + ScalarRef<'a, ScalarType = Self, VectorType = PrimitiveVector<Self>>
-        + Scalar<RefType<'a> = Self>,
+/// Represents the wrapper type that wraps a native type using the `newtype pattern`,
+/// such as [Date](`common_time::Date`) is a wrapper type for the underlying native
+/// type `i32`.
+pub trait WrapperType:
+    Copy
+    + Scalar
+    + PartialEq
+    + Into<Value>
+    + Into<ValueRef<'static>>
+    + Serialize
+    + Into<serde_json::Value>
 {
+    /// Logical primitive type that this wrapper type belongs to.
+    type LogicalType: LogicalPrimitiveType<Wrapper = Self, Native = Self::Native>;
+    /// The underlying native type.
+    type Native: NativeType;
+
+    /// Convert native type into this wrapper type.
+    fn from_native(value: Self::Native) -> Self;
+
+    /// Convert this wrapper type into native type.
+    fn into_native(self) -> Self::Native;
+}
+
+/// Trait bridging the logical primitive type with [ArrowPrimitiveType].
+pub trait LogicalPrimitiveType: 'static + Sized {
+    /// Arrow primitive type of this logical type.
+    type ArrowPrimitive: ArrowPrimitiveType<Native = Self::Native>;
+    /// Native (physical) type of this logical type.
+    type Native: NativeType;
+    /// Wrapper type that the vector returns.
+    type Wrapper: WrapperType<LogicalType = Self, Native = Self::Native>
+        + for<'a> Scalar<VectorType = PrimitiveVector<Self>, RefType<'a> = Self::Wrapper>
+        + for<'a> ScalarRef<'a, ScalarType = Self::Wrapper>;
+
     /// Construct the data type struct.
     fn build_data_type() -> ConcreteDataType;
 
-    /// Returns the name of the type id.
-    fn type_name() -> String;
+    /// Return the name of the type.
+    fn type_name() -> &'static str;
 
     /// Dynamic cast the vector to the concrete vector type.
-    fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveArray<Self>>;
+    fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveVector<Self>>;
 
     /// Cast value ref to the primitive type.
-    fn cast_value_ref(value: ValueRef) -> Result<Option<Self>>;
+    fn cast_value_ref(value: ValueRef) -> Result<Option<Self::Wrapper>>;
 }
 
-macro_rules! impl_primitive_element {
-    ($Type:ident, $TypeId:ident) => {
-        paste::paste! {
-            impl PrimitiveElement for $Type {
-                fn build_data_type() -> ConcreteDataType {
-                    ConcreteDataType::$TypeId(PrimitiveType::<$Type>::default())
-                }
+/// A new type for [WrapperType], complement the `Ord` feature for it. Wrapping non ordered
+/// primitive types like `f32` and `f64` in `OrdPrimitive` can make them be used in places that
+/// require `Ord`. For example, in `Median` or `Percentile` UDAFs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrdPrimitive<T: WrapperType>(pub T);
 
-                fn type_name() -> String {
-                    stringify!($TypeId).to_string()
-                }
+impl<T: WrapperType> OrdPrimitive<T> {
+    pub fn as_primitive(&self) -> T {
+        self.0
+    }
+}
 
-                fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveArray<$Type>> {
-                    let primitive_vector = vector
-                        .as_any()
-                        .downcast_ref::<PrimitiveVector<$Type>>()
-                        .with_context(|| error::CastTypeSnafu {
-                            msg: format!(
-                                "Failed to cast {} to vector of primitive type {}",
-                                vector.vector_type_name(),
-                                stringify!($TypeId)
-                            ),
-                        })?;
-                    Ok(&primitive_vector.array)
-                }
+impl<T: WrapperType> Eq for OrdPrimitive<T> {}
 
-                fn cast_value_ref(value: ValueRef) -> Result<Option<Self>> {
-                    match value {
-                        ValueRef::Null => Ok(None),
-                        ValueRef::$TypeId(v) => Ok(Some(v.into())),
-                        other => error::CastTypeSnafu {
-                            msg: format!(
-                                "Failed to cast value {:?} to primitive type {}",
-                                other,
-                                stringify!($TypeId),
-                            ),
-                        }.fail(),
+impl<T: WrapperType> PartialOrd for OrdPrimitive<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: WrapperType> Ord for OrdPrimitive<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        Into::<Value>::into(self.0).cmp(&Into::<Value>::into(other.0))
+    }
+}
+
+impl<T: WrapperType> From<OrdPrimitive<T>> for Value {
+    fn from(p: OrdPrimitive<T>) -> Self {
+        p.0.into()
+    }
+}
+
+macro_rules! impl_wrapper {
+    ($Type: ident, $LogicalType: ident) => {
+        impl WrapperType for $Type {
+            type LogicalType = $LogicalType;
+            type Native = $Type;
+
+            fn from_native(value: Self::Native) -> Self {
+                value
+            }
+
+            fn into_native(self) -> Self::Native {
+                self
+            }
+        }
+    };
+}
+
+impl_wrapper!(u8, UInt8Type);
+impl_wrapper!(u16, UInt16Type);
+impl_wrapper!(u32, UInt32Type);
+impl_wrapper!(u64, UInt64Type);
+impl_wrapper!(i8, Int8Type);
+impl_wrapper!(i16, Int16Type);
+impl_wrapper!(i32, Int32Type);
+impl_wrapper!(i64, Int64Type);
+impl_wrapper!(f32, Float32Type);
+impl_wrapper!(f64, Float64Type);
+
+impl WrapperType for Date {
+    type LogicalType = DateType;
+    type Native = i32;
+
+    fn from_native(value: i32) -> Self {
+        Date::new(value)
+    }
+
+    fn into_native(self) -> i32 {
+        self.val()
+    }
+}
+
+impl WrapperType for DateTime {
+    type LogicalType = DateTimeType;
+    type Native = i64;
+
+    fn from_native(value: Self::Native) -> Self {
+        DateTime::new(value)
+    }
+
+    fn into_native(self) -> Self::Native {
+        self.val()
+    }
+}
+
+macro_rules! define_logical_primitive_type {
+    ($Native: ident, $TypeId: ident, $DataType: ident) => {
+        // We need to define it as an empty struct `struct DataType {}` instead of a struct-unit
+        // `struct DataType;` to ensure the serialized JSON string is compatible with previous
+        // implementation.
+        #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+        pub struct $DataType {}
+
+        impl LogicalPrimitiveType for $DataType {
+            type ArrowPrimitive = arrow::datatypes::$DataType;
+            type Native = $Native;
+            type Wrapper = $Native;
+
+            fn build_data_type() -> ConcreteDataType {
+                ConcreteDataType::$TypeId($DataType::default())
+            }
+
+            fn type_name() -> &'static str {
+                stringify!($TypeId)
+            }
+
+            fn cast_vector(vector: &dyn Vector) -> Result<&PrimitiveVector<$DataType>> {
+                vector
+                    .as_any()
+                    .downcast_ref::<PrimitiveVector<$DataType>>()
+                    .with_context(|| error::CastTypeSnafu {
+                        msg: format!(
+                            "Failed to cast {} to vector of primitive type {}",
+                            vector.vector_type_name(),
+                            stringify!($TypeId)
+                        ),
+                    })
+            }
+
+            fn cast_value_ref(value: ValueRef) -> Result<Option<$Native>> {
+                match value {
+                    ValueRef::Null => Ok(None),
+                    ValueRef::$TypeId(v) => Ok(Some(v.into())),
+                    other => error::CastTypeSnafu {
+                        msg: format!(
+                            "Failed to cast value {:?} to primitive type {}",
+                            other,
+                            stringify!($TypeId),
+                        ),
                     }
+                    .fail(),
                 }
             }
         }
     };
 }
 
-macro_rules! impl_numeric {
-    ($Type:ident, $TypeId:ident) => {
-        impl DataType for PrimitiveType<$Type> {
+macro_rules! define_non_timestamp_primitive {
+    ($Native: ident, $TypeId: ident, $DataType: ident) => {
+        define_logical_primitive_type!($Native, $TypeId, $DataType);
+
+        impl DataType for $DataType {
             fn name(&self) -> &str {
                 stringify!($TypeId)
             }
@@ -120,7 +253,7 @@ macro_rules! impl_numeric {
             }
 
             fn default_value(&self) -> Value {
-                $Type::default().into()
+                $Native::default().into()
             }
 
             fn as_arrow_type(&self) -> ArrowDataType {
@@ -128,61 +261,98 @@ macro_rules! impl_numeric {
             }
 
             fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-                Box::new(PrimitiveVectorBuilder::<$Type>::with_capacity(capacity))
+                Box::new(PrimitiveVectorBuilder::<$DataType>::with_capacity(capacity))
             }
-        }
 
-        impl std::fmt::Debug for PrimitiveType<$Type> {
-            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(f, "{}", self.name())
+            fn is_timestamp_compatible(&self) -> bool {
+                false
             }
-        }
-
-        impl Default for PrimitiveType<$Type> {
-            fn default() -> Self {
-                Self {
-                    _phantom: PhantomData,
-                }
-            }
-        }
-
-        impl_primitive_element!($Type, $TypeId);
-
-        paste! {
-            pub type [<$TypeId Type>]=PrimitiveType<$Type>;
         }
     };
 }
 
-impl_numeric!(u8, UInt8);
-impl_numeric!(u16, UInt16);
-impl_numeric!(u32, UInt32);
-impl_numeric!(u64, UInt64);
-impl_numeric!(i8, Int8);
-impl_numeric!(i16, Int16);
-impl_numeric!(i32, Int32);
-impl_numeric!(i64, Int64);
-impl_numeric!(f32, Float32);
-impl_numeric!(f64, Float64);
+define_non_timestamp_primitive!(u8, UInt8, UInt8Type);
+define_non_timestamp_primitive!(u16, UInt16, UInt16Type);
+define_non_timestamp_primitive!(u32, UInt32, UInt32Type);
+define_non_timestamp_primitive!(u64, UInt64, UInt64Type);
+define_non_timestamp_primitive!(i8, Int8, Int8Type);
+define_non_timestamp_primitive!(i16, Int16, Int16Type);
+define_non_timestamp_primitive!(i32, Int32, Int32Type);
+define_non_timestamp_primitive!(f32, Float32, Float32Type);
+define_non_timestamp_primitive!(f64, Float64, Float64Type);
+
+// Timestamp primitive:
+define_logical_primitive_type!(i64, Int64, Int64Type);
+
+impl DataType for Int64Type {
+    fn name(&self) -> &str {
+        "Int64"
+    }
+
+    fn logical_type_id(&self) -> LogicalTypeId {
+        LogicalTypeId::Int64
+    }
+
+    fn default_value(&self) -> Value {
+        Value::Int64(0)
+    }
+
+    fn as_arrow_type(&self) -> ArrowDataType {
+        ArrowDataType::Int64
+    }
+
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+        Box::new(PrimitiveVectorBuilder::<Int64Type>::with_capacity(capacity))
+    }
+
+    fn is_timestamp_compatible(&self) -> bool {
+        true
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BinaryHeap;
+
     use super::*;
 
     #[test]
-    fn test_eq() {
-        assert_eq!(UInt8Type::default(), UInt8Type::default());
-        assert_eq!(UInt16Type::default(), UInt16Type::default());
-        assert_eq!(UInt32Type::default(), UInt32Type::default());
-        assert_eq!(UInt64Type::default(), UInt64Type::default());
-        assert_eq!(Int8Type::default(), Int8Type::default());
-        assert_eq!(Int16Type::default(), Int16Type::default());
-        assert_eq!(Int32Type::default(), Int32Type::default());
-        assert_eq!(Int64Type::default(), Int64Type::default());
-        assert_eq!(Float32Type::default(), Float32Type::default());
-        assert_eq!(Float64Type::default(), Float64Type::default());
+    fn test_ord_primitive() {
+        struct Foo<T>
+        where
+            T: WrapperType,
+        {
+            heap: BinaryHeap<OrdPrimitive<T>>,
+        }
 
-        assert_ne!(Float32Type::default(), Float64Type::default());
-        assert_ne!(Float32Type::default(), Int32Type::default());
+        impl<T> Foo<T>
+        where
+            T: WrapperType,
+        {
+            fn push(&mut self, value: T) {
+                let value = OrdPrimitive::<T>(value);
+                self.heap.push(value);
+            }
+        }
+
+        macro_rules! test {
+            ($Type:ident) => {
+                let mut foo = Foo::<$Type> {
+                    heap: BinaryHeap::new(),
+                };
+                foo.push($Type::default());
+            };
+        }
+
+        test!(u8);
+        test!(u16);
+        test!(u32);
+        test!(u64);
+        test!(i8);
+        test!(i16);
+        test!(i32);
+        test!(i64);
+        test!(f32);
+        test!(f64);
     }
 }

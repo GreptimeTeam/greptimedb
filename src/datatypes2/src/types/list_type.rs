@@ -15,17 +15,15 @@
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use serde::{Deserialize, Serialize};
 
-use crate::data_type::{ConcreteDataType, DataType};
-use crate::type_id::LogicalTypeId;
-use crate::value::{ListValue, Value};
+use crate::prelude::*;
+use crate::value::ListValue;
 use crate::vectors::{ListVectorBuilder, MutableVector};
 
 /// Used to represent the List datatype.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListType {
-    /// The type of List's item.
-    // Use Box to avoid recursive dependency, as enum ConcreteDataType depends on ListType.
-    item_type: Box<ConcreteDataType>,
+    /// The type of List's inner data.
+    inner: Box<ConcreteDataType>,
 }
 
 impl Default for ListType {
@@ -35,10 +33,9 @@ impl Default for ListType {
 }
 
 impl ListType {
-    /// Create a new `ListType` whose item's data type is `item_type`.
-    pub fn new(item_type: ConcreteDataType) -> Self {
+    pub fn new(datatype: ConcreteDataType) -> Self {
         ListType {
-            item_type: Box::new(item_type),
+            inner: Box::new(datatype),
         }
     }
 }
@@ -53,23 +50,19 @@ impl DataType for ListType {
     }
 
     fn default_value(&self) -> Value {
-        Value::List(ListValue::new(None, *self.item_type.clone()))
+        Value::List(ListValue::new(None, *self.inner.clone()))
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        let field = Box::new(Field::new("item", self.item_type.as_arrow_type(), true));
+        let field = Box::new(Field::new("item", self.inner.as_arrow_type(), true));
         ArrowDataType::List(field)
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(ListVectorBuilder::with_type_capacity(
-            *self.item_type.clone(),
+            *self.inner.clone(),
             capacity,
         ))
-    }
-
-    fn is_timestamp_compatible(&self) -> bool {
-        false
     }
 }
 

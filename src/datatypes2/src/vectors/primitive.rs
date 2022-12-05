@@ -13,111 +13,75 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::fmt;
+use std::iter::FromIterator;
+use std::slice::Iter;
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef, PrimitiveArray, PrimitiveBuilder,
-};
+use arrow::array::{Array, ArrayRef, MutableArray, MutablePrimitiveArray, PrimitiveArray};
+use arrow::bitmap::utils::ZipValidity;
 use serde_json::Value as JsonValue;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::data_type::ConcreteDataType;
-use crate::error::{self, Result};
+use crate::data_type::{ConcreteDataType, DataType};
+use crate::error::{ConversionSnafu, Result, SerializeSnafu};
 use crate::scalars::{Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::types::{
-    Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, LogicalPrimitiveType,
-    UInt16Type, UInt32Type, UInt64Type, UInt8Type, WrapperType,
-};
+use crate::types::{Primitive, PrimitiveElement};
 use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
-pub type UInt8Vector = PrimitiveVector<UInt8Type>;
-pub type UInt16Vector = PrimitiveVector<UInt16Type>;
-pub type UInt32Vector = PrimitiveVector<UInt32Type>;
-pub type UInt64Vector = PrimitiveVector<UInt64Type>;
-
-pub type Int8Vector = PrimitiveVector<Int8Type>;
-pub type Int16Vector = PrimitiveVector<Int16Type>;
-pub type Int32Vector = PrimitiveVector<Int32Type>;
-pub type Int64Vector = PrimitiveVector<Int64Type>;
-
-pub type Float32Vector = PrimitiveVector<Float32Type>;
-pub type Float64Vector = PrimitiveVector<Float64Type>;
-
 /// Vector for primitive data types.
-pub struct PrimitiveVector<T: LogicalPrimitiveType> {
-    array: PrimitiveArray<T::ArrowPrimitive>,
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrimitiveVector<T: Primitive> {
+    pub(crate) array: PrimitiveArray<T>,
 }
 
-impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
-    pub fn new(array: PrimitiveArray<T::ArrowPrimitive>) -> Self {
+impl<T: Primitive> PrimitiveVector<T> {
+    pub fn new(array: PrimitiveArray<T>) -> Self {
         Self { array }
     }
 
     pub fn try_from_arrow_array(array: impl AsRef<dyn Array>) -> Result<Self> {
-        let data = array
-            .as_ref()
-            .as_any()
-            .downcast_ref::<PrimitiveArray<T::ArrowPrimitive>>()
-            .with_context(|| error::ConversionSnafu {
-                from: format!("{:?}", array.as_ref().data_type()),
-            })?
-            .data()
-            .clone();
-        let concrete_array = PrimitiveArray::<T::ArrowPrimitive>::from(data);
-        Ok(Self::new(concrete_array))
+        Ok(Self::new(
+            array
+                .as_ref()
+                .as_any()
+                .downcast_ref::<PrimitiveArray<T>>()
+                .with_context(|| ConversionSnafu {
+                    from: format!("{:?}", array.as_ref().data_type()),
+                })?
+                .clone(),
+        ))
     }
 
-    pub fn from_slice<P: AsRef<[T::Native]>>(slice: P) -> Self {
-        let iter = slice.as_ref().iter().copied();
+    pub fn from_slice<P: AsRef<[T]>>(slice: P) -> Self {
         Self {
-            array: PrimitiveArray::from_iter_values(iter),
+            array: PrimitiveArray::from_slice(slice),
         }
     }
 
-    pub fn from_wrapper_slice<P: AsRef<[T::Wrapper]>>(slice: P) -> Self {
-        let iter = slice.as_ref().iter().copied().map(WrapperType::into_native);
+    pub fn from_vec(array: Vec<T>) -> Self {
         Self {
-            array: PrimitiveArray::from_iter_values(iter),
+            array: PrimitiveArray::from_vec(array),
         }
     }
 
-    pub fn from_vec(array: Vec<T::Native>) -> Self {
+    pub fn from_values<I: IntoIterator<Item = T>>(iter: I) -> Self {
         Self {
-            array: PrimitiveArray::from_iter_values(array),
+            array: PrimitiveArray::from_values(iter),
         }
     }
 
-    pub fn from_values<I: IntoIterator<Item = T::Native>>(iter: I) -> Self {
-        Self {
-            array: PrimitiveArray::from_iter_values(iter),
-        }
-    }
-
-    pub(crate) fn as_arrow(&self) -> &PrimitiveArray<T::ArrowPrimitive> {
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
 
-    fn to_array_data(&self) -> ArrayData {
-        self.array.data().clone()
-    }
-
-    fn from_array_data(data: ArrayData) -> Self {
-        Self {
-            array: PrimitiveArray::from(data),
-        }
-    }
-
-    // To distinguish with `Vector::slice()`.
-    fn get_slice(&self, offset: usize, length: usize) -> Self {
-        let data = self.array.data().slice(offset, length);
-        Self::from_array_data(data)
+    fn slice(&self, offset: usize, length: usize) -> Self {
+        Self::from(self.array.slice(offset, length))
     }
 }
 
-impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
+impl<T: PrimitiveElement> Vector for PrimitiveVector<T> {
     fn data_type(&self) -> ConcreteDataType {
         T::build_data_type()
     }
@@ -135,13 +99,11 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        let data = self.to_array_data();
-        Arc::new(PrimitiveArray::<T::ArrowPrimitive>::from(data))
+        Arc::new(self.array.clone())
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        let data = self.to_array_data();
-        Box::new(PrimitiveArray::<T::ArrowPrimitive>::from(data))
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
@@ -149,11 +111,7 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
     }
 
     fn memory_size(&self) -> usize {
-        self.array.get_buffer_memory_size()
-    }
-
-    fn null_count(&self) -> usize {
-        self.array.null_count()
+        self.array.values().len() * std::mem::size_of::<T>()
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -161,80 +119,57 @@ impl<T: LogicalPrimitiveType> Vector for PrimitiveVector<T> {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.data().slice(offset, length);
-        Arc::new(Self::from_array_data(data))
+        Arc::new(self.slice(offset, length))
     }
 
     fn get(&self, index: usize) -> Value {
-        if self.array.is_valid(index) {
-            // Safety: The index have been checked by `is_valid()`.
-            let wrapper = unsafe { T::Wrapper::from_native(self.array.value_unchecked(index)) };
-            wrapper.into()
-        } else {
-            Value::Null
-        }
+        vectors::impl_get_for_vector!(self.array, index)
     }
 
     fn get_ref(&self, index: usize) -> ValueRef {
         if self.array.is_valid(index) {
             // Safety: The index have been checked by `is_valid()`.
-            let wrapper = unsafe { T::Wrapper::from_native(self.array.value_unchecked(index)) };
-            wrapper.into()
+            unsafe { self.array.value_unchecked(index).into_value_ref() }
         } else {
             ValueRef::Null
         }
     }
 }
 
-impl<T: LogicalPrimitiveType> fmt::Debug for PrimitiveVector<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("PrimitiveVector")
-            .field("array", &self.array)
-            .finish()
-    }
-}
-
-impl<T: LogicalPrimitiveType> From<PrimitiveArray<T::ArrowPrimitive>> for PrimitiveVector<T> {
-    fn from(array: PrimitiveArray<T::ArrowPrimitive>) -> Self {
+impl<T: Primitive> From<PrimitiveArray<T>> for PrimitiveVector<T> {
+    fn from(array: PrimitiveArray<T>) -> Self {
         Self { array }
     }
 }
 
-impl<T: LogicalPrimitiveType> From<Vec<Option<T::Native>>> for PrimitiveVector<T> {
-    fn from(v: Vec<Option<T::Native>>) -> Self {
+impl<T: Primitive> From<Vec<Option<T>>> for PrimitiveVector<T> {
+    fn from(v: Vec<Option<T>>) -> Self {
         Self {
-            array: PrimitiveArray::from_iter(v),
+            array: PrimitiveArray::<T>::from(v),
         }
     }
 }
 
-pub struct PrimitiveIter<'a, T: LogicalPrimitiveType> {
-    iter: ArrayIter<&'a PrimitiveArray<T::ArrowPrimitive>>,
-}
-
-impl<'a, T: LogicalPrimitiveType> Iterator for PrimitiveIter<'a, T> {
-    type Item = Option<T::Wrapper>;
-
-    fn next(&mut self) -> Option<Option<T::Wrapper>> {
-        self.iter
-            .next()
-            .map(|item| item.map(T::Wrapper::from_native))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.iter.size_hint()
+impl<T: Primitive, Ptr: std::borrow::Borrow<Option<T>>> FromIterator<Ptr> for PrimitiveVector<T> {
+    fn from_iter<I: IntoIterator<Item = Ptr>>(iter: I) -> Self {
+        Self {
+            array: MutablePrimitiveArray::<T>::from_iter(iter).into(),
+        }
     }
 }
 
-impl<T: LogicalPrimitiveType> ScalarVector for PrimitiveVector<T> {
-    type OwnedItem = T::Wrapper;
-    type RefItem<'a> = T::Wrapper;
+impl<T> ScalarVector for PrimitiveVector<T>
+where
+    T: PrimitiveElement,
+{
+    type OwnedItem = T;
+    type RefItem<'a> = T;
     type Iter<'a> = PrimitiveIter<'a, T>;
     type Builder = PrimitiveVectorBuilder<T>;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
         if self.array.is_valid(idx) {
-            Some(T::Wrapper::from_native(self.array.value(idx)))
+            Some(self.array.value(idx))
         } else {
             None
         }
@@ -247,47 +182,59 @@ impl<T: LogicalPrimitiveType> ScalarVector for PrimitiveVector<T> {
     }
 }
 
-impl<T: LogicalPrimitiveType> Serializable for PrimitiveVector<T> {
+pub type UInt8Vector = PrimitiveVector<u8>;
+pub type UInt16Vector = PrimitiveVector<u16>;
+pub type UInt32Vector = PrimitiveVector<u32>;
+pub type UInt64Vector = PrimitiveVector<u64>;
+
+pub type Int8Vector = PrimitiveVector<i8>;
+pub type Int16Vector = PrimitiveVector<i16>;
+pub type Int32Vector = PrimitiveVector<i32>;
+pub type Int64Vector = PrimitiveVector<i64>;
+
+pub type Float32Vector = PrimitiveVector<f32>;
+pub type Float64Vector = PrimitiveVector<f64>;
+
+pub struct PrimitiveIter<'a, T> {
+    iter: ZipValidity<'a, &'a T, Iter<'a, T>>,
+}
+
+impl<'a, T: Copy> Iterator for PrimitiveIter<'a, T> {
+    type Item = Option<T>;
+
+    fn next(&mut self) -> Option<Option<T>> {
+        self.iter.next().map(|v| v.copied())
+    }
+}
+
+impl<T: PrimitiveElement> Serializable for PrimitiveVector<T> {
     fn serialize_to_json(&self) -> Result<Vec<JsonValue>> {
-        let res = self
-            .iter_data()
-            .map(|v| match v {
-                None => serde_json::Value::Null,
-                // use WrapperType's Into<serde_json::Value> bound instead of
-                // serde_json::to_value to facilitate customized serialization
-                // for WrapperType
-                Some(v) => v.into(),
-            })
-            .collect::<Vec<_>>();
-        Ok(res)
+        self.array
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<_>>()
+            .context(SerializeSnafu)
     }
 }
 
-impl<T: LogicalPrimitiveType> PartialEq for PrimitiveVector<T> {
-    fn eq(&self, other: &PrimitiveVector<T>) -> bool {
-        self.array == other.array
-    }
+pub struct PrimitiveVectorBuilder<T: PrimitiveElement> {
+    pub(crate) mutable_array: MutablePrimitiveArray<T>,
 }
 
-pub type UInt8VectorBuilder = PrimitiveVectorBuilder<UInt8Type>;
-pub type UInt16VectorBuilder = PrimitiveVectorBuilder<UInt16Type>;
-pub type UInt32VectorBuilder = PrimitiveVectorBuilder<UInt32Type>;
-pub type UInt64VectorBuilder = PrimitiveVectorBuilder<UInt64Type>;
+pub type UInt8VectorBuilder = PrimitiveVectorBuilder<u8>;
+pub type UInt16VectorBuilder = PrimitiveVectorBuilder<u16>;
+pub type UInt32VectorBuilder = PrimitiveVectorBuilder<u32>;
+pub type UInt64VectorBuilder = PrimitiveVectorBuilder<u64>;
 
-pub type Int8VectorBuilder = PrimitiveVectorBuilder<Int8Type>;
-pub type Int16VectorBuilder = PrimitiveVectorBuilder<Int16Type>;
-pub type Int32VectorBuilder = PrimitiveVectorBuilder<Int32Type>;
-pub type Int64VectorBuilder = PrimitiveVectorBuilder<Int64Type>;
+pub type Int8VectorBuilder = PrimitiveVectorBuilder<i8>;
+pub type Int16VectorBuilder = PrimitiveVectorBuilder<i16>;
+pub type Int32VectorBuilder = PrimitiveVectorBuilder<i32>;
+pub type Int64VectorBuilder = PrimitiveVectorBuilder<i64>;
 
-pub type Float32VectorBuilder = PrimitiveVectorBuilder<Float32Type>;
-pub type Float64VectorBuilder = PrimitiveVectorBuilder<Float64Type>;
+pub type Float32VectorBuilder = PrimitiveVectorBuilder<f32>;
+pub type Float64VectorBuilder = PrimitiveVectorBuilder<f64>;
 
-/// Builder to build a primitive vector.
-pub struct PrimitiveVectorBuilder<T: LogicalPrimitiveType> {
-    mutable_array: PrimitiveBuilder<T::ArrowPrimitive>,
-}
-
-impl<T: LogicalPrimitiveType> MutableVector for PrimitiveVectorBuilder<T> {
+impl<T: PrimitiveElement> MutableVector for PrimitiveVectorBuilder<T> {
     fn data_type(&self) -> ConcreteDataType {
         T::build_data_type()
     }
@@ -310,62 +257,81 @@ impl<T: LogicalPrimitiveType> MutableVector for PrimitiveVectorBuilder<T> {
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         let primitive = T::cast_value_ref(value)?;
-        match primitive {
-            Some(v) => self.mutable_array.append_value(v.into_native()),
-            None => self.mutable_array.append_null(),
-        }
+        self.mutable_array.push(primitive);
         Ok(())
     }
 
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
         let primitive = T::cast_vector(vector)?;
         // Slice the underlying array to avoid creating a new Arc.
-        let slice = primitive.get_slice(offset, length);
-        for v in slice.iter_data() {
-            self.push(v);
-        }
+        let slice = primitive.slice(offset, length);
+        self.mutable_array.extend_trusted_len(slice.iter());
         Ok(())
     }
 }
 
 impl<T> ScalarVectorBuilder for PrimitiveVectorBuilder<T>
 where
-    T: LogicalPrimitiveType,
-    T::Wrapper: Scalar<VectorType = PrimitiveVector<T>>,
-    for<'a> T::Wrapper: ScalarRef<'a, ScalarType = T::Wrapper>,
-    for<'a> T::Wrapper: Scalar<RefType<'a> = T::Wrapper>,
+    T: Scalar<VectorType = PrimitiveVector<T>> + PrimitiveElement,
+    for<'a> T: ScalarRef<'a, ScalarType = T, VectorType = PrimitiveVector<T>>,
+    for<'a> T: Scalar<RefType<'a> = T>,
 {
     type VectorType = PrimitiveVector<T>;
 
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            mutable_array: PrimitiveBuilder::with_capacity(capacity),
+            mutable_array: MutablePrimitiveArray::with_capacity(capacity),
         }
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        self.mutable_array
-            .append_option(value.map(|v| v.into_native()));
+        self.mutable_array.push(value);
     }
 
     fn finish(&mut self) -> Self::VectorType {
         PrimitiveVector {
-            array: self.mutable_array.finish(),
+            array: std::mem::take(&mut self.mutable_array).into(),
         }
     }
 }
 
-pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
+impl<T: PrimitiveElement> PrimitiveVectorBuilder<T> {
+    fn with_type_capacity(data_type: ConcreteDataType, capacity: usize) -> Self {
+        Self {
+            mutable_array: MutablePrimitiveArray::with_capacity_from(
+                capacity,
+                data_type.as_arrow_type(),
+            ),
+        }
+    }
+}
+
+pub(crate) fn replicate_primitive<T: PrimitiveElement>(
     vector: &PrimitiveVector<T>,
     offsets: &[usize],
+) -> VectorRef {
+    Arc::new(replicate_primitive_with_type(
+        vector,
+        offsets,
+        T::build_data_type(),
+    ))
+}
+
+pub(crate) fn replicate_primitive_with_type<T: PrimitiveElement>(
+    vector: &PrimitiveVector<T>,
+    offsets: &[usize],
+    data_type: ConcreteDataType,
 ) -> PrimitiveVector<T> {
     assert_eq!(offsets.len(), vector.len());
 
     if offsets.is_empty() {
-        return vector.get_slice(0, 0);
+        return vector.slice(0, 0);
     }
 
-    let mut builder = PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap() as usize);
+    let mut builder = PrimitiveVectorBuilder::<T>::with_type_capacity(
+        data_type,
+        *offsets.last().unwrap() as usize,
+    );
 
     let mut previous_offset = 0;
 
@@ -373,15 +339,14 @@ pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
         let repeat_times = *offset - previous_offset;
         match value {
             Some(data) => {
-                unsafe {
-                    // Safety: std::iter::Repeat and std::iter::Take implement TrustedLen.
-                    builder
-                        .mutable_array
-                        .append_trusted_len_iter(std::iter::repeat(data).take(repeat_times));
-                }
+                builder.mutable_array.extend_trusted_len(
+                    std::iter::repeat(*data)
+                        .take(repeat_times)
+                        .map(Option::Some),
+                );
             }
             None => {
-                builder.mutable_array.append_nulls(repeat_times);
+                builder.mutable_array.extend_constant(repeat_times, None);
             }
         }
         previous_offset = *offset;
@@ -391,7 +356,6 @@ pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::Int32Array;
     use arrow::datatypes::DataType as ArrowDataType;
     use serde_json;
 
@@ -400,11 +364,11 @@ mod tests {
     use crate::serialize::Serializable;
     use crate::types::Int64Type;
 
-    fn check_vec(v: Int32Vector) {
+    fn check_vec(v: PrimitiveVector<i32>) {
         assert_eq!(4, v.len());
         assert_eq!("Int32Vector", v.vector_type_name());
         assert!(!v.is_const());
-        assert!(v.validity().is_all_valid());
+        assert_eq!(Validity::AllValid, v.validity());
         assert!(!v.only_null());
 
         for i in 0..4 {
@@ -423,26 +387,26 @@ mod tests {
 
     #[test]
     fn test_from_values() {
-        let v = Int32Vector::from_values(vec![1, 2, 3, 4]);
+        let v = PrimitiveVector::<i32>::from_values(vec![1, 2, 3, 4]);
         check_vec(v);
     }
 
     #[test]
     fn test_from_vec() {
-        let v = Int32Vector::from_vec(vec![1, 2, 3, 4]);
+        let v = PrimitiveVector::<i32>::from_vec(vec![1, 2, 3, 4]);
         check_vec(v);
     }
 
     #[test]
     fn test_from_slice() {
-        let v = Int32Vector::from_slice(vec![1, 2, 3, 4]);
+        let v = PrimitiveVector::<i32>::from_slice(vec![1, 2, 3, 4]);
         check_vec(v);
     }
 
     #[test]
     fn test_serialize_primitive_vector_with_null_to_json() {
         let input = [Some(1i32), Some(2i32), None, Some(4i32), None];
-        let mut builder = Int32VectorBuilder::with_capacity(input.len());
+        let mut builder = PrimitiveVectorBuilder::with_capacity(input.len());
         for v in input {
             builder.push(v);
         }
@@ -457,15 +421,15 @@ mod tests {
 
     #[test]
     fn test_from_arrow_array() {
-        let arrow_array = Int32Array::from(vec![1, 2, 3, 4]);
-        let v = Int32Vector::from(arrow_array);
+        let arrow_array = PrimitiveArray::from_slice(vec![1, 2, 3, 4]);
+        let v = PrimitiveVector::from(arrow_array);
         check_vec(v);
     }
 
     #[test]
     fn test_primitive_vector_build_get() {
         let input = [Some(1i32), Some(2i32), None, Some(4i32), None];
-        let mut builder = Int32VectorBuilder::with_capacity(input.len());
+        let mut builder = PrimitiveVectorBuilder::with_capacity(input.len());
         for v in input {
             builder.push(v);
         }
@@ -484,28 +448,29 @@ mod tests {
     #[test]
     fn test_primitive_vector_validity() {
         let input = [Some(1i32), Some(2i32), None, None];
-        let mut builder = Int32VectorBuilder::with_capacity(input.len());
+        let mut builder = PrimitiveVectorBuilder::with_capacity(input.len());
         for v in input {
             builder.push(v);
         }
         let vector = builder.finish();
         assert_eq!(2, vector.null_count());
         let validity = vector.validity();
-        assert_eq!(2, validity.null_count());
-        assert!(!validity.is_set(2));
-        assert!(!validity.is_set(3));
+        let slots = validity.slots().unwrap();
+        assert_eq!(2, slots.null_count());
+        assert!(!slots.get_bit(2));
+        assert!(!slots.get_bit(3));
 
-        let vector = Int32Vector::from_slice(vec![1, 2, 3, 4]);
+        let vector = PrimitiveVector::<i32>::from_slice(vec![1, 2, 3, 4]);
         assert_eq!(0, vector.null_count());
-        assert!(vector.validity().is_all_valid());
+        assert_eq!(Validity::AllValid, vector.validity());
     }
 
     #[test]
     fn test_memory_size() {
-        let v = Int32Vector::from_slice((0..5).collect::<Vec<i32>>());
-        assert_eq!(64, v.memory_size());
-        let v = Int64Vector::from(vec![Some(0i64), Some(1i64), Some(2i64), None, None]);
-        assert_eq!(128, v.memory_size());
+        let v = PrimitiveVector::<i32>::from_slice((0..5).collect::<Vec<i32>>());
+        assert_eq!(20, v.memory_size());
+        let v = PrimitiveVector::<i64>::from(vec![Some(0i64), Some(1i64), Some(2i64), None, None]);
+        assert_eq!(40, v.memory_size());
     }
 
     #[test]
@@ -523,30 +488,5 @@ mod tests {
 
         let expect: VectorRef = Arc::new(Int64Vector::from_slice(&[123, 8, 9]));
         assert_eq!(expect, vector);
-    }
-
-    #[test]
-    fn test_from_wrapper_slice() {
-        macro_rules! test_from_wrapper_slice {
-            ($vec: ident, $ty: ident) => {
-                let from_wrapper_slice = $vec::from_wrapper_slice(&[
-                    $ty::from_native($ty::MAX),
-                    $ty::from_native($ty::MIN),
-                ]);
-                let from_slice = $vec::from_slice(&[$ty::MAX, $ty::MIN]);
-                assert_eq!(from_wrapper_slice, from_slice);
-            };
-        }
-
-        test_from_wrapper_slice!(UInt8Vector, u8);
-        test_from_wrapper_slice!(Int8Vector, i8);
-        test_from_wrapper_slice!(UInt16Vector, u16);
-        test_from_wrapper_slice!(Int16Vector, i16);
-        test_from_wrapper_slice!(UInt32Vector, u32);
-        test_from_wrapper_slice!(Int32Vector, i32);
-        test_from_wrapper_slice!(UInt64Vector, u64);
-        test_from_wrapper_slice!(Int64Vector, i64);
-        test_from_wrapper_slice!(Float32Vector, f32);
-        test_from_wrapper_slice!(Float64Vector, f64);
     }
 }
