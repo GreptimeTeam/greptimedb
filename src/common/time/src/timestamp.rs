@@ -209,6 +209,7 @@ impl Hash for Timestamp {
 #[cfg(test)]
 mod tests {
     use chrono::Offset;
+    use serde_json::Value;
 
     use super::*;
 
@@ -329,5 +330,40 @@ mod tests {
         let ts_millis = -1001;
         let ts = Timestamp::from_millis(ts_millis);
         assert_eq!("1969-12-31 23:59:58.999+0000", ts.to_iso8601_string());
+    }
+
+    #[test]
+    fn test_serialize_to_json_value() {
+        assert_eq!(
+            "1970-01-01 00:00:01+0000",
+            match serde_json::Value::from(Timestamp::new(1, TimeUnit::Second)) {
+                Value::String(s) => s,
+                _ => unreachable!(),
+            }
+        );
+
+        assert_eq!(
+            "1970-01-01 00:00:00.001+0000",
+            match serde_json::Value::from(Timestamp::new(1, TimeUnit::Millisecond)) {
+                Value::String(s) => s,
+                _ => unreachable!(),
+            }
+        );
+
+        assert_eq!(
+            "1970-01-01 00:00:00.000001+0000",
+            match serde_json::Value::from(Timestamp::new(1, TimeUnit::Microsecond)) {
+                Value::String(s) => s,
+                _ => unreachable!(),
+            }
+        );
+
+        assert_eq!(
+            "1970-01-01 00:00:00.000000001+0000",
+            match serde_json::Value::from(Timestamp::new(1, TimeUnit::Nanosecond)) {
+                Value::String(s) => s,
+                _ => unreachable!(),
+            }
+        );
     }
 }
