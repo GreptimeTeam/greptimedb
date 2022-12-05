@@ -28,16 +28,9 @@ message ObjectExpr {
 message SelectExpr {
   oneof expr {
     string sql = 1;
-    LogicalPlan logical_plan = 2;
+    bytes logical_plan = 2;
     PhysicalPlan physical_plan = 15;
   }
-}
-
-message LogicalPlan {
-  string catalog = 1;
-  string schema = 2;
-  string table = 3;
-  bytes plan = 4;
 }
 
 message PhysicalPlan {

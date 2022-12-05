@@ -17,7 +17,7 @@ use std::sync::Arc;
 use api::result::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use api::v1::{
     admin_expr, object_expr, select_expr, AdminExpr, AdminResult, Column, CreateDatabaseExpr,
-    LogicalPlan as LogicalPlanProto, ObjectExpr, ObjectResult, SelectExpr,
+    ObjectExpr, ObjectResult, SelectExpr,
 };
 use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
@@ -150,17 +150,9 @@ impl Instance {
         }
     }
 
-    async fn execute_logical(&self, plan: LogicalPlanProto) -> Result<Output> {
-        let table = self
-            .catalog_manager
-            .table(&plan.catalog, &plan.schema, &plan.table)
-            .context(CatalogSnafu)?
-            .context(TableNotFoundSnafu {
-                table_name: format!("{}.{}.{}", &plan.catalog, &plan.schema, &plan.table),
-            })?;
-
-        let logical_plan = DFLogicalSubstraitConvertor::new(table)
-            .decode(plan.plan.as_slice())
+    async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
+        let logical_plan = DFLogicalSubstraitConvertor
+            .decode(plan_bytes.as_slice(), self.catalog_manager.clone())
             .context(DecodeLogicalPlanSnafu)?;
 
         self.query_engine

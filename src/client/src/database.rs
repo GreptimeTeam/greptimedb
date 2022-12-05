@@ -16,9 +16,8 @@ use std::sync::Arc;
 
 use api::v1::codec::SelectResult as GrpcSelectResult;
 use api::v1::column::SemanticType;
-use api::v1::meta::TableName;
 use api::v1::{
-    object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr, LogicalPlan,
+    object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr,
     MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, PhysicalPlan,
     SelectExpr,
 };
@@ -113,14 +112,9 @@ impl Database {
         self.do_select(select_expr).await
     }
 
-    pub async fn logical_plan(&self, table_name: TableName, plan: Vec<u8>) -> Result<ObjectResult> {
+    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<ObjectResult> {
         let select_expr = SelectExpr {
-            expr: Some(select_expr::Expr::LogicalPlan(LogicalPlan {
-                catalog: table_name.catalog_name,
-                schema: table_name.schema_name,
-                table: table_name.table_name,
-                plan,
-            })),
+            expr: Some(select_expr::Expr::LogicalPlan(logical_plan)),
         };
         self.do_select(select_expr).await
     }

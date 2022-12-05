@@ -53,13 +53,13 @@ impl DatanodeInstance {
     pub(crate) async fn grpc_table_scan(&self, plan: TableScanPlan) -> Result<RecordBatches> {
         let logical_plan = self.build_logical_plan(&plan)?;
 
-        let substrait_plan = DFLogicalSubstraitConvertor::new(self.table.clone())
+        let substrait_plan = DFLogicalSubstraitConvertor
             .encode(logical_plan)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?;
 
         let output = self
             .db
-            .logical_plan(plan.table_name.into(), substrait_plan.to_vec())
+            .logical_plan(substrait_plan.to_vec())
             .await
             .and_then(Output::try_from)
             .context(error::SelectSnafu)?;
