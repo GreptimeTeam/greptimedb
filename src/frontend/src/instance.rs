@@ -825,7 +825,7 @@ mod tests {
                             memory DOUBLE NULL,
                             disk_util DOUBLE DEFAULT 9.9,
                             TIME INDEX (ts),
-                            PRIMARY KEY(ts, host)
+                            PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#;
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
@@ -1077,7 +1077,7 @@ mod tests {
             desc: None,
             column_defs,
             time_index: "ts".to_string(),
-            primary_keys: vec!["ts".to_string(), "host".to_string()],
+            primary_keys: vec!["host".to_string()],
             create_if_not_exists: true,
             table_options: Default::default(),
             table_id: None,

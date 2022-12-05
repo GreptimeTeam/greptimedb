@@ -60,9 +60,9 @@ impl ScriptsTable {
             table_name: SCRIPTS_TABLE_NAME.to_string(),
             desc: Some("Scripts table".to_string()),
             schema,
-            // name and timestamp as primary key
             region_numbers: vec![0],
-            primary_key_indices: vec![0, 3],
+            // name as primary key
+            primary_key_indices: vec![0],
             create_if_not_exists: true,
             table_options: HashMap::default(),
         };

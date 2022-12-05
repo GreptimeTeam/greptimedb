@@ -43,7 +43,6 @@ use crate::error::{
 
 pub const ENTRY_TYPE_INDEX: usize = 0;
 pub const KEY_INDEX: usize = 1;
-pub const TIMESTAMP_INDEX: usize = 2;
 pub const VALUE_INDEX: usize = 3;
 
 pub struct SystemCatalogTable {
@@ -111,7 +110,7 @@ impl SystemCatalogTable {
                 desc: Some("System catalog table".to_string()),
                 schema: schema.clone(),
                 region_numbers: vec![0],
-                primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX, TIMESTAMP_INDEX],
+                primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX],
                 create_if_not_exists: true,
                 table_options: HashMap::new(),
             };

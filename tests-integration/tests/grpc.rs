@@ -258,7 +258,7 @@ fn testing_create_expr() -> CreateExpr {
         desc: Some("blabla".to_string()),
         column_defs,
         time_index: "ts".to_string(),
-        primary_keys: vec!["ts".to_string(), "host".to_string()],
+        primary_keys: vec!["host".to_string()],
         create_if_not_exists: true,
         table_options: Default::default(),
         table_id: Some(MIN_USER_TABLE_ID),

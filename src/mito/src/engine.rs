@@ -21,7 +21,7 @@ use common_error::ext::BoxedError;
 use common_telemetry::logging;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
     ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
     CreateOptions, EngineContext as StorageEngineContext, OpenOptions, RegionDescriptorBuilder,
@@ -37,7 +37,8 @@ use tokio::sync::Mutex;
 use crate::config::EngineConfig;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
-    BuildRowKeyDescriptorSnafu, MissingTimestampIndexSnafu, Result, TableExistsSnafu,
+    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, MissingTimestampIndexSnafu, Result,
+    TableExistsSnafu,
 };
 use crate::table::MitoTable;
 
@@ -248,6 +249,27 @@ fn build_column_family(
     ))
 }
 
+fn validate_create_table_request(request: &CreateTableRequest) -> Result<()> {
+    let ts_index = request
+        .schema
+        .timestamp_index()
+        .context(MissingTimestampIndexSnafu {
+            table_name: &request.table_name,
+        })?;
+
+    ensure!(
+        !request
+            .primary_key_indices
+            .iter()
+            .any(|index| *index == ts_index),
+        InvalidPrimaryKeySnafu {
+            msg: "time index column can't be included in primary key"
+        }
+    );
+
+    Ok(())
+}
+
 impl<S: StorageEngine> MitoEngineInner<S> {
     async fn create_table(
         &self,
@@ -262,6 +284,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             schema: schema_name,
             table: table_name,
         };
+
+        validate_create_table_request(&request)?;
 
         if let Some(table) = self.get_table(&table_ref) {
             if request.create_if_not_exists {
@@ -650,6 +674,49 @@ mod tests {
             "prometheus/demo_1024/",
             table_dir("prometheus", "demo", 1024)
         );
+    }
+
+    #[test]
+    fn test_validate_create_table_request() {
+        let table_name = "test_validate_create_table_request";
+        let column_schemas = vec![
+            ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
+                true,
+            )
+            .with_time_index(true),
+        ];
+
+        let schema = Arc::new(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .build()
+                .expect("ts must be timestamp column"),
+        );
+
+        let mut request = CreateTableRequest {
+            id: 1,
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: table_name.to_string(),
+            desc: Some("a test table".to_string()),
+            schema,
+            create_if_not_exists: true,
+            // put ts into primary keys
+            primary_key_indices: vec![0, 1],
+            table_options: HashMap::new(),
+            region_numbers: vec![0],
+        };
+
+        let err = validate_create_table_request(&request).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Invalid primary key: time index column can't be included in primary key"));
+
+        request.primary_key_indices = vec![0];
+        assert!(validate_create_table_request(&request).is_ok());
     }
 
     #[tokio::test]

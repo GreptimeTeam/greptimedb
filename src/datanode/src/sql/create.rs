@@ -183,14 +183,6 @@ impl SqlHandler {
 
         ensure!(ts_index != usize::MAX, error::MissingTimestampColumnSnafu);
 
-        if primary_keys.is_empty() {
-            info!(
-                "Creating table: {} with time index column: {} upon primary keys absent",
-                table_ref, ts_index
-            );
-            primary_keys.push(ts_index);
-        }
-
         let columns_schemas: Vec<_> = stmt
             .columns
             .iter()
@@ -288,7 +280,6 @@ mod tests {
         assert_matches!(error, Error::MissingTimestampColumn { .. });
     }
 
-    /// If primary key is not specified, time index should be used as primary key.
     #[tokio::test]
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;
@@ -304,11 +295,8 @@ mod tests {
         let c = handler
             .create_to_request(42, parsed_stmt, TableReference::bare("demo_table"))
             .unwrap();
-        assert_eq!(1, c.primary_key_indices.len());
-        assert_eq!(
-            c.schema.timestamp_index().unwrap(),
-            c.primary_key_indices[0]
-        );
+        assert!(c.primary_key_indices.is_empty());
+        assert_eq!(c.schema.timestamp_index(), Some(1));
     }
 
     /// Constraints specified, not column cannot be found.
