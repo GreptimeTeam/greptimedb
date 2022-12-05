@@ -43,7 +43,6 @@ use crate::error::{
 
 pub const ENTRY_TYPE_INDEX: usize = 0;
 pub const KEY_INDEX: usize = 1;
-pub const TIMESTAMP_INDEX: usize = 2;
 pub const VALUE_INDEX: usize = 3;
 
 pub struct SystemCatalogTable {
@@ -111,7 +110,7 @@ impl SystemCatalogTable {
                 desc: Some("System catalog table".to_string()),
                 schema: schema.clone(),
                 region_numbers: vec![0],
-                primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX, TIMESTAMP_INDEX],
+                primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX],
                 create_if_not_exists: true,
                 table_options: HashMap::new(),
             };
@@ -456,7 +455,7 @@ mod tests {
     pub async fn prepare_table_engine() -> (TempDir, TableEngineRef) {
         let dir = TempDir::new("system-table-test").unwrap();
         let store_dir = dir.path().to_string_lossy();
-        let accessor = opendal::services::fs::Builder::default()
+        let accessor = object_store::backend::fs::Builder::default()
             .root(&store_dir)
             .build()
             .unwrap();

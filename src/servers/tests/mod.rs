@@ -31,6 +31,8 @@ mod http;
 mod mysql;
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
+use session::context::QueryContextRef;
+
 mod opentsdb;
 mod postgres;
 
@@ -52,8 +54,8 @@ impl DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, query: &str) -> Result<Output> {
-        let plan = self.query_engine.sql_to_plan(query).unwrap();
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Result<Output> {
+        let plan = self.query_engine.sql_to_plan(query, query_ctx).unwrap();
         Ok(self.query_engine.execute(&plan).await.unwrap())
     }
 }

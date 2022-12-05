@@ -6,10 +6,11 @@ license = "Apache-2.0"
 
 [dependencies]
 futures = { version = "0.3" }
-opendal = "0.20"
+opendal = { version = "0.21", features = ["layers-tracing", "layers-metrics"] }
 tokio = { version = "1.0", features = ["full"] }
 
 [dev-dependencies]
 anyhow = "1.0"
 common-telemetry = { path = "../common/telemetry" }
 tempdir = "0.3"
+uuid = { version = "1", features = ["serde", "v4"] }

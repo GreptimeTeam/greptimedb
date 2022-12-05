@@ -69,7 +69,8 @@ impl Services {
                     .context(error::RuntimeResourceSnafu)?,
             );
 
-            let mysql_server = MysqlServer::create_server(instance.clone(), mysql_io_runtime);
+            let mysql_server =
+                MysqlServer::create_server(instance.clone(), mysql_io_runtime, opts.tls.clone());
 
             Some((mysql_server, mysql_addr))
         } else {
@@ -90,6 +91,7 @@ impl Services {
             let pg_server = Box::new(PostgresServer::new(
                 instance.clone(),
                 opts.check_pwd,
+                opts.tls.clone(),
                 pg_io_runtime,
             )) as Box<dyn Server>;
 
@@ -116,10 +118,10 @@ impl Services {
             None
         };
 
-        let http_server_and_addr = if let Some(http_addr) = &opts.http_addr {
-            let http_addr = parse_addr(http_addr)?;
+        let http_server_and_addr = if let Some(http_options) = &opts.http_options {
+            let http_addr = parse_addr(&http_options.addr)?;
 
-            let mut http_server = HttpServer::new(instance.clone());
+            let mut http_server = HttpServer::new(instance.clone(), http_options.clone());
             if opentsdb_server_and_addr.is_some() {
                 http_server.set_opentsdb_handler(instance.clone());
             }

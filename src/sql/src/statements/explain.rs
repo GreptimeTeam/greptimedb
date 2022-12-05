@@ -12,9 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod error;
-mod insert;
-pub use insert::{
-    build_alter_table_request, build_create_expr_from_insertion, column_to_vector,
-    find_new_columns, insert_batches, insertion_expr_to_request,
-};
+use sqlparser::ast::Statement as SpStatement;
+
+use crate::error::Error;
+
+/// Explain statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Explain {
+    pub inner: SpStatement,
+}
+
+impl TryFrom<SpStatement> for Explain {
+    type Error = Error;
+
+    fn try_from(value: SpStatement) -> Result<Self, Self::Error> {
+        Ok(Explain { inner: value })
+    }
+}
+
+impl ToString for Explain {
+    fn to_string(&self) -> String {
+        self.inner.to_string()
+    }
+}

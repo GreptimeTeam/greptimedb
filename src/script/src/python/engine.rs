@@ -26,6 +26,7 @@ use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStre
 use datatypes::schema::SchemaRef;
 use futures::Stream;
 use query::QueryEngineRef;
+use session::context::QueryContext;
 use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
@@ -93,7 +94,9 @@ impl Script for PyScript {
                 matches!(stmt, Statement::Query { .. }),
                 error::UnsupportedSqlSnafu { sql }
             );
-            let plan = self.query_engine.statement_to_plan(stmt)?;
+            let plan = self
+                .query_engine
+                .statement_to_plan(stmt, Arc::new(QueryContext::new()))?;
             let res = self.query_engine.execute(&plan).await?;
             let copr = self.copr.clone();
             match res {

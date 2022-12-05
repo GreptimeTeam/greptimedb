@@ -59,11 +59,28 @@ const HTTP_API_VERSION: &str = "v1";
 
 pub struct HttpServer {
     sql_handler: SqlQueryHandlerRef,
+    options: HttpOptions,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
     prom_handler: Option<PrometheusProtocolHandlerRef>,
     script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HttpOptions {
+    pub addr: String,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+}
+
+impl Default for HttpOptions {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:4000".to_string(),
+            timeout: Duration::from_secs(30),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
@@ -168,7 +185,7 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum JsonOutput {
     AffectedRows(usize),
@@ -271,9 +288,10 @@ pub struct ApiState {
 }
 
 impl HttpServer {
-    pub fn new(sql_handler: SqlQueryHandlerRef) -> Self {
+    pub fn new(sql_handler: SqlQueryHandlerRef, options: HttpOptions) -> Self {
         Self {
             sql_handler,
+            options,
             opentsdb_handler: None,
             influxdb_handler: None,
             prom_handler: None,
@@ -326,58 +344,46 @@ impl HttpServer {
                 url: format!("/{}", HTTP_API_VERSION),
                 ..OpenAPIServer::default()
             }],
-
             ..OpenApi::default()
         };
 
-        // TODO(LFC): Use released Axum.
-        // Axum version 0.6 introduces state within router, making router methods far more elegant
-        // to write. Though version 0.6 is rc, I think it's worth to upgrade.
-        // Prior to version 0.6, we only have a single "Extension" to share all query
-        // handlers amongst router methods. That requires us to pack all query handlers in a shared
-        // state, and check-then-get the desired query handler in different router methods, which
-        // is a lot of tedious work.
-        let sql_router = ApiRouter::with_state(ApiState {
-            sql_handler: self.sql_handler.clone(),
-            script_handler: self.script_handler.clone(),
-        })
-        .api_route(
-            "/sql",
-            apirouting::get_with(handler::sql, handler::sql_docs)
-                .post_with(handler::sql, handler::sql_docs),
-        )
-        .api_route("/scripts", apirouting::post(script::scripts))
-        .api_route("/run-script", apirouting::post(script::run_script))
-        .route("/private/api.json", apirouting::get(serve_api))
-        .route("/private/docs", apirouting::get(serve_docs))
-        .finish_api(&mut api)
-        .layer(Extension(Arc::new(api)));
+        let sql_router = self
+            .route_sql(ApiState {
+                sql_handler: self.sql_handler.clone(),
+                script_handler: self.script_handler.clone(),
+            })
+            .finish_api(&mut api)
+            .layer(Extension(Arc::new(api)));
 
         let mut router = Router::new().nest(&format!("/{}", HTTP_API_VERSION), sql_router);
 
         if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
-            let opentsdb_router = Router::with_state(opentsdb_handler)
-                .route("/api/put", routing::post(opentsdb::put));
-
-            router = router.nest(&format!("/{}/opentsdb", HTTP_API_VERSION), opentsdb_router);
+            router = router.nest(
+                &format!("/{}/opentsdb", HTTP_API_VERSION),
+                self.route_opentsdb(opentsdb_handler),
+            );
         }
 
         if let Some(influxdb_handler) = self.influxdb_handler.clone() {
-            let influxdb_router =
-                Router::with_state(influxdb_handler).route("/write", routing::post(influxdb_write));
-
-            router = router.nest(&format!("/{}/influxdb", HTTP_API_VERSION), influxdb_router);
+            router = router.nest(
+                &format!("/{}/influxdb", HTTP_API_VERSION),
+                self.route_influxdb(influxdb_handler),
+            );
         }
 
         if let Some(prom_handler) = self.prom_handler.clone() {
-            let prom_router = Router::with_state(prom_handler)
-                .route("/write", routing::post(prometheus::remote_write))
-                .route("/read", routing::post(prometheus::remote_read));
-
-            router = router.nest(&format!("/{}/prometheus", HTTP_API_VERSION), prom_router);
+            router = router.nest(
+                &format!("/{}/prometheus", HTTP_API_VERSION),
+                self.route_prom(prom_handler),
+            );
         }
 
         router = router.route("/metrics", routing::get(handler::metrics));
+
+        router = router.route(
+            "/health",
+            routing::get(handler::health).post(handler::health),
+        );
 
         router
             // middlewares
@@ -385,11 +391,43 @@ impl HttpServer {
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
-                    // TODO(LFC): make timeout configurable
-                    .layer(TimeoutLayer::new(Duration::from_secs(30)))
+                    .layer(TimeoutLayer::new(self.options.timeout))
                     // custom layer
                     .layer(middleware::from_fn(context::build_ctx)),
             )
+    }
+
+    fn route_sql<S>(&self, api_state: ApiState) -> ApiRouter<S> {
+        ApiRouter::new()
+            .api_route(
+                "/sql",
+                apirouting::get_with(handler::sql, handler::sql_docs)
+                    .post_with(handler::sql, handler::sql_docs),
+            )
+            .api_route("/scripts", apirouting::post(script::scripts))
+            .api_route("/run-script", apirouting::post(script::run_script))
+            .route("/private/api.json", apirouting::get(serve_api))
+            .route("/private/docs", apirouting::get(serve_docs))
+            .with_state(api_state)
+    }
+
+    fn route_prom<S>(&self, prom_handler: PrometheusProtocolHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/write", routing::post(prometheus::remote_write))
+            .route("/read", routing::post(prometheus::remote_read))
+            .with_state(prom_handler)
+    }
+
+    fn route_influxdb<S>(&self, influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/write", routing::post(influxdb_write))
+            .with_state(influxdb_handler)
+    }
+
+    fn route_opentsdb<S>(&self, opentsdb_handler: OpentsdbProtocolHandlerRef) -> Router<S> {
+        Router::new()
+            .route("/api/put", routing::post(opentsdb::put))
+            .with_state(opentsdb_handler)
     }
 }
 
@@ -443,14 +481,72 @@ async fn handle_error(err: BoxError) -> Json<JsonResponse> {
 
 #[cfg(test)]
 mod test {
+    use std::future::pending;
     use std::sync::Arc;
 
+    use axum::handler::Handler;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum_test_helper::TestClient;
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
+    use session::context::QueryContextRef;
+    use tokio::sync::mpsc;
 
     use super::*;
+    use crate::query_handler::SqlQueryHandler;
+
+    struct DummyInstance {
+        _tx: mpsc::Sender<(String, Vec<u8>)>,
+    }
+
+    #[async_trait]
+    impl SqlQueryHandler for DummyInstance {
+        async fn do_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
+            unimplemented!()
+        }
+    }
+
+    fn timeout() -> TimeoutLayer {
+        TimeoutLayer::new(Duration::from_millis(10))
+    }
+
+    async fn forever() {
+        pending().await
+    }
+
+    fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
+        let instance = Arc::new(DummyInstance { _tx: tx });
+        let server = HttpServer::new(instance, HttpOptions::default());
+        server.make_app().route(
+            "/test/timeout",
+            get(forever.layer(
+                ServiceBuilder::new()
+                    .layer(HandleErrorLayer::new(|_: BoxError| async {
+                        StatusCode::REQUEST_TIMEOUT
+                    }))
+                    .layer(timeout()),
+            )),
+        )
+    }
+
+    #[test]
+    fn test_http_options_default() {
+        let default = HttpOptions::default();
+        assert_eq!("127.0.0.1:4000".to_string(), default.addr);
+        assert_eq!(Duration::from_secs(30), default.timeout)
+    }
+
+    #[tokio::test]
+    async fn test_http_server_request_timeout() {
+        let (tx, _rx) = mpsc::channel(100);
+        let app = make_test_app(tx);
+        let client = TestClient::new(app);
+        let res = client.get("/test/timeout").send().await;
+        assert_eq!(res.status(), StatusCode::REQUEST_TIMEOUT);
+    }
 
     #[tokio::test]
     async fn test_recordbatches_conversion() {

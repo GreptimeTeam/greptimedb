@@ -11,9 +11,9 @@ async-stream = "0.3"
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
+common-grpc-expr = { path = "../common/grpc-expr" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
-common-insert = { path = "../common/insert" }
 common-time = { path = "../common/time" }
 datafusion = "14.0.0"
 datatypes = { path = "../datatypes" }

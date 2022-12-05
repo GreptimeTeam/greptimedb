@@ -103,7 +103,7 @@ pub enum Error {
     #[snafu(display("Failed to convert column to vector, source: {}", source))]
     ColumnToVector {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 }
 

@@ -28,6 +28,7 @@ use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
 use datatypes::vectors::{StringVector, TimestampVector, VectorRef};
 use query::QueryEngineRef;
+use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::requests::{CreateTableRequest, InsertRequest};
 
@@ -59,9 +60,9 @@ impl ScriptsTable {
             table_name: SCRIPTS_TABLE_NAME.to_string(),
             desc: Some("Scripts table".to_string()),
             schema,
-            // name and timestamp as primary key
             region_numbers: vec![0],
-            primary_key_indices: vec![0, 3],
+            // name as primary key
+            primary_key_indices: vec![0],
             create_if_not_exists: true,
             table_options: HashMap::default(),
         };
@@ -151,7 +152,7 @@ impl ScriptsTable {
 
         let plan = self
             .query_engine
-            .sql_to_plan(&sql)
+            .sql_to_plan(&sql, Arc::new(QueryContext::new()))
             .context(FindScriptSnafu { name })?;
 
         let stream = match self

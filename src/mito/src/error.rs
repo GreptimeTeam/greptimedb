@@ -56,6 +56,9 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Invalid primary key: {}", msg))]
+    InvalidPrimaryKey { msg: String, backtrace: Backtrace },
+
     #[snafu(display("Missing timestamp index for table: {}", table_name))]
     MissingTimestampIndex {
         table_name: String,
@@ -214,6 +217,7 @@ impl ErrorExt for Error {
             | BuildRegionDescriptor { .. }
             | TableExists { .. }
             | ProjectedColumnNotFound { .. }
+            | InvalidPrimaryKey { .. }
             | MissingTimestampIndex { .. }
             | UnsupportedDefaultConstraint { .. }
             | TableNotFound { .. } => StatusCode::InvalidArguments,

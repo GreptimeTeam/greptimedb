@@ -16,13 +16,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{CreateDatabaseExpr, CreateExpr};
+use api::v1::{AlterExpr, CreateDatabaseExpr, CreateExpr};
+use catalog::CatalogList;
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use common_query::Output;
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
@@ -30,8 +31,9 @@ use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
     TableName, TableRoute,
 };
-use query::sql::{describe_table, show_databases, show_tables};
+use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
@@ -42,10 +44,12 @@ use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, CatalogEntrySerdeSnafu, ColumnDataTypeSnafu, PrimaryKeyNotFoundSnafu, RequestMetaSnafu,
-    Result, StartMetaClientSnafu,
+    self, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu, ColumnDataTypeSnafu,
+    PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
+    TableNotFoundSnafu,
 };
 use crate::partitioning::{PartitionBound, PartitionDef};
+use crate::table::DistTable;
 
 #[derive(Clone)]
 pub(crate) struct DistInstance {
@@ -125,26 +129,31 @@ impl DistInstance {
         Ok(Output::AffectedRows(region_routes.len()))
     }
 
-    pub(crate) async fn handle_sql(&self, sql: &str, stmt: Statement) -> Result<Output> {
+    pub(crate) async fn handle_sql(
+        &self,
+        sql: &str,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {
                 let plan = self
                     .query_engine
-                    .statement_to_plan(stmt)
+                    .statement_to_plan(stmt, query_ctx)
                     .context(error::ExecuteSqlSnafu { sql })?;
-                self.query_engine
-                    .execute(&plan)
-                    .await
-                    .context(error::ExecuteSqlSnafu { sql })
+                self.query_engine.execute(&plan).await
             }
-            Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone())
-                .context(error::ExecuteSqlSnafu { sql }),
-            Statement::ShowTables(stmt) => show_tables(stmt, self.catalog_manager.clone())
-                .context(error::ExecuteSqlSnafu { sql }),
-            Statement::DescribeTable(stmt) => describe_table(stmt, self.catalog_manager.clone())
-                .context(error::ExecuteSqlSnafu { sql }),
+            Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
+            Statement::ShowTables(stmt) => {
+                show_tables(stmt, self.catalog_manager.clone(), query_ctx)
+            }
+            Statement::DescribeTable(stmt) => describe_table(stmt, self.catalog_manager.clone()),
+            Statement::Explain(stmt) => {
+                explain(Box::new(stmt), self.query_engine.clone(), query_ctx).await
+            }
             _ => unreachable!(),
         }
+        .context(error::ExecuteSqlSnafu { sql })
     }
 
     /// Handles distributed database creation
@@ -164,6 +173,34 @@ impl DistInstance {
             .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
         client.put(request.into()).await.context(RequestMetaSnafu)?;
         Ok(Output::AffectedRows(1))
+    }
+
+    pub async fn handle_alter_table(&self, expr: AlterExpr) -> Result<Output> {
+        let catalog_name = expr.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
+        let schema_name = expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
+        let table_name = expr.table_name.as_str();
+        let table = self
+            .catalog_manager
+            .catalog(catalog_name)
+            .context(CatalogSnafu)?
+            .context(CatalogNotFoundSnafu { catalog_name })?
+            .schema(schema_name)
+            .context(CatalogSnafu)?
+            .context(SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", catalog_name, schema_name),
+            })?
+            .table(table_name)
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu {
+                table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+            })?;
+
+        let dist_table = table
+            .as_any()
+            .downcast_ref::<DistTable>()
+            .expect("Table impl must be DistTable in distributed mode");
+        dist_table.alter_by_expr(expr).await?;
+        Ok(Output::AffectedRows(0))
     }
 
     async fn create_table_in_meta(
@@ -205,17 +242,32 @@ impl DistInstance {
             catalog_name: table_name.catalog_name.clone(),
             schema_name: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
-        };
+        }
+        .to_string();
 
         let value = create_table_global_value(create_table, table_route)?
             .as_bytes()
             .context(error::CatalogEntrySerdeSnafu)?;
 
-        self.catalog_manager
+        if let Err(existing) = self
+            .catalog_manager
             .backend()
-            .set(key.to_string().as_bytes(), &value)
+            .compare_and_set(key.as_bytes(), &[], &value)
             .await
-            .context(error::CatalogSnafu)
+            .context(CatalogSnafu)?
+        {
+            let existing_bytes = existing.unwrap(); //this unwrap is safe since we compare with empty bytes and failed
+            let existing_value =
+                TableGlobalValue::from_bytes(&existing_bytes).context(CatalogEntrySerdeSnafu)?;
+            if existing_value.table_info.ident.table_id != create_table.table_id.unwrap() {
+                error!(
+                    "Table with name {} already exists, value in catalog: {:?}",
+                    key, existing_bytes
+                );
+                return error::TableAlreadyExistSnafu { table: key }.fail();
+            }
+        }
+        Ok(())
     }
 }
 

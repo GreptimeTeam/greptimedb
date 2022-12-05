@@ -20,9 +20,10 @@ use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
 use servers::error::Result;
-use servers::http::HttpServer;
+use servers::http::{HttpOptions, HttpServer};
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::{InfluxdbLineProtocolHandler, SqlQueryHandler};
+use session::context::QueryContextRef;
 use tokio::sync::mpsc;
 
 struct DummyInstance {
@@ -44,14 +45,14 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, _query: &str) -> Result<Output> {
+    async fn do_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
         unimplemented!()
     }
 }
 
 fn make_test_app(tx: mpsc::Sender<(String, String)>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
-    let mut server = HttpServer::new(instance.clone());
+    let mut server = HttpServer::new(instance.clone(), HttpOptions::default());
     server.set_influxdb_handler(instance);
     server.make_app()
 }

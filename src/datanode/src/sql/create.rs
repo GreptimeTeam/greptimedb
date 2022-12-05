@@ -23,10 +23,10 @@ use common_telemetry::tracing::log::error;
 use datatypes::schema::SchemaBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::TableConstraint;
+use sql::statements::column_def_to_schema;
 use sql::statements::create::CreateTable;
-use sql::statements::{column_def_to_schema, table_idents_to_full_name};
 use store_api::storage::consts::TIME_INDEX_NAME;
-use table::engine::EngineContext;
+use table::engine::{EngineContext, TableReference};
 use table::metadata::TableId;
 use table::requests::*;
 
@@ -84,7 +84,6 @@ impl SqlHandler {
 
         // determine catalog and schema from the very beginning
         let table_name = req.table_name.clone();
-        let table_id = req.id;
         let table = self
             .table_engine
             .create_table(&ctx, req)
@@ -97,7 +96,7 @@ impl SqlHandler {
             catalog: table.table_info().catalog_name.clone(),
             schema: table.table_info().schema_name.clone(),
             table_name: table_name.clone(),
-            table_id,
+            table_id: table.table_info().ident.table_id,
             table,
         };
 
@@ -115,12 +114,10 @@ impl SqlHandler {
         &self,
         table_id: TableId,
         stmt: CreateTable,
+        table_ref: TableReference,
     ) -> Result<CreateTableRequest> {
         let mut ts_index = usize::MAX;
         let mut primary_keys = vec![];
-
-        let (catalog_name, schema_name, table_name) =
-            table_idents_to_full_name(&stmt.name).context(error::ParseSqlSnafu)?;
 
         let col_map = stmt
             .columns
@@ -172,7 +169,7 @@ impl SqlHandler {
                     return ConstraintNotSupportedSnafu {
                         constraint: format!("{:?}", c),
                     }
-                    .fail()
+                    .fail();
                 }
             }
         }
@@ -185,14 +182,6 @@ impl SqlHandler {
         );
 
         ensure!(ts_index != usize::MAX, error::MissingTimestampColumnSnafu);
-
-        if primary_keys.is_empty() {
-            info!(
-                "Creating table: {:?}.{:?}.{} but primary key not set, use time index column: {}",
-                catalog_name, schema_name, table_name, ts_index
-            );
-            primary_keys.push(ts_index);
-        }
 
         let columns_schemas: Vec<_> = stmt
             .columns
@@ -212,9 +201,9 @@ impl SqlHandler {
 
         let request = CreateTableRequest {
             id: table_id,
-            catalog_name,
-            schema_name,
-            table_name,
+            catalog_name: table_ref.catalog.to_string(),
+            schema_name: table_ref.schema.to_string(),
+            table_name: table_ref.table.to_string(),
             desc: None,
             schema,
             region_numbers: vec![0],
@@ -262,7 +251,9 @@ mod tests {
                        TIME INDEX (ts),
                        PRIMARY KEY(host)) engine=mito with(regions=1);"#,
         );
-        let c = handler.create_to_request(42, parsed_stmt).unwrap();
+        let c = handler
+            .create_to_request(42, parsed_stmt, TableReference::bare("demo_table"))
+            .unwrap();
         assert_eq!("demo_table", c.table_name);
         assert_eq!(42, c.id);
         assert!(!c.create_if_not_exists);
@@ -283,11 +274,12 @@ mod tests {
                       memory double,
                       PRIMARY KEY(host)) engine=mito with(regions=1);"#,
         );
-        let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
+        let error = handler
+            .create_to_request(42, parsed_stmt, TableReference::bare("demo_table"))
+            .unwrap_err();
         assert_matches!(error, Error::MissingTimestampColumn { .. });
     }
 
-    /// If primary key is not specified, time index should be used as primary key.
     #[tokio::test]
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;
@@ -300,12 +292,11 @@ mod tests {
                       memory double,
                       TIME INDEX (ts)) engine=mito with(regions=1);"#,
         );
-        let c = handler.create_to_request(42, parsed_stmt).unwrap();
-        assert_eq!(1, c.primary_key_indices.len());
-        assert_eq!(
-            c.schema.timestamp_index().unwrap(),
-            c.primary_key_indices[0]
-        );
+        let c = handler
+            .create_to_request(42, parsed_stmt, TableReference::bare("demo_table"))
+            .unwrap();
+        assert!(c.primary_key_indices.is_empty());
+        assert_eq!(c.schema.timestamp_index(), Some(1));
     }
 
     /// Constraints specified, not column cannot be found.
@@ -319,7 +310,9 @@ mod tests {
                 TIME INDEX (ts)) engine=mito with(regions=1);"#,
         );
 
-        let error = handler.create_to_request(42, parsed_stmt).unwrap_err();
+        let error = handler
+            .create_to_request(42, parsed_stmt, TableReference::bare("demo_table"))
+            .unwrap_err();
         assert_matches!(error, Error::KeyColumnNotFound { .. });
     }
 
@@ -339,7 +332,9 @@ mod tests {
 
         let handler = create_mock_sql_handler().await;
 
-        let error = handler.create_to_request(42, create_table).unwrap_err();
+        let error = handler
+            .create_to_request(42, create_table, TableReference::full("c", "s", "demo"))
+            .unwrap_err();
         assert_matches!(error, Error::InvalidPrimaryKey { .. });
     }
 
@@ -359,7 +354,9 @@ mod tests {
 
         let handler = create_mock_sql_handler().await;
 
-        let request = handler.create_to_request(42, create_table).unwrap();
+        let request = handler
+            .create_to_request(42, create_table, TableReference::full("c", "s", "demo"))
+            .unwrap();
 
         assert_eq!(42, request.id);
         assert_eq!("c".to_string(), request.catalog_name);

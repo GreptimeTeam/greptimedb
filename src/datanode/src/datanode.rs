@@ -26,7 +26,15 @@ use crate::server::Services;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ObjectStoreConfig {
-    File { data_dir: String },
+    File {
+        data_dir: String,
+    },
+    S3 {
+        bucket: String,
+        root: String,
+        access_key_id: String,
+        secret_access_key: String,
+    },
 }
 
 impl Default for ObjectStoreConfig {
@@ -47,6 +55,7 @@ pub struct DatanodeOptions {
     pub meta_client_opts: Option<MetaClientOpts>,
     pub wal_dir: String,
     pub storage: ObjectStoreConfig,
+    pub enable_memory_catalog: bool,
     pub mode: Mode,
 }
 
@@ -61,6 +70,7 @@ impl Default for DatanodeOptions {
             meta_client_opts: None,
             wal_dir: "/tmp/greptimedb/wal".to_string(),
             storage: ObjectStoreConfig::default(),
+            enable_memory_catalog: false,
             mode: Mode::Standalone,
         }
     }
@@ -86,9 +96,18 @@ impl Datanode {
 
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting datanode instance...");
-        self.instance.start().await?;
-        self.services.start(&self.opts).await?;
-        Ok(())
+        self.start_instance().await?;
+        self.start_services().await
+    }
+
+    /// Start only the internal component of datanode.
+    pub async fn start_instance(&mut self) -> Result<()> {
+        self.instance.start().await
+    }
+
+    /// Start services of datanode. This method call will block until services are shutdown.
+    pub async fn start_services(&mut self) -> Result<()> {
+        self.services.start(&self.opts).await
     }
 
     pub fn get_instance(&self) -> InstanceRef {

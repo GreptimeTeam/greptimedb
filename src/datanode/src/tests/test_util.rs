@@ -21,6 +21,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use mito::config::EngineConfig;
 use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
+use query::QueryEngineFactory;
 use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
@@ -88,7 +89,7 @@ pub async fn create_test_table(
                         .expect("ts is expected to be timestamp column"),
                 ),
                 create_if_not_exists: true,
-                primary_key_indices: vec![3, 0], // "host" and "ts" are primary keys
+                primary_key_indices: vec![0], // "host" is in primary keys
                 table_options: HashMap::new(),
                 region_numbers: vec![0],
             },
@@ -121,5 +122,9 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
             .await
             .unwrap(),
     );
-    SqlHandler::new(mock_engine, catalog_manager)
+
+    let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
+    let factory = QueryEngineFactory::new(catalog_list);
+
+    SqlHandler::new(mock_engine, catalog_manager, factory.query_engine())
 }

@@ -1,0 +1,36 @@
+select 1;
+
++--------------------------+
+| Int64(1), #Field, #Int64 |
++--------------------------+
+| 1                        |
++--------------------------+
+
+select 2 + 3;
+
++----------------------------------------+
+| Int64(2) Plus Int64(3), #Field, #Int64 |
++----------------------------------------+
+| 5                                      |
++----------------------------------------+
+
+select 4 + 0.5;
+
++----------------------------------------------+
+| Int64(4) Plus Float64(0.5), #Field, #Float64 |
++----------------------------------------------+
+| 4.5                                          |
++----------------------------------------------+
+
+select "a";
+
+Failed to execute, error: Datanode { code: 1003, msg: "Failed to execute query:  select \"a\";, source: Failed to select from table, source: Error occurred on the data node, code: 3000, msg: Failed to execute sql, source: Cannot plan SQL: SELECT \"a\", source: Error during planning: Invalid identifier '#a' for schema fields:[], metadata:{}" }
+
+select "A";
+
+Failed to execute, error: Datanode { code: 1003, msg: "Failed to execute query:  select \"A\";, source: Failed to select from table, source: Error occurred on the data node, code: 3000, msg: Failed to execute sql, source: Cannot plan SQL: SELECT \"A\", source: Error during planning: Invalid identifier '#A' for schema fields:[], metadata:{}" }
+
+select * where "a" = "A";
+
+Failed to execute, error: Datanode { code: 1003, msg: "Failed to execute query:  select * where \"a\" = \"A\";, source: Failed to select from table, source: Error occurred on the data node, code: 3000, msg: Failed to execute sql, source: Cannot plan SQL: SELECT * WHERE \"a\" = \"A\", source: Error during planning: Invalid identifier '#a' for schema fields:[], metadata:{}" }
+

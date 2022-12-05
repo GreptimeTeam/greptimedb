@@ -26,6 +26,27 @@ pub struct TableReference<'a> {
     pub table: &'a str,
 }
 
+// TODO(LFC): Find a better place for `TableReference`,
+// so that we can reuse the default catalog and schema consts.
+// Could be done together with issue #559.
+impl<'a> TableReference<'a> {
+    pub fn bare(table: &'a str) -> Self {
+        TableReference {
+            catalog: "greptime",
+            schema: "public",
+            table,
+        }
+    }
+
+    pub fn full(catalog: &'a str, schema: &'a str, table: &'a str) -> Self {
+        TableReference {
+            catalog,
+            schema,
+            table,
+        }
+    }
+}
+
 impl<'a> Display for TableReference<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}.{}.{}", self.catalog, self.schema, self.table)
@@ -74,8 +95,8 @@ pub trait TableEngine: Send + Sync {
     /// Returns true when the given table is exists.
     fn table_exists<'a>(&self, ctx: &EngineContext, table_ref: &'a TableReference) -> bool;
 
-    /// Drops the given table.
-    async fn drop_table(&self, ctx: &EngineContext, request: DropTableRequest) -> Result<()>;
+    /// Drops the given table. Return true if the table is dropped, or false if the table doesn't exist.
+    async fn drop_table(&self, ctx: &EngineContext, request: DropTableRequest) -> Result<bool>;
 }
 
 pub type TableEngineRef = Arc<dyn TableEngine>;

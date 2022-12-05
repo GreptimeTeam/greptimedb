@@ -18,13 +18,17 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::v1::AlterExpr;
 use async_trait::async_trait;
+use client::admin::Admin;
 use client::Database;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use common_telemetry::debug;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::Expr as DfExpr;
 use datafusion::physical_plan::{
@@ -43,7 +47,7 @@ use table::Table;
 use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Error, Result};
+use crate::error::{self, Error, LeaderNotFoundSnafu, RequestDatanodeSnafu, Result};
 use crate::partitioning::columns::RangeColumnsPartitionRule;
 use crate::partitioning::range::RangePartitionRule;
 use crate::partitioning::{
@@ -348,6 +352,36 @@ impl DistTable {
         };
         Ok(partition_rule)
     }
+
+    /// Define a `alter_by_expr` instead of impl [`Table::alter`] to avoid redundant conversion between  
+    /// [`table::requests::AlterTableRequest`] and [`AlterExpr`].
+    pub(crate) async fn alter_by_expr(&self, expr: AlterExpr) -> Result<()> {
+        let table_routes = self.table_routes.get_route(&self.table_name).await?;
+        let leaders = table_routes.find_leaders();
+        ensure!(
+            !leaders.is_empty(),
+            LeaderNotFoundSnafu {
+                table: format!(
+                    "{:?}.{:?}.{}",
+                    expr.catalog_name, expr.schema_name, expr.table_name
+                )
+            }
+        );
+        for datanode in leaders {
+            let admin = Admin::new(
+                DEFAULT_CATALOG_NAME,
+                self.datanode_clients.get_client(&datanode).await,
+            );
+            debug!("Sent alter table {:?} to {:?}", expr, admin);
+            let result = admin
+                .alter(expr.clone())
+                .await
+                .context(RequestDatanodeSnafu)?;
+            debug!("Alter table result: {:?}", result);
+            // TODO(hl): We should further check and track alter result in some global DDL task tracker
+        }
+        Ok(())
+    }
 }
 
 fn project_schema(table_schema: SchemaRef, projection: &Option<Vec<usize>>) -> SchemaRef {
@@ -477,9 +511,8 @@ impl PartitionExec {
 mod test {
     use std::time::Duration;
 
-    use api::v1::codec::InsertBatch;
     use api::v1::column::SemanticType;
-    use api::v1::{column, insert_expr, Column, ColumnDataType};
+    use api::v1::{column, Column, ColumnDataType};
     use catalog::remote::MetaKvBackend;
     use common_recordbatch::util;
     use datafusion::arrow_print;
@@ -936,8 +969,8 @@ mod test {
         start_ts: i64,
     ) {
         let rows = data.len() as u32;
-        let values = vec![InsertBatch {
-            columns: vec![
+        let values = vec![(
+            vec![
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(column::Values {
@@ -967,10 +1000,8 @@ mod test {
                     ..Default::default()
                 },
             ],
-            row_count: rows,
-        }
-        .into()];
-        let values = insert_expr::Values { values };
+            rows,
+        )];
         dn_instance
             .execute_grpc_insert(
                 &table_name.catalog_name,

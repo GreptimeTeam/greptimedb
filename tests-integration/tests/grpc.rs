@@ -11,114 +11,65 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-use std::assert_matches::assert_matches;
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
-
 use api::v1::alter_expr::Kind;
-use api::v1::codec::InsertBatch;
 use api::v1::column::SemanticType;
 use api::v1::{
-    admin_result, column, insert_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType,
-    ColumnDef, CreateExpr, InsertExpr, MutateResult,
+    admin_result, column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
+    CreateExpr, InsertExpr, MutateResult,
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_runtime::Builder as RuntimeBuilder;
-use frontend::frontend::FrontendOptions;
-use frontend::grpc::GrpcOptions;
-use servers::grpc::GrpcServer;
 use servers::server::Server;
-use servers::Mode;
+use tests_integration::test_util::{setup_grpc_server, StorageType};
 
-use crate::instance::Instance;
-use crate::tests::test_util::{self, TestGuard};
+#[macro_export]
+macro_rules! grpc_test {
+    ($service:ident, $($(#[$meta:meta])* $test:ident),*,) => {
+        paste::item! {
+            mod [<integration_grpc_ $service:lower _test>] {
+                $(
+                    #[tokio::test(flavor = "multi_thread")]
+                    $(
+                        #[$meta]
+                    )*
+                    async fn [< $test >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            let _ = $crate::grpc::$test(store_type).await;
+                        }
 
-async fn setup_grpc_server(
-    name: &str,
-    datanode_port: usize,
-    frontend_port: usize,
-) -> (String, TestGuard, Arc<GrpcServer>, Arc<GrpcServer>) {
-    common_telemetry::init_default_ut_logging();
-
-    let (mut opts, guard) = test_util::create_tmp_dir_and_datanode_opts(name);
-    let datanode_grpc_addr = format!("127.0.0.1:{}", datanode_port);
-    opts.rpc_addr = datanode_grpc_addr.clone();
-    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    instance.start().await.unwrap();
-
-    let datanode_grpc_addr = datanode_grpc_addr.clone();
-    let runtime = Arc::new(
-        RuntimeBuilder::default()
-            .worker_threads(2)
-            .thread_name("grpc-handlers")
-            .build()
-            .unwrap(),
-    );
-
-    let fe_grpc_addr = format!("127.0.0.1:{}", frontend_port);
-    let fe_opts = FrontendOptions {
-        mode: Mode::Standalone,
-        datanode_rpc_addr: datanode_grpc_addr.clone(),
-        grpc_options: Some(GrpcOptions {
-            addr: fe_grpc_addr.clone(),
-            runtime_size: 8,
-        }),
-        ..Default::default()
+                    }
+                )*
+            }
+        }
     };
-
-    let datanode_grpc_server = Arc::new(GrpcServer::new(
-        instance.clone(),
-        instance.clone(),
-        runtime.clone(),
-    ));
-
-    let mut fe_instance = frontend::instance::Instance::try_new(&fe_opts)
-        .await
-        .unwrap();
-    fe_instance.set_catalog_manager(instance.catalog_manager.clone());
-
-    let fe_instance_ref = Arc::new(fe_instance);
-    let fe_grpc_server = Arc::new(GrpcServer::new(
-        fe_instance_ref.clone(),
-        fe_instance_ref,
-        runtime,
-    ));
-    let grpc_server_clone = fe_grpc_server.clone();
-
-    let fe_grpc_addr_clone = fe_grpc_addr.clone();
-    tokio::spawn(async move {
-        let addr = fe_grpc_addr_clone.parse::<SocketAddr>().unwrap();
-        grpc_server_clone.start(addr).await.unwrap()
-    });
-
-    let dn_grpc_addr_clone = datanode_grpc_addr.clone();
-    let dn_grpc_server_clone = datanode_grpc_server.clone();
-    tokio::spawn(async move {
-        let addr = dn_grpc_addr_clone.parse::<SocketAddr>().unwrap();
-        dn_grpc_server_clone.start(addr).await.unwrap()
-    });
-
-    // wait for GRPC server to start
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    (fe_grpc_addr, guard, fe_grpc_server, datanode_grpc_server)
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_auto_create_table() {
-    let (addr, _guard, fe_grpc_server, dn_grpc_server) =
-        setup_grpc_server("auto_create_table", 3992, 3993).await;
+#[macro_export]
+macro_rules! grpc_tests {
+    ($($service:ident),*) => {
+        $(
+            grpc_test!(
+                $service,
+
+                test_auto_create_table,
+                test_insert_and_select,
+            );
+        )*
+    };
+}
+
+pub async fn test_auto_create_table(store_type: StorageType) {
+    let (addr, mut guard, fe_grpc_server, dn_grpc_server) =
+        setup_grpc_server(store_type, "auto_create_table").await;
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new("greptime", grpc_client);
     insert_and_assert(&db).await;
     let _ = fe_grpc_server.shutdown().await;
     let _ = dn_grpc_server.shutdown().await;
+    guard.remove_all().await;
 }
 
 fn expect_data() -> (Column, Column, Column, Column) {
@@ -175,11 +126,10 @@ fn expect_data() -> (Column, Column, Column, Column) {
     )
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_insert_and_select() {
+pub async fn test_insert_and_select(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (addr, _guard, fe_grpc_server, dn_grpc_server) =
-        setup_grpc_server("insert_and_select", 3990, 3991).await;
+    let (addr, mut guard, fe_grpc_server, dn_grpc_server) =
+        setup_grpc_server(store_type, "insert_and_select").await;
 
     let grpc_client = Client::with_urls(vec![addr]);
 
@@ -189,13 +139,13 @@ async fn test_insert_and_select() {
     // create
     let expr = testing_create_expr();
     let result = admin.create(expr).await.unwrap();
-    assert_matches!(
+    assert!(matches!(
         result.result,
         Some(admin_result::Result::Mutate(MutateResult {
             success: 1,
             failure: 0
         }))
-    );
+    ));
 
     //alter
     let add_column = ColumnDef {
@@ -224,13 +174,17 @@ async fn test_insert_and_select() {
 
     let _ = fe_grpc_server.shutdown().await;
     let _ = dn_grpc_server.shutdown().await;
+    guard.remove_all().await;
 }
 
 async fn insert_and_assert(db: &Database) {
     // testing data:
     let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
 
-    let values = vec![InsertBatch {
+    let expr = InsertExpr {
+        schema_name: "public".to_string(),
+        table_name: "demo".to_string(),
+        region_number: 0,
         columns: vec![
             expected_host_col.clone(),
             expected_cpu_col.clone(),
@@ -238,14 +192,6 @@ async fn insert_and_assert(db: &Database) {
             expected_ts_col.clone(),
         ],
         row_count: 4,
-    }
-    .into()];
-    let expr = InsertExpr {
-        schema_name: "public".to_string(),
-        table_name: "demo".to_string(),
-        expr: Some(insert_expr::Expr::Values(insert_expr::Values { values })),
-        options: HashMap::default(),
-        region_number: 0,
     };
     let result = db.insert(expr).await;
     result.unwrap();
@@ -312,7 +258,7 @@ fn testing_create_expr() -> CreateExpr {
         desc: Some("blabla".to_string()),
         column_defs,
         time_index: "ts".to_string(),
-        primary_keys: vec!["ts".to_string(), "host".to_string()],
+        primary_keys: vec!["host".to_string()],
         create_if_not_exists: true,
         table_options: Default::default(),
         table_id: Some(MIN_USER_TABLE_ID),

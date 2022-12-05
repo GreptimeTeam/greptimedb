@@ -16,11 +16,11 @@
 use crate::query_engine::state::QueryEngineState;
 
 #[derive(Debug)]
-pub struct QueryContext {
+pub struct QueryEngineContext {
     state: QueryEngineState,
 }
 
-impl QueryContext {
+impl QueryEngineContext {
     pub fn new(state: QueryEngineState) -> Self {
         Self { state }
     }

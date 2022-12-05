@@ -63,14 +63,16 @@ pub struct PgAuthStartupHandler {
     verifier: PgPwdVerifier,
     param_provider: GreptimeDBStartupParameters,
     with_pwd: bool,
+    force_tls: bool,
 }
 
 impl PgAuthStartupHandler {
-    pub fn new(with_pwd: bool) -> Self {
+    pub fn new(with_pwd: bool, force_tls: bool) -> Self {
         PgAuthStartupHandler {
             verifier: PgPwdVerifier,
             param_provider: GreptimeDBStartupParameters::new(),
             with_pwd,
+            force_tls,
         }
     }
 }
@@ -89,6 +91,20 @@ impl StartupHandler for PgAuthStartupHandler {
     {
         match message {
             PgWireFrontendMessage::Startup(ref startup) => {
+                if !client.is_secure() && self.force_tls {
+                    let error_info = ErrorInfo::new(
+                        "FATAL".to_owned(),
+                        "28000".to_owned(),
+                        "No encryption".to_owned(),
+                    );
+                    let error = ErrorResponse::from(error_info);
+
+                    client
+                        .feed(PgWireBackendMessage::ErrorResponse(error))
+                        .await?;
+                    client.close().await?;
+                    return Ok(());
+                }
                 auth::save_startup_parameters_to_metadata(client, startup);
                 if self.with_pwd {
                     client.set_state(PgWireConnectionState::AuthenticationInProgress);

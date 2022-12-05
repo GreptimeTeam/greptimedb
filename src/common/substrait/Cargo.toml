@@ -9,7 +9,9 @@ bytes = "1.1"
 catalog = { path = "../../catalog" }
 common-catalog = { path = "../catalog" }
 common-error = { path = "../error" }
+common-telemetry = { path = "../telemetry" }
 datafusion = "14.0.0"
+datafusion-expr = "14.0.0"
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 prost = "0.9"

@@ -17,12 +17,12 @@ use std::sync::Arc;
 use common_query::physical_plan::PhysicalPlan;
 
 use crate::error::Result;
-use crate::query_engine::QueryContext;
+use crate::query_engine::QueryEngineContext;
 
 pub trait PhysicalOptimizer {
     fn optimize_physical_plan(
         &self,
-        ctx: &mut QueryContext,
+        ctx: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>>;
 }

@@ -18,6 +18,7 @@ use api::prometheus::remote::{ReadRequest, WriteRequest};
 use api::v1::{AdminExpr, AdminResult, ObjectExpr, ObjectResult};
 use async_trait::async_trait;
 use common_query::Output;
+use session::context::QueryContextRef;
 
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
@@ -44,7 +45,7 @@ pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 
 #[async_trait]
 pub trait SqlQueryHandler {
-    async fn do_query(&self, query: &str) -> Result<Output>;
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Result<Output>;
 }
 
 #[async_trait]

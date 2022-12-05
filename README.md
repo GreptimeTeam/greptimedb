@@ -56,7 +56,6 @@ To compile GreptimeDB from source, you'll need:
   find an installation instructions [here](https://grpc.io/docs/protoc-installation/).
   **Note that `protoc` version needs to be >= 3.15** because we have used the `optional`
   keyword. You can check it with `protoc --version`.
-  
 
 #### Build with Docker
 
@@ -160,6 +159,8 @@ This project is in its early stage and under heavy development. We move fast and
 break things. Benchmark on development branch may not represent its potential
 performance. We release pre-built binaries constantly for functional
 evaluation. Do not use it in production at the moment.
+
+For future plans, check out [GreptimeDB roadmap](https://github.com/GreptimeTeam/greptimedb/issues/669).
 
 ## Community
 

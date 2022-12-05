@@ -21,7 +21,7 @@ use common_error::ext::BoxedError;
 use common_telemetry::logging;
 use datatypes::schema::SchemaRef;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
     ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
     CreateOptions, EngineContext as StorageEngineContext, OpenOptions, RegionDescriptorBuilder,
@@ -37,7 +37,8 @@ use tokio::sync::Mutex;
 use crate::config::EngineConfig;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
-    BuildRowKeyDescriptorSnafu, MissingTimestampIndexSnafu, Result, TableExistsSnafu,
+    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, MissingTimestampIndexSnafu, Result,
+    TableExistsSnafu,
 };
 use crate::table::MitoTable;
 
@@ -57,8 +58,8 @@ fn region_id(table_id: TableId, n: u32) -> RegionId {
 }
 
 #[inline]
-fn table_dir(schema_name: &str, table_name: &str) -> String {
-    format!("{}/{}/", schema_name, table_name)
+fn table_dir(schema_name: &str, table_name: &str, table_id: TableId) -> String {
+    format!("{}/{}_{}/", schema_name, table_name, table_id)
 }
 
 /// [TableEngine] implementation.
@@ -123,14 +124,14 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     async fn drop_table(
         &self,
         _ctx: &EngineContext,
-        _request: DropTableRequest,
-    ) -> TableResult<()> {
-        unimplemented!();
+        request: DropTableRequest,
+    ) -> TableResult<bool> {
+        Ok(self.inner.drop_table(request).await?)
     }
 }
 
 struct MitoEngineInner<S: StorageEngine> {
-    /// All tables opened by the engine.
+    /// All tables opened by the engine. Map key is formatted [TableReference].
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
     tables: RwLock<HashMap<String, TableRef>>,
@@ -248,6 +249,27 @@ fn build_column_family(
     ))
 }
 
+fn validate_create_table_request(request: &CreateTableRequest) -> Result<()> {
+    let ts_index = request
+        .schema
+        .timestamp_index()
+        .context(MissingTimestampIndexSnafu {
+            table_name: &request.table_name,
+        })?;
+
+    ensure!(
+        !request
+            .primary_key_indices
+            .iter()
+            .any(|index| *index == ts_index),
+        InvalidPrimaryKeySnafu {
+            msg: "time index column can't be included in primary key"
+        }
+    );
+
+    Ok(())
+}
+
 impl<S: StorageEngine> MitoEngineInner<S> {
     async fn create_table(
         &self,
@@ -262,6 +284,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             schema: schema_name,
             table: table_name,
         };
+
+        validate_create_table_request(&request)?;
 
         if let Some(table) = self.get_table(&table_ref) {
             if request.create_if_not_exists {
@@ -317,7 +341,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             }
         }
 
-        let table_dir = table_dir(schema_name, table_name);
+        let table_dir = table_dir(schema_name, table_name, table_id);
         let opts = CreateOptions {
             parent_dir: table_dir.clone(),
         };
@@ -396,13 +420,13 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 return Ok(Some(table));
             }
 
+            let table_id = request.table_id;
             let engine_ctx = StorageEngineContext::default();
-            let table_dir = table_dir(schema_name, table_name);
+            let table_dir = table_dir(schema_name, table_name, table_id);
             let opts = OpenOptions {
                 parent_dir: table_dir.to_string(),
             };
 
-            let table_id = request.table_id;
             // TODO(dennis): supports multi regions;
             assert_eq!(request.region_numbers.len(), 1);
             let region_number = request.region_numbers[0];
@@ -463,6 +487,22 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .await
             .context(error::AlterTableSnafu { table_name })?;
         Ok(table)
+    }
+
+    /// Drop table. Returns whether a table is dropped (true) or not exist (false).
+    async fn drop_table(&self, req: DropTableRequest) -> Result<bool> {
+        let table_reference = TableReference {
+            catalog: &req.catalog_name,
+            schema: &req.schema_name,
+            table: &req.table_name,
+        };
+        // todo(ruihang): reclaim persisted data
+        Ok(self
+            .tables
+            .write()
+            .unwrap()
+            .remove(&table_reference.to_string())
+            .is_some())
     }
 }
 
@@ -626,8 +666,57 @@ mod tests {
 
     #[test]
     fn test_table_dir() {
-        assert_eq!("public/test_table/", table_dir("public", "test_table"));
-        assert_eq!("prometheus/demo/", table_dir("prometheus", "demo"));
+        assert_eq!(
+            "public/test_table_1024/",
+            table_dir("public", "test_table", 1024)
+        );
+        assert_eq!(
+            "prometheus/demo_1024/",
+            table_dir("prometheus", "demo", 1024)
+        );
+    }
+
+    #[test]
+    fn test_validate_create_table_request() {
+        let table_name = "test_validate_create_table_request";
+        let column_schemas = vec![
+            ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),
+                true,
+            )
+            .with_time_index(true),
+        ];
+
+        let schema = Arc::new(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .build()
+                .expect("ts must be timestamp column"),
+        );
+
+        let mut request = CreateTableRequest {
+            id: 1,
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: table_name.to_string(),
+            desc: Some("a test table".to_string()),
+            schema,
+            create_if_not_exists: true,
+            // put ts into primary keys
+            primary_key_indices: vec![0, 1],
+            table_options: HashMap::new(),
+            region_numbers: vec![0],
+        };
+
+        let err = validate_create_table_request(&request).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Invalid primary key: time index column can't be included in primary key"));
+
+        request.primary_key_indices = vec![0];
+        assert!(validate_create_table_request(&request).is_ok());
     }
 
     #[tokio::test]
@@ -960,5 +1049,70 @@ mod tests {
         assert_eq!(&[1, 2], &new_meta.value_indices[..]);
         assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
         assert_eq!(new_schema.version(), old_schema.version() + 1);
+    }
+
+    #[tokio::test]
+    async fn test_drop_table() {
+        common_telemetry::init_default_ut_logging();
+        let ctx = EngineContext::default();
+
+        let (_engine, table_engine, table, _object_store, _dir) =
+            test_util::setup_mock_engine_and_table().await;
+        let engine_ctx = EngineContext {};
+
+        let table_info = table.table_info();
+        let table_reference = TableReference {
+            catalog: DEFAULT_CATALOG_NAME,
+            schema: DEFAULT_SCHEMA_NAME,
+            table: &table_info.name,
+        };
+
+        let create_table_request = CreateTableRequest {
+            id: 1,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_info.name.to_string(),
+            schema: table_info.meta.schema.clone(),
+            create_if_not_exists: true,
+            desc: None,
+            primary_key_indices: Vec::default(),
+            table_options: HashMap::new(),
+            region_numbers: vec![0],
+        };
+
+        let created_table = table_engine
+            .create_table(&ctx, create_table_request)
+            .await
+            .unwrap();
+        assert_eq!(table_info, created_table.table_info());
+        assert!(table_engine.table_exists(&engine_ctx, &table_reference));
+
+        let drop_table_request = DropTableRequest {
+            catalog_name: table_reference.catalog.to_string(),
+            schema_name: table_reference.schema.to_string(),
+            table_name: table_reference.table.to_string(),
+        };
+        let table_dropped = table_engine
+            .drop_table(&engine_ctx, drop_table_request)
+            .await
+            .unwrap();
+        assert!(table_dropped);
+        assert!(!table_engine.table_exists(&engine_ctx, &table_reference));
+
+        // should be able to re-create
+        let request = CreateTableRequest {
+            id: 2,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_info.name.to_string(),
+            schema: table_info.meta.schema.clone(),
+            create_if_not_exists: false,
+            desc: None,
+            primary_key_indices: Vec::default(),
+            table_options: HashMap::new(),
+            region_numbers: vec![0],
+        };
+        table_engine.create_table(&ctx, request).await.unwrap();
+        assert!(table_engine.table_exists(&engine_ctx, &table_reference));
     }
 }

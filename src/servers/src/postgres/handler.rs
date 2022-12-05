@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::ops::Deref;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::Output;
@@ -26,6 +27,7 @@ use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{text_query_response, FieldInfo, Response, Tag, TextDataRowEncoder};
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{PgWireError, PgWireResult};
+use session::context::QueryContext;
 
 use crate::error::{self, Error, Result};
 use crate::query_handler::SqlQueryHandlerRef;
@@ -40,15 +42,30 @@ impl PostgresServerHandler {
     }
 }
 
+const CLIENT_METADATA_DATABASE: &str = "database";
+
+fn query_context_from_client_info<C>(client: &C) -> Arc<QueryContext>
+where
+    C: ClientInfo,
+{
+    let query_context = QueryContext::new();
+    if let Some(current_schema) = client.metadata().get(CLIENT_METADATA_DATABASE) {
+        query_context.set_current_schema(current_schema);
+    }
+
+    Arc::new(query_context)
+}
+
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandler {
-    async fn do_query<C>(&self, _client: &C, query: &str) -> PgWireResult<Vec<Response>>
+    async fn do_query<C>(&self, client: &C, query: &str) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
+        let query_ctx = query_context_from_client_info(client);
         let output = self
             .query_handler
-            .do_query(query)
+            .do_query(query, query_ctx)
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 

@@ -20,7 +20,7 @@ use cmd::{datanode, frontend, metasrv, standalone};
 use common_telemetry::logging::{error, info};
 
 #[derive(Parser)]
-#[clap(name = "greptimedb")]
+#[clap(name = "greptimedb", version = print_version())]
 struct Command {
     #[clap(long, default_value = "/tmp/greptimedb/logs")]
     log_dir: String,
@@ -68,6 +68,17 @@ impl fmt::Display for SubCommand {
             SubCommand::Standalone(..) => write!(f, "greptime-standalone"),
         }
     }
+}
+
+fn print_version() -> &'static str {
+    concat!(
+        "\nbranch: ",
+        env!("GIT_BRANCH"),
+        "\ncommit: ",
+        env!("GIT_COMMIT"),
+        "\ndirty: ",
+        env!("GIT_DIRTY")
+    )
 }
 
 #[tokio::main]

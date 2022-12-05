@@ -15,13 +15,13 @@ common-error = { path = "../common/error" }
 common-telemetry = { path = "../common/telemetry", features = [
     "deadlock_detection",
 ] }
-meta-client = { path = "../meta-client" }
 datanode = { path = "../datanode" }
 frontend = { path = "../frontend" }
 futures = "0.3"
+meta-client = { path = "../meta-client" }
 meta-srv = { path = "../meta-srv" }
 serde = "1.0"
-servers = {path = "../servers"}
+servers = { path = "../servers" }
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.18", features = ["full"] }
 toml = "0.5"
@@ -29,3 +29,6 @@ toml = "0.5"
 [dev-dependencies]
 serde = "1.0"
 tempdir = "0.3"
+
+[build-dependencies]
+build-data = "0.1.3"

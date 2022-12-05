@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use catalog::SchemaProviderRef;
+use catalog::CatalogManagerRef;
 use common_query::Output;
 use datatypes::prelude::{ConcreteDataType, VectorBuilder};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -23,7 +23,7 @@ use table::engine::TableReference;
 use table::requests::*;
 
 use crate::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu, ParseSqlSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu,
     ParseSqlValueSnafu, Result, TableNotFoundSnafu,
 };
 use crate::sql::{SqlHandler, SqlRequest};
@@ -49,19 +49,18 @@ impl SqlHandler {
 
     pub(crate) fn insert_to_request(
         &self,
-        schema_provider: SchemaProviderRef,
+        catalog_manager: CatalogManagerRef,
         stmt: Insert,
+        table_ref: TableReference,
     ) -> Result<SqlRequest> {
         let columns = stmt.columns();
         let values = stmt.values().context(ParseSqlValueSnafu)?;
-        let (catalog_name, schema_name, table_name) =
-            stmt.full_table_name().context(ParseSqlSnafu)?;
 
-        let table = schema_provider
-            .table(&table_name)
+        let table = catalog_manager
+            .table(table_ref.catalog, table_ref.schema, table_ref.table)
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu {
-                table_name: &table_name,
+                table_name: table_ref.table,
             })?;
         let schema = table.schema();
         let columns_num = if columns.is_empty() {
@@ -88,7 +87,7 @@ impl SqlHandler {
                 let column_schema =
                     schema.column_schema_by_name(column_name).with_context(|| {
                         ColumnNotFoundSnafu {
-                            table_name: &table_name,
+                            table_name: table_ref.table,
                             column_name: column_name.to_string(),
                         }
                     })?;
@@ -119,9 +118,9 @@ impl SqlHandler {
         }
 
         Ok(SqlRequest::Insert(InsertRequest {
-            catalog_name,
-            schema_name,
-            table_name,
+            catalog_name: table_ref.catalog.to_string(),
+            schema_name: table_ref.schema.to_string(),
+            table_name: table_ref.table.to_string(),
             columns_values: columns_builders
                 .into_iter()
                 .map(|(c, _, mut b)| (c.to_owned(), b.finish()))

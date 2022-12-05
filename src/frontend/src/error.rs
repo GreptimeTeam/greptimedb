@@ -250,6 +250,12 @@ pub enum Error {
         source: client::Error,
     },
 
+    #[snafu(display("Failed to drop table, source: {}", source))]
+    DropTable {
+        #[snafu(backtrace)]
+        source: client::Error,
+    },
+
     #[snafu(display("Failed to insert values to table, source: {}", source))]
     Insert {
         #[snafu(backtrace)]
@@ -277,25 +283,25 @@ pub enum Error {
     #[snafu(display("Failed to build CreateExpr on insertion: {}", source))]
     BuildCreateExprOnInsertion {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to find new columns on insertion: {}", source))]
     FindNewColumnsOnInsertion {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to deserialize insert batching: {}", source))]
     DeserializeInsertBatch {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to deserialize insert batching: {}", source))]
     InsertBatchToRequest {
         #[snafu(backtrace)]
-        source: common_insert::error::Error,
+        source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
@@ -427,6 +433,18 @@ pub enum Error {
 
     #[snafu(display("Missing meta_client_opts section in config"))]
     MissingMetasrvOpts { backtrace: Backtrace },
+
+    #[snafu(display("Failed to convert AlterExpr to AlterRequest, source: {}", source))]
+    AlterExprToRequest {
+        #[snafu(backtrace)]
+        source: common_grpc_expr::error::Error,
+    },
+
+    #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
+    LeaderNotFound { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Table already exists: `{}`", table))]
+    TableAlreadyExist { table: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -497,23 +515,27 @@ impl ErrorExt for Error {
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
             Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
-            Error::CreateTable { source, .. } => source.status_code(),
-            Error::AlterTable { source, .. } => source.status_code(),
-            Error::Insert { source, .. } => source.status_code(),
+            Error::CreateTable { source, .. }
+            | Error::AlterTable { source, .. }
+            | Error::DropTable { source }
+            | Error::Select { source, .. }
+            | Error::CreateDatabase { source, .. }
+            | Error::CreateTableOnInsertion { source, .. }
+            | Error::AlterTableOnInsertion { source, .. }
+            | Error::Insert { source, .. } => source.status_code(),
             Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
-            Error::CreateTableOnInsertion { source, .. } => source.status_code(),
-            Error::AlterTableOnInsertion { source, .. } => source.status_code(),
-            Error::Select { source, .. } => source.status_code(),
             Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
             Error::DeserializeInsertBatch { source, .. } => source.status_code(),
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
             Error::InsertBatchToRequest { source, .. } => source.status_code(),
-            Error::CreateDatabase { source, .. } => source.status_code(),
             Error::CollectRecordbatchStream { source } | Error::CreateRecordbatches { source } => {
                 source.status_code()
             }
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
+            Error::AlterExprToRequest { source, .. } => source.status_code(),
+            Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
+            Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
         }
     }
 

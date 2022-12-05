@@ -122,9 +122,19 @@ impl<'a> ParquetWriter<'a> {
                 sink.close().await.context(error::WriteParquetSnafu)?;
                 drop(sink);
 
-                writer.close().await.context(error::WriteObjectSnafu {
-                    path: self.file_path,
-                })
+                writer
+                    .close()
+                    .await
+                    .map_err(|err| {
+                        object_store::Error::new(
+                            object_store::ErrorKind::Unexpected,
+                            "writer close failed",
+                        )
+                        .set_source(err)
+                    })
+                    .context(error::WriteObjectSnafu {
+                        path: self.file_path,
+                    })
             }
         )
         .map(|_| ())

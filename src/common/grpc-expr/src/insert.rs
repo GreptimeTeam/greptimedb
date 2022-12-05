@@ -14,11 +14,9 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::ops::Deref;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::codec::InsertBatch;
 use api::v1::column::{SemanticType, Values};
 use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateExpr};
 use common_base::BitVec;
@@ -35,9 +33,8 @@ use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequ
 use table::Table;
 
 use crate::error::{
-    ColumnDataTypeSnafu, ColumnNotFoundSnafu, CreateVectorSnafu, DecodeInsertSnafu,
-    DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu, InvalidColumnProtoSnafu,
-    MissingTimestampColumnSnafu, Result,
+    ColumnDataTypeSnafu, ColumnNotFoundSnafu, CreateVectorSnafu, DuplicatedTimestampColumnSnafu,
+    IllegalInsertDataSnafu, InvalidColumnProtoSnafu, MissingTimestampColumnSnafu, Result,
 };
 const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
 const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
@@ -52,35 +49,25 @@ fn build_column_def(column_name: &str, datatype: i32, nullable: bool) -> ColumnD
     }
 }
 
-pub fn find_new_columns(
-    schema: &SchemaRef,
-    insert_batches: &[InsertBatch],
-) -> Result<Option<AddColumns>> {
+pub fn find_new_columns(schema: &SchemaRef, columns: &[Column]) -> Result<Option<AddColumns>> {
     let mut columns_to_add = Vec::default();
     let mut new_columns: HashSet<String> = HashSet::default();
 
-    for InsertBatch { columns, row_count } in insert_batches {
-        if *row_count == 0 || columns.is_empty() {
-            continue;
-        }
-
-        for Column {
-            column_name,
-            semantic_type,
-            datatype,
-            ..
-        } in columns
+    for Column {
+        column_name,
+        semantic_type,
+        datatype,
+        ..
+    } in columns
+    {
+        if schema.column_schema_by_name(column_name).is_none() && !new_columns.contains(column_name)
         {
-            if schema.column_schema_by_name(column_name).is_none()
-                && !new_columns.contains(column_name)
-            {
-                let column_def = Some(build_column_def(column_name, *datatype, true));
-                columns_to_add.push(AddColumn {
-                    column_def,
-                    is_key: *semantic_type == TAG_SEMANTIC_TYPE,
-                });
-                new_columns.insert(column_name.to_string());
-            }
+            let column_def = Some(build_column_def(column_name, *datatype, true));
+            columns_to_add.push(AddColumn {
+                column_def,
+                is_key: *semantic_type == TAG_SEMANTIC_TYPE,
+            });
+            new_columns.insert(column_name.to_string());
         }
     }
 
@@ -201,89 +188,84 @@ pub fn build_create_expr_from_insertion(
     schema_name: &str,
     table_id: Option<TableId>,
     table_name: &str,
-    insert_batches: &[InsertBatch],
+    columns: &[Column],
 ) -> Result<CreateExpr> {
     let mut new_columns: HashSet<String> = HashSet::default();
     let mut column_defs = Vec::default();
     let mut primary_key_indices = Vec::default();
     let mut timestamp_index = usize::MAX;
 
-    for InsertBatch { columns, row_count } in insert_batches {
-        if *row_count == 0 || columns.is_empty() {
-            continue;
-        }
-
-        for Column {
-            column_name,
-            semantic_type,
-            datatype,
-            ..
-        } in columns
-        {
-            if !new_columns.contains(column_name) {
-                let mut is_nullable = true;
-                match *semantic_type {
-                    TAG_SEMANTIC_TYPE => primary_key_indices.push(column_defs.len()),
-                    TIMESTAMP_SEMANTIC_TYPE => {
-                        ensure!(
-                            timestamp_index == usize::MAX,
-                            DuplicatedTimestampColumnSnafu {
-                                exists: &columns[timestamp_index].column_name,
-                                duplicated: column_name,
-                            }
-                        );
-                        timestamp_index = column_defs.len();
-                        // Timestamp column must not be null.
-                        is_nullable = false;
-                    }
-                    _ => {}
+    for Column {
+        column_name,
+        semantic_type,
+        datatype,
+        ..
+    } in columns
+    {
+        if !new_columns.contains(column_name) {
+            let mut is_nullable = true;
+            match *semantic_type {
+                TAG_SEMANTIC_TYPE => primary_key_indices.push(column_defs.len()),
+                TIMESTAMP_SEMANTIC_TYPE => {
+                    ensure!(
+                        timestamp_index == usize::MAX,
+                        DuplicatedTimestampColumnSnafu {
+                            exists: &columns[timestamp_index].column_name,
+                            duplicated: column_name,
+                        }
+                    );
+                    timestamp_index = column_defs.len();
+                    // Timestamp column must not be null.
+                    is_nullable = false;
                 }
-
-                let column_def = build_column_def(column_name, *datatype, is_nullable);
-                column_defs.push(column_def);
-                new_columns.insert(column_name.to_string());
+                _ => {}
             }
+
+            let column_def = build_column_def(column_name, *datatype, is_nullable);
+            column_defs.push(column_def);
+            new_columns.insert(column_name.to_string());
         }
-
-        ensure!(timestamp_index != usize::MAX, MissingTimestampColumnSnafu);
-        let timestamp_field_name = columns[timestamp_index].column_name.clone();
-
-        let primary_keys = primary_key_indices
-            .iter()
-            .map(|idx| columns[*idx].column_name.clone())
-            .collect::<Vec<_>>();
-
-        let expr = CreateExpr {
-            catalog_name: Some(catalog_name.to_string()),
-            schema_name: Some(schema_name.to_string()),
-            table_name: table_name.to_string(),
-            desc: Some("Created on insertion".to_string()),
-            column_defs,
-            time_index: timestamp_field_name,
-            primary_keys,
-            create_if_not_exists: true,
-            table_options: Default::default(),
-            table_id,
-            region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
-        };
-
-        return Ok(expr);
     }
 
-    IllegalInsertDataSnafu.fail()
+    ensure!(
+        timestamp_index != usize::MAX,
+        MissingTimestampColumnSnafu { msg: table_name }
+    );
+    let timestamp_field_name = columns[timestamp_index].column_name.clone();
+
+    let primary_keys = primary_key_indices
+        .iter()
+        .map(|idx| columns[*idx].column_name.clone())
+        .collect::<Vec<_>>();
+
+    let expr = CreateExpr {
+        catalog_name: Some(catalog_name.to_string()),
+        schema_name: Some(schema_name.to_string()),
+        table_name: table_name.to_string(),
+        desc: Some("Created on insertion".to_string()),
+        column_defs,
+        time_index: timestamp_field_name,
+        primary_keys,
+        create_if_not_exists: true,
+        table_options: Default::default(),
+        table_id,
+        region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
+    };
+
+    Ok(expr)
 }
 
 pub fn insertion_expr_to_request(
     catalog_name: &str,
     schema_name: &str,
     table_name: &str,
-    insert_batches: Vec<InsertBatch>,
+    insert_batches: Vec<(Vec<Column>, u32)>,
     table: Arc<dyn Table>,
 ) -> Result<InsertRequest> {
     let schema = table.schema();
     let mut columns_builders = HashMap::with_capacity(schema.column_schemas().len());
 
-    for InsertBatch { columns, row_count } in insert_batches {
+    for (columns, row_count) in insert_batches {
         for Column {
             column_name,
             values,
@@ -327,14 +309,6 @@ pub fn insertion_expr_to_request(
         table_name: table_name.to_string(),
         columns_values,
     })
-}
-
-#[inline]
-pub fn insert_batches(bytes_vec: &[Vec<u8>]) -> Result<Vec<InsertBatch>> {
-    bytes_vec
-        .iter()
-        .map(|bytes| bytes.deref().try_into().context(DecodeInsertSnafu))
-        .collect()
 }
 
 fn add_values_to_builder(
@@ -463,9 +437,8 @@ mod tests {
     use std::sync::Arc;
 
     use api::helper::ColumnDataTypeWrapper;
-    use api::v1::codec::InsertBatch;
     use api::v1::column::{self, SemanticType, Values};
-    use api::v1::{insert_expr, Column, ColumnDataType};
+    use api::v1::{Column, ColumnDataType};
     use common_base::BitVec;
     use common_query::physical_plan::PhysicalPlanRef;
     use common_query::prelude::Expr;
@@ -479,11 +452,12 @@ mod tests {
     use table::Table;
 
     use super::{
-        build_create_expr_from_insertion, convert_values, find_new_columns, insert_batches,
-        insertion_expr_to_request, is_null, TAG_SEMANTIC_TYPE, TIMESTAMP_SEMANTIC_TYPE,
+        build_create_expr_from_insertion, convert_values, insertion_expr_to_request, is_null,
+        TAG_SEMANTIC_TYPE, TIMESTAMP_SEMANTIC_TYPE,
     };
     use crate::error;
     use crate::error::ColumnDataTypeSnafu;
+    use crate::insert::find_new_columns;
 
     #[inline]
     fn build_column_schema(
@@ -508,11 +482,10 @@ mod tests {
 
         assert!(build_create_expr_from_insertion("", "", table_id, table_name, &[]).is_err());
 
-        let mock_batch_bytes = mock_insert_batches();
-        let insert_batches = insert_batches(&mock_batch_bytes).unwrap();
+        let insert_batch = mock_insert_batch();
 
         let create_expr =
-            build_create_expr_from_insertion("", "", table_id, table_name, &insert_batches)
+            build_create_expr_from_insertion("", "", table_id, table_name, &insert_batch.0)
                 .unwrap();
 
         assert_eq!(table_id, create_expr.table_id);
@@ -598,9 +571,9 @@ mod tests {
 
         assert!(find_new_columns(&schema, &[]).unwrap().is_none());
 
-        let mock_insert_bytes = mock_insert_batches();
-        let insert_batches = insert_batches(&mock_insert_bytes).unwrap();
-        let add_columns = find_new_columns(&schema, &insert_batches).unwrap().unwrap();
+        let insert_batch = mock_insert_batch();
+
+        let add_columns = find_new_columns(&schema, &insert_batch.0).unwrap().unwrap();
 
         assert_eq!(2, add_columns.add_columns.len());
         let host_column = &add_columns.add_columns[0];
@@ -630,10 +603,7 @@ mod tests {
     fn test_insertion_expr_to_request() {
         let table: Arc<dyn Table> = Arc::new(DemoTable {});
 
-        let values = insert_expr::Values {
-            values: mock_insert_batches(),
-        };
-        let insert_batches = insert_batches(&values.values).unwrap();
+        let insert_batches = vec![mock_insert_batch()];
         let insert_req =
             insertion_expr_to_request("greptime", "public", "demo", insert_batches, table).unwrap();
 
@@ -731,7 +701,7 @@ mod tests {
         }
     }
 
-    fn mock_insert_batches() -> Vec<Vec<u8>> {
+    fn mock_insert_batch() -> (Vec<Column>, u32) {
         let row_count = 2;
 
         let host_vals = column::Values {
@@ -782,10 +752,9 @@ mod tests {
             datatype: ColumnDataType::Timestamp as i32,
         };
 
-        let insert_batch = InsertBatch {
-            columns: vec![host_column, cpu_column, mem_column, ts_column],
+        (
+            vec![host_column, cpu_column, mem_column, ts_column],
             row_count,
-        };
-        vec![insert_batch.into()]
+        )
     }
 }
