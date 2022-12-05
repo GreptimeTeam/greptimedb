@@ -428,18 +428,18 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::Date64(d) => d
                 .map(|x| Value::DateTime(DateTime::new(x)))
                 .unwrap_or(Value::Null),
-            // ScalarValue::TimestampSecond(t, _) => t
-            //     .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Second)))
-            //     .unwrap_or(Value::Null),
-            // ScalarValue::TimestampMillisecond(t, _) => t
-            //     .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Millisecond)))
-            //     .unwrap_or(Value::Null),
-            // ScalarValue::TimestampMicrosecond(t, _) => t
-            //     .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Microsecond)))
-            //     .unwrap_or(Value::Null),
-            // ScalarValue::TimestampNanosecond(t, _) => t
-            //     .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
-            //     .unwrap_or(Value::Null),
+            ScalarValue::TimestampSecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Second)))
+                .unwrap_or(Value::Null),
+            ScalarValue::TimestampMillisecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Millisecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::TimestampMicrosecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Microsecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::TimestampNanosecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
+                .unwrap_or(Value::Null),
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.get_datatype(),
@@ -797,55 +797,55 @@ mod tests {
         );
         assert_eq!(Value::Null, ScalarValue::Date64(None).try_into().unwrap());
 
-        // assert_eq!(
-        //     Value::Timestamp(Timestamp::new(1, TimeUnit::Second)),
-        //     ScalarValue::TimestampSecond(Some(1), None)
-        //         .try_into()
-        //         .unwrap()
-        // );
-        // assert_eq!(
-        //     Value::Null,
-        //     ScalarValue::TimestampSecond(None, None).try_into().unwrap()
-        // );
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Second)),
+            ScalarValue::TimestampSecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampSecond(None, None).try_into().unwrap()
+        );
 
-        // assert_eq!(
-        //     Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)),
-        //     ScalarValue::TimestampMillisecond(Some(1), None)
-        //         .try_into()
-        //         .unwrap()
-        // );
-        // assert_eq!(
-        //     Value::Null,
-        //     ScalarValue::TimestampMillisecond(None, None)
-        //         .try_into()
-        //         .unwrap()
-        // );
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)),
+            ScalarValue::TimestampMillisecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampMillisecond(None, None)
+                .try_into()
+                .unwrap()
+        );
 
-        // assert_eq!(
-        //     Value::Timestamp(Timestamp::new(1, TimeUnit::Microsecond)),
-        //     ScalarValue::TimestampMicrosecond(Some(1), None)
-        //         .try_into()
-        //         .unwrap()
-        // );
-        // assert_eq!(
-        //     Value::Null,
-        //     ScalarValue::TimestampMicrosecond(None, None)
-        //         .try_into()
-        //         .unwrap()
-        // );
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Microsecond)),
+            ScalarValue::TimestampMicrosecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampMicrosecond(None, None)
+                .try_into()
+                .unwrap()
+        );
 
-        // assert_eq!(
-        //     Value::Timestamp(Timestamp::new(1, TimeUnit::Nanosecond)),
-        //     ScalarValue::TimestampNanosecond(Some(1), None)
-        //         .try_into()
-        //         .unwrap()
-        // );
-        // assert_eq!(
-        //     Value::Null,
-        //     ScalarValue::TimestampNanosecond(None, None)
-        //         .try_into()
-        //         .unwrap()
-        // );
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Nanosecond)),
+            ScalarValue::TimestampNanosecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampNanosecond(None, None)
+                .try_into()
+                .unwrap()
+        );
 
         let result: Result<Value> = ScalarValue::Decimal128(Some(1), 0, 0).try_into();
         result
@@ -975,10 +975,10 @@ mod tests {
             &ConcreteDataType::datetime_datatype(),
             &Value::DateTime(DateTime::new(1)),
         );
-        // check_type_and_value(
-        //     &ConcreteDataType::timestamp_millis_datatype(),
-        //     &Value::Timestamp(Timestamp::from_millis(1)),
-        // );
+        check_type_and_value(
+            &ConcreteDataType::timestamp_millisecond_datatype(),
+            &Value::Timestamp(Timestamp::from_millis(1)),
+        );
     }
 
     #[test]
@@ -1220,10 +1220,10 @@ mod tests {
             Value::DateTime(DateTime::new(0)).to_string(),
             "1970-01-01 00:00:00"
         );
-        // assert_eq!(
-        //     Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
-        //     "1970-01-01 00:00:01+0000"
-        // );
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
+            "1970-01-01 00:00:01+0000"
+        );
         assert_eq!(
             Value::List(ListValue::new(
                 Some(Box::new(vec![Value::Int8(1), Value::Int8(2)])),
@@ -1232,13 +1232,37 @@ mod tests {
             .to_string(),
             "Int8[1, 2]"
         );
-        // assert_eq!(
-        //     Value::List(ListValue::new(
-        //         Some(Box::new(vec![])),
-        //         ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
-        //     ))
-        //     .to_string(),
-        //     "Timestamp[]"
-        // );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_second_datatype(),
+            ))
+            .to_string(),
+            "TimestampSecondType[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ))
+            .to_string(),
+            "TimestampMillisecondType[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+            ))
+            .to_string(),
+            "TimestampMicrosecondType[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ))
+            .to_string(),
+            "TimestampNanosecondType[]"
+        );
     }
 }

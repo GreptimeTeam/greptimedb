@@ -105,7 +105,10 @@ pub(crate) fn find_unique_constant(
 mod tests {
     use std::sync::Arc;
 
+    use common_time::{Date, DateTime};
+
     use super::*;
+    use crate::timestamp::*;
     use crate::vectors::{Int32Vector, StringVector, Vector, VectorOp};
 
     fn check_bitmap(expect: &[bool], selected: &BitVec) {
@@ -342,7 +345,6 @@ mod tests {
 
     macro_rules! impl_find_unique_date_like_test {
         ($VectorType: ident, $ValueType: ident, $method: ident) => {{
-            use common_time::$ValueType;
             use $crate::vectors::$VectorType;
 
             let v = $VectorType::from_iterator([8, 8, 9, 10].into_iter().map($ValueType::$method));
@@ -357,6 +359,9 @@ mod tests {
     fn test_find_unique_date_like() {
         impl_find_unique_date_like_test!(DateVector, Date, new);
         impl_find_unique_date_like_test!(DateTimeVector, DateTime, new);
-        // impl_find_unique_date_like_test!(TimestampVector, Timestamp, from_millis);
+        impl_find_unique_date_like_test!(TimestampSecondVector, TimestampSecond, from);
+        impl_find_unique_date_like_test!(TimestampMillisecondVector, TimestampMillisecond, from);
+        impl_find_unique_date_like_test!(TimestampMicrosecondVector, TimestampMicrosecond, from);
+        impl_find_unique_date_like_test!(TimestampNanosecondVector, TimestampNanosecond, from);
     }
 }

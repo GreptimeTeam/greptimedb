@@ -86,7 +86,7 @@ macro_rules! define_timestamp_with_unit {
                 }
             }
 
-             impl WrapperType for [<Timestamp $unit>] {
+            impl WrapperType for [<Timestamp $unit>] {
                 type LogicalType = [<Timestamp $unit Type>];
                 type Native = i64;
 
@@ -96,6 +96,12 @@ macro_rules! define_timestamp_with_unit {
 
                 fn into_native(self) -> Self::Native {
                     self.0.into()
+                }
+            }
+
+            impl From<i64> for [<Timestamp $unit>] {
+                fn from(val: i64) -> Self {
+                    [<Timestamp $unit>]::from_native(val)
                 }
             }
         }

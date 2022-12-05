@@ -42,6 +42,10 @@ pub(crate) fn replicate_scalar<C: ScalarVector>(c: &C, offsets: &[usize]) -> Vec
 mod tests {
     use std::sync::Arc;
 
+    use common_time::timestamp::TimeUnit;
+    use common_time::{Date, DateTime, Timestamp};
+    use paste::paste;
+
     use super::*;
     use crate::vectors::constant::ConstantVector;
     use crate::vectors::{Int32Vector, StringVector, VectorOp};
@@ -120,7 +124,6 @@ mod tests {
 
     macro_rules! impl_replicate_date_like_test {
         ($VectorType: ident, $ValueType: ident, $method: ident) => {{
-            use common_time::$ValueType;
             use $crate::vectors::$VectorType;
 
             let v = $VectorType::from_iterator((0..5).map($ValueType::$method));
@@ -138,10 +141,33 @@ mod tests {
         }};
     }
 
+    macro_rules! impl_replicate_timestamp_test {
+        ($unit: ident) => {{
+            paste!{
+                use $crate::vectors::[<Timestamp $unit Vector>];
+                use $crate::timestamp::[<Timestamp $unit>];
+                let v = [<Timestamp $unit Vector>]::from_iterator((0..5).map([<Timestamp $unit>]::from));
+                let offsets = [0, 1, 2, 3, 4];
+                let v = v.replicate(&offsets);
+                assert_eq!(4, v.len());
+                for i in 0..4 {
+                    assert_eq!(
+                        Value::Timestamp(Timestamp::new(i as i64 + 1, TimeUnit::$unit)),
+                        v.get(i)
+                    );
+                }
+            }
+        }};
+    }
+
     #[test]
     fn test_replicate_date_like() {
         impl_replicate_date_like_test!(DateVector, Date, new);
         impl_replicate_date_like_test!(DateTimeVector, DateTime, new);
-        // impl_replicate_date_like_test!(TimestampVector, Timestamp, from_millis);
+
+        impl_replicate_timestamp_test!(Second);
+        impl_replicate_timestamp_test!(Millisecond);
+        impl_replicate_timestamp_test!(Microsecond);
+        impl_replicate_timestamp_test!(Nanosecond);
     }
 }

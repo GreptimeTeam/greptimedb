@@ -146,7 +146,15 @@ mod tests {
         assert_vector_ref_eq(Arc::new(BooleanVector::from(vec![true, false])));
         assert_vector_ref_eq(Arc::new(DateVector::from(vec![Some(100), Some(120)])));
         assert_vector_ref_eq(Arc::new(DateTimeVector::from(vec![Some(100), Some(120)])));
-        // assert_vector_ref_eq(Arc::new(TimestampVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimestampSecondVector::from_values([100, 120])));
+        assert_vector_ref_eq(Arc::new(TimestampMillisecondVector::from_values([
+            100, 120,
+        ])));
+
+        assert_vector_ref_eq(Arc::new(TimestampMicrosecondVector::from_values([
+            100, 120,
+        ])));
+        assert_vector_ref_eq(Arc::new(TimestampNanosecondVector::from_values([100, 120])));
 
         // let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i64>>::new();
         // arrow_array
