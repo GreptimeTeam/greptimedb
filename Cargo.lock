@@ -3045,9 +3045,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.7.8"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e999beba7b6e8345721bd280141ed958096a2e4abdf74f67ff4ce49b4b54e47a"
+checksum = "b6e8aaa3f231bb4bd57b84b2d5dc3ae7f350265df8aa96492e0bc394a1571909"
 dependencies = [
  "hashbrown",
 ]
@@ -3393,8 +3393,9 @@ dependencies = [
 
 [[package]]
 name = "mysql_async"
-version = "0.30.0"
-source = "git+https://github.com/Morranto/mysql_async.git?rev=127b538#127b538e20b880e2855204e480fa784d8d08e150"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8fbd756177cfa8248baa7c5f555b9446349822bb94810c22336ec7597a72652"
 dependencies = [
  "bytes",
  "crossbeam",
@@ -3411,7 +3412,7 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "rustls",
- "rustls-pemfile 0.2.1",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "socket2",
@@ -4806,7 +4807,7 @@ dependencies = [
  "pin-project-lite",
  "rustls",
  "rustls-native-certs",
- "rustls-pemfile 1.0.1",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -4956,18 +4957,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0167bac7a9f490495f3c33013e7722b53cb087ecbe082fb0c6387c96f634ea50"
 dependencies = [
  "openssl-probe",
- "rustls-pemfile 1.0.1",
+ "rustls-pemfile",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5eebeaeb360c87bfb72e84abdb3447159c0eaececf1bef2aecd65a8be949d1c9"
-dependencies = [
- "base64",
 ]
 
 [[package]]
@@ -5534,7 +5526,7 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "rustls",
- "rustls-pemfile 1.0.1",
+ "rustls-pemfile",
  "schemars",
  "script",
  "serde",

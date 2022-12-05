@@ -56,7 +56,7 @@ tower-http = { version = "0.3", features = ["full"] }
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
-mysql_async = { git = "https://github.com/Morranto/mysql_async.git", rev = "127b538" }
+mysql_async = { version = "0.31", default-features = false, features = ["default-rustls"] }
 query = { path = "../query" }
 rand = "0.8"
 script = { path = "../script", features = ["python"] }
