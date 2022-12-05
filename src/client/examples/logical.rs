@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::meta::TableName;
 use api::v1::{ColumnDataType, ColumnDef, CreateExpr};
 use client::admin::Admin;
 use client::{Client, Database};
@@ -72,8 +73,15 @@ async fn run() {
 
     let logical = mock_logical_plan();
     event!(Level::INFO, "plan size: {:#?}", logical.len());
+
+    let table_name = TableName {
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
+        table_name: "test_logical_dist_exec".to_string(),
+    };
+
     let db = Database::new("greptime", client);
-    let result = db.logical_plan(logical).await.unwrap();
+    let result = db.logical_plan(table_name, logical).await.unwrap();
 
     event!(Level::INFO, "result: {:#?}", result);
 }

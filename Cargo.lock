@@ -2398,6 +2398,7 @@ dependencies = [
  "sql",
  "sqlparser 0.15.0",
  "store-api",
+ "substrait 0.1.0",
  "table",
  "tempdir",
  "tokio",

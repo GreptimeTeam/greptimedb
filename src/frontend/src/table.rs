@@ -818,9 +818,9 @@ mod test {
 
     async fn new_dist_table() -> DistTable {
         let column_schemas = vec![
-            ColumnSchema::new("ts", ConcreteDataType::uint64_datatype(), false),
-            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("row_id", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false),
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new("row_id", ConcreteDataType::int32_datatype(), false),
         ];
         let schema = Arc::new(Schema::new(column_schemas.clone()));
 

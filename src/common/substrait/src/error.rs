@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::prelude::{BoxedError, ErrorExt, StatusCode};
+use common_error::prelude::{ErrorExt, StatusCode};
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use prost::{DecodeError, EncodeError};
@@ -75,15 +75,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Internal error: {}", source))]
-    Internal {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
-    #[snafu(display("Table querying not found: {}", name))]
-    TableNotFound { name: String, backtrace: Backtrace },
-
     #[snafu(display("Cannot convert plan doesn't belong to GreptimeDB"))]
     UnknownPlan { backtrace: Backtrace },
 
@@ -117,9 +108,8 @@ impl ErrorExt for Error {
             | Error::EmptyExpr { .. }
             | Error::MissingField { .. }
             | Error::InvalidParameters { .. }
-            | Error::TableNotFound { .. }
             | Error::SchemaNotMatch { .. } => StatusCode::InvalidArguments,
-            Error::DFInternal { .. } | Error::Internal { .. } => StatusCode::Internal,
+            Error::DFInternal { .. } => StatusCode::Internal,
         }
     }
 

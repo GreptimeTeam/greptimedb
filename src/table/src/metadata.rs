@@ -333,9 +333,9 @@ pub struct TableInfo {
     /// Comment of the table.
     #[builder(default, setter(into))]
     pub desc: Option<String>,
-    #[builder(default, setter(into))]
+    #[builder(default = "\"greptime\".to_string()", setter(into))]
     pub catalog_name: String,
-    #[builder(default, setter(into))]
+    #[builder(default = "\"public\".to_string()", setter(into))]
     pub schema_name: String,
     pub meta: TableMeta,
     #[builder(default = "TableType::Base")]
