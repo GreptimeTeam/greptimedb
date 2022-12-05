@@ -47,7 +47,6 @@ macro_rules! is_vector_eq {
     }};
 }
 
-// TODO(yingwen): Impl eq for other vectors.
 fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
     if lhs.data_type() != rhs.data_type() || lhs.len() != rhs.len() {
         return false;
@@ -114,7 +113,7 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
 mod tests {
     use super::*;
     use crate::vectors::{
-        Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector,
+        list, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector,
         NullVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
     };
 
@@ -150,24 +149,23 @@ mod tests {
         assert_vector_ref_eq(Arc::new(TimestampMillisecondVector::from_values([
             100, 120,
         ])));
-
         assert_vector_ref_eq(Arc::new(TimestampMicrosecondVector::from_values([
             100, 120,
         ])));
         assert_vector_ref_eq(Arc::new(TimestampNanosecondVector::from_values([100, 120])));
 
-        // let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i64>>::new();
-        // arrow_array
-        //     .try_extend(vec![Some(vec![Some(1), Some(2), Some(3)])])
-        //     .unwrap();
-        // let arrow_array: ListArray<i32> = arrow_array.into();
-        // assert_vector_ref_eq(Arc::new(ListVector::from(arrow_array)));
+        let list_vector = list::tests::new_list_vector(&[
+            Some(vec![Some(1), Some(2)]),
+            None,
+            Some(vec![Some(3), Some(4)]),
+        ]);
+        assert_vector_ref_eq(Arc::new(list_vector));
 
-        // assert_vector_ref_eq(Arc::new(NullVector::new(4)));
-        // assert_vector_ref_eq(Arc::new(StringVector::from(vec![
-        //     Some("hello"),
-        //     Some("world"),
-        // ])));
+        assert_vector_ref_eq(Arc::new(NullVector::new(4)));
+        assert_vector_ref_eq(Arc::new(StringVector::from(vec![
+            Some("hello"),
+            Some("world"),
+        ])));
 
         assert_vector_ref_eq(Arc::new(Int8Vector::from_slice(&[1, 2, 3, 4])));
         assert_vector_ref_eq(Arc::new(UInt8Vector::from_slice(&[1, 2, 3, 4])));

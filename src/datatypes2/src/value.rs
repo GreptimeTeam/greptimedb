@@ -393,9 +393,9 @@ impl Ord for ListValue {
 impl TryFrom<ScalarValue> for Value {
     type Error = error::Error;
 
-    // TODO(yingwen): Implement it.
     fn try_from(v: ScalarValue) -> Result<Self> {
         let v = match v {
+            ScalarValue::Null => Value::Null,
             ScalarValue::Boolean(b) => Value::from(b),
             ScalarValue::Float32(f) => Value::from(f),
             ScalarValue::Float64(f) => Value::from(f),
@@ -410,7 +410,9 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
                 Value::from(s.map(StringBytes::from))
             }
-            ScalarValue::Binary(b) | ScalarValue::LargeBinary(b) => Value::from(b.map(Bytes::from)),
+            ScalarValue::Binary(b)
+            | ScalarValue::LargeBinary(b)
+            | ScalarValue::FixedSizeBinary(_, b) => Value::from(b.map(Bytes::from)),
             ScalarValue::List(vs, field) => {
                 let items = if let Some(vs) = vs {
                     let vs = vs
@@ -440,7 +442,13 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::TimestampNanosecond(t, _) => t
                 .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
-            _ => {
+            ScalarValue::Decimal128(_, _, _)
+            | ScalarValue::Time64(_)
+            | ScalarValue::IntervalYearMonth(_)
+            | ScalarValue::IntervalDayTime(_)
+            | ScalarValue::IntervalMonthDayNano(_)
+            | ScalarValue::Struct(_, _)
+            | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.get_datatype(),
                 }
@@ -648,7 +656,6 @@ impl<'a> PartialOrd for ListValueRef<'a> {
     }
 }
 
-// TODO(yingwen): Pass all tests.
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;

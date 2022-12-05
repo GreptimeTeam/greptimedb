@@ -459,7 +459,7 @@ impl NullBufferBuilder {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use arrow::array::{Int32Array, Int32Builder, ListBuilder};
     use serde_json::json;
 
@@ -468,7 +468,7 @@ mod tests {
     use crate::types::ListType;
     use crate::vectors::Int32Vector;
 
-    fn new_list_vector(data: &[Option<Vec<Option<i32>>>]) -> ListVector {
+    pub fn new_list_vector(data: &[Option<Vec<Option<i32>>>]) -> ListVector {
         let mut builder =
             ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 8);
         for vec_opt in data {
@@ -503,7 +503,6 @@ mod tests {
         builder.finish()
     }
 
-    // TODO(yingwen): Pass validity tests.
     #[test]
     fn test_list_vector() {
         let data = vec![
@@ -533,10 +532,12 @@ mod tests {
                 .downcast_ref::<ListArray>()
                 .unwrap()
         );
-        // assert_eq!(
-        //     Validity::Slots(arrow_array.validity().unwrap()),
-        //     list_vector.validity()
-        // );
+        let validity = list_vector.validity();
+        assert!(!validity.is_all_null());
+        assert!(!validity.is_all_valid());
+        assert!(validity.is_set(0));
+        assert!(!validity.is_set(1));
+        assert!(validity.is_set(2));
         assert_eq!(256, list_vector.memory_size());
 
         let slice = list_vector.slice(0, 2).to_arrow_array();

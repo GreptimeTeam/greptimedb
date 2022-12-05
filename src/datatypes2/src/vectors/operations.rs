@@ -60,10 +60,10 @@ pub trait VectorOp {
 }
 
 macro_rules! impl_scalar_vector_op {
-    ($( { $VectorType: ident, $replicate: ident } ),+) => {$(
+    ($($VectorType: ident),+) => {$(
         impl VectorOp for $VectorType {
             fn replicate(&self, offsets: &[usize]) -> VectorRef {
-                replicate::$replicate(self, offsets)
+                replicate::replicate_scalar(self, offsets)
             }
 
             fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
@@ -78,15 +78,7 @@ macro_rules! impl_scalar_vector_op {
     )+};
 }
 
-impl_scalar_vector_op!(
-    { BinaryVector, replicate_scalar },
-    { BooleanVector, replicate_scalar },
-    { ListVector, replicate_scalar },
-    { StringVector, replicate_scalar }
-    // { DateVector, replicate_date },
-    // { DateTimeVector, replicate_datetime },
-    // { TimestampVector, replicate_timestamp }
-);
+impl_scalar_vector_op!(BinaryVector, BooleanVector, ListVector, StringVector);
 
 impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {

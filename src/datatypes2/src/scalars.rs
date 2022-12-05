@@ -298,6 +298,8 @@ impl<'a> ScalarRef<'a> for DateTime {
     }
 }
 
+// Timestamp types implement Scalar and ScalarRef in `src/timestamp.rs`.
+
 impl Scalar for ListValue {
     type VectorType = ListVector;
     type RefType<'a> = ListValueRef<'a>;

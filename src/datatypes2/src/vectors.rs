@@ -40,16 +40,27 @@ mod string;
 mod timestamp;
 mod validity;
 
-pub use binary::*;
-pub use boolean::*;
-pub use date::*;
-pub use datetime::*;
+pub use binary::{BinaryVector, BinaryVectorBuilder};
+pub use boolean::{BooleanVector, BooleanVectorBuilder};
+pub use constant::ConstantVector;
+pub use date::{DateVector, DateVectorBuilder};
+pub use datetime::{DateTimeVector, DateTimeVectorBuilder};
 pub use helper::Helper;
-pub use list::*;
-pub use null::*;
-pub use primitive::*;
-pub use string::*;
-pub use timestamp::*;
+pub use list::{ListIter, ListVector, ListVectorBuilder};
+pub use null::{NullVector, NullVectorBuilder};
+pub use primitive::{
+    Float32Vector, Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector,
+    Int16VectorBuilder, Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder,
+    Int8Vector, Int8VectorBuilder, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder,
+    UInt16Vector, UInt16VectorBuilder, UInt32Vector, UInt32VectorBuilder, UInt64Vector,
+    UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+};
+pub use string::{StringVector, StringVectorBuilder};
+pub use timestamp::{
+    TimestampMicrosecondVector, TimestampMicrosecondVectorBuilder, TimestampMillisecondVector,
+    TimestampMillisecondVectorBuilder, TimestampNanosecondVector, TimestampNanosecondVectorBuilder,
+    TimestampSecondVector, TimestampSecondVectorBuilder,
+};
 pub use validity::Validity;
 
 // TODO(yingwen): arrow 28.0 implements Clone for all arrays, we could upgrade to it and simplify

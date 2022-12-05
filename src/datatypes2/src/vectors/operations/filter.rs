@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// pub(crate) use crate::vectors::constant::filter_constant;
-
 macro_rules! filter_non_constant {
     ($vector: expr, $VectorType: ty, $filter: ident) => {{
         use std::sync::Arc;
