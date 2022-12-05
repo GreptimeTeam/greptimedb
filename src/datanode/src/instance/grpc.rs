@@ -115,7 +115,8 @@ impl Instance {
             Some(select_expr::Expr::Sql(sql)) => self
                 .execute_sql(&sql, Arc::new(QueryContext::new()))
                 .await
-                // take the first result as we only support 1 statement per sql query
+                // take the first result as we only support 1 statement per sql
+                // query in grpc
                 .map(|mut os| os.remove(0)),
             Some(select_expr::Expr::LogicalPlan(plan)) => self.execute_logical(plan).await,
             _ => UnsupportedExprSnafu {

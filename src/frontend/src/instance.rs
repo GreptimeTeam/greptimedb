@@ -556,10 +556,9 @@ impl Instance {
 }
 
 // TODO(sunng87): temporary workaround to extract sql statements from string
-fn parse_statement_strings(sql: &str) -> Vec<String> {
+fn parse_statement_strings(sql: &str) -> std::result::Result<Vec<String>, ParserError> {
     Parser::parse_sql(&GenericDialect, sql)
         .map(|stmts| stmts.iter().map(|s| s.to_string()).collect())
-        .unwrap()
 }
 
 #[async_trait]
@@ -579,12 +578,20 @@ impl SqlQueryHandler for Instance {
         // frontend and datanode in standalone mode, so here we have to extract
         // it. This is to be REMOVED when frontend-datanode calls refactored,
         // which is expected soon, very soon.
+        //
+        // There is a chance that this parser returns error for our customized
+        // sql. We will ignore the error temporarily.
         let stmt_strings = parse_statement_strings(query);
         let mut results = Vec::with_capacity(stmts.len());
 
         for (idx, stmt) in stmts.into_iter().enumerate() {
+            let query_string = if let Ok(ref stmt_strings) = stmt_strings {
+                &stmt_strings[idx]
+            } else {
+                query
+            };
             let output = self
-                .do_query_statement(&stmt_strings[idx], stmt, query_ctx.clone())
+                .do_query_statement(query_string, stmt, query_ctx.clone())
                 .await?;
             results.push(output);
         }
