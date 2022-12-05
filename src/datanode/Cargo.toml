@@ -26,7 +26,7 @@ common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
-  "simd",
+    "simd",
 ] }
 datatypes = { path = "../datatypes" }
 frontend = { path = "../frontend" }
@@ -61,7 +61,7 @@ axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", br
 client = { path = "../client" }
 common-query = { path = "../common/query" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
-  "simd",
+    "simd",
 ] }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 tempdir = "0.3"

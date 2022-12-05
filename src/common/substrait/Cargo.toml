@@ -11,7 +11,7 @@ common-catalog = { path = "../catalog" }
 common-error = { path = "../error" }
 common-telemetry = { path = "../telemetry" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
-  "simd",
+    "simd",
 ] }
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datatypes = { path = "../../datatypes" }
