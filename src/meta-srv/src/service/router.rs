@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use api::v1::meta::{
-    router_server, CreateRequest, Error, PeerDict, PutRequest, RangeRequest, Region, RegionRoute,
-    ResponseHeader, RouteRequest, RouteResponse, Table, TableRoute, TableRouteValue,
+    router_server, CreateRequest, DeleteRequest, Error, MoveValueRequest, Peer, PeerDict,
+    PutRequest, RangeRequest, Region, RegionRoute, ResponseHeader, RouteRequest, RouteResponse,
+    Table, TableRoute, TableRouteValue,
 };
 use common_catalog::{TableGlobalKey, TableGlobalValue};
 use common_telemetry::warn;
@@ -31,14 +32,6 @@ use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
 impl router_server::Router for MetaSrv {
-    async fn route(&self, req: Request<RouteRequest>) -> GrpcResult<RouteResponse> {
-        let req = req.into_inner();
-        let ctx = self.new_ctx();
-        let res = handle_route(req, ctx).await?;
-
-        Ok(Response::new(res))
-    }
-
     async fn create(&self, req: Request<CreateRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
         let ctx = self.new_ctx();
@@ -48,56 +41,22 @@ impl router_server::Router for MetaSrv {
 
         Ok(Response::new(res))
     }
-}
 
-async fn handle_route(req: RouteRequest, ctx: Context) -> Result<RouteResponse> {
-    let RouteRequest {
-        header,
-        table_names,
-    } = req;
-    let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
-    let table_global_keys = table_names.into_iter().map(|t| TableGlobalKey {
-        catalog_name: t.catalog_name,
-        schema_name: t.schema_name,
-        table_name: t.table_name,
-    });
-    let tables = fetch_tables(&ctx.kv_store, table_global_keys).await?;
+    async fn route(&self, req: Request<RouteRequest>) -> GrpcResult<RouteResponse> {
+        let req = req.into_inner();
+        let ctx = self.new_ctx();
+        let res = handle_route(req, ctx).await?;
 
-    let mut peer_dict = PeerDict::default();
-    let mut table_routes = vec![];
-    for (tg, tr) in tables {
-        let TableRouteValue {
-            peers,
-            mut table_route,
-        } = tr;
-        if let Some(table_route) = &mut table_route {
-            for rr in &mut table_route.region_routes {
-                if let Some(peer) = peers.get(rr.leader_peer_index as usize) {
-                    rr.leader_peer_index = peer_dict.get_or_insert(peer.clone()) as u64;
-                }
-                for index in &mut rr.follower_peer_indexes {
-                    if let Some(peer) = peers.get(*index as usize) {
-                        *index = peer_dict.get_or_insert(peer.clone()) as u64;
-                    }
-                }
-            }
-
-            if let Some(table) = &mut table_route.table {
-                table.table_schema = tg.as_bytes().context(error::InvalidCatalogValueSnafu)?;
-            }
-        }
-        if let Some(table_route) = table_route {
-            table_routes.push(table_route)
-        }
+        Ok(Response::new(res))
     }
-    let peers = peer_dict.into_peers();
 
-    let header = Some(ResponseHeader::success(cluster_id));
-    Ok(RouteResponse {
-        header,
-        peers,
-        table_routes,
-    })
+    async fn delete(&self, req: Request<DeleteRequest>) -> GrpcResult<RouteResponse> {
+        let req = req.into_inner();
+        let ctx = self.new_ctx();
+        let res = handle_delete(req, ctx).await?;
+
+        Ok(Response::new(res))
+    }
 }
 
 async fn handle_create(
@@ -169,6 +128,91 @@ async fn handle_create(
     })
 }
 
+async fn handle_route(req: RouteRequest, ctx: Context) -> Result<RouteResponse> {
+    let RouteRequest {
+        header,
+        table_names,
+    } = req;
+    let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
+    let table_global_keys = table_names.into_iter().map(|t| TableGlobalKey {
+        catalog_name: t.catalog_name,
+        schema_name: t.schema_name,
+        table_name: t.table_name,
+    });
+    let tables = fetch_tables(&ctx.kv_store, table_global_keys).await?;
+    let (peers, table_routes) = fill_table_routes(tables)?;
+
+    let header = Some(ResponseHeader::success(cluster_id));
+    Ok(RouteResponse {
+        header,
+        peers,
+        table_routes,
+    })
+}
+
+async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse> {
+    let DeleteRequest { header, table_name } = req;
+    let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
+    let tgk = table_name
+        .map(|t| TableGlobalKey {
+            catalog_name: t.catalog_name,
+            schema_name: t.schema_name,
+            table_name: t.table_name,
+        })
+        .context(error::EmptyTableNameSnafu {})?;
+
+    let tgv =
+        get_table_global_value(&ctx.kv_store, &tgk)
+            .await?
+            .context(error::TableNotFoundSnafu {
+                name: format!("{}", tgk),
+            })?;
+    let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
+    let (_, trv) = remove_table_route_value(&ctx.kv_store, &trk).await?;
+    let (peers, table_routes) = fill_table_routes(vec![(tgv, trv)])?;
+
+    let header = Some(ResponseHeader::success(cluster_id));
+    Ok(RouteResponse {
+        header,
+        peers,
+        table_routes,
+    })
+}
+
+fn fill_table_routes(
+    tables: Vec<(TableGlobalValue, TableRouteValue)>,
+) -> Result<(Vec<Peer>, Vec<TableRoute>)> {
+    let mut peer_dict = PeerDict::default();
+    let mut table_routes = vec![];
+    for (tgv, trv) in tables {
+        let TableRouteValue {
+            peers,
+            mut table_route,
+        } = trv;
+        if let Some(table_route) = &mut table_route {
+            for rr in &mut table_route.region_routes {
+                if let Some(peer) = peers.get(rr.leader_peer_index as usize) {
+                    rr.leader_peer_index = peer_dict.get_or_insert(peer.clone()) as u64;
+                }
+                for index in &mut rr.follower_peer_indexes {
+                    if let Some(peer) = peers.get(*index as usize) {
+                        *index = peer_dict.get_or_insert(peer.clone()) as u64;
+                    }
+                }
+            }
+
+            if let Some(table) = &mut table_route.table {
+                table.table_schema = tgv.as_bytes().context(error::InvalidCatalogValueSnafu)?;
+            }
+        }
+        if let Some(table_route) = table_route {
+            table_routes.push(table_route)
+        }
+    }
+
+    Ok((peer_dict.into_peers(), table_routes))
+}
+
 async fn fetch_tables(
     kv_store: &KvStoreRef,
     keys: impl Iterator<Item = TableGlobalKey>,
@@ -176,18 +220,18 @@ async fn fetch_tables(
     let mut tables = vec![];
     // Maybe we can optimize the for loop in the future, but in general,
     // there won't be many keys, in fact, there is usually just one.
-    for tk in keys {
-        let tv = get_table_global_value(kv_store, &tk).await?;
-        if tv.is_none() {
-            warn!("Table global value is absent: {}", tk);
+    for tgk in keys {
+        let tgv = get_table_global_value(kv_store, &tgk).await?;
+        if tgv.is_none() {
+            warn!("Table global value is absent: {}", tgk);
             continue;
         }
-        let tv = tv.unwrap();
+        let tgv = tgv.unwrap();
 
-        let tr_key = TableRouteKey::with_table_global_key(tv.table_id() as u64, &tk);
-        let tr = get_table_route_value(kv_store, &tr_key).await?;
+        let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
+        let trv = get_table_route_value(kv_store, &trk).await?;
 
-        tables.push((tv, tr));
+        tables.push((tgv, trv));
     }
 
     Ok(tables)
@@ -197,15 +241,32 @@ async fn get_table_route_value(
     kv_store: &KvStoreRef,
     key: &TableRouteKey<'_>,
 ) -> Result<TableRouteValue> {
-    let tr = get_from_store(kv_store, key.key().into_bytes())
+    let trv = get_from_store(kv_store, key.key().into_bytes())
         .await?
         .context(error::TableRouteNotFoundSnafu { key: key.key() })?;
-    let tr: TableRouteValue = tr
+    let trv: TableRouteValue = trv
         .as_slice()
         .try_into()
         .context(error::DecodeTableRouteSnafu)?;
 
-    Ok(tr)
+    Ok(trv)
+}
+
+async fn remove_table_route_value(
+    kv_store: &KvStoreRef,
+    key: &TableRouteKey<'_>,
+) -> Result<(Vec<u8>, TableRouteValue)> {
+    let from_key = key.key().into_bytes();
+    let to_key = key.removed_key().into_bytes();
+    let v = move_value(kv_store, from_key, to_key)
+        .await?
+        .context(error::TableRouteNotFoundSnafu { key: key.key() })?;
+    let trv: TableRouteValue =
+        v.1.as_slice()
+            .try_into()
+            .context(error::DecodeTableRouteSnafu)?;
+
+    Ok((v.0, trv))
 }
 
 async fn get_table_global_value(
@@ -221,6 +282,23 @@ async fn get_table_global_value(
         }
         None => Ok(None),
     }
+}
+
+async fn move_value(
+    kv_store: &KvStoreRef,
+    from_key: impl Into<Vec<u8>>,
+    to_key: impl Into<Vec<u8>>,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let from_key = from_key.into();
+    let to_key = to_key.into();
+    let move_req = MoveValueRequest {
+        from_key,
+        to_key,
+        ..Default::default()
+    };
+    let res = kv_store.move_value(move_req).await?;
+
+    Ok(res.kv.map(|kv| (kv.key, kv.value)))
 }
 
 async fn put_into_store(

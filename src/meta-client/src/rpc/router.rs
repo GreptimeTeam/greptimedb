@@ -15,8 +15,9 @@
 use std::collections::HashMap;
 
 use api::v1::meta::{
-    CreateRequest as PbCreateRequest, Partition as PbPartition, Region as PbRegion,
-    RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
+    CreateRequest as PbCreateRequest, DeleteRequest as PbDeleteRequest, Partition as PbPartition,
+    Region as PbRegion, RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse,
+    Table as PbTable,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::OptionExt;
@@ -24,6 +25,38 @@ use snafu::OptionExt;
 use crate::error;
 use crate::error::Result;
 use crate::rpc::{util, Peer, TableName};
+
+#[derive(Debug, Clone)]
+pub struct CreateRequest {
+    pub table_name: TableName,
+    pub partitions: Vec<Partition>,
+}
+
+impl From<CreateRequest> for PbCreateRequest {
+    fn from(mut req: CreateRequest) -> Self {
+        Self {
+            header: None,
+            table_name: Some(req.table_name.into()),
+            partitions: req.partitions.drain(..).map(Into::into).collect(),
+        }
+    }
+}
+
+impl CreateRequest {
+    #[inline]
+    pub fn new(table_name: TableName) -> Self {
+        Self {
+            table_name,
+            partitions: vec![],
+        }
+    }
+
+    #[inline]
+    pub fn add_partition(mut self, partition: Partition) -> Self {
+        self.partitions.push(partition);
+        self
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RouteRequest {
@@ -55,34 +88,23 @@ impl RouteRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct CreateRequest {
+pub struct DeleteRequest {
     pub table_name: TableName,
-    pub partitions: Vec<Partition>,
 }
 
-impl From<CreateRequest> for PbCreateRequest {
-    fn from(mut req: CreateRequest) -> Self {
+impl From<DeleteRequest> for PbDeleteRequest {
+    fn from(req: DeleteRequest) -> Self {
         Self {
             header: None,
             table_name: Some(req.table_name.into()),
-            partitions: req.partitions.drain(..).map(Into::into).collect(),
         }
     }
 }
 
-impl CreateRequest {
+impl DeleteRequest {
     #[inline]
     pub fn new(table_name: TableName) -> Self {
-        Self {
-            table_name,
-            partitions: vec![],
-        }
-    }
-
-    #[inline]
-    pub fn add_partition(mut self, partition: Partition) -> Self {
-        self.partitions.push(partition);
-        self
+        Self { table_name }
     }
 }
 
@@ -275,32 +297,13 @@ impl From<PbPartition> for Partition {
 #[cfg(test)]
 mod tests {
     use api::v1::meta::{
-        Partition as PbPartition, Peer as PbPeer, Region as PbRegion, RegionRoute as PbRegionRoute,
-        RouteRequest as PbRouteRequest, RouteResponse as PbRouteResponse, Table as PbTable,
-        TableName as PbTableName, TableRoute as PbTableRoute,
+        DeleteRequest as PbDeleteRequest, Partition as PbPartition, Peer as PbPeer,
+        Region as PbRegion, RegionRoute as PbRegionRoute, RouteRequest as PbRouteRequest,
+        RouteResponse as PbRouteResponse, Table as PbTable, TableName as PbTableName,
+        TableRoute as PbTableRoute,
     };
 
     use super::*;
-
-    #[test]
-    fn test_route_request_trans() {
-        let req = RouteRequest {
-            table_names: vec![
-                TableName::new("c1", "s1", "t1"),
-                TableName::new("c2", "s2", "t2"),
-            ],
-        };
-
-        let into_req: PbRouteRequest = req.into();
-
-        assert!(into_req.header.is_none());
-        assert_eq!("c1", into_req.table_names.get(0).unwrap().catalog_name);
-        assert_eq!("s1", into_req.table_names.get(0).unwrap().schema_name);
-        assert_eq!("t1", into_req.table_names.get(0).unwrap().table_name);
-        assert_eq!("c2", into_req.table_names.get(1).unwrap().catalog_name);
-        assert_eq!("s2", into_req.table_names.get(1).unwrap().schema_name);
-        assert_eq!("t2", into_req.table_names.get(1).unwrap().table_name);
-    }
 
     #[test]
     fn test_create_request_trans() {
@@ -341,6 +344,40 @@ mod tests {
             vec![b"v11".to_vec(), b"v22".to_vec()],
             into_req.partitions.get(1).unwrap().value_list
         );
+    }
+
+    #[test]
+    fn test_route_request_trans() {
+        let req = RouteRequest {
+            table_names: vec![
+                TableName::new("c1", "s1", "t1"),
+                TableName::new("c2", "s2", "t2"),
+            ],
+        };
+
+        let into_req: PbRouteRequest = req.into();
+
+        assert!(into_req.header.is_none());
+        assert_eq!("c1", into_req.table_names.get(0).unwrap().catalog_name);
+        assert_eq!("s1", into_req.table_names.get(0).unwrap().schema_name);
+        assert_eq!("t1", into_req.table_names.get(0).unwrap().table_name);
+        assert_eq!("c2", into_req.table_names.get(1).unwrap().catalog_name);
+        assert_eq!("s2", into_req.table_names.get(1).unwrap().schema_name);
+        assert_eq!("t2", into_req.table_names.get(1).unwrap().table_name);
+    }
+
+    #[test]
+    fn test_delete_request_trans() {
+        let req = DeleteRequest {
+            table_name: TableName::new("c1", "s1", "t1"),
+        };
+
+        let into_req: PbDeleteRequest = req.into();
+
+        assert!(into_req.header.is_none());
+        assert_eq!("c1", into_req.table_name.as_ref().unwrap().catalog_name);
+        assert_eq!("s1", into_req.table_name.as_ref().unwrap().schema_name);
+        assert_eq!("t1", into_req.table_name.as_ref().unwrap().table_name);
     }
 
     #[test]

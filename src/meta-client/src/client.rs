@@ -27,10 +27,11 @@ use store::Client as StoreClient;
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::error;
 use crate::error::Result;
+use crate::rpc::router::DeleteRequest;
 use crate::rpc::{
     BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, CreateRequest,
-    DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
-    RouteRequest, RouteResponse,
+    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
+    PutResponse, RangeRequest, RangeResponse, RouteRequest, RouteResponse,
 };
 
 pub type Id = (u64, u64);
@@ -206,6 +207,13 @@ impl MetaClient {
         self.router_client()?.route(req.into()).await?.try_into()
     }
 
+    /// Can be called repeatedly, the first call will delete and return the
+    /// table of routing information, the nth call can still return the
+    /// deleted route information.
+    pub async fn delete_route(&self, req: DeleteRequest) -> Result<RouteResponse> {
+        self.router_client()?.delete(req.into()).await?.try_into()
+    }
+
     /// Range gets the keys in the range from the key-value store.
     pub async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         self.store_client()?.range(req.into()).await?.try_into()
@@ -237,6 +245,14 @@ impl MetaClient {
     pub async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         self.store_client()?
             .delete_range(req.into())
+            .await?
+            .try_into()
+    }
+
+    /// MoveValue atomically renames the key to the given updated key.
+    pub async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
+        self.store_client()?
+            .move_value(req.into())
             .await?
             .try_into()
     }
@@ -449,10 +465,15 @@ mod tests {
         let res = client.create_route(req).await.unwrap();
         assert_eq!(1, res.table_routes.len());
 
-        let req = RouteRequest::new().add_table_name(table_name);
+        let req = RouteRequest::new().add_table_name(table_name.clone());
         let res = client.route(req).await.unwrap();
         // empty table_routes since no TableGlobalValue is stored by datanode
         assert!(res.table_routes.is_empty());
+
+        let req = DeleteRequest::new(table_name.clone());
+        let res = client.delete_route(req).await;
+        // empty table_routes since no TableGlobalValue is stored by datanode
+        assert!(res.is_err());
     }
 
     async fn gen_data(client: &MetaClient) {
@@ -695,5 +716,35 @@ mod tests {
                 kv.take_value()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_move_value() {
+        let client = mocks::mock_client_with_memstore().await;
+        let req = MoveValueRequest::new("from_key", "to_key");
+        let res = client.move_value(req).await;
+        assert!(res.unwrap().take_kv().is_none());
+
+        let req = PutRequest::new()
+            .with_key(b"to_key".to_vec())
+            .with_value(b"value".to_vec());
+        let _ = client.put(req).await;
+
+        let req = MoveValueRequest::new("from_key", "to_key");
+        let res = client.move_value(req).await;
+        let mut kv = res.unwrap().take_kv().unwrap();
+        assert_eq!(b"to_key".to_vec(), kv.take_key());
+        assert_eq!(b"value".to_vec(), kv.take_value());
+
+        let req = PutRequest::new()
+            .with_key(b"from_key".to_vec())
+            .with_value(b"value2".to_vec());
+        let _ = client.put(req).await;
+
+        let req = MoveValueRequest::new("from_key", "to_key");
+        let res = client.move_value(req).await;
+        let mut kv = res.unwrap().take_kv().unwrap();
+        assert_eq!(b"from_key".to_vec(), kv.take_key());
+        assert_eq!(b"value2".to_vec(), kv.take_value());
     }
 }

@@ -24,6 +24,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::error;
 use crate::error::Result;
 
+pub(crate) const REMOVED_PREFIX: &str = "__removed";
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
 pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
 pub(crate) const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
@@ -149,6 +150,7 @@ impl<'a> TableRouteKey<'a> {
         }
     }
 
+    #[inline]
     pub fn prefix(&self) -> String {
         format!(
             "{}-{}-{}-{}",
@@ -156,8 +158,14 @@ impl<'a> TableRouteKey<'a> {
         )
     }
 
+    #[inline]
     pub fn key(&self) -> String {
         format!("{}-{}", self.prefix(), self.table_id)
+    }
+
+    #[inline]
+    pub fn removed_key(&self) -> String {
+        format!("{}-{}", REMOVED_PREFIX, self.key())
     }
 }
 

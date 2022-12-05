@@ -123,6 +123,9 @@ pub enum Error {
 
     #[snafu(display("MetaSrv has no leader at this moment"))]
     NoLeader { backtrace: Backtrace },
+
+    #[snafu(display("Table {} not found", name))]
+    TableNotFound { name: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -163,6 +166,7 @@ impl ErrorExt for Error {
             | Error::TableRouteNotFound { .. }
             | Error::NextSequence { .. }
             | Error::InvalidTxnResult { .. } => StatusCode::Unexpected,
+            Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
         }
     }

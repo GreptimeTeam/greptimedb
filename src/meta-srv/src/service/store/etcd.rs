@@ -16,10 +16,11 @@ use std::sync::Arc;
 
 use api::v1::meta::{
     BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, KeyValue, PutRequest, PutResponse, RangeRequest,
-    RangeResponse, ResponseHeader,
+    DeleteRangeRequest, DeleteRangeResponse, KeyValue, MoveValueRequest, MoveValueResponse,
+    PutRequest, PutResponse, RangeRequest, RangeResponse, ResponseHeader,
 };
 use common_error::prelude::*;
+use common_telemetry::warn;
 use etcd_client::{
     Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
 };
@@ -226,6 +227,85 @@ impl KvStore for EtcdStore {
             prev_kvs,
         })
     }
+
+    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
+        let MoveValue {
+            cluster_id,
+            from_key,
+            to_key,
+            options,
+        } = req.try_into()?;
+
+        let mut client = self.client.kv_client();
+
+        let kv = 'success: loop {
+            let res = client
+                .get(from_key.clone(), None)
+                .await
+                .context(error::EtcdFailedSnafu)?;
+
+            let txn = if res.count() == 0 {
+                let txn = Txn::new().when(vec![Compare::create_revision(
+                    from_key.clone(),
+                    CompareOp::Equal,
+                    0,
+                )]);
+                let get_op = vec![TxnOp::get(to_key.clone(), None)];
+                txn.and_then(get_op)
+            } else {
+                let value = res.kvs()[0].value().to_owned();
+                let txn = Txn::new().when(vec![Compare::value(
+                    from_key.clone(),
+                    CompareOp::Equal,
+                    value.clone(),
+                )]);
+                let move_op = vec![
+                    TxnOp::delete(from_key.clone(), options.clone()),
+                    TxnOp::put(to_key.clone(), value, None),
+                ];
+                txn.and_then(move_op)
+            };
+
+            let txn_res = client.txn(txn).await.context(error::EtcdFailedSnafu)?;
+
+            if !txn_res.succeeded() {
+                warn!(
+                    "Failed to move {:?} to {:?}, try again...",
+                    from_key, to_key
+                );
+                continue;
+            }
+
+            for op_res in txn_res.op_responses() {
+                match op_res {
+                    TxnOpResponse::Get(get_res) => {
+                        if get_res.count() == 0 {
+                            // do not exists
+                            break 'success None;
+                        } else {
+                            ensure!(
+                                get_res.count() == 1,
+                                error::InvalidTxnResultSnafu {
+                                    err_msg: format!(
+                                        "expect 1 response, actual {}",
+                                        get_res.count()
+                                    )
+                                }
+                            );
+                            break 'success Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])));
+                        }
+                    }
+                    TxnOpResponse::Delete(del_res) => {
+                        break 'success Some(KeyValue::from(KvPair::new(&del_res.prev_kvs()[0])))
+                    }
+                    _ => {}
+                }
+            }
+        };
+
+        let header = Some(ResponseHeader::success(cluster_id));
+        Ok(MoveValueResponse { header, kv })
+    }
 }
 
 struct Get {
@@ -392,6 +472,32 @@ impl TryFrom<DeleteRangeRequest> for Delete {
     }
 }
 
+struct MoveValue {
+    cluster_id: u64,
+    from_key: Vec<u8>,
+    to_key: Vec<u8>,
+    options: Option<DeleteOptions>,
+}
+
+impl TryFrom<MoveValueRequest> for MoveValue {
+    type Error = error::Error;
+
+    fn try_from(req: MoveValueRequest) -> Result<Self> {
+        let MoveValueRequest {
+            header,
+            from_key,
+            to_key,
+        } = req;
+
+        Ok(MoveValue {
+            cluster_id: header.map_or(0, |h| h.cluster_id),
+            from_key,
+            to_key,
+            options: Some(DeleteOptions::default().with_prev_key()),
+        })
+    }
+}
+
 struct KvPair<'a>(&'a etcd_client::KeyValue);
 
 impl<'a> KvPair<'a> {
@@ -495,5 +601,20 @@ mod tests {
 
         assert_eq!(b"test_key".to_vec(), delete.key);
         assert!(delete.options.is_some());
+    }
+
+    #[test]
+    fn test_parse_move_value() {
+        let req = MoveValueRequest {
+            from_key: b"test_from_key".to_vec(),
+            to_key: b"test_to_key".to_vec(),
+            ..Default::default()
+        };
+
+        let move_value: MoveValue = req.try_into().unwrap();
+
+        assert_eq!(b"test_from_key".to_vec(), move_value.from_key);
+        assert_eq!(b"test_to_key".to_vec(), move_value.to_key);
+        assert!(move_value.options.is_some());
     }
 }
