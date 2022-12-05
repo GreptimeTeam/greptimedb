@@ -13,7 +13,7 @@ path = "src/bin/greptime.rs"
 clap = { version = "3.1", features = ["derive"] }
 common-error = { path = "../common/error" }
 common-telemetry = { path = "../common/telemetry", features = [
-    "deadlock_detection",
+  "deadlock_detection",
 ] }
 datanode = { path = "../datanode" }
 frontend = { path = "../frontend" }

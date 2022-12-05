@@ -16,7 +16,7 @@ common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-time = { path = "../common/time" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
-    "simd",
+  "simd",
 ] }
 datatypes = { path = "../datatypes" }
 enum_dispatch = "0.3"

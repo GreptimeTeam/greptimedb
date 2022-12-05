@@ -16,7 +16,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
-    "simd",
+  "simd",
 ] }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
 datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
