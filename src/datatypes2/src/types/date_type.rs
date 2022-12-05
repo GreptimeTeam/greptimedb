@@ -49,6 +49,10 @@ impl DataType for DateType {
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(DateVectorBuilder::with_capacity(capacity))
     }
+
+    fn is_timestamp_compatible(&self) -> bool {
+        false
+    }
 }
 
 impl LogicalPrimitiveType for DateType {
