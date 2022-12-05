@@ -49,6 +49,23 @@ jobs:
       - name: Run cargo check
         run: cargo check --workspace --all-targets
 
+  toml:
+    name: Toml Check
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Install taplo
+        run: cargo install taplo-cli --version ^0.8 --locked
+      - name: Run taplo
+        run: taplo format --check --option "indent_string=    "
+
   # Use coverage to run test.
   # test:
   #   name: Test Suite

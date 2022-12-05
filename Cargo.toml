@@ -35,9 +35,9 @@ members = [
     "src/storage",
     "src/store-api",
     "src/table",
-    "tests-integration"
-,
-    "tests/runner"]
+    "tests-integration",
+    "tests/runner",
+]
 
 [profile.release]
 debug = true

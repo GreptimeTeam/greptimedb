@@ -7,16 +7,16 @@ license = "Apache-2.0"
 [features]
 default = ["python"]
 python = [
-  "dep:datafusion",
-  "dep:datafusion-expr",
-  "dep:datafusion-physical-expr",
-  "dep:rustpython-vm",
-  "dep:rustpython-parser",
-  "dep:rustpython-compiler",
-  "dep:rustpython-compiler-core",
-  "dep:rustpython-bytecode",
-  "dep:rustpython-ast",
-  "dep:paste",
+    "dep:datafusion",
+    "dep:datafusion-expr",
+    "dep:datafusion-physical-expr",
+    "dep:rustpython-vm",
+    "dep:rustpython-parser",
+    "dep:rustpython-compiler",
+    "dep:rustpython-compiler-core",
+    "dep:rustpython-bytecode",
+    "dep:rustpython-ast",
+    "dep:paste",
 ]
 
 [dependencies]
@@ -45,8 +45,8 @@ rustpython-compiler = { git = "https://github.com/RustPython/RustPython", option
 rustpython-compiler-core = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
 rustpython-parser = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d" }
 rustpython-vm = { git = "https://github.com/RustPython/RustPython", optional = true, rev = "02a1d1d", features = [
-  "default",
-  "freeze-stdlib",
+    "default",
+    "freeze-stdlib",
 ] }
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
