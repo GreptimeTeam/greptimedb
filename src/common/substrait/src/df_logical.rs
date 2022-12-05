@@ -476,9 +476,9 @@ impl DFLogicalSubstraitConvertor {
     }
 }
 
-fn same_schema_without_metadata(a: &ArrowSchemaRef, b: &ArrowSchemaRef) -> bool {
-    a.fields.len() == b.fields.len()
-        && a.fields.iter().zip(b.fields.iter()).all(|(x, y)| {
+fn same_schema_without_metadata(lhs: &ArrowSchemaRef, rhs: &ArrowSchemaRef) -> bool {
+    lhs.fields.len() == rhs.fields.len()
+        && lhs.fields.iter().zip(rhs.fields.iter()).all(|(x, y)| {
             x.name == y.name && x.data_type == y.data_type && x.is_nullable == y.is_nullable
         })
 }
