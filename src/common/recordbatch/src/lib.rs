@@ -81,13 +81,9 @@ impl RecordBatches {
     }
 
     pub async fn try_collect(stream: SendableRecordBatchStream) -> Result<Self> {
+        let schema = stream.schema();
         let batches = stream.try_collect::<Vec<_>>().await?;
-        if batches.is_empty() {
-            Ok(Self::empty())
-        } else {
-            let schema = batches[0].schema.clone();
-            Self::try_new(schema, batches)
-        }
+        Ok(Self { schema, batches })
     }
 
     #[inline]

@@ -30,7 +30,7 @@ impl Default for QueryContext {
 }
 
 impl QueryContext {
-    pub fn new_ref() -> QueryContextRef {
+    pub fn arc() -> QueryContextRef {
         Arc::new(QueryContext::new())
     }
 

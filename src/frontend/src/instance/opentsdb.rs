@@ -47,13 +47,12 @@ impl OpentsdbProtocolHandler for Instance {
 impl Instance {
     async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> server_error::Result<()> {
         let insert_expr = data_point.as_grpc_insert();
-        let _ = self
-            .handle_insert(insert_expr)
+        self.handle_insert(insert_expr)
             .await
             .map_err(BoxedError::new)
             .with_context(|_| server_error::ExecuteQuerySnafu {
                 query: format!("{:?}", data_point),
-            });
+            })?;
         Ok(())
     }
 }

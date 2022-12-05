@@ -583,7 +583,7 @@ ENGINE=mito",
 
         let sql = "create database test_show_databases";
         let output = dist_instance
-            .handle_sql(sql, QueryContext::new_ref())
+            .handle_sql(sql, QueryContext::arc())
             .await
             .unwrap();
         match output {
@@ -593,7 +593,7 @@ ENGINE=mito",
 
         let sql = "show databases";
         let output = dist_instance
-            .handle_sql(sql, QueryContext::new_ref())
+            .handle_sql(sql, QueryContext::arc())
             .await
             .unwrap();
         match output {
@@ -628,7 +628,7 @@ ENGINE=mito",
 
         let sql = "create database test_show_tables";
         dist_instance
-            .handle_sql(sql, QueryContext::new_ref())
+            .handle_sql(sql, QueryContext::arc())
             .await
             .unwrap();
 
@@ -646,16 +646,13 @@ ENGINE=mito",
             )
             ENGINE=mito";
         dist_instance
-            .handle_sql(sql, QueryContext::new_ref())
+            .handle_sql(sql, QueryContext::arc())
             .await
             .unwrap();
 
         async fn assert_show_tables(instance: SqlQueryHandlerRef) {
             let sql = "show tables in test_show_tables";
-            let output = instance
-                .do_query(sql, QueryContext::new_ref())
-                .await
-                .unwrap();
+            let output = instance.do_query(sql, QueryContext::arc()).await.unwrap();
             match output {
                 Output::RecordBatches(r) => {
                     let expected = vec![
