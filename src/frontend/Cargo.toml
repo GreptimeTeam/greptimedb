@@ -21,7 +21,6 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-common-insert = { path = "../common/insert" }
 datafusion = "14.0.0"
 datafusion-common = "14.0.0"
 datafusion-expr = "14.0.0"
