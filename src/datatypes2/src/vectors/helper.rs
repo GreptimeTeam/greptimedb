@@ -18,7 +18,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef};
-use arrow::datatypes::DataType as ArrowDataType;
+use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 use snafu::OptionExt;
 
 use crate::error::{self, Result};
@@ -26,7 +26,9 @@ use crate::scalars::Scalar;
 use crate::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
     Int16Vector, Int32Vector, Int64Vector, Int8Vector, ListVector, MutableVector, NullVector,
-    StringVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
+    StringVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, UInt16Vector, UInt32Vector, UInt64Vector,
+    UInt8Vector, Vector, VectorRef,
 };
 
 pub struct Helper;
@@ -198,9 +200,18 @@ impl Helper {
             ArrowDataType::Date32 => Arc::new(DateVector::try_from_arrow_array(array)?),
             ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
-            // ArrowDataType::Timestamp(_, _) => {
-            //     Arc::new(TimestampVector::try_from_arrow_array(array)?)
-            // }
+            ArrowDataType::Timestamp(unit, _) => match unit {
+                TimeUnit::Second => Arc::new(TimestampSecondVector::try_from_arrow_array(array)?),
+                TimeUnit::Millisecond => {
+                    Arc::new(TimestampMillisecondVector::try_from_arrow_array(array)?)
+                }
+                TimeUnit::Microsecond => {
+                    Arc::new(TimestampMicrosecondVector::try_from_arrow_array(array)?)
+                }
+                TimeUnit::Nanosecond => {
+                    Arc::new(TimestampNanosecondVector::try_from_arrow_array(array)?)
+                }
+            },
             _ => unimplemented!("Arrow array datatype: {:?}", array.as_ref().data_type()),
         })
     }
@@ -243,17 +254,17 @@ mod tests {
         assert_eq!(Value::Int32(3), vectors[2].get(0));
     }
 
-    // #[test]
-    // fn test_try_into_date_vector() {
-    //     let vector = DateVector::from(vec![Some(1), Some(2), None]);
-    //     let arrow_array = vector.to_arrow_array();
-    //     assert_eq!(&arrow::datatypes::DataType::Date32, arrow_array.data_type());
-    //     let vector_converted = Helper::try_into_vector(arrow_array).unwrap();
-    //     assert_eq!(vector.len(), vector_converted.len());
-    //     for i in 0..vector_converted.len() {
-    //         assert_eq!(vector.get(i), vector_converted.get(i));
-    //     }
-    // }
+    #[test]
+    fn test_try_into_date_vector() {
+        let vector = DateVector::from(vec![Some(1), Some(2), None]);
+        let arrow_array = vector.to_arrow_array();
+        assert_eq!(&arrow::datatypes::DataType::Date32, arrow_array.data_type());
+        let vector_converted = Helper::try_into_vector(arrow_array).unwrap();
+        assert_eq!(vector.len(), vector_converted.len());
+        for i in 0..vector_converted.len() {
+            assert_eq!(vector.get(i), vector_converted.get(i));
+        }
+    }
 
     // #[test]
     // fn test_try_from_scalar_date_value() {

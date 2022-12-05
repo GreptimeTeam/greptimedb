@@ -298,27 +298,6 @@ impl<'a> ScalarRef<'a> for DateTime {
     }
 }
 
-// impl Scalar for Timestamp {
-//     type VectorType = TimestampVector;
-//     type RefType<'a> = Timestamp;
-
-//     fn as_scalar_ref(&self) -> Self::RefType<'_> {
-//         *self
-//     }
-
-//     fn upcast_gat<'short, 'long: 'short>(long: Self::RefType<'long>) -> Self::RefType<'short> {
-//         long
-//     }
-// }
-
-// impl<'a> ScalarRef<'a> for Timestamp {
-//     type ScalarType = Timestamp;
-
-//     fn to_owned_scalar(&self) -> Self::ScalarType {
-//         *self
-//     }
-// }
-
 impl Scalar for ListValue {
     type VectorType = ListVector;
     type RefType<'a> = ListValueRef<'a>;
@@ -355,7 +334,8 @@ impl<'a> ScalarRef<'a> for ListValueRef<'a> {
 mod tests {
     use super::*;
     use crate::data_type::ConcreteDataType;
-    use crate::vectors::{BinaryVector, Int32Vector, ListVectorBuilder};
+    use crate::timestamp::TimestampSecond;
+    use crate::vectors::{BinaryVector, Int32Vector, ListVectorBuilder, TimestampSecondVector};
 
     fn build_vector_from_slice<T: ScalarVector>(items: &[Option<T::RefItem<'_>>]) -> T {
         let mut builder = T::Builder::with_capacity(items.len());
@@ -449,13 +429,13 @@ mod tests {
         assert_eq!(list_value, ref_on_vec.to_owned_scalar());
     }
 
-    // #[test]
-    // fn test_build_timestamp_vector() {
-    //     let expect: Vec<Option<Timestamp>> = vec![Some(10.into()), None, Some(42.into())];
-    //     let vector: TimestampVector = build_vector_from_slice(&expect);
-    //     assert_vector_eq(&expect, &vector);
-    //     let val = vector.get_data(0).unwrap();
-    //     assert_eq!(val, val.as_scalar_ref());
-    //     assert_eq!(10, val.to_owned_scalar().value());
-    // }
+    #[test]
+    fn test_build_timestamp_vector() {
+        let expect: Vec<Option<TimestampSecond>> = vec![Some(10.into()), None, Some(42.into())];
+        let vector: TimestampSecondVector = build_vector_from_slice(&expect);
+        assert_vector_eq(&expect, &vector);
+        let val = vector.get_data(0).unwrap();
+        assert_eq!(val, val.as_scalar_ref());
+        assert_eq!(TimestampSecond::from(10), val.to_owned_scalar());
+    }
 }

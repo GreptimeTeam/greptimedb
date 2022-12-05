@@ -34,7 +34,13 @@ pub(crate) use filter_non_constant;
 mod tests {
     use std::sync::Arc;
 
+    use common_time::{Date, DateTime};
+
     use crate::scalars::ScalarVector;
+    use crate::timestamp::{
+        TimestampMicrosecond, TimestampMillisecond, TimestampNanosecond, TimestampSecond,
+    };
+    use crate::types::WrapperType;
     use crate::vectors::constant::ConstantVector;
     use crate::vectors::{
         BooleanVector, Int32Vector, NullVector, StringVector, VectorOp, VectorRef,
@@ -107,7 +113,6 @@ mod tests {
         ($VectorType: ident, $ValueType: ident, $method: ident) => {{
             use std::sync::Arc;
 
-            use common_time::$ValueType;
             use $crate::vectors::{$VectorType, VectorRef};
 
             let v = $VectorType::from_iterator((0..5).map($ValueType::$method));
@@ -125,6 +130,18 @@ mod tests {
     fn test_filter_date_like() {
         impl_filter_date_like_test!(DateVector, Date, new);
         impl_filter_date_like_test!(DateTimeVector, DateTime, new);
-        // impl_filter_date_like_test!(TimestampVector, Timestamp, from_millis);
+
+        impl_filter_date_like_test!(TimestampSecondVector, TimestampSecond, from_native);
+        impl_filter_date_like_test!(
+            TimestampMillisecondVector,
+            TimestampMillisecond,
+            from_native
+        );
+        impl_filter_date_like_test!(
+            TimestampMicrosecondVector,
+            TimestampMicrosecond,
+            from_native
+        );
+        impl_filter_date_like_test!(TimestampNanosecondVector, TimestampNanosecond, from_native);
     }
 }
