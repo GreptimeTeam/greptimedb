@@ -99,6 +99,12 @@ pub enum Error {
         storage_schema: datafusion::arrow::datatypes::SchemaRef,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to convert DataFusion schema, source: {}", source))]
+    ConvertDfSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -120,6 +126,7 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. }
             | Error::SchemaNotMatch { .. } => StatusCode::InvalidArguments,
             Error::DFInternal { .. } | Error::Internal { .. } => StatusCode::Internal,
+            Error::ConvertDfSchema { source } => source.status_code(),
         }
     }
 

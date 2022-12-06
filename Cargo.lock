@@ -1283,7 +1283,6 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
- "table",
  "tempdir",
  "tokio",
 ]
@@ -3357,6 +3356,7 @@ version = "0.1.0"
 dependencies = [
  "api",
  "async-trait",
+ "catalog",
  "common-base",
  "common-catalog",
  "common-error",
@@ -6294,6 +6294,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "common-catalog",
  "common-error",
  "common-query",
  "common-recordbatch",

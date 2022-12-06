@@ -17,13 +17,16 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use catalog::error::{self as catalog_err, InvalidCatalogValueSnafu};
+use catalog::helper::{
+    build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
+    TableGlobalKey, TableGlobalValue,
+};
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
     CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
     RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider,
     SchemaProviderRef,
 };
-use common_catalog::{CatalogKey, SchemaKey, TableGlobalKey, TableGlobalValue};
 use futures::StreamExt;
 use meta_client::rpc::TableName;
 use snafu::prelude::*;
@@ -130,7 +133,7 @@ impl CatalogList for FrontendCatalogManager {
         let backend = self.backend.clone();
         let res = std::thread::spawn(|| {
             common_runtime::block_on_read(async move {
-                let key = common_catalog::build_catalog_prefix();
+                let key = build_catalog_prefix();
                 let mut iter = backend.range(key.as_bytes());
                 let mut res = HashSet::new();
 
@@ -180,7 +183,7 @@ impl CatalogProvider for FrontendCatalogProvider {
         let catalog_name = self.catalog_name.clone();
         let res = std::thread::spawn(|| {
             common_runtime::block_on_read(async move {
-                let key = common_catalog::build_schema_prefix(&catalog_name);
+                let key = build_schema_prefix(&catalog_name);
                 let mut iter = backend.range(key.as_bytes());
                 let mut res = HashSet::new();
 
@@ -242,7 +245,7 @@ impl SchemaProvider for FrontendSchemaProvider {
 
         std::thread::spawn(|| {
             common_runtime::block_on_read(async move {
-                let key = common_catalog::build_table_global_prefix(catalog_name, schema_name);
+                let key = build_table_global_prefix(catalog_name, schema_name);
                 let mut iter = backend.range(key.as_bytes());
                 let mut res = HashSet::new();
 

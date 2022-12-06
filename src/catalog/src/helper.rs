@@ -15,18 +15,19 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
+use common_catalog::error::{
+    DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu, SerializeCatalogEntryValueSnafu,
+};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId, TableVersion};
 
-use crate::consts::{
-    CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_GLOBAL_KEY_PREFIX, TABLE_REGIONAL_KEY_PREFIX,
-};
-use crate::error::{
-    DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu, SerializeCatalogEntryValueSnafu,
-};
+const CATALOG_KEY_PREFIX: &str = "__c";
+const SCHEMA_KEY_PREFIX: &str = "__s";
+const TABLE_GLOBAL_KEY_PREFIX: &str = "__tg";
+const TABLE_REGIONAL_KEY_PREFIX: &str = "__tr";
 
 const ALPHANUMERICS_NAME_PATTERN: &str = "[a-zA-Z_][a-zA-Z0-9_]*";
 

@@ -18,12 +18,11 @@ use bytes::{Buf, Bytes, BytesMut};
 use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use common_telemetry::debug;
-use datafusion::arrow::datatypes::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
+use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datafusion::datasource::TableProvider;
 use datafusion::logical_plan::plan::Filter;
-use datafusion::logical_plan::{DFSchemaRef, LogicalPlan, TableScan, ToDFSchema};
+use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
 use datafusion::physical_plan::project_schema;
-use datatypes::schema::Schema;
 use prost::Message;
 use snafu::{ensure, OptionExt, ResultExt};
 use substrait_proto::protobuf::expression::mask_expression::{StructItem, StructSelect};
@@ -38,7 +37,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::context::ConvertorContext;
 use crate::df_expr::{expression_from_df_expr, to_df_expr};
 use crate::error::{
-    DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, Error, InternalSnafu,
+    self, DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, Error, InternalSnafu,
     InvalidParametersSnafu, MissingFieldSnafu, SchemaNotMatchSnafu, TableNotFoundSnafu,
     UnknownPlanSnafu, UnsupportedExprSnafu, UnsupportedPlanSnafu,
 };
@@ -139,7 +138,10 @@ impl DFLogicalSubstraitConvertor {
                 let schema = ctx.df_schema().context(InvalidParametersSnafu {
                     reason: "the underlying TableScan plan should have included a table schema",
                 })?;
-                let schema = try_convert_df_schema(schema)?;
+                let schema = schema
+                    .clone()
+                    .try_into()
+                    .context(error::ConvertDfSchemaSnafu)?;
                 let predicate = to_df_expr(ctx, *condition, &schema)?;
 
                 LogicalPlan::Filter(Filter { predicate, input })
@@ -303,7 +305,11 @@ impl DFLogicalSubstraitConvertor {
                     self.logical_plan_to_rel(ctx, filter.input.clone())?,
                 ));
 
-                let schema = try_convert_df_schema(plan.schema())?;
+                let schema = plan
+                    .schema()
+                    .clone()
+                    .try_into()
+                    .context(error::ConvertDfSchemaSnafu)?;
                 let condition = Some(Box::new(expression_from_df_expr(
                     ctx,
                     &filter.predicate,
@@ -481,17 +487,6 @@ fn same_schema_without_metadata(lhs: &ArrowSchemaRef, rhs: &ArrowSchemaRef) -> b
         && lhs.fields.iter().zip(rhs.fields.iter()).all(|(x, y)| {
             x.name == y.name && x.data_type == y.data_type && x.is_nullable == y.is_nullable
         })
-}
-
-fn try_convert_df_schema(df_schema: &DFSchemaRef) -> Result<Schema, Error> {
-    #[allow(clippy::needless_borrow)]
-    let arrow_schema: ArrowSchema = (&**df_schema).into();
-
-    let schema: Schema = arrow_schema
-        .try_into()
-        .map_err(BoxedError::new)
-        .context(InternalSnafu)?;
-    Ok(schema)
 }
 
 #[cfg(test)]
