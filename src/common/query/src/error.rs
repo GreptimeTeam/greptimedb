@@ -24,7 +24,7 @@ use statrs::StatsError;
 common_error::define_opaque_error!(Error);
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
+#[snafu(visibility(pub(crate)))]
 pub(crate) enum InnerError {
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
