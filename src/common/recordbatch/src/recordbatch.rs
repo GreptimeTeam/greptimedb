@@ -63,7 +63,7 @@ impl Serialize for RecordBatch {
         S: Serializer,
     {
         let mut s = serializer.serialize_struct("record", 2)?;
-        s.serialize_field("schema", &self.schema.arrow_schema())?;
+        s.serialize_field("schema", &**self.schema.arrow_schema())?;
 
         let df_columns = self.df_recordbatch.columns();
 

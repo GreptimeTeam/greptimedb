@@ -74,7 +74,8 @@ impl ErrorExt for InnerError {
 
             InnerError::DataTypes { .. }
             | InnerError::CreateRecordBatches { .. }
-            | InnerError::PollStream { .. } => StatusCode::Internal,
+            | InnerError::PollStream { .. }
+            | InnerError::Format { .. } => StatusCode::Internal,
 
             InnerError::External { source } => source.status_code(),
 

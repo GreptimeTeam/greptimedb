@@ -64,7 +64,7 @@ impl Stream for DfRecordBatchStreamAdapter {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(recordbatch)) => match recordbatch {
                 Ok(recordbatch) => Poll::Ready(Some(Ok(recordbatch.df_recordbatch))),
-                Err(e) => Poll::Ready(Some(Err(ArrowError::External(Box::new(e))))),
+                Err(e) => Poll::Ready(Some(Err(ArrowError::ExternalError(Box::new(e))))),
             },
             Poll::Ready(None) => Poll::Ready(None),
         }
