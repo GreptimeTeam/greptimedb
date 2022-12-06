@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_is_timestamp() {
-        assert!(ConcreteDataType::timestamp_millisecond_datatype().is_timestamp());
+        assert!(ConcreteDataType::timestamp_millis_datatype().is_timestamp());
         assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Second).is_timestamp());
         assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond).is_timestamp());
         assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond).is_timestamp());

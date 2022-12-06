@@ -70,7 +70,7 @@ impl TimestampVector {
 
 impl Vector for TimestampVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::timestamp_millisecond_datatype()
+        ConcreteDataType::timestamp_millis_datatype()
     }
 
     fn vector_type_name(&self) -> String {
