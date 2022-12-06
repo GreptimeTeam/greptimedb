@@ -24,8 +24,8 @@ use statrs::StatsError;
 common_error::define_opaque_error!(Error);
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum InnerError {
+#[snafu(visibility(pub(crate)))]
+pub(crate) enum InnerError {
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
@@ -120,6 +120,12 @@ pub enum InnerError {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Query engine fail to cast value: {}", source))]
+    ToScalarValue {
+        #[snafu(backtrace)]
+        source: DataTypeError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -133,7 +139,8 @@ impl ErrorExt for InnerError {
             | InnerError::DowncastVector { .. }
             | InnerError::InvalidInputState { .. }
             | InnerError::InvalidInputCol { .. }
-            | InnerError::BadAccumulatorImpl { .. } => StatusCode::EngineExecuteQuery,
+            | InnerError::BadAccumulatorImpl { .. }
+            | InnerError::ToScalarValue { .. } => StatusCode::EngineExecuteQuery,
 
             InnerError::InvalidInputs { source, .. }
             | InnerError::IntoVector { source, .. }

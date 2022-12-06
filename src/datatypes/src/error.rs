@@ -99,6 +99,12 @@ pub enum Error {
 
     #[snafu(display("Duplicated metadata for {}", key))]
     DuplicateMeta { key: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to convert value into scalar value, reason: {}", reason))]
+    ToScalarValue {
+        reason: String,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {

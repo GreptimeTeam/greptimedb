@@ -110,6 +110,7 @@ impl PhysicalPlan for PhysicalPlanAdapter {
             .collect();
         let plan = self
             .df_plan
+            .clone()
             .with_new_children(children)
             .context(error::GeneralDataFusionSnafu)?;
         Ok(Arc::new(PhysicalPlanAdapter::new(self.schema(), plan)))
