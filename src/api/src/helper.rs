@@ -15,6 +15,7 @@
 use common_base::BitVec;
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::types::TimestampType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use snafu::prelude::*;
@@ -56,7 +57,16 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             ColumnDataType::String => ConcreteDataType::string_datatype(),
             ColumnDataType::Date => ConcreteDataType::date_datatype(),
             ColumnDataType::Datetime => ConcreteDataType::datetime_datatype(),
-            ColumnDataType::Timestamp => ConcreteDataType::timestamp_millis_datatype(),
+            ColumnDataType::TimestampSecond => ConcreteDataType::timestamp_second_datatype(),
+            ColumnDataType::TimestampMillisecond => {
+                ConcreteDataType::timestamp_millisecond_datatype()
+            }
+            ColumnDataType::TimestampMicrosecond => {
+                ConcreteDataType::timestamp_microsecond_datatype()
+            }
+            ColumnDataType::TimestampNanosecond => {
+                ConcreteDataType::timestamp_nanosecond_datatype()
+            }
         }
     }
 }
@@ -81,7 +91,12 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             ConcreteDataType::String(_) => ColumnDataType::String,
             ConcreteDataType::Date(_) => ColumnDataType::Date,
             ConcreteDataType::DateTime(_) => ColumnDataType::Datetime,
-            ConcreteDataType::Timestamp(_) => ColumnDataType::Timestamp,
+            ConcreteDataType::Timestamp(unit) => match unit {
+                TimestampType::Second(_) => ColumnDataType::TimestampSecond,
+                TimestampType::Millisecond(_) => ColumnDataType::TimestampMillisecond,
+                TimestampType::Microsecond(_) => ColumnDataType::TimestampMicrosecond,
+                TimestampType::Nanosecond(_) => ColumnDataType::TimestampNanosecond,
+            },
             ConcreteDataType::Null(_) | ConcreteDataType::List(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
             }
@@ -153,8 +168,20 @@ impl Values {
                 datetime_values: Vec::with_capacity(capacity),
                 ..Default::default()
             },
-            ColumnDataType::Timestamp => Values {
-                ts_millis_values: Vec::with_capacity(capacity),
+            ColumnDataType::TimestampSecond => Values {
+                ts_second_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::TimestampMillisecond => Values {
+                ts_millisecond_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::TimestampMicrosecond => Values {
+                ts_microsecond_values: Vec::with_capacity(capacity),
+                ..Default::default()
+            },
+            ColumnDataType::TimestampNanosecond => Values {
+                ts_nanosecond_values: Vec::with_capacity(capacity),
                 ..Default::default()
             },
         }
@@ -187,9 +214,20 @@ impl Column {
             Value::Binary(val) => values.binary_values.push(val.to_vec()),
             Value::Date(val) => values.date_values.push(val.val()),
             Value::DateTime(val) => values.datetime_values.push(val.val()),
-            Value::Timestamp(val) => values
-                .ts_millis_values
-                .push(val.convert_to(TimeUnit::Millisecond)),
+            Value::Timestamp(val) => match val.unit() {
+                TimeUnit::Second => values
+                    .ts_second_values
+                    .push(val.convert_to(TimeUnit::Millisecond)),
+                TimeUnit::Millisecond => values
+                    .ts_millisecond_values
+                    .push(val.convert_to(TimeUnit::Millisecond)),
+                TimeUnit::Microsecond => values
+                    .ts_microsecond_values
+                    .push(val.convert_to(TimeUnit::Millisecond)),
+                TimeUnit::Nanosecond => values
+                    .ts_nanosecond_values
+                    .push(val.convert_to(TimeUnit::Millisecond)),
+            },
             Value::List(_) => unreachable!(),
         });
         self.null_mask = null_mask.into_vec();
@@ -258,8 +296,8 @@ mod tests {
         let values = values.datetime_values;
         assert_eq!(2, values.capacity());
 
-        let values = Values::with_capacity(ColumnDataType::Timestamp, 2);
-        let values = values.ts_millis_values;
+        let values = Values::with_capacity(ColumnDataType::TimestampMillisecond, 2);
+        let values = values.ts_millisecond_values;
         assert_eq!(2, values.capacity());
     }
 
@@ -326,8 +364,8 @@ mod tests {
             ColumnDataTypeWrapper(ColumnDataType::Datetime).into()
         );
         assert_eq!(
-            ConcreteDataType::timestamp_millis_datatype(),
-            ColumnDataTypeWrapper(ColumnDataType::Timestamp).into()
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            ColumnDataTypeWrapper(ColumnDataType::TimestampMillisecond).into()
         );
     }
 
@@ -394,8 +432,8 @@ mod tests {
             ConcreteDataType::datetime_datatype().try_into().unwrap()
         );
         assert_eq!(
-            ColumnDataTypeWrapper(ColumnDataType::Timestamp),
-            ConcreteDataType::timestamp_millis_datatype()
+            ColumnDataTypeWrapper(ColumnDataType::TimestampMillisecond),
+            ConcreteDataType::timestamp_millisecond_datatype()
                 .try_into()
                 .unwrap()
         );

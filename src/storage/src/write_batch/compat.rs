@@ -110,8 +110,12 @@ mod tests {
     ) -> SchemaBuilder {
         let mut column_schemas = vec![
             ColumnSchema::new("k0", ConcreteDataType::int32_datatype(), false),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
-                .with_time_index(true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
         ];
 
         if let Some(v0_constraint) = v0_constraint {

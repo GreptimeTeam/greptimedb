@@ -161,7 +161,7 @@ fn build_system_catalog_schema() -> Schema {
         ),
         ColumnSchema::new(
             "timestamp".to_string(),
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         )
         .with_time_index(true),
@@ -172,12 +172,12 @@ fn build_system_catalog_schema() -> Schema {
         ),
         ColumnSchema::new(
             "gmt_created".to_string(),
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         ),
         ColumnSchema::new(
             "gmt_modified".to_string(),
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         ),
     ];

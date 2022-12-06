@@ -482,8 +482,12 @@ mod tests {
     fn new_test_schema() -> Schema {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
-                .with_time_index(true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
             ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
         ];
         SchemaBuilder::try_from(column_schemas)
@@ -606,8 +610,12 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("col3", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
-                .with_time_index(true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
         ];
         let schema = Arc::new(
             SchemaBuilder::try_from(column_schemas)

@@ -14,6 +14,7 @@
 
 use core::default::Default;
 use std::cmp::Ordering;
+use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
@@ -54,6 +55,8 @@ impl Timestamp {
         self.value * self.unit.factor() / unit.factor()
     }
 
+    /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
+    /// represent, this function simply print the timestamp unit and value in plain string.
     pub fn to_iso8601_string(&self) -> String {
         let nano_factor = TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor();
 
@@ -65,8 +68,11 @@ impl Timestamp {
             nsecs += nano_factor;
         }
 
-        let datetime = Utc.timestamp(secs, nsecs as u32);
-        format!("{}", datetime.format("%Y-%m-%d %H:%M:%S%.f%z"))
+        if let LocalResult::Single(datetime) = Utc.timestamp_opt(secs, nsecs as u32) {
+            format!("{}", datetime.format("%Y-%m-%d %H:%M:%S%.f%z"))
+        } else {
+            format!("[Timestamp{}: {}]", self.unit, self.value)
+        }
     }
 }
 
@@ -166,6 +172,25 @@ pub enum TimeUnit {
     Millisecond,
     Microsecond,
     Nanosecond,
+}
+
+impl Display for TimeUnit {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeUnit::Second => {
+                write!(f, "Second")
+            }
+            TimeUnit::Millisecond => {
+                write!(f, "Millisecond")
+            }
+            TimeUnit::Microsecond => {
+                write!(f, "Microsecond")
+            }
+            TimeUnit::Nanosecond => {
+                write!(f, "Nanosecond")
+            }
+        }
+    }
 }
 
 impl TimeUnit {

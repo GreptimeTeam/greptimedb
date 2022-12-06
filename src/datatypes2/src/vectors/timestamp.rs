@@ -70,7 +70,7 @@ impl TimestampVector {
 
 impl Vector for TimestampVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::timestamp_millis_datatype()
+        ConcreteDataType::timestamp_millisecond_datatype()
     }
 
     fn vector_type_name(&self) -> String {
@@ -192,7 +192,7 @@ pub struct TimestampVectorBuilder {
 
 impl MutableVector for TimestampVectorBuilder {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::timestamp_millis_datatype()
+        ConcreteDataType::timestamp_millisecond_datatype()
     }
 
     fn len(&self) -> usize {
@@ -283,7 +283,7 @@ mod tests {
 
         let vector = builder.finish();
         assert_eq!(
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             vector.data_type()
         );
         assert_eq!(3, vector.len());

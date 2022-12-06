@@ -217,7 +217,7 @@ mod tests {
     fn test_validate_function_constraint() {
         let constraint = ColumnDefaultConstraint::Function(CURRENT_TIMESTAMP.to_string());
         constraint
-            .validate(&ConcreteDataType::timestamp_millis_datatype(), false)
+            .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
             .unwrap();
         constraint
             .validate(&ConcreteDataType::boolean_datatype(), false)
@@ -225,7 +225,7 @@ mod tests {
 
         let constraint = ColumnDefaultConstraint::Function("hello()".to_string());
         constraint
-            .validate(&ConcreteDataType::timestamp_millis_datatype(), false)
+            .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
             .unwrap_err();
     }
 
@@ -262,7 +262,7 @@ mod tests {
     fn test_create_default_vector_by_func() {
         let constraint = ColumnDefaultConstraint::Function(CURRENT_TIMESTAMP.to_string());
         // Timestamp type.
-        let data_type = ConcreteDataType::timestamp_millis_datatype();
+        let data_type = ConcreteDataType::timestamp_millisecond_datatype();
         let v = constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap();
@@ -286,7 +286,7 @@ mod tests {
         );
 
         let constraint = ColumnDefaultConstraint::Function("no".to_string());
-        let data_type = ConcreteDataType::timestamp_millis_datatype();
+        let data_type = ConcreteDataType::timestamp_millisecond_datatype();
         constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap_err();

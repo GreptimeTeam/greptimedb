@@ -989,7 +989,7 @@ mod tests {
             &Value::DateTime(DateTime::new(1)),
         );
         check_type_and_value(
-            &ConcreteDataType::timestamp_millis_datatype(),
+            &ConcreteDataType::timestamp_millisecond_datatype(),
             &Value::Timestamp(Timestamp::from_millis(1)),
         );
     }
