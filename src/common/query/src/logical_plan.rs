@@ -148,9 +148,7 @@ mod tests {
 
         let args = vec![
             DfColumnarValue::Scalar(ScalarValue::Boolean(Some(true))),
-            DfColumnarValue::Array(Arc::new(BooleanArray::from_slice(vec![
-                true, false, false, true,
-            ]))),
+            DfColumnarValue::Array(Arc::new(BooleanArray::from(vec![true, false, false, true]))),
         ];
 
         // call the function

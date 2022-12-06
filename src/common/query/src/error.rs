@@ -234,7 +234,7 @@ mod tests {
     fn test_convert_df_recordbatch_stream_error() {
         let result: std::result::Result<i32, common_recordbatch::error::Error> =
             Err(common_recordbatch::error::InnerError::PollStream {
-                source: ArrowError::Overflow,
+                source: ArrowError::DivideByZero,
                 backtrace: Backtrace::generate(),
             }
             .into());
