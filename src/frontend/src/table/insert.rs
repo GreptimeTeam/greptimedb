@@ -107,7 +107,7 @@ pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<(Vec<Col
 
             // TODO(hl): need refactor
             let semantic_type =
-                if vector.data_type() == ConcreteDataType::timestamp_millis_datatype() {
+                if vector.data_type() == ConcreteDataType::timestamp_millisecond_datatype() {
                     SemanticType::Timestamp
                 } else {
                     SemanticType::Field

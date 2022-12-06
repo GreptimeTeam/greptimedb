@@ -183,7 +183,7 @@ async fn setup_test_instance() -> Instance {
     test_util::create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
-        ConcreteDataType::timestamp_millis_datatype(),
+        ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
     .unwrap();
@@ -337,7 +337,7 @@ async fn test_execute_show_databases_tables() {
     test_util::create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
-        ConcreteDataType::timestamp_millis_datatype(),
+        ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
     .unwrap();
@@ -417,7 +417,7 @@ async fn test_alter_table() {
     test_util::create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
-        ConcreteDataType::timestamp_millis_datatype(),
+        ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
     .unwrap();

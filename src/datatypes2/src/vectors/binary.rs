@@ -15,8 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef};
-use arrow::array::{ArrayIter, GenericByteArray};
+use arrow::array::{Array, ArrayIter, ArrayRef, GenericByteArray};
 use snafu::{OptionExt, ResultExt};
 
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};

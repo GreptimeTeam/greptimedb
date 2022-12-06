@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn test_from_arrow_timestamp() {
         assert_eq!(
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Millisecond)
         );
         assert_eq!(

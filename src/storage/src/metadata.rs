@@ -1036,12 +1036,15 @@ mod tests {
     }
 
     fn new_metadata(enable_version_column: bool) -> RegionMetadata {
-        let timestamp =
-            ColumnDescriptorBuilder::new(2, "ts", ConcreteDataType::timestamp_millis_datatype())
-                .is_nullable(false)
-                .is_time_index(true)
-                .build()
-                .unwrap();
+        let timestamp = ColumnDescriptorBuilder::new(
+            2,
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+        )
+        .is_nullable(false)
+        .is_time_index(true)
+        .build()
+        .unwrap();
         let row_key = RowKeyDescriptorBuilder::new(timestamp)
             .push_column(
                 ColumnDescriptorBuilder::new(3, "k1", ConcreteDataType::int64_datatype())

@@ -315,7 +315,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             }
             .fail(),
         },
-        SqlDataType::Timestamp => Ok(ConcreteDataType::timestamp_millis_datatype()),
+        SqlDataType::Timestamp => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -374,7 +374,7 @@ mod tests {
         );
         check_type(
             SqlDataType::Timestamp,
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
         );
     }
 
@@ -471,7 +471,7 @@ mod tests {
         match parse_string_to_value(
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
-            &ConcreteDataType::timestamp_millis_datatype(),
+            &ConcreteDataType::timestamp_millisecond_datatype(),
         )
         .unwrap()
         {

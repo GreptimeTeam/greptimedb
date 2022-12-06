@@ -40,7 +40,7 @@ impl Function for FromUnixtimeFunction {
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::timestamp_millis_datatype())
+        Ok(ConcreteDataType::timestamp_millisecond_datatype())
     }
 
     fn signature(&self) -> Signature {
@@ -96,7 +96,7 @@ mod tests {
         let f = FromUnixtimeFunction::default();
         assert_eq!("from_unixtime", f.name());
         assert_eq!(
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             f.return_type(&[]).unwrap()
         );
 
