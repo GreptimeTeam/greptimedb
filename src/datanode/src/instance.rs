@@ -45,7 +45,6 @@ use crate::error::{
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
-use crate::server::grpc::plan::PhysicalPlanner;
 use crate::sql::SqlHandler;
 
 mod grpc;
@@ -59,7 +58,6 @@ pub struct Instance {
     pub(crate) query_engine: QueryEngineRef,
     pub(crate) sql_handler: SqlHandler,
     pub(crate) catalog_manager: CatalogManagerRef,
-    pub(crate) physical_planner: PhysicalPlanner,
     pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     #[allow(unused)]
@@ -159,7 +157,6 @@ impl Instance {
                 query_engine.clone(),
             ),
             catalog_manager,
-            physical_planner: PhysicalPlanner::new(query_engine),
             script_executor,
             meta_client,
             heartbeat_task,

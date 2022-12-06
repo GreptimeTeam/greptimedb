@@ -15,7 +15,7 @@
 pub use prost::DecodeError;
 use prost::Message;
 
-use crate::v1::codec::{PhysicalPlanNode, SelectResult};
+use crate::v1::codec::SelectResult;
 use crate::v1::meta::TableRouteValue;
 
 macro_rules! impl_convert_with_bytes {
@@ -37,7 +37,6 @@ macro_rules! impl_convert_with_bytes {
 }
 
 impl_convert_with_bytes!(SelectResult);
-impl_convert_with_bytes!(PhysicalPlanNode);
 impl_convert_with_bytes!(TableRouteValue);
 
 #[cfg(test)]

@@ -29,13 +29,7 @@ message SelectExpr {
   oneof expr {
     string sql = 1;
     bytes logical_plan = 2;
-    PhysicalPlan physical_plan = 15;
   }
-}
-
-message PhysicalPlan {
-  bytes original_ql = 1;
-  bytes plan = 2;
 }
 
 message InsertExpr {

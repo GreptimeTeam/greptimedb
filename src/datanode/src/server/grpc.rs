@@ -13,4 +13,3 @@
 // limitations under the License.
 
 mod ddl;
-pub(crate) mod plan;
