@@ -168,8 +168,7 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
         let schema: SchemaRef = Arc::new(
             df_schema
                 .try_into()
-                .context(error::ConvertArrowSchemaSnafu)
-                .map_err(error::Error::from)?,
+                .context(error::ConvertArrowSchemaSnafu)?,
         );
         let children = children
             .into_iter()

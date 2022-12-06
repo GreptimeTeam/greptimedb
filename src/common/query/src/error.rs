@@ -23,17 +23,9 @@ use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
 use statrs::StatsError;
 
-common_error::define_opaque_error!(Error);
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum InnerError {
-    #[snafu(display("Fail to cast array to {:?}, source: {}", typ, source))]
-    TypeCast {
-        source: ArrowError,
-        typ: arrow::datatypes::DataType,
-    },
-
+pub enum Error {
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
@@ -135,6 +127,12 @@ pub enum InnerError {
         source: BoxedError,
     },
 
+    #[snafu(display("Fail to cast array to {:?}, source: {}", typ, source))]
+    TypeCast {
+        source: ArrowError,
+        typ: arrow::datatypes::DataType,
+    },
+
     #[snafu(display("Query engine fail to cast value: {}", source))]
     ToScalarValue {
         #[snafu(backtrace)]
@@ -144,34 +142,32 @@ pub enum InnerError {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl ErrorExt for InnerError {
+impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            InnerError::ExecuteFunction { .. }
-            | InnerError::GenerateFunction { .. }
-            | InnerError::CreateAccumulator { .. }
-            | InnerError::DowncastVector { .. }
-            | InnerError::InvalidInputState { .. }
-            | InnerError::InvalidInputCol { .. }
-            | InnerError::BadAccumulatorImpl { .. }
-            | InnerError::ToScalarValue { .. } => StatusCode::EngineExecuteQuery,
+            Error::ExecuteFunction { .. }
+            | Error::GenerateFunction { .. }
+            | Error::CreateAccumulator { .. }
+            | Error::DowncastVector { .. }
+            | Error::InvalidInputState { .. }
+            | Error::InvalidInputCol { .. }
+            | Error::BadAccumulatorImpl { .. }
+            | Error::ToScalarValue { .. } => StatusCode::EngineExecuteQuery,
 
-            InnerError::InvalidInputs { source, .. }
-            | InnerError::IntoVector { source, .. }
-            | InnerError::FromScalarValue { source }
-            | InnerError::ConvertArrowSchema { source }
-            | InnerError::FromArrowArray { source } => source.status_code(),
+            Error::InvalidInputs { source, .. }
+            | Error::IntoVector { source, .. }
+            | Error::FromScalarValue { source }
+            | Error::ConvertArrowSchema { source }
+            | Error::FromArrowArray { source } => source.status_code(),
 
-            InnerError::ExecuteRepeatedly { .. }
-            | InnerError::GeneralDataFusion { .. }
-            | InnerError::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
+            Error::ExecuteRepeatedly { .. }
+            | Error::GeneralDataFusion { .. }
+            | Error::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
 
-            InnerError::UnsupportedInputDataType { .. } | InnerError::TypeCast { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::UnsupportedInputDataType { .. } | Error::TypeCast { .. } => StatusCode::InvalidArguments,
 
-            InnerError::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
-            InnerError::ExecutePhysicalPlan { source } => source.status_code(),
+            Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
+            Error::ExecutePhysicalPlan { source } => source.status_code(),
         }
     }
 
@@ -184,12 +180,6 @@ impl ErrorExt for InnerError {
     }
 }
 
-impl From<InnerError> for Error {
-    fn from(e: InnerError) -> Error {
-        Error::new(e)
-    }
-}
-
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
@@ -198,7 +188,7 @@ impl From<Error> for DataFusionError {
 
 impl From<BoxedError> for Error {
     fn from(source: BoxedError) -> Self {
-        InnerError::ExecutePhysicalPlan { source }.into()
+        Error::ExecutePhysicalPlan { source }.into()
     }
 }
 
@@ -214,7 +204,7 @@ mod tests {
     }
 
     fn assert_error(err: &Error, code: StatusCode) {
-        let inner_err = err.as_any().downcast_ref::<InnerError>().unwrap();
+        let inner_err = err.as_any().downcast_ref::<Error>().unwrap();
         assert_eq!(code, inner_err.status_code());
         assert!(inner_err.backtrace_opt().is_some());
     }
@@ -250,14 +240,14 @@ mod tests {
             .err()
             .unwrap()
             .into();
-        assert_eq!(error.inner.status_code(), StatusCode::Unexpected);
+        assert_eq!(error.status_code(), StatusCode::Unexpected);
         assert!(error.backtrace_opt().is_some());
     }
 
     #[test]
     fn test_convert_df_recordbatch_stream_error() {
         let result: std::result::Result<i32, common_recordbatch::error::Error> =
-            Err(common_recordbatch::error::InnerError::PollStream {
+            Err(common_recordbatch::error::Error::PollStream {
                 source: ArrowError::DivideByZero,
                 backtrace: Backtrace::generate(),
             }
@@ -267,7 +257,7 @@ mod tests {
             .err()
             .unwrap()
             .into();
-        assert_eq!(error.inner.status_code(), StatusCode::Internal);
+        assert_eq!(error.status_code(), StatusCode::Internal);
         assert!(error.backtrace_opt().is_some());
     }
 
