@@ -21,4 +21,5 @@ paste = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-arrow = "26.0"
+arrow = { version = "26.0" }
+arrow-schema = { version = "26.0", features = ["serde"] }

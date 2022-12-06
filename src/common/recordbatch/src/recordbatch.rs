@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow_array::arrow_array_get;
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
@@ -22,8 +21,10 @@ use serde::{Serialize, Serializer};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
+use crate::DfRecordBatch;
 
 // TODO(yingwen): We should hold vectors in the RecordBatch.
+/// A two-dimensional batch of column-oriented data with a defined schema.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordBatch {
     pub schema: SchemaRef,
@@ -125,15 +126,14 @@ impl<'a> Iterator for RecordBatchRowIterator<'a> {
 mod tests {
     use std::sync::Arc;
 
-    use datafusion_common::field_util::SchemaExt;
-    use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datatypes::arrow::array::UInt32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-    use datatypes::prelude::*;
+    use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector, Vector};
 
     use super::*;
+    use crate::DfRecordBatch;
 
     #[test]
     fn test_new_record_batch() {

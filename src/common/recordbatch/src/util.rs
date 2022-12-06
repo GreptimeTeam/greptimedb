@@ -17,6 +17,7 @@ use futures::TryStreamExt;
 use crate::error::Result;
 use crate::{RecordBatch, SendableRecordBatchStream};
 
+/// Collect all the items from the stream into a vector of [`RecordBatch`].
 pub async fn collect(stream: SendableRecordBatchStream) -> Result<Vec<RecordBatch>> {
     stream.try_collect::<Vec<_>>().await
 }
@@ -27,8 +28,6 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
 
-    use datafusion_common::field_util::SchemaExt;
-    use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datatypes::arrow::array::UInt32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
     use datatypes::schema::{Schema, SchemaRef};
@@ -36,7 +35,7 @@ mod tests {
     use futures::Stream;
 
     use super::*;
-    use crate::RecordBatchStream;
+    use crate::{DfRecordBatch, RecordBatchStream};
 
     struct MockRecordBatchStream {
         batch: Option<RecordBatch>,

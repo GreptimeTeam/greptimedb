@@ -59,6 +59,12 @@ pub enum InnerError {
         source: datatypes::arrow::error::ArrowError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Fail to format record batch, source: {}", source))]
+    Format {
+        source: datatypes::arrow::error::ArrowError,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for InnerError {

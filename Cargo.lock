@@ -258,6 +258,9 @@ name = "arrow-schema"
 version = "26.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f9406eb7834ca6bd8350d1baa515d18b9fcec487eddacfb62f5e19511f7bd37"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "arrow-select"
@@ -2029,6 +2032,7 @@ name = "datatypes"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "arrow-schema",
  "common-base",
  "common-error",
  "common-time",

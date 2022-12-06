@@ -20,16 +20,17 @@ pub mod util;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use datafusion::arrow_print;
 use datafusion::physical_plan::memory::MemoryStream;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
+pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
+use datatypes::arrow::util::pretty;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{Schema, SchemaRef};
 use error::Result;
 use futures::task::{Context, Poll};
 use futures::Stream;
 pub use recordbatch::RecordBatch;
-use snafu::ensure;
+use snafu::{ensure, ResultExt};
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn schema(&self) -> SchemaRef;
@@ -92,17 +93,18 @@ impl RecordBatches {
         self.batches.iter()
     }
 
-    pub fn pretty_print(&self) -> String {
-        arrow_print::write(
-            &self
-                .iter()
-                .map(|x| x.df_recordbatch.clone())
-                .collect::<Vec<_>>(),
-        )
+    pub fn pretty_print(&self) -> Result<String> {
+        let df_batches = &self
+            .iter()
+            .map(|x| x.df_recordbatch.clone())
+            .collect::<Vec<_>>();
+        let result = pretty::pretty_format_batches(&df_batches).context(error::FormatSnafu)?;
+
+        Ok(result.to_string())
     }
 
     pub fn try_new(schema: SchemaRef, batches: Vec<RecordBatch>) -> Result<Self> {
-        for batch in batches.iter() {
+        for batch in &batches {
             ensure!(
                 batch.schema == schema,
                 error::CreateRecordBatchesSnafu {
@@ -236,7 +238,7 @@ mod tests {
 | 1 | hello |
 | 2 | world |
 +---+-------+";
-        assert_eq!(batches.pretty_print(), expected);
+        assert_eq!(batches.pretty_print().unwrap(), expected);
 
         assert_eq!(schema1, batches.schema());
         assert_eq!(vec![batch1], batches.take());
