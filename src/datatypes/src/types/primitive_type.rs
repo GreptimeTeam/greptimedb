@@ -30,30 +30,24 @@ use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
 /// Data types that can be used as arrow's native type.
-pub trait NativeType: ArrowNativeType + NumCast {
-    // TODO(yingwen): This associated type might be useless.
-    /// Largest numeric type this primitive type can cast to.
-    type LargestType: NativeType;
-}
+pub trait NativeType: ArrowNativeType + NumCast {}
 
 macro_rules! impl_native_type {
-    ($Type: ident, $LargestType: ident) => {
-        impl NativeType for $Type {
-            type LargestType = $LargestType;
-        }
+    ($Type: ident) => {
+        impl NativeType for $Type {}
     };
 }
 
-impl_native_type!(u8, u64);
-impl_native_type!(u16, u64);
-impl_native_type!(u32, u64);
-impl_native_type!(u64, u64);
-impl_native_type!(i8, i64);
-impl_native_type!(i16, i64);
-impl_native_type!(i32, i64);
-impl_native_type!(i64, i64);
-impl_native_type!(f32, f64);
-impl_native_type!(f64, f64);
+impl_native_type!(u8);
+impl_native_type!(u16);
+impl_native_type!(u32);
+impl_native_type!(u64);
+impl_native_type!(i8);
+impl_native_type!(i16);
+impl_native_type!(i32);
+impl_native_type!(i64);
+impl_native_type!(f32);
+impl_native_type!(f64);
 
 /// Represents the wrapper type that wraps a native type using the `newtype pattern`,
 /// such as [Date](`common_time::Date`) is a wrapper type for the underlying native
