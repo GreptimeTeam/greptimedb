@@ -340,7 +340,6 @@ fn run_builtin_fn_testcases() {
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
     let cached_vm = rustpython_vm::Interpreter::with_init(Default::default(), |vm| {
         vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
-        // this can be in `.enter()` closure, but for clearity, put it in the `with_init()`
         PyVector::make_class(&vm.ctx);
     });
     for (idx, case) in testcases.into_iter().enumerate() {
@@ -358,7 +357,7 @@ fn run_builtin_fn_testcases() {
             let code_obj = vm
                 .compile(
                     &case.script,
-                    rustpython_vm::compile::Mode::BlockExpr,
+                    rustpython_compiler_core::Mode::BlockExpr,
                     "<embedded>".to_owned(),
                 )
                 .map_err(|err| vm.new_syntax_error(&err))
@@ -466,7 +465,7 @@ fn test_vm() {
                 r#"
 from udf_builtins import *
 sin(values)"#,
-                rustpython_vm::compile::Mode::BlockExpr,
+                rustpython_compiler_core::Mode::BlockExpr,
                 "<embedded>".to_owned(),
             )
             .map_err(|err| vm.new_syntax_error(&err))

@@ -192,7 +192,7 @@ fn test_type_anno() {
 def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[ _ | None]):
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#;
-    let pyast = parser::parse(python_source, parser::Mode::Interactive).unwrap();
+    let pyast = parser::parse(python_source, parser::Mode::Interactive, "<embedded>").unwrap();
     let copr = parse_and_compile_copr(python_source);
     dbg!(copr);
 }

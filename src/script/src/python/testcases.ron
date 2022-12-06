@@ -462,5 +462,72 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64]):
         predicate: ParseIsErr(
             reason: "Expect a function definition, but found a"
         )
-    )
+    ),
+    (
+        // constant column(int)
+        name: "test_import_stdlib",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
+    vector[f32]):
+    # test if using allow list for stdlib damage unrelated module
+    from collections import deque
+    import math
+    math.ceil(0.2)
+    import string
+    return cpu + mem, 1
+"#,
+        predicate: ExecIsOk(
+            fields: [
+                (
+                    datatype: Some(Float64),
+                    is_nullable: true
+                ),
+                (
+                    datatype: Some(Float32),
+                    is_nullable: false
+                ),
+            ],
+            columns: [
+                (
+                    ty: Float64,
+                    len: 4
+                ),
+                (
+                    ty: Float32,
+                    len: 4
+                )
+            ]
+        )
+    ),
+    (
+        // constant column(int)
+        name: "test_neg_import_stdlib",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
+    vector[f32]):
+    # test if module not in allow list can't be imported
+    import fcntl
+    return cpu + mem, 1
+"#,
+        predicate: ExecIsErr(
+            reason: "No module named 'fcntl'"
+        )
+    ),
+    (
+        // constant column(int)
+        name: "test_neg_import_depend_stdlib",
+        code: r#"
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
+    vector[f32]):
+    # test if module not in allow list can't be imported
+    import mailbox
+    return cpu + mem, 1
+"#,
+        predicate: ExecIsErr(
+            reason: "ModuleNotFoundError: No module named"
+        )
+    ),
 ]
