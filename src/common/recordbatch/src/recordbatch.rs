@@ -170,7 +170,7 @@ mod tests {
         let numbers: Vec<u32> = (0..10).collect();
         let df_batch = DfRecordBatch::try_new(
             arrow_schema,
-            vec![Arc::new(UInt32Array::from_slice(&numbers))],
+            vec![Arc::new(UInt32Array::from(numbers))],
         )
         .unwrap();
 
