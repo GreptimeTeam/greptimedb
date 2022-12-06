@@ -21,7 +21,7 @@ use common_recordbatch::adapter::{AsyncRecordBatchStreamAdapter, DfRecordBatchSt
 use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
-pub use datafusion::execution::runtime_env::RuntimeEnv;
+pub use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::expressions::PhysicalSortExpr;
 pub use datafusion::physical_plan::Partitioning;
 use datafusion::physical_plan::Statistics;
@@ -63,7 +63,7 @@ pub trait PhysicalPlan: Debug + Send + Sync {
     fn execute(
         &self,
         partition: usize,
-        runtime: Arc<RuntimeEnv>,
+        context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream>;
 }
 
@@ -119,10 +119,10 @@ impl PhysicalPlan for PhysicalPlanAdapter {
     fn execute(
         &self,
         partition: usize,
-        runtime: Arc<RuntimeEnv>,
+        context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let df_plan = self.df_plan.clone();
-        let stream = Box::pin(async move { df_plan.execute(partition, runtime).await });
+        let stream = Box::pin(async move { df_plan.execute(partition, context).await });
         let stream = AsyncRecordBatchStreamAdapter::new(self.schema(), stream);
 
         Ok(Box::pin(stream))
@@ -132,7 +132,6 @@ impl PhysicalPlan for PhysicalPlanAdapter {
 #[derive(Debug)]
 pub struct DfPhysicalPlanAdapter(pub PhysicalPlanRef);
 
-#[async_trait]
 impl DfPhysicalPlan for DfPhysicalPlanAdapter {
     fn as_any(&self) -> &dyn Any {
         self
@@ -159,7 +158,7 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
     }
 
     fn with_new_children(
-        &self,
+        self: Arc<Self>,
         children: Vec<Arc<dyn DfPhysicalPlan>>,
     ) -> DfResult<Arc<dyn DfPhysicalPlan>> {
         let df_schema = self.schema();
@@ -177,12 +176,12 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
         Ok(Arc::new(DfPhysicalPlanAdapter(plan)))
     }
 
-    async fn execute(
+    fn execute(
         &self,
         partition: usize,
-        runtime: Arc<RuntimeEnv>,
+        context: Arc<TaskContext>,
     ) -> DfResult<DfSendableRecordBatchStream> {
-        let stream = self.0.execute(partition, runtime)?;
+        let stream = self.0.execute(partition, context)?;
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream)))
     }
 
@@ -195,15 +194,14 @@ impl DfPhysicalPlan for DfPhysicalPlanAdapter {
 #[cfg(test)]
 mod test {
     use common_recordbatch::{RecordBatch, RecordBatches};
-    use datafusion::arrow_print;
-    use datafusion::datasource::TableProvider as DfTableProvider;
-    use datafusion::logical_plan::LogicalPlanBuilder;
+    use datafusion::datasource::{TableProvider as DfTableProvider, TableType};
+    use datafusion::execution::context::{SessionContext, SessionState};
     use datafusion::physical_plan::collect;
     use datafusion::physical_plan::empty::EmptyExec;
-    use datafusion::prelude::ExecutionContext;
-    use datafusion_common::field_util::SchemaExt;
+    use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
     use datafusion_expr::Expr;
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+    use datatypes::arrow::util::pretty;
     use datatypes::schema::Schema;
     use datatypes::vectors::Int32Vector;
 
@@ -225,8 +223,13 @@ mod test {
             )]))
         }
 
+        fn table_type(&self) -> TableType {
+            TableType::Base
+        }
+
         async fn scan(
             &self,
+            _ctx: &SessionState,
             _projection: &Option<Vec<usize>>,
             _filters: &[Expr],
             _limit: Option<usize>,
@@ -269,7 +272,7 @@ mod test {
         fn execute(
             &self,
             _partition: usize,
-            _runtime: Arc<RuntimeEnv>,
+            _context: Arc<TaskContext>,
         ) -> Result<SendableRecordBatchStream> {
             let schema = self.schema();
             let recordbatches = RecordBatches::try_new(
@@ -295,16 +298,16 @@ mod test {
     // Test our physical plan can be executed by DataFusion, through adapters.
     #[tokio::test]
     async fn test_execute_physical_plan() {
-        let ctx = ExecutionContext::new();
+        let ctx = SessionContext::new();
         let logical_plan = LogicalPlanBuilder::scan("test", Arc::new(MyDfTableProvider), None)
             .unwrap()
             .build()
             .unwrap();
         let physical_plan = ctx.create_physical_plan(&logical_plan).await.unwrap();
-        let df_recordbatches = collect(physical_plan, Arc::new(RuntimeEnv::default()))
+        let df_recordbatches = collect(physical_plan, Arc::new(TaskContext::from(&ctx)))
             .await
             .unwrap();
-        let pretty_print = arrow_print::write(&df_recordbatches);
+        let pretty_print = pretty::pretty_format_batches(&df_recordbatches).unwrap();
         let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
         assert_eq!(
             pretty_print,

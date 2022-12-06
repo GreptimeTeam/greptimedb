@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use common_time::timestamp::TimeUnit;
 use datafusion_common::Result as DfResult;
-use datafusion_expr::Accumulator as DfAccumulator;
+use datafusion_expr::{Accumulator as DfAccumulator, AggregateState};
 use datatypes::arrow::array::ArrayRef;
 use datatypes::prelude::*;
 use datatypes::value::ListValue;
@@ -128,7 +128,7 @@ impl DfAccumulatorAdaptor {
 }
 
 impl DfAccumulator for DfAccumulatorAdaptor {
-    fn state(&self) -> DfResult<Vec<ScalarValue>> {
+    fn state(&self) -> DfResult<Vec<AggregateState>> {
         let state_values = self.accumulator.state()?;
         let state_types = self.creator.state_types()?;
         if state_values.len() != state_types.len() {
@@ -141,7 +141,10 @@ impl DfAccumulator for DfAccumulatorAdaptor {
         Ok(state_values
             .into_iter()
             .zip(state_types.iter())
-            .map(|(v, t)| try_into_scalar_value(v, t))
+            .map(|(v, t)| {
+                let scalar = try_into_scalar_value(v, t)?;
+                Ok(AggregateState::Scalar(scalar))
+            })
             .collect::<Result<Vec<_>>>()
             .map_err(Error::from)?)
     }
@@ -234,7 +237,7 @@ fn try_convert_null_value(datatype: &ConcreteDataType) -> Result<ScalarValue> {
         ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
         ConcreteDataType::Binary(_) => ScalarValue::LargeBinary(None),
         ConcreteDataType::String(_) => ScalarValue::Utf8(None),
-        ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit, None),
+        ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
         _ => {
             return error::BadAccumulatorImplSnafu {
                 err_msg: format!(

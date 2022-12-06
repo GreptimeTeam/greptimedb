@@ -62,6 +62,7 @@ mod tests {
         }
     }
 
+    // TODO(yingwen): Avoid using arrow api.
     #[tokio::test]
     async fn test_collect() {
         let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
@@ -82,7 +83,7 @@ mod tests {
         let numbers: Vec<u32> = (0..10).collect();
         let df_batch = DfRecordBatch::try_new(
             arrow_schema.clone(),
-            vec![Arc::new(UInt32Array::from_slice(&numbers))],
+            vec![Arc::new(UInt32Array::from(numbers))],
         )
         .unwrap();
 
