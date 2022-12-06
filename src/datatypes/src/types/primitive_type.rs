@@ -57,7 +57,7 @@ pub trait WrapperType:
     + Send
     + Sync
     + fmt::Debug
-    + Scalar
+    + for<'a> Scalar<RefType<'a> = Self>
     + PartialEq
     + Into<Value>
     + Into<ValueRef<'static>>

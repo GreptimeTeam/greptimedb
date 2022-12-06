@@ -54,9 +54,7 @@ where
 impl<T, O> Accumulator for Diff<T, O>
 where
     T: WrapperType,
-    for<'a> T: Scalar<RefType<'a> = T>,
     O: WrapperType,
-    for<'a> O: Scalar<RefType<'a> = O>,
     T::Native: AsPrimitive<O::Native>,
     O::Native: std::ops::Sub<Output = O::Native>,
 {
