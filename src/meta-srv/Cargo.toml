@@ -10,6 +10,7 @@ mock = []
 [dependencies]
 api = { path = "../api" }
 async-trait = "0.1"
+catalog = { path = "../catalog" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }

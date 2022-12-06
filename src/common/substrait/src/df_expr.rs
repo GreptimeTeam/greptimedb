@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 
 use datafusion::logical_plan::{Column, Expr};
-use datafusion_expr::{expr_fn, BuiltinScalarFunction, Operator};
+use datafusion_expr::{expr_fn, lit, BuiltinScalarFunction, Operator};
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt};
 use substrait_proto::protobuf::expression::field_reference::ReferenceType as FieldReferenceType;
@@ -24,7 +24,7 @@ use substrait_proto::protobuf::expression::reference_segment::{
     ReferenceType as SegReferenceType, StructField,
 };
 use substrait_proto::protobuf::expression::{
-    FieldReference, ReferenceSegment, RexType, ScalarFunction,
+    FieldReference, Literal, ReferenceSegment, RexType, ScalarFunction,
 };
 use substrait_proto::protobuf::function_argument::ArgType;
 use substrait_proto::protobuf::Expression;
@@ -33,15 +33,24 @@ use crate::context::ConvertorContext;
 use crate::error::{
     EmptyExprSnafu, InvalidParametersSnafu, MissingFieldSnafu, Result, UnsupportedExprSnafu,
 };
+use crate::types::{literal_type_to_scalar_value, scalar_value_as_literal_type};
 
 /// Convert substrait's `Expression` to DataFusion's `Expr`.
-pub fn to_df_expr(ctx: &ConvertorContext, expression: Expression, schema: &Schema) -> Result<Expr> {
+pub(crate) fn to_df_expr(
+    ctx: &ConvertorContext,
+    expression: Expression,
+    schema: &Schema,
+) -> Result<Expr> {
     let expr_rex_type = expression.rex_type.context(EmptyExprSnafu)?;
     match expr_rex_type {
-        RexType::Literal(_) => UnsupportedExprSnafu {
-            name: "substrait Literal expression",
+        RexType::Literal(l) => {
+            let t = l.literal_type.context(MissingFieldSnafu {
+                field: "LiteralType",
+                plan: "Literal",
+            })?;
+            let v = literal_type_to_scalar_value(t)?;
+            Ok(lit(v))
         }
-        .fail()?,
         RexType::Selection(selection) => convert_selection_rex(*selection, schema),
         RexType::ScalarFunction(scalar_fn) => convert_scalar_function(ctx, scalar_fn, schema),
         RexType::WindowFunction(_)
@@ -453,10 +462,21 @@ pub fn expression_from_df_expr(
             }
         }
         // Don't merge them with other unsupported expr arms to preserve the ordering.
-        Expr::ScalarVariable(..) | Expr::Literal(..) => UnsupportedExprSnafu {
+        Expr::ScalarVariable(..) => UnsupportedExprSnafu {
             name: expr.to_string(),
         }
         .fail()?,
+        Expr::Literal(v) => {
+            let t = scalar_value_as_literal_type(v)?;
+            let l = Literal {
+                nullable: true,
+                type_variation_reference: 0,
+                literal_type: Some(t),
+            };
+            Expression {
+                rex_type: Some(RexType::Literal(l)),
+            }
+        }
         Expr::BinaryExpr { left, op, right } => {
             let left = expression_from_df_expr(ctx, left, schema)?;
             let right = expression_from_df_expr(ctx, right, schema)?;

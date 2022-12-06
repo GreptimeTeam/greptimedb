@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use datafusion::logical_plan::DFSchemaRef;
 use substrait_proto::protobuf::extensions::simple_extension_declaration::{
     ExtensionFunction, MappingType,
 };
@@ -23,6 +24,7 @@ use substrait_proto::protobuf::extensions::SimpleExtensionDeclaration;
 pub struct ConvertorContext {
     scalar_fn_names: HashMap<String, u32>,
     scalar_fn_map: HashMap<u32, String>,
+    df_schema: Option<DFSchemaRef>,
 }
 
 impl ConvertorContext {
@@ -62,5 +64,14 @@ impl ConvertorContext {
             result.push(declaration);
         }
         result
+    }
+
+    pub(crate) fn set_df_schema(&mut self, schema: DFSchemaRef) {
+        debug_assert!(self.df_schema.is_none());
+        self.df_schema.get_or_insert(schema);
+    }
+
+    pub(crate) fn df_schema(&self) -> Option<&DFSchemaRef> {
+        self.df_schema.as_ref()
     }
 }

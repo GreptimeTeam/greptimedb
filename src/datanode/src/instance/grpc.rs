@@ -151,9 +151,8 @@ impl Instance {
     }
 
     async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
-        let logical_plan_converter = DFLogicalSubstraitConvertor::new(self.catalog_manager.clone());
-        let logical_plan = logical_plan_converter
-            .decode(plan_bytes.as_slice())
+        let logical_plan = DFLogicalSubstraitConvertor
+            .decode(plan_bytes.as_slice(), self.catalog_manager.clone())
             .context(DecodeLogicalPlanSnafu)?;
 
         self.query_engine

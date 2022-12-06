@@ -20,10 +20,6 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use async_stream::stream;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
-use common_catalog::{
-    build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
-    SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
-};
 use common_telemetry::{debug, info};
 use futures::Stream;
 use futures_util::StreamExt;
@@ -38,6 +34,10 @@ use tokio::sync::Mutex;
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu,
     OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
+};
+use crate::helper::{
+    build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
+    SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
 };
 use crate::remote::{Kv, KvBackendRef};
 use crate::{

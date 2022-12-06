@@ -22,6 +22,7 @@ mod schema;
 mod types;
 
 use bytes::{Buf, Bytes};
+use catalog::CatalogManagerRef;
 
 pub use crate::df_logical::DFLogicalSubstraitConvertor;
 
@@ -30,7 +31,11 @@ pub trait SubstraitPlan {
 
     type Plan;
 
-    fn decode<B: Buf + Send>(&self, message: B) -> Result<Self::Plan, Self::Error>;
+    fn decode<B: Buf + Send>(
+        &self,
+        message: B,
+        catalog_manager: CatalogManagerRef,
+    ) -> Result<Self::Plan, Self::Error>;
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error>;
 }

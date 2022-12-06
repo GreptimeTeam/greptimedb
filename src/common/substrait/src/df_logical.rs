@@ -18,7 +18,9 @@ use bytes::{Buf, Bytes, BytesMut};
 use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use common_telemetry::debug;
+use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datafusion::datasource::TableProvider;
+use datafusion::logical_plan::plan::Filter;
 use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
 use datafusion::physical_plan::project_schema;
 use prost::Message;
@@ -29,31 +31,33 @@ use substrait_proto::protobuf::extensions::simple_extension_declaration::Mapping
 use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
 use substrait_proto::protobuf::read_rel::{NamedTable, ReadType};
 use substrait_proto::protobuf::rel::RelType;
-use substrait_proto::protobuf::{Plan, PlanRel, ReadRel, Rel};
+use substrait_proto::protobuf::{FilterRel, Plan, PlanRel, ReadRel, Rel};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::context::ConvertorContext;
 use crate::df_expr::{expression_from_df_expr, to_df_expr};
 use crate::error::{
-    DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, Error, InternalSnafu,
+    self, DFInternalSnafu, DecodeRelSnafu, EmptyPlanSnafu, EncodeRelSnafu, Error, InternalSnafu,
     InvalidParametersSnafu, MissingFieldSnafu, SchemaNotMatchSnafu, TableNotFoundSnafu,
     UnknownPlanSnafu, UnsupportedExprSnafu, UnsupportedPlanSnafu,
 };
 use crate::schema::{from_schema, to_schema};
 use crate::SubstraitPlan;
 
-pub struct DFLogicalSubstraitConvertor {
-    catalog_manager: CatalogManagerRef,
-}
+pub struct DFLogicalSubstraitConvertor;
 
 impl SubstraitPlan for DFLogicalSubstraitConvertor {
     type Error = Error;
 
     type Plan = LogicalPlan;
 
-    fn decode<B: Buf + Send>(&self, message: B) -> Result<Self::Plan, Self::Error> {
+    fn decode<B: Buf + Send>(
+        &self,
+        message: B,
+        catalog_manager: CatalogManagerRef,
+    ) -> Result<Self::Plan, Self::Error> {
         let plan = Plan::decode(message).context(DecodeRelSnafu)?;
-        self.convert_plan(plan)
+        self.convert_plan(plan, catalog_manager)
     }
 
     fn encode(&self, plan: Self::Plan) -> Result<Bytes, Self::Error> {
@@ -67,13 +71,11 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 }
 
 impl DFLogicalSubstraitConvertor {
-    pub fn new(catalog_manager: CatalogManagerRef) -> Self {
-        Self { catalog_manager }
-    }
-}
-
-impl DFLogicalSubstraitConvertor {
-    pub fn convert_plan(&self, mut plan: Plan) -> Result<LogicalPlan, Error> {
+    fn convert_plan(
+        &self,
+        mut plan: Plan,
+        catalog_manager: CatalogManagerRef,
+    ) -> Result<LogicalPlan, Error> {
         // prepare convertor context
         let mut ctx = ConvertorContext::default();
         for simple_ext in plan.extensions {
@@ -99,15 +101,51 @@ impl DFLogicalSubstraitConvertor {
             }
             .fail()?
         };
+
+        self.rel_to_logical_plan(&mut ctx, Box::new(rel), catalog_manager)
+    }
+
+    fn rel_to_logical_plan(
+        &self,
+        ctx: &mut ConvertorContext,
+        rel: Box<Rel>,
+        catalog_manager: CatalogManagerRef,
+    ) -> Result<LogicalPlan, Error> {
         let rel_type = rel.rel_type.context(EmptyPlanSnafu)?;
 
         // build logical plan
         let logical_plan = match rel_type {
-            RelType::Read(read_rel) => self.convert_read_rel(&mut ctx, read_rel),
-            RelType::Filter(_filter_rel) => UnsupportedPlanSnafu {
-                name: "Filter Relation",
+            RelType::Read(read_rel) => self.convert_read_rel(ctx, read_rel, catalog_manager)?,
+            RelType::Filter(filter) => {
+                let FilterRel {
+                    common: _,
+                    input,
+                    condition,
+                    advanced_extension: _,
+                } = *filter;
+
+                let input = input.context(MissingFieldSnafu {
+                    field: "input",
+                    plan: "Filter",
+                })?;
+                let input = Arc::new(self.rel_to_logical_plan(ctx, input, catalog_manager)?);
+
+                let condition = condition.context(MissingFieldSnafu {
+                    field: "condition",
+                    plan: "Filter",
+                })?;
+
+                let schema = ctx.df_schema().context(InvalidParametersSnafu {
+                    reason: "the underlying TableScan plan should have included a table schema",
+                })?;
+                let schema = schema
+                    .clone()
+                    .try_into()
+                    .context(error::ConvertDfSchemaSnafu)?;
+                let predicate = to_df_expr(ctx, *condition, &schema)?;
+
+                LogicalPlan::Filter(Filter { predicate, input })
             }
-            .fail()?,
             RelType::Fetch(_fetch_rel) => UnsupportedPlanSnafu {
                 name: "Fetch Relation",
             }
@@ -148,7 +186,7 @@ impl DFLogicalSubstraitConvertor {
                 name: "Cross Relation",
             }
             .fail()?,
-        }?;
+        };
 
         Ok(logical_plan)
     }
@@ -157,6 +195,7 @@ impl DFLogicalSubstraitConvertor {
         &self,
         ctx: &mut ConvertorContext,
         read_rel: Box<ReadRel>,
+        catalog_manager: CatalogManagerRef,
     ) -> Result<LogicalPlan, Error> {
         // Extract the catalog, schema and table name from NamedTable. Assume the first three are those names.
         let read_type = read_rel.read_type.context(MissingFieldSnafu {
@@ -192,8 +231,7 @@ impl DFLogicalSubstraitConvertor {
             .map(|mask_expr| self.convert_mask_expression(mask_expr));
 
         // Get table handle from catalog manager
-        let table_ref = self
-            .catalog_manager
+        let table_ref = catalog_manager
             .table(&catalog_name, &schema_name, &table_name)
             .map_err(BoxedError::new)
             .context(InternalSnafu)?
@@ -207,7 +245,7 @@ impl DFLogicalSubstraitConvertor {
         let retrieved_schema = to_schema(read_rel.base_schema.unwrap_or_default())?;
         let retrieved_arrow_schema = retrieved_schema.arrow_schema();
         ensure!(
-            stored_schema.fields == retrieved_arrow_schema.fields,
+            same_schema_without_metadata(&stored_schema, retrieved_arrow_schema),
             SchemaNotMatchSnafu {
                 substrait_schema: retrieved_arrow_schema.clone(),
                 storage_schema: stored_schema
@@ -227,9 +265,11 @@ impl DFLogicalSubstraitConvertor {
             .to_dfschema_ref()
             .context(DFInternalSnafu)?;
 
-        // TODO(ruihang): Support filters and limit
+        ctx.set_df_schema(projected_schema.clone());
+
+        // TODO(ruihang): Support limit
         Ok(LogicalPlan::TableScan(TableScan {
-            table_name,
+            table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
             source: adapter,
             projection,
             projected_schema,
@@ -250,20 +290,42 @@ impl DFLogicalSubstraitConvertor {
 }
 
 impl DFLogicalSubstraitConvertor {
-    pub fn convert_df_plan(&self, plan: LogicalPlan) -> Result<Plan, Error> {
-        let mut ctx = ConvertorContext::default();
-
-        // TODO(ruihang): extract this translation logic into a separated function
-        // convert PlanRel
-        let rel = match plan {
+    fn logical_plan_to_rel(
+        &self,
+        ctx: &mut ConvertorContext,
+        plan: Arc<LogicalPlan>,
+    ) -> Result<Rel, Error> {
+        Ok(match &*plan {
             LogicalPlan::Projection(_) => UnsupportedPlanSnafu {
                 name: "DataFusion Logical Projection",
             }
             .fail()?,
-            LogicalPlan::Filter(_) => UnsupportedPlanSnafu {
-                name: "DataFusion Logical Filter",
+            LogicalPlan::Filter(filter) => {
+                let input = Some(Box::new(
+                    self.logical_plan_to_rel(ctx, filter.input.clone())?,
+                ));
+
+                let schema = plan
+                    .schema()
+                    .clone()
+                    .try_into()
+                    .context(error::ConvertDfSchemaSnafu)?;
+                let condition = Some(Box::new(expression_from_df_expr(
+                    ctx,
+                    &filter.predicate,
+                    &schema,
+                )?));
+
+                let rel = FilterRel {
+                    common: None,
+                    input,
+                    condition,
+                    advanced_extension: None,
+                };
+                Rel {
+                    rel_type: Some(RelType::Filter(Box::new(rel))),
+                }
             }
-            .fail()?,
             LogicalPlan::Window(_) => UnsupportedPlanSnafu {
                 name: "DataFusion Logical Window",
             }
@@ -293,7 +355,7 @@ impl DFLogicalSubstraitConvertor {
             }
             .fail()?,
             LogicalPlan::TableScan(table_scan) => {
-                let read_rel = self.convert_table_scan_plan(&mut ctx, table_scan)?;
+                let read_rel = self.convert_table_scan_plan(ctx, table_scan)?;
                 Rel {
                     rel_type: Some(RelType::Read(Box::new(read_rel))),
                 }
@@ -319,7 +381,13 @@ impl DFLogicalSubstraitConvertor {
                 ),
             }
             .fail()?,
-        };
+        })
+    }
+
+    fn convert_df_plan(&self, plan: LogicalPlan) -> Result<Plan, Error> {
+        let mut ctx = ConvertorContext::default();
+
+        let rel = self.logical_plan_to_rel(&mut ctx, Arc::new(plan))?;
 
         // convert extension
         let extensions = ctx.generate_function_extension();
@@ -341,7 +409,7 @@ impl DFLogicalSubstraitConvertor {
     pub fn convert_table_scan_plan(
         &self,
         ctx: &mut ConvertorContext,
-        table_scan: TableScan,
+        table_scan: &TableScan,
     ) -> Result<ReadRel, Error> {
         let provider = table_scan
             .source
@@ -363,7 +431,8 @@ impl DFLogicalSubstraitConvertor {
         // assemble projection
         let projection = table_scan
             .projection
-            .map(|proj| self.convert_schema_projection(&proj));
+            .as_ref()
+            .map(|x| self.convert_schema_projection(x));
 
         // assemble base (unprojected) schema using Table's schema.
         let base_schema = from_schema(&provider.table().schema())?;
@@ -371,7 +440,8 @@ impl DFLogicalSubstraitConvertor {
         // make conjunction over a list of filters and convert the result to substrait
         let filter = if let Some(conjunction) = table_scan
             .filters
-            .into_iter()
+            .iter()
+            .cloned()
             .reduce(|accum, expr| accum.and(expr))
         {
             Some(Box::new(expression_from_df_expr(
@@ -410,6 +480,13 @@ impl DFLogicalSubstraitConvertor {
             maintain_singular_struct: true,
         }
     }
+}
+
+fn same_schema_without_metadata(lhs: &ArrowSchemaRef, rhs: &ArrowSchemaRef) -> bool {
+    lhs.fields.len() == rhs.fields.len()
+        && lhs.fields.iter().zip(rhs.fields.iter()).all(|(x, y)| {
+            x.name == y.name && x.data_type == y.data_type && x.is_nullable == y.is_nullable
+        })
 }
 
 #[cfg(test)]
@@ -463,10 +540,10 @@ mod test {
     }
 
     async fn logical_plan_round_trip(plan: LogicalPlan, catalog: CatalogManagerRef) {
-        let convertor = DFLogicalSubstraitConvertor::new(catalog);
+        let convertor = DFLogicalSubstraitConvertor;
 
         let proto = convertor.encode(plan.clone()).unwrap();
-        let tripped_plan = convertor.decode(proto).unwrap();
+        let tripped_plan = convertor.decode(proto, catalog).unwrap();
 
         assert_eq!(format!("{:?}", plan), format!("{:?}", tripped_plan));
     }
@@ -488,6 +565,7 @@ mod test {
             .await
             .unwrap();
         let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
+
         let projection = vec![1, 3, 5];
         let df_schema = adapter.schema().to_dfschema().unwrap();
         let projected_fields = projection
@@ -498,7 +576,10 @@ mod test {
             Arc::new(DFSchema::new_with_metadata(projected_fields, Default::default()).unwrap());
 
         let table_scan_plan = LogicalPlan::TableScan(TableScan {
-            table_name: DEFAULT_TABLE_NAME.to_string(),
+            table_name: format!(
+                "{}.{}.{}",
+                DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, DEFAULT_TABLE_NAME
+            ),
             source: adapter,
             projection: Some(projection),
             projected_schema,

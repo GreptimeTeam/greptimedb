@@ -22,12 +22,12 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    use catalog::helper::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use catalog::remote::{
         KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider,
     };
     use catalog::{CatalogList, CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_catalog::{CatalogKey, CatalogValue, SchemaKey, SchemaValue};
     use datatypes::schema::Schema;
     use futures_util::StreamExt;
     use table::engine::{EngineContext, TableEngineRef};

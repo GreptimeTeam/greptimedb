@@ -16,7 +16,7 @@ use api::v1::meta::{
     router_server, CreateRequest, Error, PeerDict, PutRequest, RangeRequest, Region, RegionRoute,
     ResponseHeader, RouteRequest, RouteResponse, Table, TableRoute, TableRouteValue,
 };
-use common_catalog::{TableGlobalKey, TableGlobalValue};
+use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
