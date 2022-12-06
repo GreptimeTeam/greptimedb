@@ -41,6 +41,12 @@ impl ListType {
             item_type: Box::new(item_type),
         }
     }
+
+    /// Returns the item data type.
+    #[inline]
+    pub fn item_type(&self) -> &ConcreteDataType {
+        &self.item_type
+    }
 }
 
 impl DataType for ListType {
@@ -91,5 +97,6 @@ mod tests {
             ArrowDataType::List(Box::new(Field::new("item", ArrowDataType::Boolean, true))),
             t.as_arrow_type()
         );
+        assert_eq!(ConcreteDataType::boolean_datatype(), *t.item_type());
     }
 }

@@ -134,6 +134,14 @@ impl ConcreteDataType {
     pub fn is_null(&self) -> bool {
         matches!(self, ConcreteDataType::Null(NullType))
     }
+
+    /// Try to cast the type as a [`ListType`].
+    pub fn as_list(&self) -> Option<&ListType> {
+        match self {
+            ConcreteDataType::List(t) => Some(t),
+            _ => None,
+        }
+    }
 }
 
 impl TryFrom<&ArrowDataType> for ConcreteDataType {
@@ -482,5 +490,15 @@ mod tests {
     fn test_numerics() {
         let nums = ConcreteDataType::numerics();
         assert_eq!(10, nums.len());
+    }
+
+    #[test]
+    fn test_as_list() {
+        let list_type = ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype());
+        assert_eq!(
+            ListType::new(ConcreteDataType::int32_datatype()),
+            *list_type.as_list().unwrap()
+        );
+        assert!(ConcreteDataType::int32_datatype().as_list().is_none());
     }
 }
