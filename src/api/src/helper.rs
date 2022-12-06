@@ -215,18 +215,10 @@ impl Column {
             Value::Date(val) => values.date_values.push(val.val()),
             Value::DateTime(val) => values.datetime_values.push(val.val()),
             Value::Timestamp(val) => match val.unit() {
-                TimeUnit::Second => values
-                    .ts_second_values
-                    .push(val.convert_to(TimeUnit::Millisecond)),
-                TimeUnit::Millisecond => values
-                    .ts_millisecond_values
-                    .push(val.convert_to(TimeUnit::Millisecond)),
-                TimeUnit::Microsecond => values
-                    .ts_microsecond_values
-                    .push(val.convert_to(TimeUnit::Millisecond)),
-                TimeUnit::Nanosecond => values
-                    .ts_nanosecond_values
-                    .push(val.convert_to(TimeUnit::Millisecond)),
+                TimeUnit::Second => values.ts_second_values.push(val.value()),
+                TimeUnit::Millisecond => values.ts_millisecond_values.push(val.value()),
+                TimeUnit::Microsecond => values.ts_microsecond_values.push(val.value()),
+                TimeUnit::Nanosecond => values.ts_nanosecond_values.push(val.value()),
             },
             Value::List(_) => unreachable!(),
         });
@@ -238,7 +230,10 @@ impl Column {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::vectors::BooleanVector;
+    use datatypes::vectors::{
+        BooleanVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+        TimestampNanosecondVector, TimestampSecondVector,
+    };
 
     use super::*;
 
@@ -451,6 +446,47 @@ mod tests {
         assert_eq!(
             result.unwrap_err().to_string(),
             "Failed to create column datatype from List(ListType { inner: Boolean(BooleanType) })"
+        );
+    }
+
+    #[test]
+    fn test_column_put_timestamp_values() {
+        let mut column = Column {
+            column_name: "test".to_string(),
+            semantic_type: 0,
+            values: Some(Values {
+                ..Default::default()
+            }),
+            null_mask: vec![],
+            datatype: 0,
+        };
+
+        let vector = Arc::new(TimestampNanosecondVector::from_vec(vec![1, 2, 3]));
+        column.push_vals(3, vector);
+        assert_eq!(
+            vec![1, 2, 3],
+            column.values.as_ref().unwrap().ts_nanosecond_values
+        );
+
+        let vector = Arc::new(TimestampMillisecondVector::from_vec(vec![4, 5, 6]));
+        column.push_vals(3, vector);
+        assert_eq!(
+            vec![4, 5, 6],
+            column.values.as_ref().unwrap().ts_millisecond_values
+        );
+
+        let vector = Arc::new(TimestampMicrosecondVector::from_vec(vec![7, 8, 9]));
+        column.push_vals(3, vector);
+        assert_eq!(
+            vec![7, 8, 9],
+            column.values.as_ref().unwrap().ts_microsecond_values
+        );
+
+        let vector = Arc::new(TimestampSecondVector::from_vec(vec![10, 11, 12]));
+        column.push_vals(3, vector);
+        assert_eq!(
+            vec![10, 11, 12],
+            column.values.as_ref().unwrap().ts_second_values
         );
     }
 
