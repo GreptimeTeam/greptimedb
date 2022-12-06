@@ -30,32 +30,32 @@ use num_traits::AsPrimitive;
 use snafu::{ensure, OptionExt, ResultExt};
 
 // https://numpy.org/doc/stable/reference/generated/numpy.diff.html
-// T is the input type, O is the output type.
+// I is the input type, O is the output type.
 #[derive(Debug, Default)]
-pub struct Diff<T, O>
+pub struct Diff<I, O>
 where
-    T: WrapperType,
+    I: WrapperType,
     O: WrapperType,
 {
-    values: Vec<T>,
+    values: Vec<I>,
     _phantom: PhantomData<O>,
 }
 
-impl<T, O> Diff<T, O>
+impl<I, O> Diff<I, O>
 where
-    T: WrapperType,
+    I: WrapperType,
     O: WrapperType,
 {
-    fn push(&mut self, value: T) {
+    fn push(&mut self, value: I) {
         self.values.push(value);
     }
 }
 
-impl<T, O> Accumulator for Diff<T, O>
+impl<I, O> Accumulator for Diff<I, O>
 where
-    T: WrapperType,
+    I: WrapperType,
     O: WrapperType,
-    T::Native: AsPrimitive<O::Native>,
+    I::Native: AsPrimitive<O::Native>,
     O::Native: std::ops::Sub<Output = O::Native>,
 {
     fn state(&self) -> Result<Vec<Value>> {
@@ -66,7 +66,7 @@ where
             .collect::<Vec<Value>>();
         Ok(vec![Value::List(ListValue::new(
             Some(Box::new(nums)),
-            T::LogicalType::build_data_type(),
+            I::LogicalType::build_data_type(),
         ))])
     }
 
@@ -79,7 +79,7 @@ where
 
         let column = &values[0];
         let mut len = 1;
-        let column: &<T as Scalar>::VectorType = if column.is_const() {
+        let column: &<I as Scalar>::VectorType = if column.is_const() {
             len = column.len();
             let column: &ConstantVector = unsafe { Helper::static_cast(column) };
             unsafe { Helper::static_cast(column.inner()) }
