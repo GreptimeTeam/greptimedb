@@ -22,40 +22,43 @@ use common_query::error::{
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::prelude::*;
-use datatypes::types::PrimitiveType;
+use datatypes::types::{LogicalPrimitiveType, WrapperType};
 use datatypes::value::ListValue;
-use datatypes::vectors::{ConstantVector, ListVector};
+use datatypes::vectors::{ConstantVector, Helper, ListVector};
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use snafu::{ensure, OptionExt, ResultExt};
 
 // https://numpy.org/doc/stable/reference/generated/numpy.diff.html
+// T is input type, O is output type.
 #[derive(Debug, Default)]
-pub struct Diff<T, SubT>
+pub struct Diff<T, O>
 where
-    T: Primitive + AsPrimitive<SubT>,
-    SubT: Primitive + std::ops::Sub<Output = SubT>,
+    T: WrapperType,
+    O: WrapperType,
 {
     values: Vec<T>,
-    _phantom: PhantomData<SubT>,
+    _phantom: PhantomData<O>,
 }
 
-impl<T, SubT> Diff<T, SubT>
+impl<T, O> Diff<T, O>
 where
-    T: Primitive + AsPrimitive<SubT>,
-    SubT: Primitive + std::ops::Sub<Output = SubT>,
+    T: WrapperType,
+    O: WrapperType,
 {
     fn push(&mut self, value: T) {
         self.values.push(value);
     }
 }
 
-impl<T, SubT> Accumulator for Diff<T, SubT>
+impl<T, O> Accumulator for Diff<T, O>
 where
-    T: Primitive + AsPrimitive<SubT>,
+    T: WrapperType,
     for<'a> T: Scalar<RefType<'a> = T>,
-    SubT: Primitive + std::ops::Sub<Output = SubT>,
-    for<'a> SubT: Scalar<RefType<'a> = SubT>,
+    O: WrapperType,
+    for<'a> O: Scalar<RefType<'a> = O>,
+    T::Native: AsPrimitive<O::Native>,
+    O::Native: std::ops::Sub<Output = O::Native>,
 {
     fn state(&self) -> Result<Vec<Value>> {
         let nums = self
@@ -65,7 +68,7 @@ where
             .collect::<Vec<Value>>();
         Ok(vec![Value::List(ListValue::new(
             Some(Box::new(nums)),
-            T::default().into().data_type(),
+            T::LogicalType::build_data_type(),
         ))])
     }
 
@@ -80,10 +83,10 @@ where
         let mut len = 1;
         let column: &<T as Scalar>::VectorType = if column.is_const() {
             len = column.len();
-            let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
-            unsafe { VectorHelper::static_cast(column.inner()) }
+            let column: &ConstantVector = unsafe { Helper::static_cast(column) };
+            unsafe { Helper::static_cast(column.inner()) }
         } else {
-            unsafe { VectorHelper::static_cast(column) }
+            unsafe { Helper::static_cast(column) }
         };
         (0..len).for_each(|_| {
             for v in column.iter_data().flatten() {
@@ -109,8 +112,9 @@ where
                 ),
             })?;
         for state in states.values_iter() {
-            let state = state.context(FromScalarValueSnafu)?;
-            self.update_batch(&[state])?
+            if let Some(state) = state.context(FromScalarValueSnafu)? {
+                self.update_batch(&[state])?;
+            }
         }
         Ok(())
     }
@@ -122,11 +126,14 @@ where
         let diff = self
             .values
             .windows(2)
-            .map(|x| (x[1].as_() - x[0].as_()).into())
+            .map(|x| {
+                let native = x[1].into_native().as_() - x[0].into_native().as_();
+                O::from_native(native).into()
+            })
             .collect::<Vec<Value>>();
         let diff = Value::List(ListValue::new(
             Some(Box::new(diff)),
-            SubT::default().into().data_type(),
+            O::LogicalType::build_data_type(),
         ));
         Ok(diff)
     }
@@ -143,7 +150,7 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Diff::<$S,<$S as Primitive>::LargestType>::default()))
+                    Ok(Box::new(Diff::<<$S as LogicalPrimitiveType>::Wrapper, <<$S as LogicalPrimitiveType>::LargestType as LogicalPrimitiveType>::Wrapper>::default()))
                 },
                 {
                     let err_msg = format!(
@@ -163,7 +170,7 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
         with_match_primitive_type_id!(
             input_types[0].logical_type_id(),
             |$S| {
-                Ok(ConcreteDataType::list_datatype(PrimitiveType::<<$S as Primitive>::LargestType>::default().into()))
+                Ok(ConcreteDataType::list_datatype($S::default().into()))
             },
             {
                 unreachable!()
@@ -177,7 +184,7 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
         with_match_primitive_type_id!(
             input_types[0].logical_type_id(),
             |$S| {
-                Ok(vec![ConcreteDataType::list_datatype(PrimitiveType::<$S>::default().into())])
+                Ok(vec![ConcreteDataType::list_datatype($S::default().into())])
             },
             {
                 unreachable!()
@@ -188,9 +195,10 @@ impl AggregateFunctionCreator for DiffAccumulatorCreator {
 
 #[cfg(test)]
 mod test {
-    use datatypes::vectors::PrimitiveVector;
+    use datatypes::vectors::Int32Vector;
 
     use super::*;
+
     #[test]
     fn test_update_batch() {
         // test update empty batch, expect not updating anything
@@ -201,21 +209,19 @@ mod test {
 
         // test update one not-null value
         let mut diff = Diff::<i32, i64>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Some(42)]))];
         assert!(diff.update_batch(&v).is_ok());
         assert_eq!(Value::Null, diff.evaluate().unwrap());
 
         // test update one null value
         let mut diff = Diff::<i32, i64>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
-            Option::<i32>::None,
-        ]))];
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Option::<i32>::None]))];
         assert!(diff.update_batch(&v).is_ok());
         assert_eq!(Value::Null, diff.evaluate().unwrap());
 
         // test update no null-value batch
         let mut diff = Diff::<i32, i64>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![
             Some(-1i32),
             Some(1),
             Some(2),
@@ -232,7 +238,7 @@ mod test {
 
         // test update null-value batch
         let mut diff = Diff::<i32, i64>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![
             Some(-2i32),
             None,
             Some(3),
@@ -251,7 +257,7 @@ mod test {
         // test update with constant vector
         let mut diff = Diff::<i32, i64>::default();
         let v: Vec<VectorRef> = vec![Arc::new(ConstantVector::new(
-            Arc::new(PrimitiveVector::<i32>::from_vec(vec![4])),
+            Arc::new(Int32Vector::from_vec(vec![4])),
             4,
         ))];
         let values = vec![Value::from(0_i64), Value::from(0_i64), Value::from(0_i64)];

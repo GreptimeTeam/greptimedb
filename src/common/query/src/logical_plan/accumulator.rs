@@ -148,10 +148,8 @@ impl DfAccumulator for DfAccumulatorAdaptor {
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> DfResult<()> {
-        let vectors = VectorHelper::try_into_vectors(values)
-            .context(FromScalarValueSnafu)?;
-        self.accumulator
-            .update_batch(&vectors)?;
+        let vectors = VectorHelper::try_into_vectors(values).context(FromScalarValueSnafu)?;
+        self.accumulator.update_batch(&vectors)?;
         Ok(())
     }
 
@@ -159,10 +157,9 @@ impl DfAccumulator for DfAccumulatorAdaptor {
         let mut vectors = Vec::with_capacity(states.len());
         for array in states.iter() {
             vectors.push(
-                VectorHelper::try_into_vector(array)
-                    .context(IntoVectorSnafu {
-                        data_type: array.data_type().clone(),
-                    })?,
+                VectorHelper::try_into_vector(array).context(IntoVectorSnafu {
+                    data_type: array.data_type().clone(),
+                })?,
             );
         }
         self.accumulator.merge_batch(&vectors)?;

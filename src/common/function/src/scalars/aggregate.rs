@@ -12,29 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod argmax;
-mod argmin;
+// mod argmax;
+// mod argmin;
 mod diff;
-mod mean;
-mod median;
-mod percentile;
-mod polyval;
-mod scipy_stats_norm_cdf;
-mod scipy_stats_norm_pdf;
+// mod mean;
+// mod median;
+// mod percentile;
+// mod polyval;
+// mod scipy_stats_norm_cdf;
+// mod scipy_stats_norm_pdf;
 
 use std::sync::Arc;
 
-pub use argmax::ArgmaxAccumulatorCreator;
-pub use argmin::ArgminAccumulatorCreator;
+// pub use argmax::ArgmaxAccumulatorCreator;
+// pub use argmin::ArgminAccumulatorCreator;
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use diff::DiffAccumulatorCreator;
-pub use mean::MeanAccumulatorCreator;
-pub use median::MedianAccumulatorCreator;
-pub use percentile::PercentileAccumulatorCreator;
-pub use polyval::PolyvalAccumulatorCreator;
-pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
-pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
 
+// pub use mean::MeanAccumulatorCreator;
+// pub use median::MedianAccumulatorCreator;
+// pub use percentile::PercentileAccumulatorCreator;
+// pub use polyval::PolyvalAccumulatorCreator;
+// pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
+// pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
 use crate::scalars::FunctionRegistry;
 
 /// A function creates `AggregateFunctionCreator`.
@@ -88,14 +88,14 @@ impl AggregateFunctions {
             };
         }
 
-        register_aggr_func!("median", 1, MedianAccumulatorCreator);
+        // register_aggr_func!("median", 1, MedianAccumulatorCreator);
         register_aggr_func!("diff", 1, DiffAccumulatorCreator);
-        register_aggr_func!("mean", 1, MeanAccumulatorCreator);
-        register_aggr_func!("polyval", 2, PolyvalAccumulatorCreator);
-        register_aggr_func!("argmax", 1, ArgmaxAccumulatorCreator);
-        register_aggr_func!("argmin", 1, ArgminAccumulatorCreator);
-        register_aggr_func!("percentile", 2, PercentileAccumulatorCreator);
-        register_aggr_func!("scipystatsnormcdf", 2, ScipyStatsNormCdfAccumulatorCreator);
-        register_aggr_func!("scipystatsnormpdf", 2, ScipyStatsNormPdfAccumulatorCreator);
+        // register_aggr_func!("mean", 1, MeanAccumulatorCreator);
+        // register_aggr_func!("polyval", 2, PolyvalAccumulatorCreator);
+        // register_aggr_func!("argmax", 1, ArgmaxAccumulatorCreator);
+        // register_aggr_func!("argmin", 1, ArgminAccumulatorCreator);
+        // register_aggr_func!("percentile", 2, PercentileAccumulatorCreator);
+        // register_aggr_func!("scipystatsnormcdf", 2, ScipyStatsNormCdfAccumulatorCreator);
+        // register_aggr_func!("scipystatsnormpdf", 2, ScipyStatsNormPdfAccumulatorCreator);
     }
 }

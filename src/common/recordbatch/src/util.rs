@@ -35,7 +35,7 @@ mod tests {
     use futures::Stream;
 
     use super::*;
-    use crate::{RecordBatchStream};
+    use crate::RecordBatchStream;
 
     struct MockRecordBatchStream {
         batch: Option<RecordBatch>,

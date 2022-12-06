@@ -138,6 +138,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: DataTypeError,
     },
+
+    #[snafu(display("Fail to get scalar vector, {}", source))]
+    GetScalarVector {
+        #[snafu(backtrace)]
+        source: DataTypeError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -152,7 +158,8 @@ impl ErrorExt for Error {
             | Error::InvalidInputState { .. }
             | Error::InvalidInputCol { .. }
             | Error::BadAccumulatorImpl { .. }
-            | Error::ToScalarValue { .. } => StatusCode::EngineExecuteQuery,
+            | Error::ToScalarValue { .. }
+            | Error::GetScalarVector { .. } => StatusCode::EngineExecuteQuery,
 
             Error::InvalidInputs { source, .. }
             | Error::IntoVector { source, .. }
