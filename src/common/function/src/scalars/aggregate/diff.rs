@@ -30,7 +30,7 @@ use num_traits::AsPrimitive;
 use snafu::{ensure, OptionExt, ResultExt};
 
 // https://numpy.org/doc/stable/reference/generated/numpy.diff.html
-// T is input type, O is output type.
+// T is the input type, O is the output type.
 #[derive(Debug, Default)]
 pub struct Diff<T, O>
 where
