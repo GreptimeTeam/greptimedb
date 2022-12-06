@@ -28,16 +28,14 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
 
-    use datatypes::arrow::array::UInt32Array;
-    use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::prelude::*;
+    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::UInt32Vector;
     use futures::task::{Context, Poll};
     use futures::Stream;
 
     use super::*;
-    use crate::{DfRecordBatch, RecordBatchStream};
+    use crate::{RecordBatchStream};
 
     struct MockRecordBatchStream {
         batch: Option<RecordBatch>,
@@ -83,14 +81,8 @@ mod tests {
         assert_eq!(0, batches.len());
 
         let numbers: Vec<u32> = (0..10).collect();
-        let columns = [
-            Arc::new(UInt32Vector::from_vec(numbers)) as _,
-        ];
-        let batch = RecordBatch::new(
-            schema.clone(),
-            columns,
-        )
-        .unwrap();
+        let columns = [Arc::new(UInt32Vector::from_vec(numbers)) as _];
+        let batch = RecordBatch::new(schema.clone(), columns).unwrap();
 
         let stream = MockRecordBatchStream {
             schema: schema.clone(),
