@@ -64,11 +64,7 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let kvs = res
-            .kvs()
-            .iter()
-            .map(|kv| KvPair::new(kv).into())
-            .collect::<Vec<_>>();
+        let kvs = res.kvs().iter().map(to_key_value).collect::<Vec<_>>();
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(RangeResponse {
@@ -93,7 +89,7 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kv = res.prev_key().map(|kv| KvPair::new(kv).into());
+        let prev_kv = res.prev_key().map(to_key_value);
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(PutResponse { header, prev_kv })
@@ -124,7 +120,7 @@ impl KvStore for EtcdStore {
             match op_res {
                 TxnOpResponse::Put(put_res) => {
                     if let Some(prev_kv) = put_res.prev_key() {
-                        prev_kvs.push(KvPair::new(prev_kv).into());
+                        prev_kvs.push(to_key_value(prev_kv));
                     }
                 }
                 _ => unreachable!(), // never get here
@@ -141,20 +137,23 @@ impl KvStore for EtcdStore {
             key,
             expect,
             value,
-            options,
+            put_options,
         } = req.try_into()?;
 
-        let put_op = vec![TxnOp::put(key.clone(), value, options)];
-        let get_op = vec![TxnOp::get(key.clone(), None)];
-        let mut txn = if expect.is_empty() {
+        let compare = if expect.is_empty() {
             // create if absent
             // revision 0 means key was not exist
-            Txn::new().when(vec![Compare::create_revision(key, CompareOp::Equal, 0)])
+            Compare::create_revision(key.clone(), CompareOp::Equal, 0)
         } else {
             // compare and put
-            Txn::new().when(vec![Compare::value(key, CompareOp::Equal, expect)])
+            Compare::value(key.clone(), CompareOp::Equal, expect)
         };
-        txn = txn.and_then(put_op).or_else(get_op);
+        let put = TxnOp::put(key.clone(), value, put_options);
+        let get = TxnOp::get(key, None);
+        let txn = Txn::new()
+            .when(vec![compare])
+            .and_then(vec![put])
+            .or_else(vec![get]);
 
         let txn_res = self
             .client
@@ -172,23 +171,8 @@ impl KvStore for EtcdStore {
             })?;
 
         let prev_kv = match op_res {
-            TxnOpResponse::Put(put_res) => {
-                put_res.prev_key().map(|kv| KeyValue::from(KvPair::new(kv)))
-            }
-            TxnOpResponse::Get(get_res) => {
-                if get_res.count() == 0 {
-                    // do not exists
-                    None
-                } else {
-                    ensure!(
-                        get_res.count() == 1,
-                        error::InvalidTxnResultSnafu {
-                            err_msg: format!("expect 1 response, actual {}", get_res.count())
-                        }
-                    );
-                    Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])))
-                }
-            }
+            TxnOpResponse::Put(res) => res.prev_key().map(to_key_value),
+            TxnOpResponse::Get(res) => res.kvs().first().map(to_key_value),
             _ => unreachable!(), // never get here
         };
 
@@ -214,11 +198,7 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kvs = res
-            .prev_kvs()
-            .iter()
-            .map(|kv| KvPair::new(kv).into())
-            .collect::<Vec<_>>();
+        let prev_kvs = res.prev_kvs().iter().map(to_key_value).collect::<Vec<_>>();
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(DeleteRangeResponse {
@@ -233,70 +213,57 @@ impl KvStore for EtcdStore {
             cluster_id,
             from_key,
             to_key,
-            options,
+            delete_options,
         } = req.try_into()?;
 
         let mut client = self.client.kv_client();
 
         let kv = 'success: loop {
+            let from_key = from_key.as_slice();
+            let to_key = to_key.as_slice();
+
             let res = client
-                .get(from_key.clone(), None)
+                .get(from_key, None)
                 .await
                 .context(error::EtcdFailedSnafu)?;
 
-            let txn = if res.count() == 0 {
-                let txn = Txn::new().when(vec![Compare::create_revision(
-                    from_key.clone(),
-                    CompareOp::Equal,
-                    0,
-                )]);
-                let get_op = vec![TxnOp::get(to_key.clone(), None)];
-                txn.and_then(get_op)
-            } else {
-                let value = res.kvs()[0].value().to_owned();
-                let txn = Txn::new().when(vec![Compare::value(
-                    from_key.clone(),
-                    CompareOp::Equal,
-                    value.clone(),
-                )]);
-                let move_op = vec![
-                    TxnOp::delete(from_key.clone(), options.clone()),
-                    TxnOp::put(to_key.clone(), value, None),
-                ];
-                txn.and_then(move_op)
+            let txn = match res.kvs().first() {
+                None => {
+                    // get `to_key` if `from_key` absent
+                    // revision 0 means key was not exist
+                    let compare = Compare::create_revision(from_key, CompareOp::Equal, 0);
+                    let get = TxnOp::get(to_key, None);
+                    Txn::new().when(vec![compare]).and_then(vec![get])
+                }
+                Some(kv) => {
+                    // compare `from_key` and move to `to_key`
+                    let value = kv.value();
+                    let compare = Compare::value(from_key, CompareOp::Equal, value);
+                    let delete = TxnOp::delete(from_key, delete_options.clone());
+                    let put = TxnOp::put(to_key, value, None);
+                    Txn::new().when(vec![compare]).and_then(vec![delete, put])
+                }
             };
 
             let txn_res = client.txn(txn).await.context(error::EtcdFailedSnafu)?;
 
             if !txn_res.succeeded() {
                 warn!(
-                    "Failed to move {:?} to {:?}, try again...",
-                    from_key, to_key
+                    "Failed to atomically move {:?} to {:?}, try again...",
+                    String::from_utf8_lossy(from_key),
+                    String::from_utf8_lossy(to_key)
                 );
                 continue;
             }
 
+            // [`get_res'] or [`delete_res`, `put_res`], `put_res` will be ignored.
             for op_res in txn_res.op_responses() {
                 match op_res {
-                    TxnOpResponse::Get(get_res) => {
-                        if get_res.count() == 0 {
-                            // do not exists
-                            break 'success None;
-                        } else {
-                            ensure!(
-                                get_res.count() == 1,
-                                error::InvalidTxnResultSnafu {
-                                    err_msg: format!(
-                                        "expect 1 response, actual {}",
-                                        get_res.count()
-                                    )
-                                }
-                            );
-                            break 'success Some(KeyValue::from(KvPair::new(&get_res.kvs()[0])));
-                        }
+                    TxnOpResponse::Get(res) => {
+                        break 'success res.kvs().first().map(to_key_value);
                     }
-                    TxnOpResponse::Delete(del_res) => {
-                        break 'success Some(KeyValue::from(KvPair::new(&del_res.prev_kvs()[0])))
+                    TxnOpResponse::Delete(res) => {
+                        break 'success res.prev_kvs().first().map(to_key_value)
                     }
                     _ => {}
                 }
@@ -413,7 +380,7 @@ struct CompareAndPut {
     key: Vec<u8>,
     expect: Vec<u8>,
     value: Vec<u8>,
-    options: Option<PutOptions>,
+    put_options: Option<PutOptions>,
 }
 
 impl TryFrom<CompareAndPutRequest> for CompareAndPut {
@@ -432,7 +399,7 @@ impl TryFrom<CompareAndPutRequest> for CompareAndPut {
             key,
             expect,
             value,
-            options: Some(PutOptions::default().with_prev_key()),
+            put_options: Some(PutOptions::default().with_prev_key()),
         })
     }
 }
@@ -476,7 +443,7 @@ struct MoveValue {
     cluster_id: u64,
     from_key: Vec<u8>,
     to_key: Vec<u8>,
-    options: Option<DeleteOptions>,
+    delete_options: Option<DeleteOptions>,
 }
 
 impl TryFrom<MoveValueRequest> for MoveValue {
@@ -493,7 +460,7 @@ impl TryFrom<MoveValueRequest> for MoveValue {
             cluster_id: header.map_or(0, |h| h.cluster_id),
             from_key,
             to_key,
-            options: Some(DeleteOptions::default().with_prev_key()),
+            delete_options: Some(DeleteOptions::default().with_prev_key()),
         })
     }
 }
@@ -515,6 +482,10 @@ impl<'a> From<KvPair<'a>> for KeyValue {
             value: kv.0.value().to_vec(),
         }
     }
+}
+
+fn to_key_value(kv: &etcd_client::KeyValue) -> KeyValue {
+    KeyValue::from(KvPair::new(kv))
 }
 
 #[cfg(test)]
@@ -585,7 +556,7 @@ mod tests {
         assert_eq!(b"test_key".to_vec(), compare_and_put.key);
         assert_eq!(b"test_expect".to_vec(), compare_and_put.expect);
         assert_eq!(b"test_value".to_vec(), compare_and_put.value);
-        assert!(compare_and_put.options.is_some());
+        assert!(compare_and_put.put_options.is_some());
     }
 
     #[test]
@@ -615,6 +586,6 @@ mod tests {
 
         assert_eq!(b"test_from_key".to_vec(), move_value.from_key);
         assert_eq!(b"test_to_key".to_vec(), move_value.to_key);
-        assert!(move_value.options.is_some());
+        assert!(move_value.delete_options.is_some());
     }
 }
