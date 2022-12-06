@@ -22,7 +22,7 @@ use std::sync::Arc;
 use datatypes::prelude::ConcreteDataType;
 
 pub use self::accumulator::{Accumulator, AggregateFunctionCreator, AggregateFunctionCreatorRef};
-pub use self::expr::Expr;
+pub use self::expr::{DfExpr, Expr};
 pub use self::udaf::AggregateFunction;
 pub use self::udf::ScalarUdf;
 use crate::function::{ReturnTypeFunction, ScalarFunctionImplementation};

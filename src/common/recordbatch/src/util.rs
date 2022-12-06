@@ -30,7 +30,9 @@ mod tests {
 
     use datatypes::arrow::array::UInt32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-    use datatypes::schema::{Schema, SchemaRef};
+    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+    use datatypes::prelude::*;
+    use datatypes::vectors::UInt32Vector;
     use futures::task::{Context, Poll};
     use futures::Stream;
 
@@ -64,12 +66,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_collect() {
-        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+        let column_schemas = vec![ColumnSchema::new(
             "number",
-            DataType::UInt32,
+            ConcreteDataType::uint32_datatype(),
             false,
-        )]));
-        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
+        )];
+
+        let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
 
         let stream = MockRecordBatchStream {
             schema: schema.clone(),
@@ -80,19 +83,17 @@ mod tests {
         assert_eq!(0, batches.len());
 
         let numbers: Vec<u32> = (0..10).collect();
-        let df_batch = DfRecordBatch::try_new(
-            arrow_schema.clone(),
-            vec![Arc::new(UInt32Array::from_slice(&numbers))],
+        let columns = [
+            Arc::new(UInt32Vector::from_vec(numbers)) as _,
+        ];
+        let batch = RecordBatch::new(
+            schema.clone(),
+            columns,
         )
         .unwrap();
 
-        let batch = RecordBatch {
-            schema: schema.clone(),
-            df_recordbatch: df_batch,
-        };
-
         let stream = MockRecordBatchStream {
-            schema: Arc::new(Schema::try_from(arrow_schema).unwrap()),
+            schema: schema.clone(),
             batch: Some(batch.clone()),
         };
         let batches = collect(Box::pin(stream)).await.unwrap();

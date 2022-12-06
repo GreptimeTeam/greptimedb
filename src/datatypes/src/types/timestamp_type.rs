@@ -50,6 +50,18 @@ pub enum TimestampType {
     Nanosecond(TimestampNanosecondType),
 }
 
+impl TimestampType {
+    /// Returns the [`TimeUnit`] of this type.
+    pub fn unit(&self) -> TimeUnit {
+        match self {
+            TimestampType::Second(_) => TimeUnit::Second,
+            TimestampType::Millisecond(_) => TimeUnit::Millisecond,
+            TimestampType::Microsecond(_) => TimeUnit::Microsecond,
+            TimestampType::Nanosecond(_) => TimeUnit::Nanosecond,
+        }
+    }
+}
+
 macro_rules! impl_data_type_for_timestamp {
     ($unit: ident) => {
         paste! {
@@ -81,7 +93,6 @@ macro_rules! impl_data_type_for_timestamp {
                     true
                 }
             }
-
 
             impl LogicalPrimitiveType for [<Timestamp $unit Type>] {
                 type ArrowPrimitive = [<Arrow Timestamp $unit Type>];
@@ -138,3 +149,28 @@ impl_data_type_for_timestamp!(Nanosecond);
 impl_data_type_for_timestamp!(Second);
 impl_data_type_for_timestamp!(Millisecond);
 impl_data_type_for_timestamp!(Microsecond);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timestamp_type_unit() {
+        assert_eq!(
+            TimeUnit::Second,
+            TimestampType::Second(TimestampSecondType).unit()
+        );
+        assert_eq!(
+            TimeUnit::Millisecond,
+            TimestampType::Millisecond(TimestampMillisecondType).unit()
+        );
+        assert_eq!(
+            TimeUnit::Microsecond,
+            TimestampType::Microsecond(TimestampMicrosecondType).unit()
+        );
+        assert_eq!(
+            TimeUnit::Nanosecond,
+            TimestampType::Nanosecond(TimestampNanosecondType).unit()
+        );
+    }
+}
