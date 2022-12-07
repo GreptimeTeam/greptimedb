@@ -76,8 +76,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Invalid inputs: {}", err_msg))]
-    InvalidInputs {
+    #[snafu(display("Invalid input type: {}", err_msg))]
+    InvalidInputType {
         #[snafu(backtrace)]
         source: DataTypeError,
         err_msg: String,
@@ -154,6 +154,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: DataTypeError,
     },
+
+    #[snafu(display("Invalid function args: {}", err_msg))]
+    InvalidFuncArgs {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -172,7 +178,7 @@ impl ErrorExt for Error {
             | Error::GetScalarVector { .. }
             | Error::ArrowCompute { .. } => StatusCode::EngineExecuteQuery,
 
-            Error::InvalidInputs { source, .. }
+            Error::InvalidInputType { source, .. }
             | Error::IntoVector { source, .. }
             | Error::FromScalarValue { source }
             | Error::ConvertArrowSchema { source }
@@ -182,9 +188,9 @@ impl ErrorExt for Error {
             | Error::GeneralDataFusion { .. }
             | Error::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
 
-            Error::UnsupportedInputDataType { .. } | Error::TypeCast { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::UnsupportedInputDataType { .. }
+            | Error::TypeCast { .. }
+            | Error::InvalidFuncArgs { .. } => StatusCode::InvalidArguments,
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
             Error::ExecutePhysicalPlan { source } => source.status_code(),

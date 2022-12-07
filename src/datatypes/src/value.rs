@@ -464,7 +464,7 @@ impl ListValue {
 
         Ok(ScalarValue::List(
             vs,
-            Box::new(new_item_field(output_type.as_arrow_type())),
+            Box::new(new_item_field(output_type.item_type().as_arrow_type())),
         ))
     }
 }

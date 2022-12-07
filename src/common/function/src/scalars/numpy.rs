@@ -13,7 +13,6 @@
 // limitations under the License.
 
 mod clip;
-#[allow(unused)]
 mod interp;
 
 use std::sync::Arc;
