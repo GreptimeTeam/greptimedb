@@ -171,7 +171,9 @@ impl ErrorExt for Error {
             | Error::GeneralDataFusion { .. }
             | Error::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
 
-            Error::UnsupportedInputDataType { .. } | Error::TypeCast { .. } => StatusCode::InvalidArguments,
+            Error::UnsupportedInputDataType { .. } | Error::TypeCast { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
             Error::ExecutePhysicalPlan { source } => source.status_code(),

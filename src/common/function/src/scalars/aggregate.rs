@@ -28,13 +28,13 @@ pub use argmax::ArgmaxAccumulatorCreator;
 pub use argmin::ArgminAccumulatorCreator;
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use diff::DiffAccumulatorCreator;
-
 pub use mean::MeanAccumulatorCreator;
 pub use median::MedianAccumulatorCreator;
 pub use percentile::PercentileAccumulatorCreator;
 pub use polyval::PolyvalAccumulatorCreator;
 pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
 pub use scipy_stats_norm_pdf::ScipyStatsNormPdfAccumulatorCreator;
+
 use crate::scalars::FunctionRegistry;
 
 /// A function creates `AggregateFunctionCreator`.
