@@ -14,7 +14,6 @@
 
 pub const DEFAULT_USERNAME: &str = "greptime";
 
-use std::ops::Deref;
 use std::sync::Arc;
 
 /// Types that can get [ UserInfo ].
@@ -40,7 +39,17 @@ pub enum Identity<'a> {
 
 pub struct UserInfo {
     username: String,
-    auth_method: Box<dyn Authenticator>,
+    /// If auth_method is None, it indicates that the user does not need authentication.
+    auth_method: Option<Box<dyn Authenticator>>,
+}
+
+impl Default for UserInfo {
+    fn default() -> Self {
+        Self {
+            username: DEFAULT_USERNAME.to_string(),
+            auth_method: None,
+        }
+    }
 }
 
 impl UserInfo {
@@ -48,8 +57,16 @@ impl UserInfo {
         &self.username
     }
 
-    pub fn auth_method(&self) -> &dyn Authenticator {
-        self.auth_method.deref()
+    pub fn auth_method(&self) -> Option<&dyn Authenticator> {
+        self.auth_method.as_deref()
+    }
+
+    #[cfg(test)]
+    pub fn new(username: impl Into<String>, auth_method: Option<Box<dyn Authenticator>>) -> Self {
+        Self {
+            username: username.into(),
+            auth_method,
+        }
     }
 }
 
@@ -90,9 +107,9 @@ mod tests {
                     if username == "greptime" {
                         return Ok(UserInfo {
                             username: "greptime".to_string(),
-                            auth_method: Box::new(MockAuthMethod {
+                            auth_method: Some(Box::new(MockAuthMethod {
                                 plain_text: "greptime".to_string(),
-                            }),
+                            })),
                         });
                     }
                     todo!()
@@ -132,7 +149,7 @@ mod tests {
 
         assert_eq!(username, user_info.user_name());
 
-        let auth_method = user_info.auth_method();
+        let auth_method = user_info.auth_method().unwrap();
         assert!(auth_method.auth(Password::PlainText(pwd)));
         assert!(!auth_method.auth(Password::PlainText(wrong_pwd)));
     }

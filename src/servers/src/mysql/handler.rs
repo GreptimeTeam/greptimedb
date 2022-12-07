@@ -28,7 +28,7 @@ use tokio::sync::RwLock;
 
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::context::Channel::MYSQL;
-use crate::context::{Context, CtxBuilder, UserInfo};
+use crate::context::{Context, CtxBuilder};
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
 use crate::query_handler::SqlQueryHandlerRef;
@@ -113,14 +113,15 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         salt: &[u8],
         auth_data: &[u8],
     ) -> bool {
-        // if not specified then **root** will be used
+        // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
         let client_addr = self.client_addr.clone();
 
+        let mut user_info = None;
         if let Some(user_provider) = &self.user_provider {
             let user_id = Identity::UserId(&username, Some(&client_addr));
 
-            match user_provider.user_info(user_id.clone()).await {
+            match user_provider.user_info(user_id).await {
                 Ok(userinfo) => {
                     let pwd = match auth_plugin {
                         "mysql_native_password" => Password::MysqlNativePwd(auth_data, salt),
@@ -129,9 +130,13 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                             return false;
                         }
                     };
-                    if !userinfo.auth_method().auth(pwd) {
-                        return false;
+
+                    if let Some(auth_method) = userinfo.auth_method() {
+                        if !auth_method.auth(pwd) {
+                            return false;
+                        }
                     }
+                    user_info = Some(userinfo);
                 }
                 Err(e) => {
                     error!("Failed to auth, err: {:?}", e);
@@ -139,13 +144,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 }
             }
         }
+        let user_info = user_info.unwrap_or_default();
 
         return match CtxBuilder::new()
             .client_addr(client_addr)
             .set_channel(MYSQL)
-            .set_user_info(UserInfo {
-                username: username.to_string(),
-            })
+            .set_user_info(user_info)
             .build()
         {
             Ok(ctx) => {

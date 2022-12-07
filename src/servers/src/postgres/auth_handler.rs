@@ -35,18 +35,20 @@ struct PgPwdVerifier {
 
 impl PgPwdVerifier {
     async fn verify_pwd(&self, pwd: &str, meta: HashMap<String, String>) -> Result<bool> {
-        let user_name = match meta.get("user") {
-            Some(name) => name,
-            None => return Ok(false),
-        };
         if let Some(user_provider) = &self.user_provider {
+            let user_name = match meta.get("user") {
+                Some(name) => name,
+                None => return Ok(false),
+            };
+
             let user_info = user_provider
                 .user_info(Identity::UserId(user_name, None))
                 .await
                 .context(error::GetUserInfoSnafu)?;
-            return Ok(user_info
-                .auth_method()
-                .auth(Password::PlainText(pwd.as_bytes())));
+
+            if let Some(auth_method) = user_info.auth_method() {
+                return Ok(auth_method.auth(Password::PlainText(pwd.as_bytes())));
+            }
         }
         Ok(true)
     }

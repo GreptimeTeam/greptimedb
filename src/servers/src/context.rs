@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use snafu::OptionExt;
 
+use crate::auth::UserInfo;
 use crate::error::{BuildingContextSnafu, Result};
 
 type CtxFnRef = Arc<dyn Fn(&Context) -> bool + Send + Sync>;
@@ -25,10 +26,6 @@ pub struct Context {
     pub user_info: UserInfo,
     pub quota: Quota,
     pub predicates: Vec<CtxFnRef>,
-}
-
-pub struct UserInfo {
-    pub username: String,
 }
 
 impl Context {
@@ -107,8 +104,9 @@ mod test {
 
     use std::sync::Arc;
 
+    use crate::auth::UserInfo;
     use crate::context::Channel::{self, HTTP};
-    use crate::context::{ClientInfo, Context, CtxBuilder, UserInfo};
+    use crate::context::{ClientInfo, Context, CtxBuilder};
 
     #[test]
     fn test_predicate() {
@@ -117,9 +115,7 @@ mod test {
                 client_host: Default::default(),
                 channel: Channel::GRPC,
             },
-            user_info: UserInfo {
-                username: "greptime".to_string(),
-            },
+            user_info: UserInfo::new("greptime", None),
             quota: Default::default(),
             predicates: vec![],
         };
@@ -142,9 +138,7 @@ mod test {
         let ctx = CtxBuilder::new()
             .client_addr("127.0.0.1:4001".to_string())
             .set_channel(HTTP)
-            .set_user_info(UserInfo {
-                username: "greptime".to_string(),
-            })
+            .set_user_info(UserInfo::new("greptime", None))
             .build()
             .unwrap();
 
