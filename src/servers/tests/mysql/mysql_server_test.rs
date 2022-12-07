@@ -149,7 +149,7 @@ async fn test_server_prefer_secure_client_secure() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_server_require_secure_client_secure() -> Result<()> {
     let server_tls = Arc::new(TlsOption {
         mode: servers::tls::TlsMode::Require,

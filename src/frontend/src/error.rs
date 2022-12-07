@@ -445,6 +445,12 @@ pub enum Error {
 
     #[snafu(display("Table already exists: `{}`", table))]
     TableAlreadyExist { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to encode Substrait logical plan, source: {}", source))]
+    EncodeSubstraitLogicalPlan {
+        #[snafu(backtrace)]
+        source: substrait::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -536,6 +542,7 @@ impl ErrorExt for Error {
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
+            Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
         }
     }
 

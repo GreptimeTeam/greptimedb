@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
 use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
 use derive_builder::Builder;
@@ -333,9 +334,9 @@ pub struct TableInfo {
     /// Comment of the table.
     #[builder(default, setter(into))]
     pub desc: Option<String>,
-    #[builder(default, setter(into))]
+    #[builder(default = "DEFAULT_CATALOG_NAME.to_string()", setter(into))]
     pub catalog_name: String,
-    #[builder(default, setter(into))]
+    #[builder(default = "DEFAULT_SCHEMA_NAME.to_string()", setter(into))]
     pub schema_name: String,
     pub meta: TableMeta,
     #[builder(default = "TableType::Base")]

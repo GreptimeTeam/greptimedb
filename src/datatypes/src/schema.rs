@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
+use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
 use crate::data_type::DataType;
@@ -309,6 +310,15 @@ impl TryFrom<ArrowSchema> for Schema {
         let arrow_schema = Arc::new(arrow_schema);
 
         Schema::try_from(arrow_schema)
+    }
+}
+
+impl TryFrom<DFSchemaRef> for Schema {
+    type Error = Error;
+
+    fn try_from(value: DFSchemaRef) -> Result<Self> {
+        let s: ArrowSchema = value.as_ref().into();
+        s.try_into()
     }
 }
 

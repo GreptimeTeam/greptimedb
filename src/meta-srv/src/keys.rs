@@ -15,7 +15,7 @@
 use std::str::FromStr;
 
 use api::v1::meta::TableName;
-use common_catalog::TableGlobalKey;
+use catalog::helper::TableGlobalKey;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};

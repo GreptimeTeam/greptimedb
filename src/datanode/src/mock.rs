@@ -31,7 +31,6 @@ use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::{create_local_file_log_store, new_object_store, DefaultEngine, Instance};
 use crate::script::ScriptExecutor;
-use crate::server::grpc::plan::PhysicalPlanner;
 use crate::sql::SqlHandler;
 
 impl Instance {
@@ -63,7 +62,6 @@ impl Instance {
             catalog_manager.clone(),
             query_engine.clone(),
         );
-        let physical_planner = PhysicalPlanner::new(query_engine.clone());
         let script_executor = ScriptExecutor::new(catalog_manager.clone(), query_engine.clone())
             .await
             .unwrap();
@@ -79,7 +77,6 @@ impl Instance {
             query_engine,
             sql_handler,
             catalog_manager,
-            physical_planner,
             script_executor,
             meta_client,
             heartbeat_task,
@@ -133,7 +130,6 @@ impl Instance {
                 query_engine.clone(),
             ),
             catalog_manager,
-            physical_planner: PhysicalPlanner::new(query_engine),
             script_executor,
             table_id_provider: Some(Arc::new(LocalTableIdProvider::default())),
             meta_client: Some(meta_client),

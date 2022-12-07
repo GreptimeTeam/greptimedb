@@ -18,22 +18,17 @@ use api::v1::codec::SelectResult as GrpcSelectResult;
 use api::v1::column::SemanticType;
 use api::v1::{
     object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr,
-    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, PhysicalPlan,
-    SelectExpr,
+    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, SelectExpr,
 };
 use common_error::status_code::StatusCode;
-use common_grpc::{AsExecutionPlan, DefaultAsPlanImpl};
 use common_grpc_expr::column_to_vector;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
-use datafusion::physical_plan::ExecutionPlan;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{
-    ColumnToVectorSnafu, ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu, EncodePhysicalSnafu,
-};
+use crate::error::{ColumnToVectorSnafu, ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu};
 use crate::{error, Client, Result};
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -90,24 +85,6 @@ impl Database {
             Select::Sql(sql) => SelectExpr {
                 expr: Some(select_expr::Expr::Sql(sql)),
             },
-        };
-        self.do_select(select_expr).await
-    }
-
-    pub async fn physical_plan(
-        &self,
-        physical: Arc<dyn ExecutionPlan>,
-        original_ql: Option<String>,
-    ) -> Result<ObjectResult> {
-        let plan = DefaultAsPlanImpl::try_from_physical_plan(physical.clone())
-            .context(EncodePhysicalSnafu { physical })?
-            .bytes;
-        let original_ql = original_ql.unwrap_or_default();
-        let select_expr = SelectExpr {
-            expr: Some(select_expr::Expr::PhysicalPlan(PhysicalPlan {
-                original_ql: original_ql.into_bytes(),
-                plan,
-            })),
         };
         self.do_select(select_expr).await
     }

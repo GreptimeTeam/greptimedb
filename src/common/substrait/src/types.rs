@@ -18,11 +18,13 @@
 //! Current we only have variations on integer types. Variation 0 (system preferred) are the same with base types, which
 //! are signed integer (i.e. I8 -> [i8]), and Variation 1 stands for unsigned integer (i.e. I8 -> [u8]).
 
+use datafusion::scalar::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
+use substrait_proto::protobuf::expression::literal::LiteralType;
 use substrait_proto::protobuf::r#type::{self as s_type, Kind, Nullability};
-use substrait_proto::protobuf::Type as SType;
+use substrait_proto::protobuf::{Type as SType, Type};
 
-use crate::error::{Result, UnsupportedConcreteTypeSnafu, UnsupportedSubstraitTypeSnafu};
+use crate::error::{self, Result, UnsupportedConcreteTypeSnafu, UnsupportedSubstraitTypeSnafu};
 
 macro_rules! substrait_kind {
     ($desc:ident, $concrete_ty:ident) => {{
@@ -133,4 +135,68 @@ pub fn from_concrete_type(ty: ConcreteDataType, nullability: Option<bool>) -> Re
     };
 
     Ok(SType { kind })
+}
+
+pub(crate) fn scalar_value_as_literal_type(v: &ScalarValue) -> Result<LiteralType> {
+    Ok(if v.is_null() {
+        LiteralType::Null(Type { kind: None })
+    } else {
+        match v {
+            ScalarValue::Boolean(Some(v)) => LiteralType::Boolean(*v),
+            ScalarValue::Float32(Some(v)) => LiteralType::Fp32(*v),
+            ScalarValue::Float64(Some(v)) => LiteralType::Fp64(*v),
+            ScalarValue::Int8(Some(v)) => LiteralType::I8(*v as i32),
+            ScalarValue::Int16(Some(v)) => LiteralType::I16(*v as i32),
+            ScalarValue::Int32(Some(v)) => LiteralType::I32(*v),
+            ScalarValue::Int64(Some(v)) => LiteralType::I64(*v),
+            ScalarValue::LargeUtf8(Some(v)) => LiteralType::String(v.clone()),
+            ScalarValue::LargeBinary(Some(v)) => LiteralType::Binary(v.clone()),
+            // TODO(LFC): Implement other conversions: ScalarValue => LiteralType
+            _ => {
+                return error::UnsupportedExprSnafu {
+                    name: format!("{:?}", v),
+                }
+                .fail()
+            }
+        }
+    })
+}
+
+pub(crate) fn literal_type_to_scalar_value(t: LiteralType) -> Result<ScalarValue> {
+    Ok(match t {
+        LiteralType::Null(Type { kind: Some(kind) }) => match kind {
+            Kind::Bool(_) => ScalarValue::Boolean(None),
+            Kind::I8(_) => ScalarValue::Int8(None),
+            Kind::I16(_) => ScalarValue::Int16(None),
+            Kind::I32(_) => ScalarValue::Int32(None),
+            Kind::I64(_) => ScalarValue::Int64(None),
+            Kind::Fp32(_) => ScalarValue::Float32(None),
+            Kind::Fp64(_) => ScalarValue::Float64(None),
+            Kind::String(_) => ScalarValue::LargeUtf8(None),
+            Kind::Binary(_) => ScalarValue::LargeBinary(None),
+            // TODO(LFC): Implement other conversions: Kind => ScalarValue
+            _ => {
+                return error::UnsupportedSubstraitTypeSnafu {
+                    ty: format!("{:?}", kind),
+                }
+                .fail()
+            }
+        },
+        LiteralType::Boolean(v) => ScalarValue::Boolean(Some(v)),
+        LiteralType::I8(v) => ScalarValue::Int8(Some(v as i8)),
+        LiteralType::I16(v) => ScalarValue::Int16(Some(v as i16)),
+        LiteralType::I32(v) => ScalarValue::Int32(Some(v)),
+        LiteralType::I64(v) => ScalarValue::Int64(Some(v)),
+        LiteralType::Fp32(v) => ScalarValue::Float32(Some(v)),
+        LiteralType::Fp64(v) => ScalarValue::Float64(Some(v)),
+        LiteralType::String(v) => ScalarValue::LargeUtf8(Some(v)),
+        LiteralType::Binary(v) => ScalarValue::LargeBinary(Some(v)),
+        // TODO(LFC): Implement other conversions: LiteralType => ScalarValue
+        _ => {
+            return error::UnsupportedSubstraitTypeSnafu {
+                ty: format!("{:?}", t),
+            }
+            .fail()
+        }
+    })
 }

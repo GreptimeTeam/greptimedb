@@ -13,9 +13,9 @@
 // limitations under the License.
 
 //! compile script to code object
-
-use rustpython_bytecode::CodeObject;
-use rustpython_compiler_core::compile as python_compile;
+use rustpython_codegen::compile::compile_top;
+use rustpython_compiler::{CompileOpts, Mode};
+use rustpython_compiler_core::CodeObject;
 use rustpython_parser::ast::{Located, Location};
 use rustpython_parser::{ast, parser};
 use snafu::ResultExt;
@@ -73,7 +73,8 @@ fn gen_call(name: &str, deco_args: &DecoratorArgs, loc: &Location) -> ast::Stmt<
 /// strip type annotation
 pub fn compile_script(name: &str, deco_args: &DecoratorArgs, script: &str) -> Result<CodeObject> {
     // note that it's important to use `parser::Mode::Interactive` so the ast can be compile to return a result instead of return None in eval mode
-    let mut top = parser::parse(script, parser::Mode::Interactive).context(PyParseSnafu)?;
+    let mut top =
+        parser::parse(script, parser::Mode::Interactive, "<embedded>").context(PyParseSnafu)?;
     // erase decorator
     if let ast::Mod::Interactive { body } = &mut top {
         let stmts = body;
@@ -122,11 +123,11 @@ pub fn compile_script(name: &str, deco_args: &DecoratorArgs, script: &str) -> Re
         );
     }
     // use `compile::Mode::BlockExpr` so it return the result of statement
-    python_compile::compile_top(
+    compile_top(
         &top,
         "<embedded>".to_owned(),
-        python_compile::Mode::BlockExpr,
-        python_compile::CompileOpts { optimize: 0 },
+        Mode::BlockExpr,
+        CompileOpts { optimize: 0 },
     )
     .context(PyCompileSnafu)
 }

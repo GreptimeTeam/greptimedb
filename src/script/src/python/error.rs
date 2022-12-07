@@ -18,7 +18,7 @@ use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::error::Error as DataTypeError;
 use query::error::Error as QueryError;
-use rustpython_compiler_core::error::CompileError as CoreCompileError;
+use rustpython_codegen::error::CodegenError;
 use rustpython_parser::ast::Location;
 use rustpython_parser::error::ParseError;
 pub use snafu::ensure;
@@ -54,7 +54,7 @@ pub enum Error {
     #[snafu(display("Failed to compile script, source: {}", source))]
     PyCompile {
         backtrace: Backtrace,
-        source: CoreCompileError,
+        source: CodegenError,
     },
 
     /// rustpython problem, using python virtual machines' backtrace instead
@@ -76,7 +76,7 @@ pub enum Error {
     /// errors in coprocessors' parse check for types and etc.
     #[snafu(display("Coprocessor error: {} {}.", reason,
                     if let Some(loc) = loc{
-                        format!("at {loc}")
+                        format!("at {loc:?}")
                     }else{
                         "".into()
                     }))]

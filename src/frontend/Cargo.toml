@@ -42,6 +42,7 @@ snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
 sqlparser = "0.15"
 store-api = { path = "../store-api" }
+substrait = { path = "../common/substrait" }
 table = { path = "../table" }
 tokio = { version = "1.18", features = ["full"] }
 

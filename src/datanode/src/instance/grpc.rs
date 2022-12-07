@@ -39,7 +39,6 @@ use crate::error::{
     UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
-use crate::server::grpc::plan::PhysicalPlanner;
 
 impl Instance {
     pub async fn execute_grpc_insert(
@@ -117,11 +116,6 @@ impl Instance {
                 self.execute_sql(&sql, Arc::new(QueryContext::new())).await
             }
             Some(select_expr::Expr::LogicalPlan(plan)) => self.execute_logical(plan).await,
-            Some(select_expr::Expr::PhysicalPlan(api::v1::PhysicalPlan { original_ql, plan })) => {
-                self.physical_planner
-                    .execute(PhysicalPlanner::parse(plan)?, original_ql)
-                    .await
-            }
             _ => UnsupportedExprSnafu {
                 name: format!("{:?}", expr),
             }
@@ -151,9 +145,8 @@ impl Instance {
     }
 
     async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
-        let logical_plan_converter = DFLogicalSubstraitConvertor::new(self.catalog_manager.clone());
-        let logical_plan = logical_plan_converter
-            .decode(plan_bytes.as_slice())
+        let logical_plan = DFLogicalSubstraitConvertor
+            .decode(plan_bytes.as_slice(), self.catalog_manager.clone())
             .context(DecodeLogicalPlanSnafu)?;
 
         self.query_engine

@@ -16,7 +16,7 @@ pub mod compile;
 pub mod parse;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::schema::Schema;
 use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector, VectorRef};
-use rustpython_bytecode::CodeObject;
+use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
 use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::AsObject;
@@ -430,7 +430,24 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
     INTERPRETER.with(|i| {
         i.borrow_mut()
             .get_or_insert_with(|| {
+                // we limit stdlib imports for safety reason, i.e `fcntl` is not allowed here
+                let native_module_allow_list = HashSet::from([
+                    "array", "cmath", "gc", "hashlib", "_json", "_random", "math",
+                ]);
                 let interpreter = Arc::new(vm::Interpreter::with_init(Default::default(), |vm| {
+                    // not using full stdlib to prevent security issue, instead filter out a few simple util module
+                    vm.add_native_modules(
+                        rustpython_stdlib::get_module_inits()
+                            .into_iter()
+                            .filter(|(k, _)| native_module_allow_list.contains(k.as_ref())),
+                    );
+
+                    // We are freezing the stdlib to include the standard library inside the binary.
+                    // so according to this issue:
+                    // https://github.com/RustPython/RustPython/issues/4292
+                    // add this line for stdlib, so rustpython can found stdlib's python part in bytecode format
+                    vm.add_frozen(rustpython_pylib::frozen_stdlib());
+                    // add our own custom datatype and module
                     PyVector::make_class(&vm.ctx);
                     vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
                 }));
