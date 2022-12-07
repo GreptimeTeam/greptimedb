@@ -22,8 +22,7 @@ use common_query::error::{
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::prelude::*;
-use datatypes::types::WrapperType;
-use datatypes::vectors::{ConstantVector, Float64Vector, Helper, UInt64Vector};
+use datatypes::vectors::{ConstantVector, Float64Vector, UInt64Vector};
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use snafu::{ensure, OptionExt};
@@ -31,8 +30,7 @@ use snafu::{ensure, OptionExt};
 #[derive(Debug, Default)]
 pub struct Mean<T>
 where
-    T: WrapperType,
-    T::Native: AsPrimitive<f64>,
+    T: Primitive + AsPrimitive<f64>,
 {
     sum: f64,
     n: u64,
@@ -41,8 +39,7 @@ where
 
 impl<T> Mean<T>
 where
-    T: WrapperType,
-    T::Native: AsPrimitive<f64>,
+    T: Primitive + AsPrimitive<f64>,
 {
     #[inline(always)]
     fn push(&mut self, value: T) {
@@ -59,8 +56,8 @@ where
 
 impl<T> Accumulator for Mean<T>
 where
-    T: WrapperType,
-    T::Native: AsPrimitive<f64>,
+    T: Primitive + AsPrimitive<f64>,
+    for<'a> T: Scalar<RefType<'a> = T>,
 {
     fn state(&self) -> Result<Vec<Value>> {
         Ok(vec![self.sum.into(), self.n.into()])
@@ -76,10 +73,10 @@ where
         let mut len = 1;
         let column: &<T as Scalar>::VectorType = if column.is_const() {
             len = column.len();
-            let column: &ConstantVector = unsafe { Helper::static_cast(column) };
-            unsafe { Helper::static_cast(column.inner()) }
+            let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
+            unsafe { VectorHelper::static_cast(column.inner()) }
         } else {
-            unsafe { Helper::static_cast(column) }
+            unsafe { VectorHelper::static_cast(column) }
         };
         (0..len).for_each(|_| {
             for v in column.iter_data().flatten() {
