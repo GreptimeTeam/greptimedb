@@ -19,6 +19,7 @@ use common_query::error::Result;
 use common_query::prelude::{Signature, Volatility};
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::types::LogicalPrimitiveType;
 use datatypes::vectors::VectorRef;
 use datatypes::with_match_primitive_type_id;
 use num::traits::Pow;
@@ -46,7 +47,7 @@ impl Function for PowFunction {
     fn eval(&self, _func_ctx: FunctionContext, columns: &[VectorRef]) -> Result<VectorRef> {
         with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$S| {
             with_match_primitive_type_id!(columns[1].data_type().logical_type_id(), |$T| {
-                let col = scalar_binary_op::<$S, $T, f64, _>(&columns[0], &columns[1], scalar_pow, &mut EvalContext::default())?;
+                let col = scalar_binary_op::<<$S as LogicalPrimitiveType>::Native, <$T as LogicalPrimitiveType>::Native, f64, _>(&columns[0], &columns[1], scalar_pow, &mut EvalContext::default())?;
                 Ok(Arc::new(col))
             },{
                 unreachable!()

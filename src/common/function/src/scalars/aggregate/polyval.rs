@@ -60,8 +60,8 @@ where
 impl<T, PolyT> Accumulator for Polyval<T, PolyT>
 where
     T: WrapperType,
-    PolyT: WrapperType,
     T::Native: AsPrimitive<PolyT::Native>,
+    PolyT: WrapperType + std::iter::Sum<<PolyT as WrapperType>::Native>,
     PolyT::Native: std::ops::Mul<Output = PolyT::Native> + std::iter::Sum<PolyT::Native>,
 {
     fn state(&self) -> Result<Vec<Value>> {
@@ -73,7 +73,7 @@ where
         Ok(vec![
             Value::List(ListValue::new(
                 Some(Box::new(nums)),
-                T::default().into().data_type(),
+                T::LogicalType::build_data_type(),
             )),
             self.x.into(),
         ])
@@ -106,7 +106,7 @@ where
         });
 
         let x = &values[1];
-        let x = Helper::check_get_scalar::<i64>(x).context(error::InvalidInputsSnafu {
+        let x = Helper::check_get_scalar::<i64>(x).context(error::InvalidInputTypeSnafu {
             err_msg: "expecting \"POLYVAL\" function's second argument to be a positive integer",
         })?;
         // `get(0)` is safe because we have checked `values[1].len() == values[0].len() != 0`
@@ -175,12 +175,14 @@ where
                 ),
             })?;
         for value in values.values_iter() {
-            let value = value.context(FromScalarValueSnafu)?;
-            let column: &<T as Scalar>::VectorType = unsafe { Helper::static_cast(&value) };
-            for v in column.iter_data().flatten() {
-                self.push(v);
+            if let Some(value) = value.context(FromScalarValueSnafu)? {
+                let column: &<T as Scalar>::VectorType = unsafe { Helper::static_cast(&value) };
+                for v in column.iter_data().flatten() {
+                    self.push(v);
+                }
             }
         }
+
         Ok(())
     }
 
@@ -199,7 +201,7 @@ where
             .values
             .iter()
             .enumerate()
-            .map(|(i, &value)| value.as_() * (x.pow((len - 1 - i) as u32)).as_())
+            .map(|(i, &value)| value.into_native().as_() * (x.pow((len - 1 - i) as u32)))
             .sum();
         Ok(polyval.into())
     }
@@ -216,7 +218,7 @@ impl AggregateFunctionCreator for PolyvalAccumulatorCreator {
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Polyval::<$S,<<$S as LogicalPrimitiveType>::LargestType as LogicalPrimitiveType>::Wrapper>::default()))
+                    Ok(Box::new(Polyval::<<$S as LogicalPrimitiveType>::Wrapper, <<$S as LogicalPrimitiveType>::LargestType as LogicalPrimitiveType>::Wrapper>::default()))
                 },
                 {
                     let err_msg = format!(

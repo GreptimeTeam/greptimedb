@@ -42,7 +42,7 @@ where
 {
     #[inline(always)]
     fn push(&mut self, value: T) {
-        self.sum += value.as_();
+        self.sum += value.into_native().as_();
         self.n += 1;
     }
 
@@ -149,7 +149,7 @@ impl AggregateFunctionCreator for MeanAccumulatorCreator {
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Mean::<$S>::default()))
+                    Ok(Box::new(Mean::<<$S as LogicalPrimitiveType>::Native>::default()))
                 },
                 {
                     let err_msg = format!(
