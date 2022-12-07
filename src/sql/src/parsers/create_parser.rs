@@ -248,7 +248,7 @@ impl<'a> ParserContext<'a> {
         columns: &mut Vec<ColumnDef>,
         constraints: &mut Vec<TableConstraint>,
     ) -> Result<()> {
-        let mut column = self
+        let column = self
             .parser
             .parse_column_def()
             .context(SyntaxSnafu { sql: self.sql })?;
@@ -261,6 +261,15 @@ impl<'a> ParserContext<'a> {
         }
 
         // for supporting `ts TIMESTAMP TIME INDEX,` syntax.
+        self.parse_time_index(column, columns, constraints)
+    }
+
+    fn parse_time_index(
+        &mut self,
+        mut column: ColumnDef,
+        columns: &mut Vec<ColumnDef>,
+        constraints: &mut Vec<TableConstraint>,
+    ) -> Result<()> {
         self.parser
             .expect_keyword(Keyword::TIME)
             .context(error::UnexpectedSnafu {
@@ -295,6 +304,36 @@ impl<'a> ParserContext<'a> {
         }];
         columns.push(column);
         constraints.push(constraint);
+
+        match self.parser.peek_token() {
+            Token::Comma => return Ok(()),
+            Token::Word(w) if &w.value != "NOT" => {
+                self.parser
+                    .expect_keyword(Keyword::INDEX)
+                    .context(error::UnexpectedSnafu {
+                        sql: self.sql,
+                        expected: ", or NOT NULL",
+                        actual: self.peek_token_as_string(),
+                    })?;
+            }
+            _ => {}
+        };
+
+        self.parser
+            .expect_keyword(Keyword::NOT)
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "NOT",
+                actual: self.peek_token_as_string(),
+            })?;
+
+        self.parser
+            .expect_keyword(Keyword::NULL)
+            .context(error::UnexpectedSnafu {
+                sql: self.sql,
+                expected: "NULL",
+                actual: self.peek_token_as_string(),
+            })?;
 
         Ok(())
     }
@@ -772,6 +811,26 @@ CREATE TABLE monitor (
 ENGINE=mito";
         let result1 = ParserContext::create_with_dialect(sql1, &GenericDialect {}).unwrap();
 
+        if let Statement::CreateTable(c) = &result1[0] {
+            assert_eq!(c.constraints.len(), 2);
+            let tc = c.constraints[0].clone();
+            match tc {
+                TableConstraint::Unique {
+                    name,
+                    columns,
+                    is_primary,
+                } => {
+                    assert_eq!(name.unwrap().to_string(), "__time_index");
+                    assert_eq!(columns.len(), 1);
+                    assert_eq!(&columns[0].value, "ts");
+                    assert!(!is_primary);
+                }
+                _ => panic!("should be time index constraint"),
+            };
+        } else {
+            panic!("should be create_table statement");
+        }
+
         // `TIME INDEX` should be in front of `PRIMARY KEY`
         // in order to equal the `TIMESTAMP TIME INDEX` constraint options vector
         let sql2 = r"
@@ -789,6 +848,7 @@ ENGINE=mito";
 
         assert_eq!(result1, result2);
 
+        // TIMESTAMP can be NULL which is not equal to above
         let sql3 = r"
 CREATE TABLE monitor (
   host_id    INT,
@@ -804,6 +864,91 @@ ENGINE=mito";
         let result3 = ParserContext::create_with_dialect(sql3, &GenericDialect {}).unwrap();
 
         assert_ne!(result1, result3);
+    }
+
+    #[test]
+    fn test_parse_create_table_with_timestamp_index_not_null() {
+        let sql = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  ts         TIMESTAMP TIME INDEX,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  TIME INDEX (ts),
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+
+        assert_eq!(result.len(), 1);
+        if let Statement::CreateTable(c) = &result[0] {
+            let ts = c.columns[2].clone();
+            assert_eq!(ts.name.to_string(), "ts");
+            assert_eq!(ts.options[0].option, NotNull);
+        } else {
+            panic!("should be create table statement");
+        }
+
+        let sql1 = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  ts         TIMESTAMP NOT NULL TIME INDEX,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  TIME INDEX (ts),
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+
+        let result1 = ParserContext::create_with_dialect(sql1, &GenericDialect {}).unwrap();
+        assert_eq!(result, result1);
+
+        let sql2 = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  ts         TIMESTAMP TIME INDEX NOT NULL,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  TIME INDEX (ts),
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+
+        let result2 = ParserContext::create_with_dialect(sql2, &GenericDialect {}).unwrap();
+        assert_eq!(result, result2);
+
+        let sql3 = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  ts         TIMESTAMP TIME INDEX NULL NOT,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  TIME INDEX (ts),
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+
+        let result3 = ParserContext::create_with_dialect(sql3, &GenericDialect {});
+        assert!(result3.is_err());
+
+        let sql4 = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  ts         TIMESTAMP TIME INDEX NOT NULL NULL,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  TIME INDEX (ts),
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+
+        let result4 = ParserContext::create_with_dialect(sql4, &GenericDialect {});
+        assert!(result4.is_err());
     }
 
     #[test]
