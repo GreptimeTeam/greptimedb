@@ -17,11 +17,10 @@ use std::sync::Arc;
 use api::prometheus::remote::read_request::ResponseType;
 use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
 use async_trait::async_trait;
-use client::{ObjectResult, Select};
+use client::ObjectResult;
 use common_error::prelude::BoxedError;
 use common_grpc::select::to_object_result;
 use common_telemetry::logging;
-use futures_util::TryFutureExt;
 use prost::Message;
 use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
@@ -30,7 +29,7 @@ use servers::Mode;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 
-use crate::instance::{parse_stmt, Instance};
+use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
 
@@ -94,19 +93,14 @@ impl Instance {
                 sql
             );
 
-            let object_result = if let Some(dist_instance) = &self.dist_instance {
-                let output = futures::future::ready(parse_stmt(&sql))
-                    .and_then(|stmt| {
-                        let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
-                        dist_instance.handle_sql(&sql, stmt, query_ctx)
-                    })
-                    .await;
-                to_object_result(output).await.try_into()
-            } else {
-                self.database(db).select(Select::Sql(sql.clone())).await
-            }
-            .map_err(BoxedError::new)
-            .context(error::ExecuteQuerySnafu { query: sql })?;
+            let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
+            let output = self.sql_handler.do_query(&sql, query_ctx).await;
+
+            let object_result = to_object_result(output)
+                .await
+                .try_into()
+                .map_err(BoxedError::new)
+                .context(error::ExecuteQuerySnafu { query: sql })?;
 
             results.push((table_name, object_result));
         }
@@ -117,34 +111,25 @@ impl Instance {
 #[async_trait]
 impl PrometheusProtocolHandler for Instance {
     async fn write(&self, database: &str, request: WriteRequest) -> ServerResult<()> {
+        let exprs = prometheus::write_request_to_insert_exprs(database, request.clone())?;
         match self.mode {
             Mode::Standalone => {
-                let exprs = prometheus::write_request_to_insert_exprs(database, request)?;
-                let futures = exprs
-                    .into_iter()
-                    .map(|e| self.handle_insert(e))
-                    .collect::<Vec<_>>();
-                let res = futures_util::future::join_all(futures)
+                self.handle_inserts(exprs)
                     .await
-                    .into_iter()
-                    .collect::<Result<Vec<_>, crate::error::Error>>();
-                res.map_err(BoxedError::new)
-                    .context(error::ExecuteInsertSnafu {
-                        msg: "failed to write prometheus remote request",
+                    .map_err(BoxedError::new)
+                    .with_context(|_| error::ExecuteInsertSnafu {
+                        msg: format!("{:?}", request),
                     })?;
             }
             Mode::Distributed => {
-                let inserts = prometheus::write_request_to_insert_exprs(database, request)?;
-
-                self.dist_insert(inserts)
+                self.dist_insert(exprs)
                     .await
                     .map_err(BoxedError::new)
-                    .context(error::ExecuteInsertSnafu {
-                        msg: "execute insert failed",
+                    .with_context(|_| error::ExecuteInsertSnafu {
+                        msg: format!("{:?}", request),
                     })?;
             }
         }
-
         Ok(())
     }
 

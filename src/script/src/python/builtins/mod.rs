@@ -15,7 +15,6 @@
 //!  Builtin module contains GreptimeDB builtin udf/udaf
 
 #[cfg(test)]
-#[allow(clippy::print_stdout)]
 mod test;
 
 use datafusion_common::{DataFusionError, ScalarValue};

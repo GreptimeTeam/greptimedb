@@ -20,50 +20,49 @@ mod prometheus;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::result::ObjectResultBuilder;
+use api::result::{ObjectResultBuilder, PROTOCOL_VERSION};
 use api::v1::alter_expr::Kind;
 use api::v1::object_expr::Expr;
 use api::v1::{
-    admin_expr, select_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, Column,
-    CreateDatabaseExpr, CreateExpr, DropTableExpr, InsertExpr, ObjectExpr,
+    admin_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, Column, CreateDatabaseExpr,
+    CreateExpr, DropTableExpr, ExprHeader, InsertExpr, ObjectExpr,
     ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManagerRef, CatalogProviderRef, SchemaProviderRef};
-use client::admin::{admin_result_to_output, Admin};
-use client::{Client, Database, Select};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::prelude::{BoxedError, StatusCode};
+use client::admin::admin_result_to_output;
+use client::ObjectResult;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_grpc::select::to_object_result;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, info};
+use datanode::instance::InstanceRef as DnInstanceRef;
 use distributed::DistInstance;
-use meta_client::client::MetaClientBuilder;
+use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use servers::query_handler::{
-    GrpcAdminHandler, GrpcQueryHandler, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
-    PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
+    GrpcAdminHandler, GrpcAdminHandlerRef, GrpcQueryHandler, GrpcQueryHandlerRef,
+    InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
+    ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
 };
 use servers::{error as server_error, Mode};
-use session::context::{QueryContext, QueryContextRef};
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::create::Partitions;
-use sql::statements::explain::Explain;
 use sql::statements::insert::Insert;
 use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, AlterTableOnInsertionSnafu, AlterTableSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    CreateDatabaseSnafu, CreateTableSnafu, DropTableSnafu, FindNewColumnsOnInsertionSnafu,
-    InsertSnafu, MissingMetasrvOptsSnafu, Result, SchemaNotFoundSnafu, SelectSnafu,
-    UnsupportedExprSnafu,
+    self, AlterTableOnInsertionSnafu, CatalogNotFoundSnafu, CatalogSnafu, CreateDatabaseSnafu,
+    CreateTableSnafu, FindNewColumnsOnInsertionSnafu, InsertSnafu, MissingMetasrvOptsSnafu, Result,
+    SchemaNotFoundSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
@@ -91,9 +90,6 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 
 #[derive(Clone)]
 pub struct Instance {
-    // TODO(hl): In standalone mode, there is only one client.
-    // But in distribute mode, frontend should fetch datanodes' addresses from metasrv.
-    client: Client,
     /// catalog manager is None in standalone mode, datanode will keep their own
     catalog_manager: Option<CatalogManagerRef>,
     /// Script handler is None in distributed mode, only works on standalone mode.
@@ -103,94 +99,87 @@ pub struct Instance {
     // Standalone and Distributed, then the code behind it doesn't need to use so
     // many match statements.
     mode: Mode,
-    // TODO(LFC): Refactor consideration: Can we split Frontend to DistInstance and EmbedInstance?
-    dist_instance: Option<DistInstance>,
-}
 
-impl Default for Instance {
-    fn default() -> Self {
-        Self {
-            client: Client::default(),
-            catalog_manager: None,
-            script_handler: None,
-            create_expr_factory: Arc::new(DefaultCreateExprFactory {}),
-            mode: Mode::Standalone,
-            dist_instance: None,
-        }
-    }
+    // TODO(LFC): Remove `dist_instance` together with Arrow Flight adoption refactor.
+    dist_instance: Option<DistInstance>,
+
+    sql_handler: SqlQueryHandlerRef,
+    grpc_query_handler: GrpcQueryHandlerRef,
+    grpc_admin_handler: GrpcAdminHandlerRef,
 }
 
 impl Instance {
-    pub async fn try_new(opts: &FrontendOptions) -> Result<Self> {
-        let mut instance = Instance {
-            mode: opts.mode.clone(),
-            ..Default::default()
-        };
+    pub async fn try_new_distributed(opts: &FrontendOptions) -> Result<Self> {
+        let meta_client = Self::create_meta_client(opts).await?;
 
-        let addr = opts.datanode_grpc_addr();
-        instance.client.start(vec![addr]);
+        let meta_backend = Arc::new(MetaKvBackend {
+            client: meta_client.clone(),
+        });
+        let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
+        let datanode_clients = Arc::new(DatanodeClients::new());
+        let catalog_manager = Arc::new(FrontendCatalogManager::new(
+            meta_backend,
+            table_routes,
+            datanode_clients.clone(),
+        ));
 
-        instance.dist_instance = match &opts.mode {
-            Mode::Standalone => None,
-            Mode::Distributed => {
-                let metasrv_addr = &opts
-                    .meta_client_opts
-                    .as_ref()
-                    .context(MissingMetasrvOptsSnafu)?
-                    .metasrv_addrs;
-                info!(
-                    "Creating Frontend instance in distributed mode with Meta server addr {:?}",
-                    metasrv_addr
-                );
+        let dist_instance =
+            DistInstance::new(meta_client, catalog_manager.clone(), datanode_clients);
+        let dist_instance_ref = Arc::new(dist_instance.clone());
 
-                let meta_config = MetaClientOpts::default();
-                let channel_config = ChannelConfig::new()
-                    .timeout(Duration::from_millis(meta_config.timeout_millis))
-                    .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
-                    .tcp_nodelay(meta_config.tcp_nodelay);
-
-                let channel_manager = ChannelManager::with_config(channel_config);
-
-                let mut meta_client = MetaClientBuilder::new(0, 0)
-                    .enable_router()
-                    .enable_store()
-                    .channel_manager(channel_manager)
-                    .build();
-                meta_client
-                    .start(metasrv_addr)
-                    .await
-                    .context(error::StartMetaClientSnafu)?;
-                let meta_client = Arc::new(meta_client);
-
-                let meta_backend = Arc::new(MetaKvBackend {
-                    client: meta_client.clone(),
-                });
-                let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
-                let datanode_clients = Arc::new(DatanodeClients::new());
-                let catalog_manager = Arc::new(FrontendCatalogManager::new(
-                    meta_backend,
-                    table_routes,
-                    datanode_clients.clone(),
-                ));
-
-                instance.catalog_manager = Some(catalog_manager.clone());
-
-                Some(DistInstance::new(
-                    meta_client,
-                    catalog_manager,
-                    datanode_clients,
-                ))
-            }
-        };
-        Ok(instance)
+        Ok(Instance {
+            catalog_manager: Some(catalog_manager),
+            script_handler: None,
+            create_expr_factory: Arc::new(DefaultCreateExprFactory),
+            mode: Mode::Distributed,
+            dist_instance: Some(dist_instance),
+            sql_handler: dist_instance_ref.clone(),
+            grpc_query_handler: dist_instance_ref.clone(),
+            grpc_admin_handler: dist_instance_ref,
+        })
     }
 
-    pub fn database(&self, database: &str) -> Database {
-        Database::new(database, self.client.clone())
+    async fn create_meta_client(opts: &FrontendOptions) -> Result<Arc<MetaClient>> {
+        let metasrv_addr = &opts
+            .meta_client_opts
+            .as_ref()
+            .context(MissingMetasrvOptsSnafu)?
+            .metasrv_addrs;
+        info!(
+            "Creating Frontend instance in distributed mode with Meta server addr {:?}",
+            metasrv_addr
+        );
+
+        let meta_config = MetaClientOpts::default();
+        let channel_config = ChannelConfig::new()
+            .timeout(Duration::from_millis(meta_config.timeout_millis))
+            .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
+            .tcp_nodelay(meta_config.tcp_nodelay);
+        let channel_manager = ChannelManager::with_config(channel_config);
+
+        let mut meta_client = MetaClientBuilder::new(0, 0)
+            .enable_router()
+            .enable_store()
+            .channel_manager(channel_manager)
+            .build();
+        meta_client
+            .start(metasrv_addr)
+            .await
+            .context(error::StartMetaClientSnafu)?;
+        Ok(Arc::new(meta_client))
     }
 
-    pub fn admin(&self, database: &str) -> Admin {
-        Admin::new(database, self.client.clone())
+    pub fn new_standalone(dn_instance: DnInstanceRef) -> Self {
+        Instance {
+            catalog_manager: None,
+            script_handler: None,
+            create_expr_factory: Arc::new(DefaultCreateExprFactory),
+            mode: Mode::Standalone,
+            dist_instance: None,
+            sql_handler: dn_instance.clone(),
+            grpc_query_handler: dn_instance.clone(),
+            grpc_admin_handler: dn_instance,
+        }
     }
 
     pub fn catalog_manager(&self) -> &Option<CatalogManagerRef> {
@@ -213,27 +202,6 @@ impl Instance {
         self.script_handler = Some(handler);
     }
 
-    async fn handle_select(
-        &self,
-        expr: Select,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        if let Some(dist_instance) = &self.dist_instance {
-            let Select::Sql(sql) = expr;
-            dist_instance.handle_sql(&sql, stmt, query_ctx).await
-        } else {
-            // TODO(LFC): Refactor consideration: Datanode should directly execute statement in standalone mode to avoid parse SQL again.
-            // Find a better way to execute query between Frontend and Datanode in standalone mode.
-            // Otherwise we have to parse SQL first to get schema name. Maybe not GRPC.
-            self.database(DEFAULT_SCHEMA_NAME)
-                .select(expr)
-                .await
-                .and_then(Output::try_from)
-                .context(SelectSnafu)
-        }
-    }
-
     /// Handle create expr.
     pub async fn handle_create_table(
         &self,
@@ -243,81 +211,38 @@ impl Instance {
         if let Some(v) = &self.dist_instance {
             v.create_table(&mut expr, partitions).await
         } else {
-            // Currently standalone mode does not support multi partitions/regions.
+            let expr = AdminExpr {
+                header: Some(ExprHeader {
+                    version: PROTOCOL_VERSION,
+                }),
+                expr: Some(admin_expr::Expr::Create(expr)),
+            };
             let result = self
-                .admin(expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME))
-                .create(expr.clone())
-                .await;
-            if let Err(e) = &result {
-                error!(e; "Failed to create table by expr: {:?}", expr);
-            }
-            result
-                .and_then(admin_result_to_output)
-                .context(CreateTableSnafu)
+                .grpc_admin_handler
+                .exec_admin_request(expr)
+                .await
+                .context(error::InvokeGrpcServerSnafu)?;
+            admin_result_to_output(result).context(CreateTableSnafu)
         }
     }
 
     /// Handle create database expr.
     pub async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
         let database_name = expr.database_name.clone();
-        if let Some(dist_instance) = &self.dist_instance {
-            dist_instance.handle_create_database(expr).await
-        } else {
-            // FIXME(hl): In order to get admin client to create schema, we need to use the default schema admin
-            self.admin(DEFAULT_SCHEMA_NAME)
-                .create_database(expr)
-                .await
-                .and_then(admin_result_to_output)
-                .context(CreateDatabaseSnafu {
-                    name: database_name,
-                })
-        }
-    }
-
-    /// Handle alter expr
-    pub async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
-        match &self.dist_instance {
-            Some(dist_instance) => dist_instance.handle_alter_table(expr).await,
-            None => self
-                .admin(expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME))
-                .alter(expr)
-                .await
-                .and_then(admin_result_to_output)
-                .context(AlterTableSnafu),
-        }
-    }
-
-    /// Handle drop table expr
-    pub async fn handle_drop_table(&self, expr: DropTableExpr) -> Result<Output> {
-        match self.mode {
-            Mode::Standalone => self
-                .admin(&expr.schema_name)
-                .drop_table(expr)
-                .await
-                .and_then(admin_result_to_output)
-                .context(DropTableSnafu),
-            // TODO(ruihang): support drop table in distributed mode
-            Mode::Distributed => UnsupportedExprSnafu {
-                name: "Distributed DROP TABLE",
-            }
-            .fail(),
-        }
-    }
-
-    /// Handle explain expr
-    pub async fn handle_explain(
-        &self,
-        sql: &str,
-        explain_stmt: Explain,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        if let Some(dist_instance) = &self.dist_instance {
-            dist_instance
-                .handle_sql(sql, Statement::Explain(explain_stmt), query_ctx)
-                .await
-        } else {
-            Ok(Output::AffectedRows(0))
-        }
+        let expr = AdminExpr {
+            header: Some(ExprHeader {
+                version: PROTOCOL_VERSION,
+            }),
+            expr: Some(admin_expr::Expr::CreateDatabase(expr)),
+        };
+        let result = self
+            .grpc_admin_handler
+            .exec_admin_request(expr)
+            .await
+            .context(error::InvokeGrpcServerSnafu)?;
+        admin_result_to_output(result).context(CreateDatabaseSnafu {
+            name: database_name,
+        })
     }
 
     /// Handle batch inserts
@@ -333,7 +258,7 @@ impl Instance {
     }
 
     /// Handle insert. for 'values' insertion, create/alter the destination table on demand.
-    pub async fn handle_insert(&self, mut insert_expr: InsertExpr) -> Result<Output> {
+    async fn handle_insert(&self, mut insert_expr: InsertExpr) -> Result<Output> {
         let table_name = &insert_expr.table_name;
         let catalog_name = DEFAULT_CATALOG_NAME;
         let schema_name = &insert_expr.schema_name;
@@ -345,11 +270,17 @@ impl Instance {
 
         insert_expr.region_number = 0;
 
-        self.database(schema_name)
-            .insert(insert_expr)
+        let query = ObjectExpr {
+            header: Some(ExprHeader {
+                version: PROTOCOL_VERSION,
+            }),
+            expr: Some(Expr::Insert(insert_expr)),
+        };
+        let result = GrpcQueryHandler::do_query(&*self.grpc_query_handler, query)
             .await
-            .and_then(Output::try_from)
-            .context(InsertSnafu)
+            .context(error::InvokeGrpcServerSnafu)?;
+        let result: ObjectResult = result.try_into().context(InsertSnafu)?;
+        result.try_into().context(InsertSnafu)
     }
 
     // check if table already exist:
@@ -455,11 +386,19 @@ impl Instance {
             catalog_name: Some(catalog_name.to_string()),
             kind: Some(Kind::AddColumns(add_columns)),
         };
-        self.admin(schema_name)
-            .alter(expr)
+
+        let expr = AdminExpr {
+            header: Some(ExprHeader {
+                version: PROTOCOL_VERSION,
+            }),
+            expr: Some(admin_expr::Expr::Alter(expr)),
+        };
+        let result = self
+            .grpc_admin_handler
+            .exec_admin_request(expr)
             .await
-            .and_then(admin_result_to_output)
-            .context(AlterTableOnInsertionSnafu)
+            .context(error::InvokeGrpcServerSnafu)?;
+        admin_result_to_output(result).context(AlterTableOnInsertionSnafu)
     }
 
     fn get_catalog(&self, catalog_name: &str) -> Result<CatalogProviderRef> {
@@ -547,20 +486,6 @@ impl FrontendInstance for Instance {
     }
 }
 
-#[cfg(test)]
-impl Instance {
-    pub fn with_client_and_catalog_manager(client: Client, catalog: CatalogManagerRef) -> Self {
-        Self {
-            client,
-            catalog_manager: Some(catalog),
-            script_handler: None,
-            create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            mode: Mode::Standalone,
-            dist_instance: None,
-        }
-    }
-}
-
 fn parse_stmt(sql: &str) -> Result<Statement> {
     let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
         .context(error::ParseSqlSnafu)?;
@@ -587,12 +512,14 @@ impl SqlQueryHandler for Instance {
             .context(server_error::ExecuteQuerySnafu { query })?;
 
         match stmt {
-            Statement::ShowDatabases(_)
+            Statement::CreateDatabase(_)
+            | Statement::ShowDatabases(_)
+            | Statement::CreateTable(_)
             | Statement::ShowTables(_)
             | Statement::DescribeTable(_)
+            | Statement::Explain(_)
             | Statement::Query(_) => {
-                self.handle_select(Select::Sql(query.to_string()), stmt, query_ctx)
-                    .await
+                return self.sql_handler.do_query(query, query_ctx).await;
             }
             Statement::Insert(insert) => match self.mode {
                 Mode::Standalone => {
@@ -629,30 +556,18 @@ impl SqlQueryHandler for Instance {
                     Ok(Output::AffectedRows(affected))
                 }
             },
-            Statement::CreateTable(create) => {
-                let create_expr = self
-                    .create_expr_factory
-                    .create_expr_by_stmt(&create)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })?;
-
-                self.handle_create_table(create_expr, create.partitions)
-                    .await
-            }
-            Statement::CreateDatabase(c) => {
-                let expr = CreateDatabaseExpr {
-                    database_name: c.name.to_string(),
-                };
-                self.handle_create_database(expr).await
-            }
             Statement::Alter(alter_stmt) => {
-                self.handle_alter(
-                    AlterExpr::try_from(alter_stmt)
-                        .map_err(BoxedError::new)
-                        .context(server_error::ExecuteAlterSnafu { query })?,
-                )
-                .await
+                let expr = AlterExpr::try_from(alter_stmt)
+                    .map_err(BoxedError::new)
+                    .context(server_error::ExecuteAlterSnafu { query })?;
+                let expr = AdminExpr {
+                    header: Some(ExprHeader {
+                        version: PROTOCOL_VERSION,
+                    }),
+                    expr: Some(admin_expr::Expr::Alter(expr)),
+                };
+                let result = self.grpc_admin_handler.exec_admin_request(expr).await?;
+                admin_result_to_output(result).context(error::InvalidAdminResultSnafu)
             }
             Statement::DropTable(drop_stmt) => {
                 let expr = DropTableExpr {
@@ -660,10 +575,14 @@ impl SqlQueryHandler for Instance {
                     schema_name: drop_stmt.schema_name,
                     table_name: drop_stmt.table_name,
                 };
-                self.handle_drop_table(expr).await
-            }
-            Statement::Explain(explain_stmt) => {
-                self.handle_explain(query, explain_stmt, query_ctx).await
+                let expr = AdminExpr {
+                    header: Some(ExprHeader {
+                        version: PROTOCOL_VERSION,
+                    }),
+                    expr: Some(admin_expr::Expr::DropTable(expr)),
+                };
+                let result = self.grpc_admin_handler.exec_admin_request(expr).await?;
+                admin_result_to_output(result).context(error::InvalidAdminResultSnafu)
             }
             Statement::ShowCreateTable(_) => {
                 return server_error::NotSupportedSnafu { feat: query }.fail();
@@ -703,79 +622,32 @@ impl ScriptHandler for Instance {
 #[async_trait]
 impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> server_error::Result<GrpcObjectResult> {
-        if let Some(expr) = &query.expr {
-            match expr {
-                Expr::Insert(insert) => {
-                    // TODO(fys): refactor, avoid clone
-                    let result = self.handle_insert(insert.clone()).await;
-                    result
-                        .map(|o| match o {
-                            Output::AffectedRows(rows) => ObjectResultBuilder::new()
-                                .status_code(StatusCode::Success as u32)
-                                .mutate_result(rows as u32, 0u32)
-                                .build(),
-                            _ => {
-                                unreachable!()
-                            }
-                        })
-                        .map_err(BoxedError::new)
-                        .with_context(|_| server_error::ExecuteQuerySnafu {
-                            query: format!("{:?}", query),
-                        })
-                }
-                Expr::Select(select) => {
-                    let select = select
-                        .expr
-                        .as_ref()
-                        .context(server_error::InvalidQuerySnafu {
-                            reason: "empty query",
-                        })?;
-                    match select {
-                        select_expr::Expr::Sql(sql) => {
-                            let query_ctx = Arc::new(QueryContext::new());
-                            let output = SqlQueryHandler::do_query(self, sql, query_ctx).await;
-                            Ok(to_object_result(output).await)
-                        }
-                        _ => {
-                            if self.dist_instance.is_some() {
-                                return server_error::NotSupportedSnafu {
-                                    feat: "Executing plan directly in Frontend.",
-                                }
-                                .fail();
-                            }
-                            // FIXME(hl): refactor
-                            self.database(DEFAULT_SCHEMA_NAME)
-                                .object(query.clone())
-                                .await
-                                .map_err(BoxedError::new)
-                                .with_context(|_| server_error::ExecuteQuerySnafu {
-                                    query: format!("{:?}", query),
-                                })
-                        }
-                    }
-                }
-                _ => server_error::NotSupportedSnafu {
-                    feat: "Currently only insert and select is supported in GRPC service.",
-                }
-                .fail(),
+        let expr = query
+            .clone()
+            .expr
+            .context(server_error::InvalidQuerySnafu {
+                reason: "empty expr",
+            })?;
+        match expr {
+            Expr::Insert(insert_expr) => {
+                let output = self
+                    .handle_insert(insert_expr.clone())
+                    .await
+                    .map_err(BoxedError::new)
+                    .with_context(|_| server_error::ExecuteQuerySnafu {
+                        query: format!("{:?}", insert_expr),
+                    })?;
+                let object_result = match output {
+                    Output::AffectedRows(rows) => ObjectResultBuilder::default()
+                        .mutate_result(rows as _, 0)
+                        .build(),
+                    _ => unreachable!(),
+                };
+                Ok(object_result)
             }
-        } else {
-            server_error::InvalidQuerySnafu {
-                reason: "empty query",
-            }
-            .fail()
+            _ => GrpcQueryHandler::do_query(&*self.grpc_query_handler, query).await,
         }
     }
-}
-
-fn get_schema_name(expr: &AdminExpr) -> &str {
-    let schema_name = match &expr.expr {
-        Some(admin_expr::Expr::Create(expr)) => expr.schema_name.as_deref(),
-        Some(admin_expr::Expr::Alter(expr)) => expr.schema_name.as_deref(),
-        Some(admin_expr::Expr::CreateDatabase(_)) | None => Some(DEFAULT_SCHEMA_NAME),
-        Some(admin_expr::Expr::DropTable(expr)) => Some(expr.schema_name.as_ref()),
-    };
-    schema_name.unwrap_or(DEFAULT_SCHEMA_NAME)
 }
 
 #[async_trait]
@@ -786,13 +658,7 @@ impl GrpcAdminHandler for Instance {
         if let Some(api::v1::admin_expr::Expr::Create(create)) = &mut expr.expr {
             create.table_id = None;
         }
-        self.admin(get_schema_name(&expr))
-            .do_request(expr.clone())
-            .await
-            .map_err(BoxedError::new)
-            .with_context(|_| server_error::ExecuteQuerySnafu {
-                query: format!("{:?}", expr),
-            })
+        self.grpc_admin_handler.exec_admin_request(expr).await
     }
 }
 
@@ -808,6 +674,7 @@ mod tests {
     };
     use datatypes::schema::ColumnDefaultConstraint;
     use datatypes::value::Value;
+    use session::context::QueryContext;
 
     use super::*;
     use crate::tests;
@@ -853,7 +720,8 @@ mod tests {
             .await
             .unwrap();
         match output {
-            Output::RecordBatches(recordbatches) => {
+            Output::Stream(stream) => {
+                let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let pretty_print = recordbatches.pretty_print();
                 let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
                 let expected = vec![
@@ -875,7 +743,8 @@ mod tests {
             .await
             .unwrap();
         match output {
-            Output::RecordBatches(recordbatches) => {
+            Output::Stream(stream) => {
+                let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let pretty_print = recordbatches.pretty_print();
                 let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
                 let expected = vec![

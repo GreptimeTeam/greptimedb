@@ -40,7 +40,6 @@ pub struct FrontendOptions {
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
     pub mode: Mode,
-    pub datanode_rpc_addr: String,
     pub meta_client_opts: Option<MetaClientOpts>,
 }
 
@@ -55,15 +54,8 @@ impl Default for FrontendOptions {
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
             mode: Mode::Standalone,
-            datanode_rpc_addr: "127.0.0.1:3001".to_string(),
             meta_client_opts: None,
         }
-    }
-}
-
-impl FrontendOptions {
-    pub(crate) fn datanode_grpc_addr(&self) -> String {
-        self.datanode_rpc_addr.clone()
     }
 }
 

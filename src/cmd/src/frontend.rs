@@ -78,7 +78,7 @@ impl StartCommand {
         let opts: FrontendOptions = self.try_into()?;
         let mut frontend = Frontend::new(
             opts.clone(),
-            Instance::try_new(&opts)
+            Instance::try_new_distributed(&opts)
                 .await
                 .context(error::StartFrontendSnafu)?,
         );
@@ -213,7 +213,6 @@ mod tests {
 
         let fe_opts = FrontendOptions::try_from(command).unwrap();
         assert_eq!(Mode::Distributed, fe_opts.mode);
-        assert_eq!("127.0.0.1:3001".to_string(), fe_opts.datanode_rpc_addr);
         assert_eq!(
             "127.0.0.1:4000".to_string(),
             fe_opts.http_options.as_ref().unwrap().addr

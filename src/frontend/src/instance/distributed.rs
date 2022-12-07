@@ -16,12 +16,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{AlterExpr, CreateDatabaseExpr, CreateExpr};
+use api::result::AdminResultBuilder;
+use api::v1::{
+    admin_expr, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr, CreateExpr, ObjectExpr,
+    ObjectResult,
+};
+use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use catalog::CatalogList;
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::{debug, error, info};
 use datatypes::prelude::ConcreteDataType;
@@ -33,6 +39,8 @@ use meta_client::rpc::{
 };
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
+use servers::error as server_error;
+use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
@@ -48,6 +56,8 @@ use crate::error::{
     PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
     TableNotFoundSnafu,
 };
+use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
+use crate::instance::parse_stmt;
 use crate::partitioning::{PartitionBound, PartitionDef};
 use crate::table::DistTable;
 
@@ -126,15 +136,12 @@ impl DistInstance {
                 .context(error::InvalidAdminResultSnafu)?;
         }
 
-        Ok(Output::AffectedRows(region_routes.len()))
+        // Checked in real MySQL, it truly returns "0 rows affected".
+        Ok(Output::AffectedRows(0))
     }
 
-    pub(crate) async fn handle_sql(
-        &self,
-        sql: &str,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
+    async fn handle_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
+        let stmt = parse_stmt(sql)?;
         match stmt {
             Statement::Query(_) => {
                 let plan = self
@@ -142,6 +149,17 @@ impl DistInstance {
                     .statement_to_plan(stmt, query_ctx)
                     .context(error::ExecuteSqlSnafu { sql })?;
                 self.query_engine.execute(&plan).await
+            }
+            Statement::CreateDatabase(stmt) => {
+                let expr = CreateDatabaseExpr {
+                    database_name: stmt.name.to_string(),
+                };
+                self.handle_create_database(expr).await?;
+                Ok(Output::AffectedRows(1))
+            }
+            Statement::CreateTable(stmt) => {
+                let create_expr = &mut DefaultCreateExprFactory.create_expr_by_stmt(&stmt).await?;
+                Ok(self.create_table(create_expr, stmt.partitions).await?)
             }
             Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
             Statement::ShowTables(stmt) => {
@@ -157,7 +175,7 @@ impl DistInstance {
     }
 
     /// Handles distributed database creation
-    pub(crate) async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
+    async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<()> {
         let key = SchemaKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: expr.database_name,
@@ -172,10 +190,10 @@ impl DistInstance {
             .with_key(key.to_string())
             .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
         client.put(request.into()).await.context(RequestMetaSnafu)?;
-        Ok(Output::AffectedRows(1))
+        Ok(())
     }
 
-    pub async fn handle_alter_table(&self, expr: AlterExpr) -> Result<Output> {
+    async fn handle_alter_table(&self, expr: AlterExpr) -> Result<AdminResult> {
         let catalog_name = expr.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
         let schema_name = expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = expr.table_name.as_str();
@@ -200,7 +218,7 @@ impl DistInstance {
             .downcast_ref::<DistTable>()
             .expect("Table impl must be DistTable in distributed mode");
         dist_table.alter_by_expr(expr).await?;
-        Ok(Output::AffectedRows(0))
+        Ok(AdminResultBuilder::default().mutate_result(0, 0).build())
     }
 
     async fn create_table_in_meta(
@@ -268,6 +286,56 @@ impl DistInstance {
             }
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn catalog_manager(&self) -> Arc<FrontendCatalogManager> {
+        self.catalog_manager.clone()
+    }
+}
+
+#[async_trait]
+impl SqlQueryHandler for DistInstance {
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.handle_sql(query, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQuerySnafu { query })
+    }
+}
+
+#[async_trait]
+impl GrpcQueryHandler for DistInstance {
+    async fn do_query(&self, _: ObjectExpr) -> server_error::Result<ObjectResult> {
+        unimplemented!()
+    }
+}
+
+#[async_trait]
+impl GrpcAdminHandler for DistInstance {
+    async fn exec_admin_request(&self, query: AdminExpr) -> server_error::Result<AdminResult> {
+        let expr = query
+            .clone()
+            .expr
+            .context(server_error::InvalidQuerySnafu {
+                reason: "empty expr",
+            })?;
+        match expr {
+            admin_expr::Expr::CreateDatabase(create_database) => self
+                .handle_create_database(create_database)
+                .await
+                .map(|_| AdminResultBuilder::default().mutate_result(1, 0).build()),
+            admin_expr::Expr::Alter(alter) => self.handle_alter_table(alter).await,
+            _ => unimplemented!(),
+        }
+        .map_err(BoxedError::new)
+        .context(server_error::ExecuteQuerySnafu {
+            query: format!("{:?}", query),
+        })
     }
 }
 
@@ -454,12 +522,15 @@ fn find_partition_columns(
 
 #[cfg(test)]
 mod test {
+    use servers::query_handler::SqlQueryHandlerRef;
+    use session::context::QueryContext;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
     use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
+    use crate::tests::create_dist_instance;
 
     #[tokio::test]
     async fn test_parse_partitions() {
@@ -492,15 +563,115 @@ ENGINE=mito",
             let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
             match &result[0] {
                 Statement::CreateTable(c) => {
-                    common_telemetry::info!("{}", sql);
-                    let factory = DefaultCreateExprFactory {};
-                    let expr = factory.create_expr_by_stmt(c).await.unwrap();
+                    let expr = DefaultCreateExprFactory
+                        .create_expr_by_stmt(c)
+                        .await
+                        .unwrap();
                     let partitions = parse_partitions(&expr, c.partitions.clone()).unwrap();
                     let json = serde_json::to_string(&partitions).unwrap();
                     assert_eq!(json, expected);
                 }
                 _ => unreachable!(),
             }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_show_databases() {
+        let (dist_instance, _) = create_dist_instance().await;
+
+        let sql = "create database test_show_databases";
+        let output = dist_instance
+            .handle_sql(sql, QueryContext::arc())
+            .await
+            .unwrap();
+        match output {
+            Output::AffectedRows(rows) => assert_eq!(rows, 1),
+            _ => unreachable!(),
+        }
+
+        let sql = "show databases";
+        let output = dist_instance
+            .handle_sql(sql, QueryContext::arc())
+            .await
+            .unwrap();
+        match output {
+            Output::RecordBatches(r) => {
+                let expected1 = vec![
+                    "+---------------------+",
+                    "| Schemas             |",
+                    "+---------------------+",
+                    "| public              |",
+                    "| test_show_databases |",
+                    "+---------------------+",
+                ];
+                let expected2 = vec![
+                    "+---------------------+",
+                    "| Schemas             |",
+                    "+---------------------+",
+                    "| test_show_databases |",
+                    "| public              |",
+                    "+---------------------+",
+                ];
+                let pretty = r.pretty_print();
+                let lines = pretty.lines().collect::<Vec<_>>();
+                assert!(lines == expected1 || lines == expected2)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_show_tables() {
+        let (dist_instance, datanode_instances) = create_dist_instance().await;
+
+        let sql = "create database test_show_tables";
+        dist_instance
+            .handle_sql(sql, QueryContext::arc())
+            .await
+            .unwrap();
+
+        let sql = "
+            CREATE TABLE greptime.test_show_tables.dist_numbers (
+                ts BIGINT,
+                n INT,
+                TIME INDEX (ts),
+            )
+            PARTITION BY RANGE COLUMNS (n) (
+                PARTITION r0 VALUES LESS THAN (10),
+                PARTITION r1 VALUES LESS THAN (20),
+                PARTITION r2 VALUES LESS THAN (50),
+                PARTITION r3 VALUES LESS THAN (MAXVALUE),
+            )
+            ENGINE=mito";
+        dist_instance
+            .handle_sql(sql, QueryContext::arc())
+            .await
+            .unwrap();
+
+        async fn assert_show_tables(instance: SqlQueryHandlerRef) {
+            let sql = "show tables in test_show_tables";
+            let output = instance.do_query(sql, QueryContext::arc()).await.unwrap();
+            match output {
+                Output::RecordBatches(r) => {
+                    let expected = vec![
+                        "+--------------+",
+                        "| Tables       |",
+                        "+--------------+",
+                        "| dist_numbers |",
+                        "+--------------+",
+                    ];
+                    assert_eq!(r.pretty_print().lines().collect::<Vec<_>>(), expected);
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        assert_show_tables(Arc::new(dist_instance)).await;
+
+        // Asserts that new table is created in Datanode as well.
+        for x in datanode_instances.values() {
+            assert_show_tables(x.clone()).await
         }
     }
 }

@@ -1984,7 +1984,6 @@ dependencies = [
  "datafusion",
  "datafusion-common 7.0.0",
  "datatypes",
- "frontend",
  "futures",
  "hyper",
  "log-store",

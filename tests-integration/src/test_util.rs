@@ -29,8 +29,6 @@ use datanode::instance::{Instance, InstanceRef};
 use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
-use frontend::frontend::FrontendOptions;
-use frontend::grpc::GrpcOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use object_store::backend::s3;
 use object_store::test_util::TempFolder;
@@ -215,8 +213,7 @@ pub async fn create_test_table(
 }
 
 async fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
-    let fe_opts = FrontendOptions::default();
-    let mut frontend_instance = FeInstance::try_new(&fe_opts).await.unwrap();
+    let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
     frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
     frontend_instance.set_script_handler(datanode_instance);
     frontend_instance
@@ -262,19 +259,13 @@ pub async fn setup_test_app_with_frontend(
 pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
-) -> (String, TestGuard, Arc<GrpcServer>, Arc<GrpcServer>) {
+) -> (String, TestGuard, Arc<GrpcServer>) {
     common_telemetry::init_default_ut_logging();
 
-    let datanode_port = get_port();
-    let frontend_port = get_port();
-
-    let (mut opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
-    let datanode_grpc_addr = format!("127.0.0.1:{}", datanode_port);
-    opts.rpc_addr = datanode_grpc_addr.clone();
+    let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
     instance.start().await.unwrap();
 
-    let datanode_grpc_addr = datanode_grpc_addr.clone();
     let runtime = Arc::new(
         RuntimeBuilder::default()
             .worker_threads(2)
@@ -283,26 +274,9 @@ pub async fn setup_grpc_server(
             .unwrap(),
     );
 
-    let fe_grpc_addr = format!("127.0.0.1:{}", frontend_port);
-    let fe_opts = FrontendOptions {
-        mode: Mode::Standalone,
-        datanode_rpc_addr: datanode_grpc_addr.clone(),
-        grpc_options: Some(GrpcOptions {
-            addr: fe_grpc_addr.clone(),
-            runtime_size: 8,
-        }),
-        ..Default::default()
-    };
+    let fe_grpc_addr = format!("127.0.0.1:{}", get_port());
 
-    let datanode_grpc_server = Arc::new(GrpcServer::new(
-        instance.clone(),
-        instance.clone(),
-        runtime.clone(),
-    ));
-
-    let mut fe_instance = frontend::instance::Instance::try_new(&fe_opts)
-        .await
-        .unwrap();
+    let mut fe_instance = frontend::instance::Instance::new_standalone(instance.clone());
     fe_instance.set_catalog_manager(instance.catalog_manager().clone());
 
     let fe_instance_ref = Arc::new(fe_instance);
@@ -319,15 +293,8 @@ pub async fn setup_grpc_server(
         grpc_server_clone.start(addr).await.unwrap()
     });
 
-    let dn_grpc_addr_clone = datanode_grpc_addr.clone();
-    let dn_grpc_server_clone = datanode_grpc_server.clone();
-    tokio::spawn(async move {
-        let addr = dn_grpc_addr_clone.parse::<SocketAddr>().unwrap();
-        dn_grpc_server_clone.start(addr).await.unwrap()
-    });
-
     // wait for GRPC server to start
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    (fe_grpc_addr, guard, fe_grpc_server, datanode_grpc_server)
+    (fe_grpc_addr, guard, fe_grpc_server)
 }
