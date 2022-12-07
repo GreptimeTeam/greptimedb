@@ -87,7 +87,7 @@ where
         };
 
         let x = &values[1];
-        let x = Helper::check_get_scalar::<f64>(x).context(error::InvalidInputsSnafu {
+        let x = Helper::check_get_scalar::<f64>(x).context(error::InvalidInputTypeSnafu {
             err_msg: "expecting \"SCIPYSTATSNORMCDF\" function's second argument to be a positive integer",
         })?;
         let first = x.get(0);

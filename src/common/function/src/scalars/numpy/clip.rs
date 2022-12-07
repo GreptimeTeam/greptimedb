@@ -15,14 +15,14 @@
 use std::fmt;
 use std::sync::Arc;
 
+use common_query::error::Result;
 use common_query::prelude::{Signature, Volatility};
 use datatypes::data_type::{ConcreteDataType, DataType};
-use datatypes::prelude::{Scalar, VectorRef};
+use datatypes::prelude::*;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use paste::paste;
 
-use crate::error::Result;
 use crate::scalars::expression::{scalar_binary_op, EvalContext};
 use crate::scalars::function::{Function, FunctionContext};
 
@@ -38,8 +38,8 @@ macro_rules! define_eval {
                     with_match_primitive_type_id!(columns[1].data_type().logical_type_id(), |$T| {
                         with_match_primitive_type_id!(columns[2].data_type().logical_type_id(), |$R| {
                             // clip(a, min, max) is equals to min(max(a, min), max)
-                            let col: VectorRef = Arc::new(scalar_binary_op::<$S, $T, $O, _>(&columns[0], &columns[1], scalar_max, &mut EvalContext::default())?);
-                            let col = scalar_binary_op::<$O, $R, $O, _>(&col, &columns[2], scalar_min, &mut EvalContext::default())?;
+                            let col: VectorRef = Arc::new(scalar_binary_op::<<$S as LogicalPrimitiveType>::Wrapper, <$T as LogicalPrimitiveType>::Wrapper, $O, _>(&columns[0], &columns[1], scalar_max, &mut EvalContext::default())?);
+                            let col = scalar_binary_op::<$O, <$R as LogicalPrimitiveType>::Wrapper, $O, _>(&col, &columns[2], scalar_min, &mut EvalContext::default())?;
                             Ok(Arc::new(col))
                         }, {
                             unreachable!()

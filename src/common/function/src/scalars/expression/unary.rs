@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_query::error::{self, Result};
 use datatypes::prelude::*;
+use datatypes::vectors::Helper;
 use snafu::ResultExt;
 
-use crate::error::{GetScalarVectorSnafu, Result};
 use crate::scalars::expression::ctx::EvalContext;
 
 /// TODO: remove the allow_unused when it's used.
@@ -28,7 +29,7 @@ pub fn scalar_unary_op<L: Scalar, O: Scalar, F>(
 where
     F: Fn(Option<L::RefType<'_>>, &mut EvalContext) -> Option<O>,
 {
-    let left = VectorHelper::check_get_scalar::<L>(l).context(GetScalarVectorSnafu)?;
+    let left = Helper::check_get_scalar::<L>(l).context(error::GetScalarVectorSnafu)?;
     let it = left.iter_data().map(|a| f(a, ctx));
     let result = <O as Scalar>::VectorType::from_owned_iterator(it);
 

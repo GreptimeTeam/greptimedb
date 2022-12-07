@@ -109,8 +109,8 @@ pub trait LogicalPrimitiveType: 'static + Sized {
 pub struct OrdPrimitive<T: WrapperType>(pub T);
 
 impl<T: WrapperType> OrdPrimitive<T> {
-    pub fn as_primitive(&self) -> T {
-        self.0
+    pub fn as_primitive(&self) -> T::Native {
+        self.0.into_native()
     }
 }
 
@@ -343,6 +343,7 @@ mod tests {
                     heap: BinaryHeap::new(),
                 };
                 foo.push($Type::default());
+                assert_eq!($Type::default(), foo.heap.pop().unwrap().as_primitive());
             };
         }
 
