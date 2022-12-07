@@ -115,7 +115,7 @@ mod test {
                 client_host: Default::default(),
                 channel: Channel::GRPC,
             },
-            user_info: UserInfo::new("greptime", None),
+            user_info: UserInfo::new("greptime"),
             quota: Default::default(),
             predicates: vec![],
         };
@@ -138,7 +138,7 @@ mod test {
         let ctx = CtxBuilder::new()
             .client_addr("127.0.0.1:4001".to_string())
             .set_channel(HTTP)
-            .set_user_info(UserInfo::new("greptime", None))
+            .set_user_info(UserInfo::new("greptime"))
             .build()
             .unwrap();
 

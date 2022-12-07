@@ -21,6 +21,8 @@ use axum::Json;
 use common_error::prelude::*;
 use serde_json::json;
 
+use crate::auth;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -197,9 +199,9 @@ pub enum Error {
     TlsRequired { server: String },
 
     #[snafu(display("Failed to get user info, source: {}", source))]
-    GetUserInfo {
-        source: Box<dyn std::error::Error + Send + Sync>,
-        backtrace: Backtrace,
+    Auth {
+        #[snafu(backtrace)]
+        source: auth::Error,
     },
 }
 
@@ -220,7 +222,6 @@ impl ErrorExt for Error {
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
             | GrpcReflectionService { .. }
-            | GetUserInfo { .. }
             | BuildingContext { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
@@ -246,6 +247,7 @@ impl ErrorExt for Error {
             Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
             StartFrontend { source, .. } => source.status_code(),
+            Auth { source, .. } => source.status_code(),
         }
     }
 

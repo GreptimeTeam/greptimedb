@@ -41,14 +41,14 @@ impl PgPwdVerifier {
                 None => return Ok(false),
             };
 
-            let user_info = user_provider
-                .user_info(Identity::UserId(user_name, None))
+            // TODO(fys): pass user_info to context
+            let _user_info = user_provider
+                .auth(
+                    Identity::UserId(user_name, None),
+                    Password::PlainText(pwd.as_bytes()),
+                )
                 .await
-                .context(error::GetUserInfoSnafu)?;
-
-            if let Some(auth_method) = user_info.auth_method() {
-                return Ok(auth_method.auth(Password::PlainText(pwd.as_bytes())));
-            }
+                .context(error::AuthSnafu)?;
         }
         Ok(true)
     }

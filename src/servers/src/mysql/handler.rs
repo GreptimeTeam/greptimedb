@@ -121,28 +121,22 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         if let Some(user_provider) = &self.user_provider {
             let user_id = Identity::UserId(&username, Some(&client_addr));
 
-            match user_provider.user_info(user_id).await {
+            let pwd = match auth_plugin {
+                "mysql_native_password" => Password::MysqlNativePwd(auth_data, salt),
+                other => {
+                    error!("Unsupported mysql auth plugin: {}", other);
+                    return false;
+                }
+            };
+            match user_provider.auth(user_id, pwd).await {
                 Ok(userinfo) => {
-                    let pwd = match auth_plugin {
-                        "mysql_native_password" => Password::MysqlNativePwd(auth_data, salt),
-                        other => {
-                            error!("Unsupported mysql auth plugin: {}", other);
-                            return false;
-                        }
-                    };
-
-                    if let Some(auth_method) = userinfo.auth_method() {
-                        if !auth_method.auth(pwd) {
-                            return false;
-                        }
-                    }
                     user_info = Some(userinfo);
                 }
                 Err(e) => {
                     error!("Failed to auth, err: {:?}", e);
                     return false;
                 }
-            }
+            };
         }
         let user_info = user_info.unwrap_or_default();
 

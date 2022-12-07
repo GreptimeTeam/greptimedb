@@ -16,15 +16,15 @@ pub const DEFAULT_USERNAME: &str = "greptime";
 
 use std::sync::Arc;
 
-/// Types that can get [ UserInfo ].
+use common_error::prelude::ErrorExt;
+use common_error::status_code::StatusCode;
+use snafu::{Backtrace, ErrorCompat, Snafu};
+
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
     fn name(&self) -> &str;
 
-    async fn user_info(
-        &self,
-        id: Identity<'_>,
-    ) -> Result<UserInfo, Box<dyn std::error::Error + Send + Sync>>;
+    async fn auth(&self, id: Identity<'_>, pwd: Password<'_>) -> Result<UserInfo, Error>;
 }
 
 pub type UserProviderRef = Arc<dyn UserProvider>;
@@ -35,44 +35,6 @@ type HostOrIp<'a> = &'a str;
 #[derive(Debug, Clone)]
 pub enum Identity<'a> {
     UserId(Username<'a>, Option<HostOrIp<'a>>),
-}
-
-pub struct UserInfo {
-    username: String,
-    /// If auth_method is None, it indicates that the user does not need authentication.
-    auth_method: Option<Box<dyn Authenticator>>,
-}
-
-impl Default for UserInfo {
-    fn default() -> Self {
-        Self {
-            username: DEFAULT_USERNAME.to_string(),
-            auth_method: None,
-        }
-    }
-}
-
-impl UserInfo {
-    pub fn user_name(&self) -> &str {
-        &self.username
-    }
-
-    pub fn auth_method(&self) -> Option<&dyn Authenticator> {
-        self.auth_method.as_deref()
-    }
-
-    #[cfg(test)]
-    pub fn new(username: impl Into<String>, auth_method: Option<Box<dyn Authenticator>>) -> Self {
-        Self {
-            username: username.into(),
-            auth_method,
-        }
-    }
-}
-
-/// Types that can verify whether the password is correct.
-pub trait Authenticator: Send + Sync {
-    fn auth(&self, password: Password) -> bool;
 }
 
 pub type HashedPwd<'a> = &'a [u8];
@@ -86,9 +48,69 @@ pub enum Password<'a> {
     PgMD5(HashedPwd<'a>, Salt<'a>),
 }
 
+pub struct UserInfo {
+    username: String,
+}
+
+impl Default for UserInfo {
+    fn default() -> Self {
+        Self {
+            username: DEFAULT_USERNAME.to_string(),
+        }
+    }
+}
+
+impl UserInfo {
+    pub fn user_name(&self) -> &str {
+        &self.username
+    }
+
+    #[cfg(test)]
+    pub fn new(username: impl Into<String>) -> Self {
+        Self {
+            username: username.into(),
+        }
+    }
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum Error {
+    #[snafu(display("User not exist"))]
+    UserNotExist { backtrace: Backtrace },
+
+    #[snafu(display("Unsupported Password Type: {}", pwd_type))]
+    UnsupportedPwdType {
+        pwd_type: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Username and password does not match"))]
+    WrongPwd { backtrace: Backtrace },
+}
+
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Error::UserNotExist { .. }
+            | Error::UnsupportedPwdType { .. }
+            | Error::WrongPwd { .. } => StatusCode::InvalidArguments,
+        }
+    }
+
+    fn backtrace_opt(&self) -> Option<&common_error::snafu::Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Authenticator, Identity, Password, UserInfo, UserProvider};
+    use super::{Identity, Password, UserInfo, UserProvider};
+    use crate::auth;
 
     struct MockUserProvider {}
 
@@ -98,59 +120,81 @@ mod tests {
             "mock_user_provider"
         }
 
-        async fn user_info(
+        async fn auth(
             &self,
             id: Identity<'_>,
-        ) -> Result<UserInfo, Box<dyn std::error::Error + Send + Sync>> {
+            password: Password<'_>,
+        ) -> Result<UserInfo, super::Error> {
             match id {
-                Identity::UserId(username, _host) => {
-                    if username == "greptime" {
-                        return Ok(UserInfo {
-                            username: "greptime".to_string(),
-                            auth_method: Some(Box::new(MockAuthMethod {
-                                plain_text: "greptime".to_string(),
-                            })),
-                        });
+                Identity::UserId(username, _host) => match password {
+                    Password::PlainText(pwd) => {
+                        if username == "greptime" {
+                            if pwd == b"greptime" {
+                                return Ok(UserInfo {
+                                    username: "greptime".to_string(),
+                                });
+                            } else {
+                                return super::WrongPwdSnafu {}.fail();
+                            }
+                        } else {
+                            return super::UserNotExistSnafu {}.fail();
+                        }
                     }
-                    todo!()
-                }
-            }
-        }
-    }
-
-    struct MockAuthMethod {
-        plain_text: String,
-    }
-
-    impl Authenticator for MockAuthMethod {
-        fn auth(&self, password: Password) -> bool {
-            match password {
-                Password::PlainText(pwd) => pwd == self.plain_text.as_bytes(),
-                Password::MysqlNativePwd(_, _) => unimplemented!(),
-                Password::PgMD5(_, _) => unimplemented!(),
+                    _ => super::UnsupportedPwdTypeSnafu {
+                        pwd_type: "mysql_native_pwd",
+                    }
+                    .fail(),
+                },
             }
         }
     }
 
     #[tokio::test]
     async fn test_auth_by_plain_text() {
-        let username = "greptime";
-        let pwd = b"greptime";
-        let wrong_pwd = b"wrong";
-
         let user_provider = MockUserProvider {};
-
         assert_eq!("mock_user_provider", user_provider.name());
 
-        let user_info = user_provider
-            .user_info(Identity::UserId(username, None))
-            .await
-            .unwrap();
+        // auth success
+        let auth_result = user_provider
+            .auth(
+                Identity::UserId("greptime", None),
+                Password::PlainText(b"greptime"),
+            )
+            .await;
+        assert!(auth_result.is_ok());
+        assert_eq!("greptime", auth_result.unwrap().user_name());
 
-        assert_eq!(username, user_info.user_name());
+        // auth failed, unsupported pwd type
+        let auth_result = user_provider
+            .auth(
+                Identity::UserId("greptime", None),
+                Password::MysqlNativePwd(b"hashed_value", b"salt"),
+            )
+            .await;
+        assert!(auth_result.is_err());
+        matches!(
+            auth_result.err().unwrap(),
+            auth::Error::UnsupportedPwdType { .. }
+        );
 
-        let auth_method = user_info.auth_method().unwrap();
-        assert!(auth_method.auth(Password::PlainText(pwd)));
-        assert!(!auth_method.auth(Password::PlainText(wrong_pwd)));
+        // auth failed, err: user not exist.
+        let auth_result = user_provider
+            .auth(
+                Identity::UserId("not_exist_username", None),
+                Password::PlainText(b"greptime"),
+            )
+            .await;
+        assert!(auth_result.is_err());
+        matches!(auth_result.err().unwrap(), auth::Error::UserNotExist { .. });
+
+        // auth failed, err: wrong password
+        let auth_result = user_provider
+            .auth(
+                Identity::UserId("greptime", None),
+                Password::PlainText(b"wrong_pwd"),
+            )
+            .await;
+        assert!(auth_result.is_err());
+        matches!(auth_result.err().unwrap(), auth::Error::WrongPwd { .. });
     }
 }
