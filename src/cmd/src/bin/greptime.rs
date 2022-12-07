@@ -77,7 +77,9 @@ fn print_version() -> &'static str {
         "\ncommit: ",
         env!("GIT_COMMIT"),
         "\ndirty: ",
-        env!("GIT_DIRTY")
+        env!("GIT_DIRTY"),
+        "\nversion: ",
+        env!("CARGO_PKG_VERSION")
     )
 }
 
