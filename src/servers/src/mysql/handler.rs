@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use common_query::Output;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error};
 use opensrv_mysql::{
     AsyncMysqlShim, ErrorKind, InitWriter, ParamParser, QueryResultWriter, StatementMetaWriter,
 };
@@ -26,10 +26,9 @@ use session::Session;
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
 
-use crate::auth::mysql::{auth_mysql, MysqlAuthPlugin};
-use crate::auth::{Identity, UserInfo, UserProviderRef, DEFAULT_USERNAME};
+use crate::auth::{Identity, Password, UserProviderRef};
 use crate::context::Channel::MYSQL;
-use crate::context::{Context, CtxBuilder};
+use crate::context::{Context, CtxBuilder, UserInfo};
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
 use crate::query_handler::SqlQueryHandlerRef;
@@ -118,58 +117,35 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         let username = String::from_utf8_lossy(username);
         let client_addr = self.client_addr.clone();
 
-        let auth_plugin = match auth_plugin {
-            "mysql_native_password" => MysqlAuthPlugin::MysqlNativePwd,
-            _ => return false,
-        };
-
-        let mut user_info = None;
-
         if let Some(user_provider) = &self.user_provider {
-            let user_id = Identity::UserId(username.to_string(), Some(client_addr.clone()));
+            let user_id = Identity::UserId(&username, Some(&client_addr));
 
-            match user_provider.get_user_info(&user_id).await {
-                Ok(Some(userinfo)) => {
-                    let auth_method = if let Some(auth_method) =
-                        userinfo.mysql_auth_method(&auth_plugin)
-                    {
-                        auth_method
-                    } else {
-                        error!(
-                                "Failed to auth, channel: mysql, user_id: {:?}, err: no suitable auth method",
-                                user_id
-                            );
-                        return false;
+            match user_provider.user_info(user_id.clone()).await {
+                Ok(userinfo) => {
+                    let pwd = match auth_plugin {
+                        "mysql_native_password" => Password::MysqlNativePwd(auth_data, salt),
+                        other => {
+                            error!("Unsupported mysql auth plugin: {}", other);
+                            return false;
+                        }
                     };
-
-                    if auth_mysql(auth_plugin, auth_data, salt, auth_method) {
-                        info!("Auth successful, channel: mysql, user_id: {:?}", user_id);
-                    } else {
-                        info!("Failed to auth, channel: mysql, user_id: {:?}", user_id);
+                    if !userinfo.auth_method().auth(pwd) {
                         return false;
                     }
-                    user_info = Some(userinfo);
-                }
-                Ok(None) => {
-                    error!(
-                        "Failed to auth, user_id: {:?}, err: can not find user info ",
-                        user_id
-                    );
-                    return false;
                 }
                 Err(e) => {
-                    error!("Failed to auth, user_id: {:?}, err: {:?}", user_id, e);
+                    error!("Failed to auth, err: {:?}", e);
                     return false;
                 }
             }
         }
 
-        let user_info =
-            user_info.unwrap_or_else(|| UserInfo::new(DEFAULT_USERNAME.to_string(), vec![]));
         return match CtxBuilder::new()
             .client_addr(client_addr)
             .set_channel(MYSQL)
-            .set_user_info(user_info)
+            .set_user_info(UserInfo {
+                username: username.to_string(),
+            })
             .build()
         {
             Ok(ctx) => {

@@ -5540,7 +5540,6 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
- "sha1",
  "snafu",
  "snap",
  "table",

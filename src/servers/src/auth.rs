@@ -12,116 +12,128 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod mysql;
-pub mod postgres;
-pub mod pwd;
-
-use std::sync::Arc;
-
-use serde::{Deserialize, Serialize};
-
-use self::mysql::MysqlAuthPlugin;
-use self::postgres::PgAuthPlugin;
-use crate::error::Result;
-
 pub const DEFAULT_USERNAME: &str = "greptime";
 
+use std::ops::Deref;
+use std::sync::Arc;
+
+/// Types that can get [ UserInfo ].
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
-    fn name(&self) -> String;
+    fn name(&self) -> &str;
 
-    async fn get_user_info(&self, identity: &Identity) -> Result<Option<UserInfo>>;
+    async fn user_info(
+        &self,
+        id: Identity<'_>,
+    ) -> Result<UserInfo, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 pub type UserProviderRef = Arc<dyn UserProvider>;
 
-type Username = String;
-type HostOrIp = String;
+type Username<'a> = &'a str;
+type HostOrIp<'a> = &'a str;
 
-#[derive(Debug)]
-pub enum Identity {
-    UserId(Username, Option<HostOrIp>),
+#[derive(Debug, Clone)]
+pub enum Identity<'a> {
+    UserId(Username<'a>, Option<HostOrIp<'a>>),
 }
 
-#[derive(Clone, Serialize, Deserialize)]
 pub struct UserInfo {
     username: String,
-    auth_methods: Vec<AuthMethod>,
-    // TODO(fys): maybe contain some user permission information here
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub enum AuthMethod {
-    PlainText(Vec<u8>),
-    DoubleSha1(Vec<u8>),
+    auth_method: Box<dyn Authenticator>,
 }
 
 impl UserInfo {
-    pub fn new(username: impl Into<String>, auth_methods: Vec<AuthMethod>) -> Self {
-        Self {
-            username: username.into(),
-            auth_methods,
-        }
+    pub fn user_name(&self) -> &str {
+        &self.username
     }
 
-    pub fn get_username(&self) -> String {
-        self.username.clone()
-    }
-
-    pub fn auth_methods(&self) -> &[AuthMethod] {
-        &self.auth_methods
-    }
-
-    pub fn mysql_auth_method(&self, auth_plugin: &MysqlAuthPlugin) -> Option<&AuthMethod> {
-        self.auth_methods
-            .iter()
-            .find(|&method| method.support_mysql(auth_plugin))
-    }
-
-    pub fn pg_auth_method(&self, auth_plugin: &PgAuthPlugin) -> Option<&AuthMethod> {
-        self.auth_methods
-            .iter()
-            .find(|&method| method.support_pg(auth_plugin))
+    pub fn auth_method(&self) -> &dyn Authenticator {
+        self.auth_method.deref()
     }
 }
 
-impl AuthMethod {
-    /// Get the auth method that supports the specified mysql auth plugin.
-    fn support_mysql(&self, auth_plugin: &MysqlAuthPlugin) -> bool {
-        match auth_plugin {
-            MysqlAuthPlugin::MysqlNativePwd => match self {
-                AuthMethod::PlainText(_) => true,
-                AuthMethod::DoubleSha1(_) => true,
-            },
-        }
-    }
+/// Types that can verify whether the password is correct.
+pub trait Authenticator: Send + Sync {
+    fn auth(&self, password: Password) -> bool;
+}
 
-    /// Get the authentication method that supports the specified pg auth plugin.
-    fn support_pg(&self, auth_plugin: &PgAuthPlugin) -> bool {
-        match auth_plugin {
-            PgAuthPlugin::PlainText => match self {
-                AuthMethod::PlainText(_) => true,
-                AuthMethod::DoubleSha1(_) => true,
-            },
-        }
-    }
+pub type HashedPwd<'a> = &'a [u8];
+pub type Salt<'a> = &'a [u8];
+pub type Pwd<'a> = &'a [u8];
+
+/// Authentication information sent by the client.
+pub enum Password<'a> {
+    PlainText(Pwd<'a>),
+    MysqlNativePwd(HashedPwd<'a>, Salt<'a>),
+    PgMD5(HashedPwd<'a>, Salt<'a>),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AuthMethod;
-    use crate::auth::mysql::MysqlAuthPlugin;
-    use crate::auth::postgres::PgAuthPlugin;
-    use crate::auth::pwd::sha1;
+    use super::{Authenticator, Identity, Password, UserInfo, UserProvider};
 
-    #[test]
-    fn test_auth_method_support() {
-        let plain = AuthMethod::PlainText(b"123456".to_vec());
-        assert!(plain.support_mysql(&MysqlAuthPlugin::MysqlNativePwd));
-        assert!(plain.support_pg(&PgAuthPlugin::PlainText));
+    struct MockUserProvider {}
 
-        let doublesha1 = AuthMethod::DoubleSha1(sha1(&sha1(b"123456")).to_vec());
-        assert!(doublesha1.support_mysql(&MysqlAuthPlugin::MysqlNativePwd));
-        assert!(doublesha1.support_pg(&PgAuthPlugin::PlainText));
+    #[async_trait::async_trait]
+    impl UserProvider for MockUserProvider {
+        fn name(&self) -> &str {
+            "mock_user_provider"
+        }
+
+        async fn user_info(
+            &self,
+            id: Identity<'_>,
+        ) -> Result<UserInfo, Box<dyn std::error::Error + Send + Sync>> {
+            match id {
+                Identity::UserId(username, _host) => {
+                    if username == "greptime" {
+                        return Ok(UserInfo {
+                            username: "greptime".to_string(),
+                            auth_method: Box::new(MockAuthMethod {
+                                plain_text: "greptime".to_string(),
+                            }),
+                        });
+                    }
+                    todo!()
+                }
+            }
+        }
+    }
+
+    struct MockAuthMethod {
+        plain_text: String,
+    }
+
+    impl Authenticator for MockAuthMethod {
+        fn auth(&self, password: Password) -> bool {
+            match password {
+                Password::PlainText(pwd) => pwd == self.plain_text.as_bytes(),
+                Password::MysqlNativePwd(_, _) => unimplemented!(),
+                Password::PgMD5(_, _) => unimplemented!(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auth_by_plain_text() {
+        let username = "greptime";
+        let pwd = b"greptime";
+        let wrong_pwd = b"wrong";
+
+        let user_provider = MockUserProvider {};
+
+        assert_eq!("mock_user_provider", user_provider.name());
+
+        let user_info = user_provider
+            .user_info(Identity::UserId(username, None))
+            .await
+            .unwrap();
+
+        assert_eq!(username, user_info.user_name());
+
+        let auth_method = user_info.auth_method();
+        assert!(auth_method.auth(Password::PlainText(pwd)));
+        assert!(!auth_method.auth(Password::PlainText(wrong_pwd)));
     }
 }

@@ -14,21 +14,21 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
-use crate::auth::UserInfo;
 use crate::error::{BuildingContextSnafu, Result};
 
 type CtxFnRef = Arc<dyn Fn(&Context) -> bool + Send + Sync>;
 
-#[derive(Serialize, Deserialize)]
 pub struct Context {
     pub client_info: ClientInfo,
     pub user_info: UserInfo,
     pub quota: Quota,
-    #[serde(skip)]
     pub predicates: Vec<CtxFnRef>,
+}
+
+pub struct UserInfo {
+    pub username: String,
 }
 
 impl Context {
@@ -83,20 +83,19 @@ impl CtxBuilder {
     }
 }
 
-#[derive(Serialize, Deserialize)]
 pub struct ClientInfo {
     pub client_host: String,
     pub channel: Channel,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Channel {
     GRPC,
     HTTP,
     MYSQL,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Quota {
     pub total: u64,
     pub consumed: u64,
@@ -108,7 +107,6 @@ mod test {
 
     use std::sync::Arc;
 
-    use crate::auth::AuthMethod;
     use crate::context::Channel::{self, HTTP};
     use crate::context::{ClientInfo, Context, CtxBuilder, UserInfo};
 
@@ -119,11 +117,9 @@ mod test {
                 client_host: Default::default(),
                 channel: Channel::GRPC,
             },
-
-            user_info: UserInfo::new(
-                "greptime".to_string(),
-                vec![AuthMethod::PlainText(b"123456".to_vec())],
-            ),
+            user_info: UserInfo {
+                username: "greptime".to_string(),
+            },
             quota: Default::default(),
             predicates: vec![],
         };
@@ -146,10 +142,9 @@ mod test {
         let ctx = CtxBuilder::new()
             .client_addr("127.0.0.1:4001".to_string())
             .set_channel(HTTP)
-            .set_user_info(UserInfo::new(
-                "greptime".to_string(),
-                vec![AuthMethod::PlainText(b"123456".to_vec())],
-            ))
+            .set_user_info(UserInfo {
+                username: "greptime".to_string(),
+            })
             .build()
             .unwrap();
 

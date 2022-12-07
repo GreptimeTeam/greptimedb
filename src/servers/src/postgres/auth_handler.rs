@@ -23,9 +23,10 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
+use snafu::ResultExt;
 
-use crate::auth::postgres::{auth_pg, PgAuthPlugin};
-use crate::auth::{Identity, UserProviderRef};
+use crate::auth::{Identity, Password, UserProviderRef};
+use crate::error;
 use crate::error::Result;
 
 struct PgPwdVerifier {
@@ -38,27 +39,14 @@ impl PgPwdVerifier {
             Some(name) => name,
             None => return Ok(false),
         };
-
         if let Some(user_provider) = &self.user_provider {
-            match user_provider
-                .get_user_info(&Identity::UserId(user_name.to_string(), None))
-                .await?
-            {
-                Some(user_info) => {
-                    let auth_method = match user_info.pg_auth_method(&PgAuthPlugin::PlainText) {
-                        Some(auth_method) => auth_method,
-                        None => return Ok(false),
-                    };
-
-                    return Ok(auth_pg(
-                        PgAuthPlugin::PlainText,
-                        pwd.as_bytes(),
-                        &[],
-                        auth_method,
-                    ));
-                }
-                None => return Ok(false),
-            }
+            let user_info = user_provider
+                .user_info(Identity::UserId(user_name, None))
+                .await
+                .context(error::GetUserInfoSnafu)?;
+            return Ok(user_info
+                .auth_method()
+                .auth(Password::PlainText(pwd.as_bytes())));
         }
         Ok(true)
     }

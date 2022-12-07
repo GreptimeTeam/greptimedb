@@ -195,6 +195,12 @@ pub enum Error {
 
     #[snafu(display("Tls is required for {}, plain connection is rejected", server))]
     TlsRequired { server: String },
+
+    #[snafu(display("Failed to get user info, source: {}", source))]
+    GetUserInfo {
+        source: Box<dyn std::error::Error + Send + Sync>,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -214,6 +220,7 @@ impl ErrorExt for Error {
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
             | GrpcReflectionService { .. }
+            | GetUserInfo { .. }
             | BuildingContext { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
