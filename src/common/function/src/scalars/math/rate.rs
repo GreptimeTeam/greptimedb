@@ -16,7 +16,6 @@ use std::fmt;
 
 use common_query::error::{self, Result};
 use common_query::prelude::{Signature, Volatility};
-use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::compute::kernels::{arithmetic, cast};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::*;
@@ -58,16 +57,12 @@ impl Function for RateFunction {
         let ts_1 = ts.slice(1, ts.len() - 1);
         let dt = arithmetic::subtract_dyn(&ts_1, &ts_0).context(error::ArrowComputeSnafu)?;
 
-        fn all_to_f64(array: &ArrayRef) -> Result<ArrayRef> {
-            Ok(
-                cast::cast(array, &DataType::Float64).context(error::TypeCastSnafu {
-                    typ: DataType::Float64,
-                })?,
-            )
-        }
-
-        let dv = all_to_f64(&dv)?;
-        let dt = all_to_f64(&dt)?;
+        let dv = cast::cast(&dv, &DataType::Float64).context(error::TypeCastSnafu {
+            typ: DataType::Float64,
+        })?;
+        let dt = cast::cast(&dt, &DataType::Float64).context(error::TypeCastSnafu {
+            typ: DataType::Float64,
+        })?;
         let rate = arithmetic::divide_dyn(&dv, &dt).context(error::ArrowComputeSnafu)?;
         let v = Helper::try_into_vector(&rate).context(error::FromArrowArraySnafu)?;
 
