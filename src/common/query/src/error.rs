@@ -127,10 +127,20 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Fail to cast array to {:?}, source: {}", typ, source))]
+    #[snafu(display("Failed to cast array to {:?}, source: {}", typ, source))]
     TypeCast {
         source: ArrowError,
         typ: arrow::datatypes::DataType,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to perform compute operation on arrow arrays, source: {}",
+        source
+    ))]
+    ArrowCompute {
+        source: ArrowError,
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Query engine fail to cast value: {}", source))]
@@ -139,7 +149,7 @@ pub enum Error {
         source: DataTypeError,
     },
 
-    #[snafu(display("Fail to get scalar vector, {}", source))]
+    #[snafu(display("Failed to get scalar vector, {}", source))]
     GetScalarVector {
         #[snafu(backtrace)]
         source: DataTypeError,
@@ -159,7 +169,8 @@ impl ErrorExt for Error {
             | Error::InvalidInputCol { .. }
             | Error::BadAccumulatorImpl { .. }
             | Error::ToScalarValue { .. }
-            | Error::GetScalarVector { .. } => StatusCode::EngineExecuteQuery,
+            | Error::GetScalarVector { .. }
+            | Error::ArrowCompute { .. } => StatusCode::EngineExecuteQuery,
 
             Error::InvalidInputs { source, .. }
             | Error::IntoVector { source, .. }

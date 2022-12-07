@@ -14,10 +14,11 @@
 
 use std::fmt;
 
-use arrow::array::Array;
-use common_query::error::{FromArrowArraySnafu, Result, TypeCastSnafu};
+use common_query::error::{self, Result};
 use common_query::prelude::{Signature, Volatility};
-use datatypes::arrow;
+use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::compute::kernels::{arithmetic, cast};
+use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::*;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::ResultExt;
@@ -51,28 +52,25 @@ impl Function for RateFunction {
         let val = &columns[0].to_arrow_array();
         let val_0 = val.slice(0, val.len() - 1);
         let val_1 = val.slice(1, val.len() - 1);
-        let dv = arrow::compute::arithmetics::sub(&*val_1, &*val_0);
+        let dv = arithmetic::subtract_dyn(&val_1, &val_0).context(error::ArrowComputeSnafu)?;
         let ts = &columns[1].to_arrow_array();
         let ts_0 = ts.slice(0, ts.len() - 1);
         let ts_1 = ts.slice(1, ts.len() - 1);
-        let dt = arrow::compute::arithmetics::sub(&*ts_1, &*ts_0);
-        fn all_to_f64(array: &dyn Array) -> Result<Box<dyn Array>> {
-            Ok(arrow::compute::cast::cast(
-                array,
-                &arrow::datatypes::DataType::Float64,
-                arrow::compute::cast::CastOptions {
-                    wrapped: true,
-                    partial: true,
-                },
+        let dt = arithmetic::subtract_dyn(&ts_1, &ts_0).context(error::ArrowComputeSnafu)?;
+
+        fn all_to_f64(array: &ArrayRef) -> Result<ArrayRef> {
+            Ok(
+                cast::cast(array, &DataType::Float64).context(error::TypeCastSnafu {
+                    typ: DataType::Float64,
+                })?,
             )
-            .context(TypeCastSnafu {
-                typ: arrow::datatypes::DataType::Float64,
-            })?)
         }
-        let dv = all_to_f64(&*dv)?;
-        let dt = all_to_f64(&*dt)?;
-        let rate = arrow::compute::arithmetics::div(&*dv, &*dt);
-        let v = Helper::try_into_vector(&rate).context(FromArrowArraySnafu)?;
+
+        let dv = all_to_f64(&dv)?;
+        let dt = all_to_f64(&dt)?;
+        let rate = arithmetic::divide_dyn(&dv, &dt).context(error::ArrowComputeSnafu)?;
+        let v = Helper::try_into_vector(&rate).context(error::FromArrowArraySnafu)?;
+
         Ok(v)
     }
 }
@@ -81,9 +79,8 @@ impl Function for RateFunction {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::Float64Array;
     use common_query::prelude::TypeSignature;
-    use datatypes::vectors::{Float32Vector, Int64Vector};
+    use datatypes::vectors::{Float32Vector, Float64Vector, Int64Vector};
 
     use super::*;
     #[test]
@@ -108,9 +105,7 @@ mod tests {
             Arc::new(Int64Vector::from_vec(ts)),
         ];
         let vector = rate.eval(FunctionContext::default(), &args).unwrap();
-        let arr = vector.to_arrow_array();
-        let expect = Arc::new(Float64Array::from_vec(vec![2.0, 3.0]));
-        let res = arrow::compute::comparison::eq(&*arr, &*expect);
-        res.iter().for_each(|x| assert!(matches!(x, Some(true))));
+        let expect: VectorRef = Arc::new(Float64Vector::from_vec(vec![2.0, 3.0]));
+        assert_eq!(expect, vector);
     }
 }
