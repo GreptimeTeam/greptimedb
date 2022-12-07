@@ -63,11 +63,6 @@ where
     PolyT: WrapperType,
     T::Native: AsPrimitive<PolyT::Native>,
     PolyT::Native: std::ops::Mul<Output = PolyT::Native> + std::iter::Sum<PolyT::Native>,
-    // T: Primitive + AsPrimitive<PolyT>,
-    // PolyT: Primitive + std::ops::Mul<Output = PolyT> + std::iter::Sum<PolyT>,
-    // for<'a> T: Scalar<RefType<'a> = T>,
-    // for<'a> PolyT: Scalar<RefType<'a> = PolyT>,
-    // i64: AsPrimitive<PolyT>,
 {
     fn state(&self) -> Result<Vec<Value>> {
         let nums = self

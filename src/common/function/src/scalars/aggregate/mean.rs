@@ -29,11 +29,7 @@ use num_traits::AsPrimitive;
 use snafu::{ensure, OptionExt};
 
 #[derive(Debug, Default)]
-pub struct Mean<T>
-where
-    T: WrapperType,
-    T::Native: AsPrimitive<f64>,
-{
+pub struct Mean<T> {
     sum: f64,
     n: u64,
     _phantom: PhantomData<T>,
