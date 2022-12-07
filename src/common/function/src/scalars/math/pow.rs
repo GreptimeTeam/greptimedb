@@ -15,6 +15,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use common_query::error::Result;
 use common_query::prelude::{Signature, Volatility};
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
@@ -23,7 +24,6 @@ use datatypes::with_match_primitive_type_id;
 use num::traits::Pow;
 use num_traits::AsPrimitive;
 
-use crate::error::Result;
 use crate::scalars::expression::{scalar_binary_op, EvalContext};
 use crate::scalars::function::{Function, FunctionContext};
 

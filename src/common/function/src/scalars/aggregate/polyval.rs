@@ -23,9 +23,9 @@ use common_query::error::{
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::prelude::*;
-use datatypes::types::PrimitiveType;
+use datatypes::types::{LogicalPrimitiveType, WrapperType};
 use datatypes::value::ListValue;
-use datatypes::vectors::{ConstantVector, Int64Vector, ListVector};
+use datatypes::vectors::{ConstantVector, Helper, Int64Vector, ListVector};
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -34,8 +34,10 @@ use snafu::{ensure, OptionExt, ResultExt};
 #[derive(Debug, Default)]
 pub struct Polyval<T, PolyT>
 where
-    T: Primitive + AsPrimitive<PolyT>,
-    PolyT: Primitive + std::ops::Mul<Output = PolyT>,
+    T: WrapperType,
+    T::Native: AsPrimitive<PolyT::Native>,
+    PolyT: WrapperType,
+    PolyT::Native: std::ops::Mul<Output = PolyT::Native>,
 {
     values: Vec<T>,
     // DataFusion casts constant in into i64 type.
@@ -45,8 +47,10 @@ where
 
 impl<T, PolyT> Polyval<T, PolyT>
 where
-    T: Primitive + AsPrimitive<PolyT>,
-    PolyT: Primitive + std::ops::Mul<Output = PolyT>,
+    T: WrapperType,
+    T::Native: AsPrimitive<PolyT::Native>,
+    PolyT: WrapperType,
+    PolyT::Native: std::ops::Mul<Output = PolyT::Native>,
 {
     fn push(&mut self, value: T) {
         self.values.push(value);
@@ -55,11 +59,15 @@ where
 
 impl<T, PolyT> Accumulator for Polyval<T, PolyT>
 where
-    T: Primitive + AsPrimitive<PolyT>,
-    PolyT: Primitive + std::ops::Mul<Output = PolyT> + std::iter::Sum<PolyT>,
-    for<'a> T: Scalar<RefType<'a> = T>,
-    for<'a> PolyT: Scalar<RefType<'a> = PolyT>,
-    i64: AsPrimitive<PolyT>,
+    T: WrapperType,
+    PolyT: WrapperType,
+    T::Native: AsPrimitive<PolyT::Native>,
+    PolyT::Native: std::ops::Mul<Output = PolyT::Native> + std::iter::Sum<PolyT::Native>,
+    // T: Primitive + AsPrimitive<PolyT>,
+    // PolyT: Primitive + std::ops::Mul<Output = PolyT> + std::iter::Sum<PolyT>,
+    // for<'a> T: Scalar<RefType<'a> = T>,
+    // for<'a> PolyT: Scalar<RefType<'a> = PolyT>,
+    // i64: AsPrimitive<PolyT>,
 {
     fn state(&self) -> Result<Vec<Value>> {
         let nums = self
@@ -91,10 +99,10 @@ where
         let mut len = 1;
         let column: &<T as Scalar>::VectorType = if column.is_const() {
             len = column.len();
-            let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
-            unsafe { VectorHelper::static_cast(column.inner()) }
+            let column: &ConstantVector = unsafe { Helper::static_cast(column) };
+            unsafe { Helper::static_cast(column.inner()) }
         } else {
-            unsafe { VectorHelper::static_cast(column) }
+            unsafe { Helper::static_cast(column) }
         };
         (0..len).for_each(|_| {
             for v in column.iter_data().flatten() {
@@ -103,7 +111,7 @@ where
         });
 
         let x = &values[1];
-        let x = VectorHelper::check_get_scalar::<i64>(x).context(error::InvalidInputsSnafu {
+        let x = Helper::check_get_scalar::<i64>(x).context(error::InvalidInputsSnafu {
             err_msg: "expecting \"POLYVAL\" function's second argument to be a positive integer",
         })?;
         // `get(0)` is safe because we have checked `values[1].len() == values[0].len() != 0`
@@ -173,7 +181,7 @@ where
             })?;
         for value in values.values_iter() {
             let value = value.context(FromScalarValueSnafu)?;
-            let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(&value) };
+            let column: &<T as Scalar>::VectorType = unsafe { Helper::static_cast(&value) };
             for v in column.iter_data().flatten() {
                 self.push(v);
             }
@@ -213,7 +221,7 @@ impl AggregateFunctionCreator for PolyvalAccumulatorCreator {
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Polyval::<$S,<$S as Primitive>::LargestType>::default()))
+                    Ok(Box::new(Polyval::<$S,<<$S as LogicalPrimitiveType>::LargestType as LogicalPrimitiveType>::Wrapper>::default()))
                 },
                 {
                     let err_msg = format!(
@@ -234,7 +242,7 @@ impl AggregateFunctionCreator for PolyvalAccumulatorCreator {
         with_match_primitive_type_id!(
             input_type,
             |$S| {
-                Ok(PrimitiveType::<<$S as Primitive>::LargestType>::default().into())
+                Ok(<<$S as LogicalPrimitiveType>::LargestType as LogicalPrimitiveType>::build_data_type())
             },
             {
                 unreachable!()

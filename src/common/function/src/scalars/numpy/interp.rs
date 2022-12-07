@@ -15,8 +15,8 @@
 use std::sync::Arc;
 
 use datatypes::arrow::array::PrimitiveArray;
-use datatypes::arrow::compute::cast::primitive_to_primitive;
-use datatypes::arrow::datatypes::DataType::Float64;
+use datatypes::arrow::compute::cast;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
@@ -80,8 +80,7 @@ fn binary_search_ascending_vector(key: Value, xp: &PrimitiveVector<f64>) -> usiz
 fn concrete_type_to_primitive_vector(arg: &VectorRef) -> Result<PrimitiveVector<f64>> {
     with_match_primitive_type_id!(arg.data_type().logical_type_id(), |$S| {
         let tmp = arg.to_arrow_array();
-        let from = tmp.as_any().downcast_ref::<PrimitiveArray<$S>>().expect("cast failed");
-        let array = primitive_to_primitive(from, &Float64);
+        let array = cast(&tmp, &DataType::Float64)?;
         Ok(PrimitiveVector::new(array))
     },{
         unreachable!()
