@@ -41,7 +41,7 @@ impl Instance {
 
         let mut results = Vec::with_capacity(stmts.len());
 
-        for stmt in stmts.into_iter() {
+        for stmt in stmts {
             let output = self.execute_stmt(stmt, query_ctx.clone()).await?;
             results.push(output);
         }
