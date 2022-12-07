@@ -98,6 +98,7 @@ macro_rules! impl_data_type_for_timestamp {
                 type ArrowPrimitive = [<Arrow Timestamp $unit Type>];
                 type Native = i64;
                 type Wrapper = [<Timestamp $unit>];
+                type LargestType = Self;
 
                 fn build_data_type() -> ConcreteDataType {
                     ConcreteDataType::Timestamp(TimestampType::$unit(

@@ -17,12 +17,10 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use common_time::timestamp::TimeUnit;
 use datafusion_common::Result as DfResult;
 use datafusion_expr::{Accumulator as DfAccumulator, AggregateState};
 use datatypes::arrow::array::ArrayRef;
 use datatypes::prelude::*;
-use datatypes::value::ListValue;
 use datatypes::vectors::{Helper as VectorHelper, VectorRef};
 use snafu::ResultExt;
 
@@ -135,8 +133,7 @@ impl DfAccumulator for DfAccumulatorAdaptor {
             return error::BadAccumulatorImplSnafu {
                 err_msg: format!("Accumulator {:?} returned state values size do not match its state types size.", self),
             }
-            .fail()
-            .map_err(Error::from)?;
+            .fail()?;
         }
         Ok(state_values
             .into_iter()
@@ -147,31 +144,26 @@ impl DfAccumulator for DfAccumulatorAdaptor {
                     .context(error::ToScalarValueSnafu)?;
                 Ok(AggregateState::Scalar(scalar))
             })
-            .collect::<Result<Vec<_>>>()
-            .map_err(Error::from)?)
+            .collect::<Result<Vec<_>>>()?)
     }
 
     fn update_batch(&mut self, values: &[ArrayRef]) -> DfResult<()> {
-        let vectors = VectorHelper::try_into_vectors(values)
-            .context(FromScalarValueSnafu)
-            .map_err(Error::from)?;
-        self.accumulator
-            .update_batch(&vectors)
-            .map_err(|e| e.into())
+        let vectors = VectorHelper::try_into_vectors(values).context(FromScalarValueSnafu)?;
+        self.accumulator.update_batch(&vectors)?;
+        Ok(())
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> DfResult<()> {
         let mut vectors = Vec::with_capacity(states.len());
         for array in states.iter() {
             vectors.push(
-                VectorHelper::try_into_vector(array)
-                    .context(IntoVectorSnafu {
-                        data_type: array.data_type().clone(),
-                    })
-                    .map_err(Error::from)?,
+                VectorHelper::try_into_vector(array).context(IntoVectorSnafu {
+                    data_type: array.data_type().clone(),
+                })?,
             );
         }
-        self.accumulator.merge_batch(&vectors).map_err(|e| e.into())
+        self.accumulator.merge_batch(&vectors)?;
+        Ok(())
     }
 
     fn evaluate(&self) -> DfResult<ScalarValue> {

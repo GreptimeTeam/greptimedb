@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
+use std::fmt;
 
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
 use common_time::{Date, DateTime};
@@ -29,36 +30,34 @@ use crate::value::{Value, ValueRef};
 use crate::vectors::{MutableVector, PrimitiveVector, PrimitiveVectorBuilder, Vector};
 
 /// Data types that can be used as arrow's native type.
-pub trait NativeType: ArrowNativeType + NumCast {
-    /// Largest numeric type this primitive type can be cast to.
-    type LargestType: NativeType;
-}
+pub trait NativeType: ArrowNativeType + NumCast {}
 
 macro_rules! impl_native_type {
-    ($Type: ident, $LargestType: ident) => {
-        impl NativeType for $Type {
-            type LargestType = $LargestType;
-        }
+    ($Type: ident) => {
+        impl NativeType for $Type {}
     };
 }
 
-impl_native_type!(u8, u64);
-impl_native_type!(u16, u64);
-impl_native_type!(u32, u64);
-impl_native_type!(u64, u64);
-impl_native_type!(i8, i64);
-impl_native_type!(i16, i64);
-impl_native_type!(i32, i64);
-impl_native_type!(i64, i64);
-impl_native_type!(f32, f64);
-impl_native_type!(f64, f64);
+impl_native_type!(u8);
+impl_native_type!(u16);
+impl_native_type!(u32);
+impl_native_type!(u64);
+impl_native_type!(i8);
+impl_native_type!(i16);
+impl_native_type!(i32);
+impl_native_type!(i64);
+impl_native_type!(f32);
+impl_native_type!(f64);
 
 /// Represents the wrapper type that wraps a native type using the `newtype pattern`,
 /// such as [Date](`common_time::Date`) is a wrapper type for the underlying native
 /// type `i32`.
 pub trait WrapperType:
     Copy
-    + Scalar
+    + Send
+    + Sync
+    + fmt::Debug
+    + for<'a> Scalar<RefType<'a> = Self>
     + PartialEq
     + Into<Value>
     + Into<ValueRef<'static>>
@@ -87,6 +86,8 @@ pub trait LogicalPrimitiveType: 'static + Sized {
     type Wrapper: WrapperType<LogicalType = Self, Native = Self::Native>
         + for<'a> Scalar<VectorType = PrimitiveVector<Self>, RefType<'a> = Self::Wrapper>
         + for<'a> ScalarRef<'a, ScalarType = Self::Wrapper>;
+    /// Largest type this primitive type can cast to.
+    type LargestType: LogicalPrimitiveType;
 
     /// Construct the data type struct.
     fn build_data_type() -> ConcreteDataType;
@@ -188,7 +189,7 @@ impl WrapperType for DateTime {
 }
 
 macro_rules! define_logical_primitive_type {
-    ($Native: ident, $TypeId: ident, $DataType: ident) => {
+    ($Native: ident, $TypeId: ident, $DataType: ident, $Largest: ident) => {
         // We need to define it as an empty struct `struct DataType {}` instead of a struct-unit
         // `struct DataType;` to ensure the serialized JSON string is compatible with previous
         // implementation.
@@ -199,6 +200,7 @@ macro_rules! define_logical_primitive_type {
             type ArrowPrimitive = arrow::datatypes::$DataType;
             type Native = $Native;
             type Wrapper = $Native;
+            type LargestType = $Largest;
 
             fn build_data_type() -> ConcreteDataType {
                 ConcreteDataType::$TypeId($DataType::default())
@@ -240,8 +242,8 @@ macro_rules! define_logical_primitive_type {
 }
 
 macro_rules! define_non_timestamp_primitive {
-    ($Native: ident, $TypeId: ident, $DataType: ident) => {
-        define_logical_primitive_type!($Native, $TypeId, $DataType);
+    ($Native: ident, $TypeId: ident, $DataType: ident, $Largest: ident) => {
+        define_logical_primitive_type!($Native, $TypeId, $DataType, $Largest);
 
         impl DataType for $DataType {
             fn name(&self) -> &str {
@@ -271,18 +273,18 @@ macro_rules! define_non_timestamp_primitive {
     };
 }
 
-define_non_timestamp_primitive!(u8, UInt8, UInt8Type);
-define_non_timestamp_primitive!(u16, UInt16, UInt16Type);
-define_non_timestamp_primitive!(u32, UInt32, UInt32Type);
-define_non_timestamp_primitive!(u64, UInt64, UInt64Type);
-define_non_timestamp_primitive!(i8, Int8, Int8Type);
-define_non_timestamp_primitive!(i16, Int16, Int16Type);
-define_non_timestamp_primitive!(i32, Int32, Int32Type);
-define_non_timestamp_primitive!(f32, Float32, Float32Type);
-define_non_timestamp_primitive!(f64, Float64, Float64Type);
+define_non_timestamp_primitive!(u8, UInt8, UInt8Type, UInt64Type);
+define_non_timestamp_primitive!(u16, UInt16, UInt16Type, UInt64Type);
+define_non_timestamp_primitive!(u32, UInt32, UInt32Type, UInt64Type);
+define_non_timestamp_primitive!(u64, UInt64, UInt64Type, UInt64Type);
+define_non_timestamp_primitive!(i8, Int8, Int8Type, Int64Type);
+define_non_timestamp_primitive!(i16, Int16, Int16Type, Int64Type);
+define_non_timestamp_primitive!(i32, Int32, Int32Type, Int64Type);
+define_non_timestamp_primitive!(f32, Float32, Float32Type, Float64Type);
+define_non_timestamp_primitive!(f64, Float64, Float64Type, Float64Type);
 
 // Timestamp primitive:
-define_logical_primitive_type!(i64, Int64, Int64Type);
+define_logical_primitive_type!(i64, Int64, Int64Type, Int64Type);
 
 impl DataType for Int64Type {
     fn name(&self) -> &str {

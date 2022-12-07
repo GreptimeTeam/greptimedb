@@ -17,13 +17,12 @@ use std::any::Any;
 
 use common_error::ext::BoxedError;
 use common_error::prelude::*;
-common_error::define_opaque_error!(Error);
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum InnerError {
+pub enum Error {
     #[snafu(display("Fail to create datafusion record batch, source: {}", source))]
     NewDfRecordBatch {
         source: datatypes::arrow::error::ArrowError,
@@ -67,19 +66,19 @@ pub enum InnerError {
     },
 }
 
-impl ErrorExt for InnerError {
+impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            InnerError::NewDfRecordBatch { .. } => StatusCode::InvalidArguments,
+            Error::NewDfRecordBatch { .. } => StatusCode::InvalidArguments,
 
-            InnerError::DataTypes { .. }
-            | InnerError::CreateRecordBatches { .. }
-            | InnerError::PollStream { .. }
-            | InnerError::Format { .. } => StatusCode::Internal,
+            Error::DataTypes { .. }
+            | Error::CreateRecordBatches { .. }
+            | Error::PollStream { .. }
+            | Error::Format { .. } => StatusCode::Internal,
 
-            InnerError::External { source } => source.status_code(),
+            Error::External { source } => source.status_code(),
 
-            InnerError::SchemaConversion { source, .. } => source.status_code(),
+            Error::SchemaConversion { source, .. } => source.status_code(),
         }
     }
 
@@ -89,11 +88,5 @@ impl ErrorExt for InnerError {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl From<InnerError> for Error {
-    fn from(e: InnerError) -> Error {
-        Error::new(e)
     }
 }
