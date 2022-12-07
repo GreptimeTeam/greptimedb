@@ -173,7 +173,7 @@ impl Instance {
         Instance {
             catalog_manager: None,
             script_handler: None,
-            create_expr_factory: Arc::new(DefaultCreateExprFactory {}),
+            create_expr_factory: Arc::new(DefaultCreateExprFactory),
             mode: Mode::Standalone,
             dist_instance: None,
             sql_handler: dn_instance.clone(),

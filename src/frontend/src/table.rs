@@ -932,8 +932,10 @@ mod test {
             _ => unreachable!(),
         };
 
-        let factory = DefaultCreateExprFactory {};
-        let mut expr = factory.create_expr_by_stmt(&create_table).await.unwrap();
+        let mut expr = DefaultCreateExprFactory
+            .create_expr_by_stmt(&create_table)
+            .await
+            .unwrap();
         let _result = dist_instance
             .create_table(&mut expr, create_table.partitions)
             .await

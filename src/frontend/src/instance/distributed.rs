@@ -16,13 +16,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use api::result::AdminResultBuilder;
 use api::v1::{
     admin_expr, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr, CreateExpr, ObjectExpr,
     ObjectResult,
 };
 use async_trait::async_trait;
+use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use catalog::CatalogList;
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
@@ -158,9 +158,7 @@ impl DistInstance {
                 Ok(Output::AffectedRows(1))
             }
             Statement::CreateTable(stmt) => {
-                let create_expr = &mut DefaultCreateExprFactory {}
-                    .create_expr_by_stmt(&stmt)
-                    .await?;
+                let create_expr = &mut DefaultCreateExprFactory.create_expr_by_stmt(&stmt).await?;
                 Ok(self.create_table(create_expr, stmt.partitions).await?)
             }
             Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
@@ -565,9 +563,10 @@ ENGINE=mito",
             let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
             match &result[0] {
                 Statement::CreateTable(c) => {
-                    common_telemetry::info!("{}", sql);
-                    let factory = DefaultCreateExprFactory {};
-                    let expr = factory.create_expr_by_stmt(c).await.unwrap();
+                    let expr = DefaultCreateExprFactory
+                        .create_expr_by_stmt(c)
+                        .await
+                        .unwrap();
                     let partitions = parse_partitions(&expr, c.partitions.clone()).unwrap();
                     let json = serde_json::to_string(&partitions).unwrap();
                     assert_eq!(json, expected);
