@@ -22,7 +22,6 @@ use common_query::error::{
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::prelude::*;
-use datatypes::types::{LogicalPrimitiveType, WrapperType};
 use datatypes::value::ListValue;
 use datatypes::vectors::{ConstantVector, Helper, ListVector};
 use datatypes::with_match_primitive_type_id;
@@ -32,20 +31,12 @@ use snafu::{ensure, OptionExt, ResultExt};
 // https://numpy.org/doc/stable/reference/generated/numpy.diff.html
 // I is the input type, O is the output type.
 #[derive(Debug, Default)]
-pub struct Diff<I, O>
-where
-    I: WrapperType,
-    O: WrapperType,
-{
+pub struct Diff<I, O> {
     values: Vec<I>,
     _phantom: PhantomData<O>,
 }
 
-impl<I, O> Diff<I, O>
-where
-    I: WrapperType,
-    O: WrapperType,
-{
+impl<I, O> Diff<I, O> {
     fn push(&mut self, value: I) {
         self.values.push(value);
     }

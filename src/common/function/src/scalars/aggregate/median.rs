@@ -25,7 +25,7 @@ use common_query::prelude::*;
 use datatypes::prelude::*;
 use datatypes::types::OrdPrimitive;
 use datatypes::value::ListValue;
-use datatypes::vectors::{ConstantVector, ListVector};
+use datatypes::vectors::{ConstantVector, Helper, ListVector};
 use datatypes::with_match_primitive_type_id;
 use num::NumCast;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -51,7 +51,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 #[derive(Debug, Default)]
 pub struct Median<T>
 where
-    T: Primitive,
+    T: WrapperType,
 {
     greater: BinaryHeap<Reverse<OrdPrimitive<T>>>,
     not_greater: BinaryHeap<OrdPrimitive<T>>,
@@ -59,7 +59,7 @@ where
 
 impl<T> Median<T>
 where
-    T: Primitive,
+    T: WrapperType,
 {
     fn push(&mut self, value: T) {
         let value = OrdPrimitive::<T>(value);
@@ -87,8 +87,7 @@ where
 // to use them.
 impl<T> Accumulator for Median<T>
 where
-    T: Primitive,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    T: WrapperType + NumCast,
 {
     // This function serializes our state to `ScalarValue`, which DataFusion uses to pass this
     // state between execution stages. Note that this can be arbitrary data.
@@ -105,7 +104,7 @@ where
             .collect::<Vec<Value>>();
         Ok(vec![Value::List(ListValue::new(
             Some(Box::new(nums)),
-            T::default().into().data_type(),
+            T::LogicalType::build_data_type(),
         ))])
     }
 
@@ -123,10 +122,10 @@ where
         let mut len = 1;
         let column: &<T as Scalar>::VectorType = if column.is_const() {
             len = column.len();
-            let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
-            unsafe { VectorHelper::static_cast(column.inner()) }
+            let column: &ConstantVector = unsafe { Helper::static_cast(column) };
+            unsafe { Helper::static_cast(column.inner()) }
         } else {
-            unsafe { VectorHelper::static_cast(column) }
+            unsafe { Helper::static_cast(column) }
         };
         (0..len).for_each(|_| {
             for v in column.iter_data().flatten() {
@@ -156,9 +155,10 @@ where
                 ),
             })?;
         for state in states.values_iter() {
-            let state = state.context(FromScalarValueSnafu)?;
-            // merging state is simply accumulate stored numbers from others', so just call update
-            self.update_batch(&[state])?
+            if let Some(state) = state.context(FromScalarValueSnafu)? {
+                // merging state is simply accumulate stored numbers from others', so just call update
+                self.update_batch(&[state])?
+            }
         }
         Ok(())
     }
@@ -202,7 +202,7 @@ impl AggregateFunctionCreator for MedianAccumulatorCreator {
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Median::<$S>::default()))
+                    Ok(Box::new(Median::<<$S as LogicalPrimitiveType>::Wrapper>::default()))
                 },
                 {
                     let err_msg = format!(
@@ -230,7 +230,7 @@ impl AggregateFunctionCreator for MedianAccumulatorCreator {
 
 #[cfg(test)]
 mod test {
-    use datatypes::vectors::PrimitiveVector;
+    use datatypes::vectors::Int32Vector;
 
     use super::*;
     #[test]
@@ -244,21 +244,19 @@ mod test {
 
         // test update one not-null value
         let mut median = Median::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Some(42)]))];
         assert!(median.update_batch(&v).is_ok());
         assert_eq!(Value::Int32(42), median.evaluate().unwrap());
 
         // test update one null value
         let mut median = Median::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
-            Option::<i32>::None,
-        ]))];
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Option::<i32>::None]))];
         assert!(median.update_batch(&v).is_ok());
         assert_eq!(Value::Null, median.evaluate().unwrap());
 
         // test update no null-value batch
         let mut median = Median::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![
             Some(-1i32),
             Some(1),
             Some(2),
@@ -268,7 +266,7 @@ mod test {
 
         // test update null-value batch
         let mut median = Median::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![
             Some(-2i32),
             None,
             Some(3),
@@ -280,7 +278,7 @@ mod test {
         // test update with constant vector
         let mut median = Median::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(ConstantVector::new(
-            Arc::new(PrimitiveVector::<i32>::from_vec(vec![4])),
+            Arc::new(Int32Vector::from_vec(vec![4])),
             10,
         ))];
         assert!(median.update_batch(&v).is_ok());
