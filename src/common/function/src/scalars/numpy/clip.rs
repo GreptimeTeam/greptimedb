@@ -158,7 +158,10 @@ impl fmt::Display for ClipFunction {
 mod tests {
     use common_query::prelude::TypeSignature;
     use datatypes::value::Value;
-    use datatypes::vectors::{ConstantVector, Float64Vector, Int64Vector, UInt64Vector};
+    use datatypes::vectors::{
+        ConstantVector, Float32Vector, Int16Vector, Int32Vector, Int8Vector, UInt16Vector,
+        UInt32Vector, UInt8Vector,
+    };
 
     use super::*;
 
@@ -214,13 +217,13 @@ mod tests {
 
         // eval with signed integers
         let args: Vec<VectorRef> = vec![
-            Arc::new(Int64Vector::from_values(0..10)),
+            Arc::new(Int32Vector::from_values(0..10)),
             Arc::new(ConstantVector::new(
-                Arc::new(Int64Vector::from_vec(vec![3])),
+                Arc::new(Int8Vector::from_vec(vec![3])),
                 10,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(Int64Vector::from_vec(vec![6])),
+                Arc::new(Int16Vector::from_vec(vec![6])),
                 10,
             )),
         ];
@@ -246,13 +249,13 @@ mod tests {
 
         // eval with unsigned integers
         let args: Vec<VectorRef> = vec![
-            Arc::new(UInt64Vector::from_values(0..10)),
+            Arc::new(UInt8Vector::from_values(0..10)),
             Arc::new(ConstantVector::new(
-                Arc::new(UInt64Vector::from_vec(vec![3])),
+                Arc::new(UInt32Vector::from_vec(vec![3])),
                 10,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(UInt64Vector::from_vec(vec![6])),
+                Arc::new(UInt16Vector::from_vec(vec![6])),
                 10,
             )),
         ];
@@ -278,13 +281,13 @@ mod tests {
 
         // eval with floats
         let args: Vec<VectorRef> = vec![
-            Arc::new(Float64Vector::from_values((0..10).map(f64::from))),
+            Arc::new(Int8Vector::from_values(0..10)),
             Arc::new(ConstantVector::new(
-                Arc::new(Float64Vector::from_vec(vec![3f64])),
+                Arc::new(UInt32Vector::from_vec(vec![3])),
                 10,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(Float64Vector::from_vec(vec![6f64])),
+                Arc::new(Float32Vector::from_vec(vec![6f32])),
                 10,
             )),
         ];
