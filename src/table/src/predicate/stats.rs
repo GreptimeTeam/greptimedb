@@ -20,6 +20,7 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::Vector;
 pub use datatypes::vectors::UInt64Vector;
+use paste::paste;
 
 pub struct RowGroupPruningStatistics<'a> {
     pub meta_data: &'a [RowGroupMetaData],
@@ -41,15 +42,15 @@ impl<'a> RowGroupPruningStatistics<'a> {
     }
 }
 
-impl<'a> PruningStatistics for RowGroupPruningStatistics<'a> {
-    fn min_values(&self, column: &Column) -> Option<ArrayRef> {
-        let arrow_schema = self.schema.arrow_schema().clone();
-        let (column_index, field) =
-            if let Some((v, f)) = arrow_schema.column_with_name(&column.name) {
-                (v, f)
-            } else {
-                return None;
-            };
+macro_rules! impl_min_max_values {
+    ($self:ident, $col:ident, $min_max: ident) => {{
+        let arrow_schema = $self.schema.arrow_schema().clone();
+        let (column_index, field) = if let Some((v, f)) = arrow_schema.column_with_name(&$col.name)
+        {
+            (v, f)
+        } else {
+            return None;
+        };
         let data_type = field.data_type();
         let null_scalar: ScalarValue = if let Ok(v) = data_type.try_into() {
             v
@@ -57,7 +58,7 @@ impl<'a> PruningStatistics for RowGroupPruningStatistics<'a> {
             return None;
         };
 
-        let scalar_values: Vec<ScalarValue> = self
+        let scalar_values = $self
             .meta_data
             .iter()
             .flat_map(|meta| meta.column(column_index).statistics())
@@ -66,17 +67,19 @@ impl<'a> PruningStatistics for RowGroupPruningStatistics<'a> {
                     return None;
                 }
                 match stats {
-                    ParquetStats::Boolean(s) => Some(ScalarValue::Boolean(Some(*s.min()))),
-                    ParquetStats::Int32(s) => Some(ScalarValue::Int32(Some(*s.min()))),
-                    ParquetStats::Int64(s) => Some(ScalarValue::Int64(Some(*s.min()))),
+                    ParquetStats::Boolean(s) => Some(ScalarValue::Boolean(Some(*s.$min_max()))),
+                    ParquetStats::Int32(s) => Some(ScalarValue::Int32(Some(*s.$min_max()))),
+                    ParquetStats::Int64(s) => Some(ScalarValue::Int64(Some(*s.$min_max()))),
 
                     ParquetStats::Int96(_) => None,
-                    ParquetStats::Float(s) => Some(ScalarValue::Float32(Some(*s.min()))),
-                    ParquetStats::Double(s) => Some(ScalarValue::Float64(Some(*s.min()))),
+                    ParquetStats::Float(s) => Some(ScalarValue::Float32(Some(*s.$min_max()))),
+                    ParquetStats::Double(s) => Some(ScalarValue::Float64(Some(*s.$min_max()))),
                     ParquetStats::ByteArray(s) => {
-                        let s = std::str::from_utf8(s.min_bytes())
-                            .map(|s| s.to_string())
-                            .ok();
+                        paste! {
+                            let s = std::str::from_utf8(s.[<$min_max _bytes>]())
+                                .map(|s| s.to_string())
+                                .ok();
+                        }
                         Some(ScalarValue::Utf8(s))
                     }
 
@@ -84,56 +87,18 @@ impl<'a> PruningStatistics for RowGroupPruningStatistics<'a> {
                 }
             })
             .map(|maybe_scalar| maybe_scalar.unwrap_or_else(|| null_scalar.clone()))
-            .collect();
+            .collect::<Vec<ScalarValue>>();
         ScalarValue::iter_to_array(scalar_values).ok()
+    }};
+}
+
+impl<'a> PruningStatistics for RowGroupPruningStatistics<'a> {
+    fn min_values(&self, column: &Column) -> Option<ArrayRef> {
+        impl_min_max_values!(self, column, min)
     }
 
     fn max_values(&self, column: &Column) -> Option<ArrayRef> {
-        let arrow_schema = self.schema.arrow_schema().clone();
-        let (column_index, field) =
-            if let Some((v, f)) = arrow_schema.column_with_name(&column.name) {
-                (v, f)
-            } else {
-                return None;
-            };
-
-        let data_type = field.data_type();
-        let null_scalar: ScalarValue = if let Ok(v) = data_type.try_into() {
-            v
-        } else {
-            return None;
-        };
-
-        let scalar_values: Vec<ScalarValue> = self
-            .meta_data
-            .iter()
-            .flat_map(|meta| meta.column(column_index).statistics())
-            .map(|stats| {
-                if !stats.has_min_max_set() {
-                    return None;
-                }
-                match stats {
-                    ParquetStats::Boolean(s) => Some(ScalarValue::Boolean(Some(*s.max()))),
-                    ParquetStats::Int32(s) => Some(ScalarValue::Int32(Some(*s.max()))),
-                    ParquetStats::Int64(s) => Some(ScalarValue::Int64(Some(*s.max()))),
-
-                    ParquetStats::Int96(_) => None,
-                    ParquetStats::Float(s) => Some(ScalarValue::Float32(Some(*s.max()))),
-                    ParquetStats::Double(s) => Some(ScalarValue::Float64(Some(*s.max()))),
-                    ParquetStats::ByteArray(s) => {
-                        let s = std::str::from_utf8(s.max_bytes())
-                            .map(|s| s.to_string())
-                            .ok();
-                        Some(ScalarValue::Utf8(s))
-                    }
-
-                    ParquetStats::FixedLenByteArray(_) => None,
-                }
-            })
-            .map(|maybe_scalar| maybe_scalar.unwrap_or_else(|| null_scalar.clone()))
-            .collect();
-
-        ScalarValue::iter_to_array(scalar_values).ok()
+        impl_min_max_values!(self, column, max)
     }
 
     fn num_containers(&self) -> usize {
