@@ -22,6 +22,7 @@ common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
+digest = "0.10"
 futures = "0.3"
 hex = { version = "0.4" }
 http-body = "0.4"
@@ -43,6 +44,7 @@ schemars = "0.8"
 serde = "1.0"
 serde_json = "1.0"
 session = { path = "../session" }
+sha1 = "0.10"
 snafu = { version = "0.7", features = ["backtraces"] }
 snap = "1"
 strum = { version = "0.24", features = ["derive"] }

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod user_provider;
+
 pub const DEFAULT_USERNAME: &str = "greptime";
 
 use std::sync::Arc;
