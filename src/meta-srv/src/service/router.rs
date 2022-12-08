@@ -164,7 +164,7 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
     let tgv =
         get_table_global_value(&ctx.kv_store, &tgk)
             .await?
-            .context(error::TableNotFoundSnafu {
+            .with_context(|| error::TableNotFoundSnafu {
                 name: format!("{}", tgk),
             })?;
     let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
