@@ -21,6 +21,8 @@ use axum::Json;
 use common_error::prelude::*;
 use serde_json::json;
 
+use crate::auth;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -195,6 +197,12 @@ pub enum Error {
 
     #[snafu(display("Tls is required for {}, plain connection is rejected", server))]
     TlsRequired { server: String },
+
+    #[snafu(display("Failed to get user info, source: {}", source))]
+    Auth {
+        #[snafu(backtrace)]
+        source: auth::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -239,6 +247,7 @@ impl ErrorExt for Error {
             Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
             StartFrontend { source, .. } => source.status_code(),
+            Auth { source, .. } => source.status_code(),
         }
     }
 

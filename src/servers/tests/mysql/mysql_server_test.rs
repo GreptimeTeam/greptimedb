@@ -41,7 +41,13 @@ fn create_mysql_server(table: MemTable, tls: Arc<TlsOption>) -> Result<Box<dyn S
             .build()
             .unwrap(),
     );
-    Ok(MysqlServer::create_server(query_handler, io_runtime, tls))
+
+    Ok(MysqlServer::create_server(
+        query_handler,
+        io_runtime,
+        tls,
+        None,
+    ))
 }
 
 #[tokio::test]

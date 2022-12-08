@@ -26,9 +26,9 @@ use session::Session;
 use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
 
-use crate::context::AuthHashMethod::DoubleSha1;
+use crate::auth::{Identity, Password, UserProviderRef};
 use crate::context::Channel::MYSQL;
-use crate::context::{AuthMethod, Context, CtxBuilder};
+use crate::context::{Context, CtxBuilder};
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
 use crate::query_handler::SqlQueryHandlerRef;
@@ -41,10 +41,15 @@ pub struct MysqlInstanceShim {
     // TODO(LFC): Break `Context` struct into different fields in `Session`, each with its own purpose.
     ctx: Arc<RwLock<Option<Context>>>,
     session: Arc<Session>,
+    user_provider: Option<UserProviderRef>,
 }
 
 impl MysqlInstanceShim {
-    pub fn create(query_handler: SqlQueryHandlerRef, client_addr: String) -> MysqlInstanceShim {
+    pub fn create(
+        query_handler: SqlQueryHandlerRef,
+        client_addr: String,
+        user_provider: Option<UserProviderRef>,
+    ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
         let mut rng = rand::thread_rng();
@@ -64,6 +69,7 @@ impl MysqlInstanceShim {
             client_addr,
             ctx: Arc::new(RwLock::new(None)),
             session: Arc::new(Session::new()),
+            user_provider,
         }
     }
 
@@ -102,28 +108,42 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
     async fn authenticate(
         &self,
-        _auth_plugin: &str,
+        auth_plugin: &str,
         username: &[u8],
         salt: &[u8],
         auth_data: &[u8],
     ) -> bool {
-        // if not specified then **root** will be used
+        // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
         let client_addr = self.client_addr.clone();
-        let auth_method = match auth_data.len() {
-            0 => AuthMethod::None,
-            _ => AuthMethod::Password {
-                hash_method: DoubleSha1,
-                hashed_value: auth_data.to_vec(),
-                salt: salt.to_vec(),
-            },
-        };
+
+        let mut user_info = None;
+        if let Some(user_provider) = &self.user_provider {
+            let user_id = Identity::UserId(&username, Some(&client_addr));
+
+            let pwd = match auth_plugin {
+                "mysql_native_password" => Password::MysqlNativePwd(auth_data, salt),
+                other => {
+                    error!("Unsupported mysql auth plugin: {}", other);
+                    return false;
+                }
+            };
+            match user_provider.auth(user_id, pwd).await {
+                Ok(userinfo) => {
+                    user_info = Some(userinfo);
+                }
+                Err(e) => {
+                    error!("Failed to auth, err: {:?}", e);
+                    return false;
+                }
+            };
+        }
+        let user_info = user_info.unwrap_or_default();
 
         return match CtxBuilder::new()
-            .client_addr(Some(client_addr))
-            .set_channel(Some(MYSQL))
-            .set_username(Some(username.to_string()))
-            .set_auth_method(Some(auth_method))
+            .client_addr(client_addr)
+            .set_channel(MYSQL)
+            .set_user_info(user_info)
             .build()
         {
             Ok(ctx) => {

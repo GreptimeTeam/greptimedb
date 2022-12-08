@@ -14,8 +14,10 @@
 
 use std::sync::Arc;
 
+use common_telemetry::info;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
+use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
 use servers::Mode;
 use snafu::prelude::*;
@@ -65,6 +67,7 @@ where
 {
     opts: FrontendOptions,
     instance: Option<T>,
+    user_provider: Option<UserProviderRef>,
 }
 
 impl<T> Frontend<T>
@@ -75,7 +78,16 @@ where
         Self {
             opts,
             instance: Some(instance),
+            user_provider: None,
         }
+    }
+
+    pub fn set_user_provider(&mut self, user_provider: Option<UserProviderRef>) {
+        info!(
+            "Configured user provider: {:?}",
+            user_provider.as_ref().map(|u| u.name())
+        );
+        self.user_provider = user_provider;
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -88,6 +100,6 @@ where
         instance.start().await?;
 
         let instance = Arc::new(instance);
-        Services::start(&self.opts, instance).await
+        Services::start(&self.opts, instance, self.user_provider.clone()).await
     }
 }

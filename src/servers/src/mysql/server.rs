@@ -28,6 +28,7 @@ use tokio::io::BufWriter;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::ServerConfig;
 
+use crate::auth::UserProviderRef;
 use crate::error::{Error, Result};
 use crate::mysql::handler::MysqlInstanceShim;
 use crate::query_handler::SqlQueryHandlerRef;
@@ -41,6 +42,7 @@ pub struct MysqlServer {
     base_server: BaseTcpServer,
     query_handler: SqlQueryHandlerRef,
     tls: Arc<TlsOption>,
+    user_provider: Option<UserProviderRef>,
 }
 
 impl MysqlServer {
@@ -48,11 +50,13 @@ impl MysqlServer {
         query_handler: SqlQueryHandlerRef,
         io_runtime: Arc<Runtime>,
         tls: Arc<TlsOption>,
+        user_provider: Option<UserProviderRef>,
     ) -> Box<dyn Server> {
         Box::new(MysqlServer {
             base_server: BaseTcpServer::create_server("MySQL", io_runtime),
             query_handler,
             tls,
+            user_provider,
         })
     }
 
@@ -63,19 +67,29 @@ impl MysqlServer {
         tls_conf: Option<Arc<ServerConfig>>,
     ) -> impl Future<Output = ()> {
         let query_handler = self.query_handler.clone();
+        let user_provider = self.user_provider.clone();
+
         let force_tls = self.tls.should_force_tls();
 
         stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
             let query_handler = query_handler.clone();
+            let user_provider = user_provider.clone();
             let tls_conf = tls_conf.clone();
+
             async move {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
-                        if let Err(error) =
-                            Self::handle(io_stream, io_runtime, query_handler, tls_conf, force_tls)
-                                .await
+                        if let Err(error) = Self::handle(
+                            io_stream,
+                            io_runtime,
+                            query_handler,
+                            tls_conf,
+                            force_tls,
+                            user_provider,
+                        )
+                        .await
                         {
                             error!(error; "Unexpected error when handling TcpStream");
                         };
@@ -91,11 +105,12 @@ impl MysqlServer {
         query_handler: SqlQueryHandlerRef,
         tls_conf: Option<Arc<ServerConfig>>,
         force_tls: bool,
+        user_provider: Option<UserProviderRef>,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
         io_runtime .spawn(async move {
             // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
-            if let Err(e)  = Self::do_handle(stream, query_handler, tls_conf, force_tls).await {
+            if let Err(e)  = Self::do_handle(stream, query_handler, tls_conf, force_tls, user_provider).await {
                 // TODO(LFC): Write this error to client as well, in MySQL text protocol.
                 // Looks like we have to expose opensrv-mysql's `PacketWriter`?
                 error!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time.")
@@ -110,8 +125,13 @@ impl MysqlServer {
         query_handler: SqlQueryHandlerRef,
         tls_conf: Option<Arc<ServerConfig>>,
         force_tls: bool,
+        user_provider: Option<UserProviderRef>,
     ) -> Result<()> {
-        let mut shim = MysqlInstanceShim::create(query_handler, stream.peer_addr()?.to_string());
+        let mut shim = MysqlInstanceShim::create(
+            query_handler,
+            stream.peer_addr()?.to_string(),
+            user_provider,
+        );
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
         let ops = IntermediaryOptions::default();
