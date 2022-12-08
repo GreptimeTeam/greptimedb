@@ -4698,6 +4698,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "promql"
+version = "0.1.0"
+
+[[package]]
 name = "prost"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
