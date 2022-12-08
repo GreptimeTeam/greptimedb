@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_telemetry::info;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
 use servers::auth::UserProviderRef;
@@ -90,6 +91,10 @@ where
     }
 
     pub fn set_user_provider(&mut self, user_provider: Option<UserProviderRef>) {
+        info!(
+            "Configured user provider: {:?}",
+            user_provider.as_ref().map(|u| u.name())
+        );
         self.user_provider = user_provider;
     }
 

@@ -65,11 +65,11 @@ pub enum StatusCode {
 
     // ====== Begin of auth related status code =====
     /// User not exist
-    UserNotExist = 7000,
+    UserNotFound = 7000,
     /// Unsupported password type
     UnsupportedPwdType = 7001,
     /// Username and password does not match
-    WrongPwd = 7002,
+    UserPwdMismatch = 7002,
     // ====== End of auth related status code =====
 }
 

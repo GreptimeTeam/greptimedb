@@ -92,9 +92,9 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::UserNotExist { .. } => StatusCode::UserNotExist,
+            Error::UserNotExist { .. } => StatusCode::UserNotFound,
             Error::UnsupportedPwdType { .. } => StatusCode::UnsupportedPwdType,
-            Error::WrongPwd { .. } => StatusCode::WrongPwd,
+            Error::WrongPwd { .. } => StatusCode::UserPwdMismatch,
         }
     }
 
