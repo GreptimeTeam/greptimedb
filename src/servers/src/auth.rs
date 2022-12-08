@@ -24,7 +24,7 @@ use snafu::{Backtrace, ErrorCompat, Snafu};
 pub trait UserProvider: Send + Sync {
     fn name(&self) -> &str;
 
-    async fn auth(&self, id: Identity<'_>, pwd: Password<'_>) -> Result<UserInfo, Error>;
+    async fn auth(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfo, Error>;
 }
 
 pub type UserProviderRef = Arc<dyn UserProvider>;
@@ -37,17 +37,17 @@ pub enum Identity<'a> {
     UserId(Username<'a>, Option<HostOrIp<'a>>),
 }
 
-pub type HashedPwd<'a> = &'a [u8];
+pub type HashedPassword<'a> = &'a [u8];
 pub type Salt<'a> = &'a [u8];
-pub type Pwd<'a> = &'a [u8];
 
 /// Authentication information sent by the client.
 pub enum Password<'a> {
-    PlainText(Pwd<'a>),
-    MysqlNativePwd(HashedPwd<'a>, Salt<'a>),
-    PgMD5(HashedPwd<'a>, Salt<'a>),
+    PlainText(&'a [u8]),
+    MysqlNativePassword(HashedPassword<'a>, Salt<'a>),
+    PgMD5(HashedPassword<'a>, Salt<'a>),
 }
 
+#[derive(Clone)]
 pub struct UserInfo {
     username: String,
 }
@@ -76,25 +76,25 @@ impl UserInfo {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("User not exist"))]
-    UserNotExist { backtrace: Backtrace },
+    #[snafu(display("User not found"))]
+    UserNotFound { backtrace: Backtrace },
 
-    #[snafu(display("Unsupported Password Type: {}", pwd_type))]
-    UnsupportedPwdType {
-        pwd_type: String,
+    #[snafu(display("Unsupported password type: {}", password_type))]
+    UnsupportedPasswordType {
+        password_type: String,
         backtrace: Backtrace,
     },
 
     #[snafu(display("Username and password does not match"))]
-    WrongPwd { backtrace: Backtrace },
+    UserPasswordMismatch { backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::UserNotExist { .. } => StatusCode::UserNotFound,
-            Error::UnsupportedPwdType { .. } => StatusCode::UnsupportedPwdType,
-            Error::WrongPwd { .. } => StatusCode::UserPwdMismatch,
+            Error::UserNotFound { .. } => StatusCode::UserNotFound,
+            Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,
+            Error::UserPasswordMismatch { .. } => StatusCode::UserPasswordMismatch,
         }
     }
 
@@ -127,21 +127,21 @@ mod tests {
         ) -> Result<UserInfo, super::Error> {
             match id {
                 Identity::UserId(username, _host) => match password {
-                    Password::PlainText(pwd) => {
+                    Password::PlainText(password) => {
                         if username == "greptime" {
-                            if pwd == b"greptime" {
+                            if password == b"greptime" {
                                 return Ok(UserInfo {
                                     username: "greptime".to_string(),
                                 });
                             } else {
-                                return super::WrongPwdSnafu {}.fail();
+                                return super::UserPasswordMismatchSnafu {}.fail();
                             }
                         } else {
-                            return super::UserNotExistSnafu {}.fail();
+                            return super::UserNotFoundSnafu {}.fail();
                         }
                     }
-                    _ => super::UnsupportedPwdTypeSnafu {
-                        pwd_type: "mysql_native_pwd",
+                    _ => super::UnsupportedPasswordTypeSnafu {
+                        password_type: "mysql_native_password",
                     }
                     .fail(),
                 },
@@ -164,17 +164,17 @@ mod tests {
         assert!(auth_result.is_ok());
         assert_eq!("greptime", auth_result.unwrap().user_name());
 
-        // auth failed, unsupported pwd type
+        // auth failed, unsupported password type
         let auth_result = user_provider
             .auth(
                 Identity::UserId("greptime", None),
-                Password::MysqlNativePwd(b"hashed_value", b"salt"),
+                Password::MysqlNativePassword(b"hashed_value", b"salt"),
             )
             .await;
         assert!(auth_result.is_err());
         matches!(
             auth_result.err().unwrap(),
-            auth::Error::UnsupportedPwdType { .. }
+            auth::Error::UnsupportedPasswordType { .. }
         );
 
         // auth failed, err: user not exist.
@@ -185,16 +185,19 @@ mod tests {
             )
             .await;
         assert!(auth_result.is_err());
-        matches!(auth_result.err().unwrap(), auth::Error::UserNotExist { .. });
+        matches!(auth_result.err().unwrap(), auth::Error::UserNotFound { .. });
 
         // auth failed, err: wrong password
         let auth_result = user_provider
             .auth(
                 Identity::UserId("greptime", None),
-                Password::PlainText(b"wrong_pwd"),
+                Password::PlainText(b"wrong_password"),
             )
             .await;
         assert!(auth_result.is_err());
-        matches!(auth_result.err().unwrap(), auth::Error::WrongPwd { .. });
+        matches!(
+            auth_result.err().unwrap(),
+            auth::Error::UserPasswordMismatch { .. }
+        );
     }
 }

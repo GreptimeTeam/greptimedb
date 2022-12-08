@@ -18,12 +18,14 @@ use std::time::Instant;
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
+use axum::Extension;
 use common_error::status_code::StatusCode;
 use common_telemetry::metric;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
 
+use crate::auth::UserInfo;
 use crate::http::{ApiState, JsonResponse};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -37,6 +39,8 @@ pub struct SqlQuery {
 pub async fn sql(
     State(state): State<ApiState>,
     Query(params): Query<SqlQuery>,
+    // TODO(fys): pass _user_info into query context
+    _user_info: Extension<UserInfo>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
     let start = Instant::now();
