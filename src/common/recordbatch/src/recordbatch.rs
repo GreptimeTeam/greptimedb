@@ -112,7 +112,7 @@ impl<'a> Iterator for RecordBatchRowIterator<'a> {
                     .context(error::DataTypesSnafu)
                 {
                     Ok(field) => row.push(field),
-                    Err(e) => return Some(Err(e.into())),
+                    Err(e) => return Some(Err(e)),
                 }
             }
 

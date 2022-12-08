@@ -168,8 +168,7 @@ impl Stream for AsyncRecordBatchStreamAdapter {
                             error::CreateRecordBatchesSnafu {
                                 reason: format!("Read error {:?} from stream", e),
                             }
-                            .fail()
-                            .map_err(|e| e.into()),
+                            .fail(),
                         ))
                     }
                 },

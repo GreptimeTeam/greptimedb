@@ -76,8 +76,7 @@ impl Function for FromUnixtimeFunction {
                 function: NAME,
                 datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
             }
-            .fail()
-            .map_err(|e| e.into()),
+            .fail(),
         }
     }
 }

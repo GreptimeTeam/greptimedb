@@ -214,7 +214,7 @@ impl From<Error> for DataFusionError {
 
 impl From<BoxedError> for Error {
     fn from(source: BoxedError) -> Self {
-        Error::ExecutePhysicalPlan { source }.into()
+        Error::ExecutePhysicalPlan { source }
     }
 }
 
