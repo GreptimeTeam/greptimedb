@@ -943,7 +943,7 @@ mod tests {
         let expected_ts_col = Column {
             column_name: "ts".to_string(),
             values: Some(column::Values {
-                ts_millis_values: vec![1000, 2000, 3000, 4000],
+                ts_millisecond_values: vec![1000, 2000, 3000, 4000],
                 ..Default::default()
             }),
             semantic_type: SemanticType::Timestamp as i32,

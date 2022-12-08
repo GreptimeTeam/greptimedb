@@ -22,7 +22,7 @@ use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::codec::SelectResult;
 use api::v1::column::SemanticType;
 use api::v1::{column, Column, ColumnDataType, InsertExpr};
-use common_grpc::writer::Precision::MILLISECOND;
+use common_grpc::writer::Precision::Millisecond;
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
@@ -279,7 +279,7 @@ pub fn select_result_to_timeseries(
             timestamp: ts_column
                 .values
                 .as_ref()
-                .map(|vs| vs.ts_millis_values[ts_row])
+                .map(|vs| vs.ts_millisecond_values[ts_row])
                 .unwrap_or(0i64),
         };
 
@@ -325,7 +325,7 @@ fn timeseries_to_insert_request(db: &str, mut timeseries: TimeSeries) -> Result<
         let ts_millis = sample.timestamp;
         let val = sample.value;
 
-        line_writer.write_ts(TIMESTAMP_COLUMN_NAME, (ts_millis, MILLISECOND));
+        line_writer.write_ts(TIMESTAMP_COLUMN_NAME, (ts_millis, Millisecond));
         line_writer.write_f64(VALUE_COLUMN_NAME, val);
 
         labels
@@ -368,11 +368,11 @@ fn timeseries_to_insert_expr(database: &str, mut timeseries: TimeSeries) -> Resu
     let ts_column = Column {
         column_name: TIMESTAMP_COLUMN_NAME.to_string(),
         values: Some(column::Values {
-            ts_millis_values: samples.iter().map(|x| x.timestamp).collect(),
+            ts_millisecond_values: samples.iter().map(|x| x.timestamp).collect(),
             ..Default::default()
         }),
         semantic_type: SemanticType::Timestamp as i32,
-        datatype: ColumnDataType::Timestamp as i32,
+        datatype: ColumnDataType::TimestampMillisecond as i32,
         ..Default::default()
     };
     columns.push(ts_column);
@@ -686,7 +686,7 @@ mod tests {
 
         assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
         assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millis_values,
+            columns[0].values.as_ref().unwrap().ts_millisecond_values,
             vec![1000, 2000]
         );
 
@@ -712,7 +712,7 @@ mod tests {
 
         assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
         assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millis_values,
+            columns[0].values.as_ref().unwrap().ts_millisecond_values,
             vec![1000, 2000]
         );
 
@@ -743,7 +743,7 @@ mod tests {
 
         assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
         assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millis_values,
+            columns[0].values.as_ref().unwrap().ts_millisecond_values,
             vec![1000, 2000, 3000]
         );
 
@@ -773,7 +773,7 @@ mod tests {
                 Column {
                     column_name: TIMESTAMP_COLUMN_NAME.to_string(),
                     values: Some(column::Values {
-                        ts_millis_values: vec![1000, 2000],
+                        ts_millisecond_values: vec![1000, 2000],
                         ..Default::default()
                     }),
                     ..Default::default()

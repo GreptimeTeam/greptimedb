@@ -24,7 +24,7 @@ use crate::error::{Error, InfluxdbLineProtocolSnafu, InfluxdbLinesWriteSnafu};
 use crate::line_writer::LineWriter;
 
 pub const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
-pub const DEFAULT_TIME_PRECISION: Precision = Precision::NANOSECOND;
+pub const DEFAULT_TIME_PRECISION: Precision = Precision::Nanosecond;
 
 pub struct InfluxdbRequest {
     pub precision: Option<Precision>,
@@ -363,7 +363,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
             SemanticType::Timestamp,
             Vec::new(),
             Values {
-                ts_millis_values: vec![1663840496100, 1663840496400],
+                ts_millisecond_values: vec![1663840496100, 1663840496400],
                 ..Default::default()
             },
         );
@@ -402,7 +402,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
             SemanticType::Timestamp,
             Vec::new(),
             Values {
-                ts_millis_values: vec![1663840496100, 1663840496400],
+                ts_millisecond_values: vec![1663840496100, 1663840496400],
                 ..Default::default()
             },
         );

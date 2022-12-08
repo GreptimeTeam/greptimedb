@@ -184,7 +184,7 @@ fn transverse_recursive<T, F: Fn(&DataType) -> T + Clone>(
         Struct => {
             if let DataType::Struct(fields) = data_type.to_logical_type() {
                 for field in fields {
-                    transverse_recursive(&field.data_type, map.clone(), encodings)
+                    transverse_recursive(&field.data_type(), map.clone(), encodings)
                 }
             } else {
                 unreachable!()

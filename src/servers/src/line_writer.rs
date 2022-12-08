@@ -16,13 +16,18 @@ use std::collections::HashMap;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_grpc::writer::{to_ms_ts, Precision};
+use common_telemetry::error;
 use common_time::timestamp::TimeUnit::Millisecond;
 use common_time::Timestamp;
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::types::TimestampType;
-use datatypes::value::Value;
-use datatypes::vectors::{VectorBuilder, VectorRef};
+use datatypes::types::{TimestampMillisecondType, TimestampType};
+use datatypes::value::{Value, ValueRef};
+use datatypes::vectors::{MutableVector, VectorRef};
+use snafu::ResultExt;
 use table::requests::InsertRequest;
+
+use crate::error::VectorConversionSnafu;
 
 type ColumnLen = usize;
 type ColumnName = String;
@@ -32,7 +37,7 @@ pub struct LineWriter {
     table_name: String,
     expected_rows: usize,
     current_rows: usize,
-    columns_builders: HashMap<ColumnName, (VectorBuilder, ColumnLen)>,
+    columns_builders: HashMap<ColumnName, (Box<dyn MutableVector>, ColumnLen)>,
 }
 
 impl LineWriter {
@@ -48,7 +53,8 @@ impl LineWriter {
 
     pub fn write_ts(&mut self, column_name: &str, value: (i64, Precision)) {
         let (val, precision) = value;
-        let datatype = ConcreteDataType::Timestamp(TimestampType { unit: Millisecond });
+        let datatype =
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(TimestampMillisecondType));
         let ts_val = Value::Timestamp(Timestamp::new(to_ms_ts(precision, val), Millisecond));
         self.write(column_name, datatype, ts_val);
     }
@@ -104,8 +110,14 @@ impl LineWriter {
     fn write(&mut self, column_name: &str, datatype: ConcreteDataType, value: Value) {
         let or_insert = || {
             let rows = self.current_rows;
-            let mut builder = VectorBuilder::with_capacity(datatype, self.expected_rows);
-            (0..rows).into_iter().for_each(|_| builder.push_null());
+            let mut builder = datatype.create_mutable_vector(self.expected_rows);
+            if let Err(e) = (0..rows)
+                .into_iter()
+                .try_for_each(|_| builder.push_value_ref(ValueRef::Null))
+                .context(VectorConversionSnafu)
+            {
+                error!("{:?}", e)
+            }
             (builder, rows)
         };
         let (builder, column_len) = self
@@ -113,27 +125,34 @@ impl LineWriter {
             .entry(column_name.to_string())
             .or_insert_with(or_insert);
 
-        builder.push(&value);
+        if let Err(e) = builder.push_value_ref(value.as_value_ref()) {
+            error!("{:?}", e);
+        };
         *column_len += 1;
     }
 
     pub fn commit(&mut self) {
         self.current_rows += 1;
-        self.columns_builders
+        let _ = self
+            .columns_builders
             .values_mut()
             .into_iter()
-            .for_each(|(builder, len)| {
+            .try_for_each(|(builder, len)| {
                 if self.current_rows > *len {
-                    builder.push(&Value::Null)
+                    builder.push_value_ref(ValueRef::Null)
+                } else {
+                    Ok(())
                 }
-            });
+            })
+            .context(VectorConversionSnafu)
+            .map_err(|e| error!("{:?}", e));
     }
 
     pub fn finish(self) -> InsertRequest {
         let columns_values: HashMap<ColumnName, VectorRef> = self
             .columns_builders
             .into_iter()
-            .map(|(column_name, (mut builder, _))| (column_name, builder.finish()))
+            .map(|(column_name, (mut builder, _))| (column_name, builder.to_vector()))
             .collect();
         InsertRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
@@ -158,18 +177,18 @@ mod tests {
     #[test]
     fn test_writer() {
         let mut writer = LineWriter::with_lines(DEFAULT_SCHEMA_NAME, "demo".to_string(), 4);
-        writer.write_ts("ts", (1665893727685, Precision::MILLISECOND));
+        writer.write_ts("ts", (1665893727685, Precision::Millisecond));
         writer.write_tag("host", "host-1");
         writer.write_i64("memory", 10_i64);
         writer.commit();
 
-        writer.write_ts("ts", (1665893727686, Precision::MILLISECOND));
+        writer.write_ts("ts", (1665893727686, Precision::Millisecond));
         writer.write_tag("host", "host-2");
         writer.write_tag("region", "region-2");
         writer.write_i64("memory", 9_i64);
         writer.commit();
 
-        writer.write_ts("ts", (1665893727689, Precision::MILLISECOND));
+        writer.write_ts("ts", (1665893727689, Precision::Millisecond));
         writer.write_tag("host", "host-3");
         writer.write_tag("region", "region-3");
         writer.write_i64("cpu", 19_i64);

@@ -186,6 +186,8 @@ pub trait MutableVector: Send + Sync {
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()>;
 }
 
+pub type MutableVectorRef = Arc<dyn MutableVector>;
+
 /// Helper to define `try_from_arrow_array(array: arrow::array::ArrayRef)` function.
 macro_rules! impl_try_from_arrow_array_for_vector {
     ($Array: ident, $Vector: ident) => {

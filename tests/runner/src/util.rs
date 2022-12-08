@@ -99,7 +99,7 @@ pub fn values_to_string(data_type: ColumnDataType, values: Values) -> Vec<String
             .map(|v| v.to_string())
             .collect(),
         ColumnDataType::Timestamp => values
-            .ts_millis_values
+            .ts_millisecond_values
             .into_iter()
             .map(|v| v.to_string())
             .collect(),

@@ -132,7 +132,7 @@ impl DataPoint {
         let mut line_writer = LineWriter::with_lines(DEFAULT_SCHEMA_NAME, self.metric.clone(), 1);
         line_writer.write_ts(
             OPENTSDB_TIMESTAMP_COLUMN_NAME,
-            (self.ts_millis(), Precision::MILLISECOND),
+            (self.ts_millis(), Precision::Millisecond),
         );
 
         line_writer.write_f64(OPENTSDB_VALUE_COLUMN_NAME, self.value);
@@ -152,11 +152,11 @@ impl DataPoint {
         let ts_column = Column {
             column_name: OPENTSDB_TIMESTAMP_COLUMN_NAME.to_string(),
             values: Some(column::Values {
-                ts_millis_values: vec![self.ts_millis],
+                ts_millisecond_values: vec![self.ts_millis],
                 ..Default::default()
             }),
             semantic_type: SemanticType::Timestamp as i32,
-            datatype: ColumnDataType::Timestamp as i32,
+            datatype: ColumnDataType::TimestampMillisecond as i32,
             ..Default::default()
         };
         columns.push(ts_column);
@@ -336,7 +336,7 @@ mod test {
 
         assert_eq!(columns[0].column_name, OPENTSDB_TIMESTAMP_COLUMN_NAME);
         assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millis_values,
+            columns[0].values.as_ref().unwrap().ts_millisecond_values,
             vec![1000]
         );
 
