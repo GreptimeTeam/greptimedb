@@ -56,7 +56,7 @@ impl Display for Date {
     /// [Date] is formatted according to ISO-8601 standard.
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if let Some(abs_date) = NaiveDate::from_num_days_from_ce_opt(UNIX_EPOCH_FROM_CE + self.0) {
-            write!(f, "{}", abs_date.format("%F").to_string())
+            write!(f, "{}", abs_date.format("%F"))
         } else {
             write!(f, "Date({})", self.0)
         }

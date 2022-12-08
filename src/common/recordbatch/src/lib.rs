@@ -98,7 +98,7 @@ impl RecordBatches {
             .iter()
             .map(|x| x.df_recordbatch.clone())
             .collect::<Vec<_>>();
-        let result = pretty::pretty_format_batches(&df_batches).context(error::FormatSnafu)?;
+        let result = pretty::pretty_format_batches(df_batches).context(error::FormatSnafu)?;
 
         Ok(result.to_string())
     }
