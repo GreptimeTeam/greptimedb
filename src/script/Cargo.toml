@@ -43,17 +43,17 @@ paste = { version = "1.0", optional = true }
 query = { path = "../query" }
 # TODO(discord9): This is a forked and tweaked version of RustPython, please update it to newest original RustPython After Update toolchain to 1.65
 rustpython-ast = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab" }
-rustpython-codegen = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab" }
 rustpython-compiler = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab" }
 rustpython-compiler-core = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab" }
+rustpython-codegen = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab" }
 rustpython-parser = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab" }
-rustpython-pylib = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab", features = [
-    "freeze-stdlib",
-] }
-rustpython-stdlib = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab" }
 rustpython-vm = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab", features = [
     "default",
     "codegen",
+] }
+rustpython-stdlib = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab" }
+rustpython-pylib = { git = "https://github.com/discord9/RustPython", optional = true, rev = "183e8dab", features = [
+    "freeze-stdlib",
 ] }
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
