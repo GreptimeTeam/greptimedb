@@ -16,7 +16,6 @@ use std::collections::HashMap;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_grpc::writer::{to_ms_ts, Precision};
-use common_telemetry::error;
 use common_time::timestamp::TimeUnit::Millisecond;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
@@ -111,13 +110,11 @@ impl LineWriter {
         let or_insert = || {
             let rows = self.current_rows;
             let mut builder = datatype.create_mutable_vector(self.expected_rows);
-            if let Err(e) = (0..rows)
+            (0..rows)
                 .into_iter()
                 .try_for_each(|_| builder.push_value_ref(ValueRef::Null))
                 .context(VectorConversionSnafu)
-            {
-                error!("{:?}", e)
-            }
+                .unwrap();
             (builder, rows)
         };
         let (builder, column_len) = self
@@ -125,16 +122,13 @@ impl LineWriter {
             .entry(column_name.to_string())
             .or_insert_with(or_insert);
 
-        if let Err(e) = builder.push_value_ref(value.as_value_ref()) {
-            error!("{:?}", e);
-        };
+        builder.push_value_ref(value.as_value_ref()).unwrap();
         *column_len += 1;
     }
 
     pub fn commit(&mut self) {
         self.current_rows += 1;
-        let _ = self
-            .columns_builders
+        self.columns_builders
             .values_mut()
             .into_iter()
             .try_for_each(|(builder, len)| {
@@ -145,7 +139,7 @@ impl LineWriter {
                 }
             })
             .context(VectorConversionSnafu)
-            .map_err(|e| error!("{:?}", e));
+            .unwrap();
     }
 
     pub fn finish(self) -> InsertRequest {
