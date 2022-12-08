@@ -6707,6 +6707,7 @@ dependencies = [
  "datatypes",
  "derive_builder",
  "futures",
+ "parquet",
  "parquet-format-async-temp",
  "paste",
  "serde",

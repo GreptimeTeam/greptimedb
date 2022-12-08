@@ -152,7 +152,9 @@ impl From<InnerError> for DataFusionError {
 
 impl From<InnerError> for RecordBatchError {
     fn from(e: InnerError) -> RecordBatchError {
-        RecordBatchError::new(e)
+        RecordBatchError::External {
+            source: BoxedError::new(e),
+        }
     }
 }
 
@@ -173,7 +175,7 @@ mod tests {
     }
 
     fn throw_arrow() -> Result<()> {
-        Err(ArrowError::Overflow).context(PollStreamSnafu)?
+        Err(ArrowError::ComputeError("Overflow".to_string())).context(PollStreamSnafu)?
     }
 
     #[test]

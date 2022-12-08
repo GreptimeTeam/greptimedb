@@ -18,8 +18,9 @@ use std::sync::{Arc, Mutex};
 
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
-use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef, RuntimeEnv};
+use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::SendableRecordBatchStream;
+use datafusion::execution::context::TaskContext;
 use datatypes::schema::SchemaRef;
 use snafu::OptionExt;
 
@@ -71,7 +72,7 @@ impl PhysicalPlan for SimpleTableScan {
     fn execute(
         &self,
         _partition: usize,
-        _runtime: Arc<RuntimeEnv>,
+        _context: Arc<TaskContext>,
     ) -> QueryResult<SendableRecordBatchStream> {
         let mut stream = self.stream.lock().unwrap();
         Ok(stream.take().context(query_error::ExecuteRepeatedlySnafu)?)
@@ -81,6 +82,7 @@ impl PhysicalPlan for SimpleTableScan {
 #[cfg(test)]
 mod test {
     use common_recordbatch::{util, RecordBatch, RecordBatches};
+    use datafusion::prelude::SessionContext;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -89,6 +91,7 @@ mod test {
 
     #[tokio::test]
     async fn test_simple_table_scan() {
+        let ctx = SessionContext::new();
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "a",
             ConcreteDataType::int32_datatype(),
@@ -114,13 +117,12 @@ mod test {
 
         assert_eq!(scan.schema(), schema);
 
-        let runtime = Arc::new(RuntimeEnv::default());
-        let stream = scan.execute(0, runtime.clone()).unwrap();
+        let stream = scan.execute(0, ctx.task_ctx()).unwrap();
         let recordbatches = util::collect(stream).await.unwrap();
         assert_eq!(recordbatches[0], batch1);
         assert_eq!(recordbatches[1], batch2);
 
-        let result = scan.execute(0, runtime);
+        let result = scan.execute(0, ctx.task_ctx());
         assert!(result.is_err());
         match result {
             Err(e) => assert!(e
