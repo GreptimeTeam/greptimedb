@@ -61,8 +61,9 @@ macro_rules! impl_min_max_values {
         let scalar_values = $self
             .meta_data
             .iter()
-            .flat_map(|meta| meta.column(column_index).statistics())
+            .map(|meta| meta.column(column_index).statistics())
             .map(|stats| {
+                let stats = stats?;
                 if !stats.has_min_max_set() {
                     return None;
                 }
@@ -76,9 +77,7 @@ macro_rules! impl_min_max_values {
                     ParquetStats::Double(s) => Some(ScalarValue::Float64(Some(*s.$min_max()))),
                     ParquetStats::ByteArray(s) => {
                         paste! {
-                            let s = std::str::from_utf8(s.[<$min_max _bytes>]())
-                                .map(|s| s.to_string())
-                                .ok();
+                            let s = String::from_utf8(s.[<$min_max _bytes>]().to_owned()).ok();
                         }
                         Some(ScalarValue::Utf8(s))
                     }
