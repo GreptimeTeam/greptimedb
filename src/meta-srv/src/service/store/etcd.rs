@@ -218,7 +218,10 @@ impl KvStore for EtcdStore {
 
         let mut client = self.client.kv_client();
 
-        let kv = 'success: loop {
+        let header = Some(ResponseHeader::success(cluster_id));
+        // TODO(jiachun): Maybe it's better to let the users control it in the request
+        const MAX_RETRIES: usize = 8;
+        for _ in 0..MAX_RETRIES {
             let from_key = from_key.as_slice();
             let to_key = to_key.as_slice();
 
@@ -260,18 +263,26 @@ impl KvStore for EtcdStore {
             for op_res in txn_res.op_responses() {
                 match op_res {
                     TxnOpResponse::Get(res) => {
-                        break 'success res.kvs().first().map(KvPair::to_kv);
+                        return Ok(MoveValueResponse {
+                            header,
+                            kv: res.kvs().first().map(KvPair::to_kv),
+                        });
                     }
                     TxnOpResponse::Delete(res) => {
-                        break 'success res.prev_kvs().first().map(KvPair::to_kv)
+                        return Ok(MoveValueResponse {
+                            header,
+                            kv: res.prev_kvs().first().map(KvPair::to_kv),
+                        });
                     }
                     _ => {}
                 }
             }
-        };
+        }
 
-        let header = Some(ResponseHeader::success(cluster_id));
-        Ok(MoveValueResponse { header, kv })
+        error::MoveValueSnafu {
+            key: String::from_utf8_lossy(&from_key),
+        }
+        .fail()
     }
 }
 

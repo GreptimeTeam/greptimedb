@@ -161,12 +161,11 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
         })
         .context(error::EmptyTableNameSnafu)?;
 
-    let tgv =
-        get_table_global_value(&ctx.kv_store, &tgk)
-            .await?
-            .with_context(|| error::TableNotFoundSnafu {
-                name: format!("{}", tgk),
-            })?;
+    let tgv = get_table_global_value(&ctx.kv_store, &tgk)
+        .await?
+        .with_context(|| error::TableNotFoundSnafu {
+            name: format!("{}", tgk),
+        })?;
     let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
     let (_, trv) = remove_table_route_value(&ctx.kv_store, &trk).await?;
     let (peers, table_routes) = fill_table_routes(vec![(tgv, trv)])?;

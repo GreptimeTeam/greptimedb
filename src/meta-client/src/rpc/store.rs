@@ -512,6 +512,7 @@ impl DeleteRangeResponse {
         self.0.header.take().map(ResponseHeader::new)
     }
 
+    #[inline]
     pub fn deleted(&self) -> i64 {
         self.0.deleted
     }
