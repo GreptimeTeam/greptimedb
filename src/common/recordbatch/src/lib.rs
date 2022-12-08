@@ -96,7 +96,7 @@ impl RecordBatches {
     pub fn pretty_print(&self) -> Result<String> {
         let df_batches = &self
             .iter()
-            .map(|x| x.df_recordbatch.clone())
+            .map(|x| x.df_record_batch().clone())
             .collect::<Vec<_>>();
         let result = pretty::pretty_format_batches(df_batches).context(error::FormatSnafu)?;
 
@@ -140,7 +140,7 @@ impl RecordBatches {
         let df_record_batches = self
             .batches
             .into_iter()
-            .map(|batch| batch.df_recordbatch)
+            .map(|batch| batch.into_df_record_batch())
             .collect();
         // unwrap safety: `MemoryStream::try_new` won't fail
         Box::pin(

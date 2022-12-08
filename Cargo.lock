@@ -1321,6 +1321,7 @@ dependencies = [
  "criterion 0.4.0",
  "dashmap",
  "datafusion",
+ "datatypes",
  "rand 0.8.5",
  "snafu",
  "tokio",
