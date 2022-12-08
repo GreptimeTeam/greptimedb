@@ -175,7 +175,7 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
             ))
         }
         ColumnDataType::Timestamp => {
-            collect_values!(values.ts_millis_values, |v| ValueRef::Timestamp(
+            collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
                 Timestamp::from_millis(*v)
             ))
         }
@@ -418,7 +418,7 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .map(|v| Value::Date(v.into()))
             .collect(),
         ConcreteDataType::Timestamp(_) => values
-            .ts_millis_values
+            .ts_millisecond_values
             .into_iter()
             .map(|v| Value::Timestamp(Timestamp::from_millis(v)))
             .collect(),
@@ -745,7 +745,7 @@ mod tests {
         };
 
         let ts_vals = column::Values {
-            ts_millis_values: vec![100, 101],
+            ts_millisecond_values: vec![100, 101],
             ..Default::default()
         };
         let ts_column = Column {
