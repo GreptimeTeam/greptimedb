@@ -38,8 +38,23 @@ macro_rules! define_eval {
                     with_match_primitive_type_id!(columns[1].data_type().logical_type_id(), |$T| {
                         with_match_primitive_type_id!(columns[2].data_type().logical_type_id(), |$R| {
                             // clip(a, min, max) is equals to min(max(a, min), max)
-                            let col: VectorRef = Arc::new(scalar_binary_op::<<$S as LogicalPrimitiveType>::Wrapper, <$T as LogicalPrimitiveType>::Wrapper, $O, _>(&columns[0], &columns[1], scalar_max, &mut EvalContext::default())?);
-                            let col = scalar_binary_op::<$O, <$R as LogicalPrimitiveType>::Wrapper, $O, _>(&col, &columns[2], scalar_min, &mut EvalContext::default())?;
+                            let col: VectorRef = Arc::new(scalar_binary_op::<
+                                <$S as LogicalPrimitiveType>::Wrapper,
+                                <$T as LogicalPrimitiveType>::Wrapper,
+                                $O,
+                                _,
+                            >(
+                                &columns[0],
+                                &columns[1],
+                                scalar_max,
+                                &mut EvalContext::default(),
+                            )?);
+                            let col = scalar_binary_op::<$O, <$R as LogicalPrimitiveType>::Wrapper, $O, _>(
+                                &col,
+                                &columns[2],
+                                scalar_min,
+                                &mut EvalContext::default(),
+                            )?;
                             Ok(Arc::new(col))
                         }, {
                             unreachable!()

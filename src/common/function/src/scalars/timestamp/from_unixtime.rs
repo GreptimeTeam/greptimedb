@@ -17,16 +17,16 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::error::{IntoVectorSnafu, UnsupportedInputDataTypeSnafu};
+use common_query::error::{
+    ArrowComputeSnafu, IntoVectorSnafu, Result, UnsupportedInputDataTypeSnafu,
+};
 use common_query::prelude::{Signature, Volatility};
-use datatypes::arrow::compute::arithmetics;
-use datatypes::arrow::datatypes::DataType as ArrowDatatype;
-use datatypes::arrow::scalar::PrimitiveScalar;
+use datatypes::arrow::compute;
+use datatypes::arrow::datatypes::{DataType as ArrowDatatype, Int64Type};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::{TimestampVector, VectorRef};
+use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
 use snafu::ResultExt;
 
-use crate::error::Result;
 use crate::scalars::function::{Function, FunctionContext};
 
 #[derive(Clone, Debug, Default)]
@@ -56,15 +56,15 @@ impl Function for FromUnixtimeFunction {
             ConcreteDataType::Int64(_) => {
                 let array = columns[0].to_arrow_array();
                 // Our timestamp vector's time unit is millisecond
-                let array = arithmetics::mul_scalar(
-                    &*array,
-                    &PrimitiveScalar::new(ArrowDatatype::Int64, Some(1000i64)),
-                );
+                let array = compute::multiply_scalar_dyn::<Int64Type>(&array, 1000i64)
+                    .context(ArrowComputeSnafu)?;
 
                 Ok(Arc::new(
-                    TimestampVector::try_from_arrow_array(array).context(IntoVectorSnafu {
-                        data_type: ArrowDatatype::Int64,
-                    })?,
+                    TimestampMillisecondVector::try_from_arrow_array(array).context(
+                        IntoVectorSnafu {
+                            data_type: ArrowDatatype::Int64,
+                        },
+                    )?,
                 ))
             }
             _ => UnsupportedInputDataTypeSnafu {
