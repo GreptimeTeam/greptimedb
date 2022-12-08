@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use datafusion::parquet::file::metadata::RowGroupMetaData;
 use datafusion::parquet::file::statistics::Statistics as ParquetStats;
 use datafusion::physical_optimizer::pruning::PruningStatistics;
 use datafusion_common::{Column, ScalarValue};
-use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::array::{ArrayRef, UInt64Array};
 use datatypes::arrow::datatypes::DataType;
-use datatypes::prelude::Vector;
-pub use datatypes::vectors::UInt64Vector;
 use paste::paste;
 
 pub struct RowGroupPruningStatistics<'a> {
@@ -88,6 +88,7 @@ macro_rules! impl_min_max_values {
             })
             .map(|maybe_scalar| maybe_scalar.unwrap_or_else(|| null_scalar.clone()))
             .collect::<Vec<ScalarValue>>();
+        debug_assert_eq!(scalar_values.len(), $self.meta_data.len());
         ScalarValue::iter_to_array(scalar_values).ok()
     }};
 }
@@ -114,7 +115,6 @@ impl<'a> PruningStatistics for RowGroupPruningStatistics<'a> {
             let bs = stat.null_count();
             values.push(Some(bs));
         }
-
-        Some(UInt64Vector::from(values).to_arrow_array())
+        Some(Arc::new(UInt64Array::from(values)))
     }
 }
