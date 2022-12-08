@@ -18,11 +18,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_query::error::{
-    ArrowComputeSnafu, IntoVectorSnafu, Result, UnsupportedInputDataTypeSnafu,
+    ArrowComputeSnafu, IntoVectorSnafu, Result, TypeCastSnafu, UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::{Signature, Volatility};
 use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::{DataType as ArrowDatatype, Int64Type};
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
 use snafu::ResultExt;
@@ -59,12 +60,16 @@ impl Function for FromUnixtimeFunction {
                 let array = compute::multiply_scalar_dyn::<Int64Type>(&array, 1000i64)
                     .context(ArrowComputeSnafu)?;
 
+                let arrow_datatype = &self.return_type(&[]).unwrap().as_arrow_type();
                 Ok(Arc::new(
-                    TimestampMillisecondVector::try_from_arrow_array(array).context(
-                        IntoVectorSnafu {
-                            data_type: ArrowDatatype::Int64,
-                        },
-                    )?,
+                    TimestampMillisecondVector::try_from_arrow_array(
+                        compute::cast(&array, arrow_datatype).context(TypeCastSnafu {
+                            typ: ArrowDatatype::Int64,
+                        })?,
+                    )
+                    .context(IntoVectorSnafu {
+                        data_type: arrow_datatype.clone(),
+                    })?,
                 ))
             }
             _ => UnsupportedInputDataTypeSnafu {

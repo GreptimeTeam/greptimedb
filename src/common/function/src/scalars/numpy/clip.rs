@@ -158,11 +158,15 @@ impl fmt::Display for ClipFunction {
 mod tests {
     use common_query::prelude::TypeSignature;
     use datatypes::value::Value;
-    use datatypes::vectors::{ConstantVector, Float32Vector, Int32Vector, UInt32Vector};
+    use datatypes::vectors::{
+        ConstantVector, Float32Vector, Float64Vector, Int32Vector, Int64Vector, UInt32Vector,
+        UInt64Vector,
+    };
 
     use super::*;
+
     #[test]
-    fn test_clip_function() {
+    fn test_clip_signature() {
         let clip = ClipFunction::default();
 
         assert_eq!("clip", clip.name());
@@ -205,16 +209,21 @@ mod tests {
                              volatility: Volatility::Immutable
                          } if  valid_types == ConcreteDataType::numerics()
         ));
+    }
+
+    #[test]
+    fn test_clip_fn_signed() {
+        let clip = ClipFunction::default();
 
         // eval with signed integers
         let args: Vec<VectorRef> = vec![
-            Arc::new(Int32Vector::from_values(0..10)),
+            Arc::new(Int64Vector::from_values(0..10)),
             Arc::new(ConstantVector::new(
-                Arc::new(Int32Vector::from_vec(vec![3])),
+                Arc::new(Int64Vector::from_vec(vec![3])),
                 10,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(Int32Vector::from_vec(vec![6])),
+                Arc::new(Int64Vector::from_vec(vec![6])),
                 10,
             )),
         ];
@@ -232,16 +241,21 @@ mod tests {
                 assert!(matches!(vector.get(i), Value::Int64(v) if v == 6));
             }
         }
+    }
+
+    #[test]
+    fn test_clip_fn_unsigned() {
+        let clip = ClipFunction::default();
 
         // eval with unsigned integers
         let args: Vec<VectorRef> = vec![
-            Arc::new(UInt32Vector::from_values(0..10)),
+            Arc::new(UInt64Vector::from_values(0..10)),
             Arc::new(ConstantVector::new(
-                Arc::new(UInt32Vector::from_vec(vec![3])),
+                Arc::new(UInt64Vector::from_vec(vec![3])),
                 10,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(UInt32Vector::from_vec(vec![6])),
+                Arc::new(UInt64Vector::from_vec(vec![6])),
                 10,
             )),
         ];
@@ -259,16 +273,21 @@ mod tests {
                 assert!(matches!(vector.get(i), Value::UInt64(v) if v == 6));
             }
         }
+    }
+
+    #[test]
+    fn test_clip_fn_float() {
+        let clip = ClipFunction::default();
 
         // eval with floats
         let args: Vec<VectorRef> = vec![
-            Arc::new(Int32Vector::from_values(0..10)),
+            Arc::new(Float64Vector::from_values((0..10).map(f64::from))),
             Arc::new(ConstantVector::new(
-                Arc::new(Int32Vector::from_vec(vec![3])),
+                Arc::new(Float64Vector::from_vec(vec![3f64])),
                 10,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(Float32Vector::from_vec(vec![6f32])),
+                Arc::new(Float64Vector::from_vec(vec![6f64])),
                 10,
             )),
         ];
