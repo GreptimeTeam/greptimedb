@@ -194,7 +194,7 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         object_store
             .layer(RetryLayer::new(ExponentialBackoff::default().with_jitter()))
             .layer(MetricsLayer)
-            .layer(LoggingLayer)
+            .layer(LoggingLayer::default())
             .layer(TracingLayer)
     })
 }
