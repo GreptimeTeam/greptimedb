@@ -140,9 +140,9 @@ impl Stream for NumbersStream {
         )
         .unwrap();
 
-        Poll::Ready(Some(Ok(RecordBatch {
-            schema: self.schema.clone(),
-            df_recordbatch: batch,
-        })))
+        Poll::Ready(Some(RecordBatch::try_from_df_record_batch(
+            self.schema.clone(),
+            batch,
+        )))
     }
 }
