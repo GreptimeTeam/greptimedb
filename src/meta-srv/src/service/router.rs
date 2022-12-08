@@ -159,7 +159,7 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
             schema_name: t.schema_name,
             table_name: t.table_name,
         })
-        .context(error::EmptyTableNameSnafu {})?;
+        .context(error::EmptyTableNameSnafu)?;
 
     let tgv =
         get_table_global_value(&ctx.kv_store, &tgk)
