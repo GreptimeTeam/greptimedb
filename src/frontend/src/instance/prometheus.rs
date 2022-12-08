@@ -94,7 +94,11 @@ impl Instance {
             );
 
             let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
-            let output = self.sql_handler.do_query(&sql, query_ctx).await;
+            let output = self
+                .sql_handler
+                .do_query(&sql, query_ctx)
+                .await
+                .map(|mut v| v.remove(0));
 
             let object_result = to_object_result(output)
                 .await

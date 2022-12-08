@@ -386,6 +386,14 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to execute statement: {}", source))]
+    ExecuteStatement {
+        // TODO(sunng87): statement is moved and I could not find a way to
+        // included any form of it in this error
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("Failed to do vector computation, source: {}", source))]
     VectorComputation {
         #[snafu(backtrace)]
@@ -524,6 +532,7 @@ impl ErrorExt for Error {
             Error::DeserializeInsertBatch { source, .. } => source.status_code(),
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
+            Error::ExecuteStatement { source, .. } => source.status_code(),
             Error::InsertBatchToRequest { source, .. } => source.status_code(),
             Error::CollectRecordbatchStream { source } | Error::CreateRecordbatches { source } => {
                 source.status_code()

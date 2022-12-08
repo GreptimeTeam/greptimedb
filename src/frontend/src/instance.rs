@@ -480,7 +480,12 @@ impl Instance {
             | Statement::DescribeTable(_)
             | Statement::Explain(_)
             | Statement::Query(_) => {
-                return self.sql_handler.do_query(query, query_ctx).await;
+                // TODO(sunng87): refactor this
+                return self
+                    .sql_handler
+                    .do_query(query, query_ctx)
+                    .await
+                    .map(|mut v| v.remove(0));
             }
             Statement::Insert(insert) => match self.mode {
                 Mode::Standalone => {
@@ -724,8 +729,9 @@ mod tests {
         let sql = "select * from demo";
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
-            .unwrap();
-        match output[0] {
+            .unwrap()
+            .remove(0);
+        match output {
             Output::Stream(stream) => {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let pretty_print = recordbatches.pretty_print();
@@ -747,8 +753,9 @@ mod tests {
         let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
-            .unwrap();
-        match output[0] {
+            .unwrap()
+            .remove(0);
+        match output {
             Output::Stream(stream) => {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let pretty_print = recordbatches.pretty_print();

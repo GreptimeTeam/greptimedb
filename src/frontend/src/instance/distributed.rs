@@ -140,14 +140,17 @@ impl DistInstance {
         Ok(Output::AffectedRows(0))
     }
 
-    async fn handle_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
-        let stmt = parse_stmt(sql)?;
+    async fn handle_statement(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {
                 let plan = self
                     .query_engine
                     .statement_to_plan(stmt, query_ctx)
-                    .context(error::ExecuteSqlSnafu { sql })?;
+                    .context(error::ExecuteStatementSnafu)?;
                 self.query_engine.execute(&plan).await
             }
             Statement::CreateDatabase(stmt) => {
@@ -171,7 +174,19 @@ impl DistInstance {
             }
             _ => unreachable!(),
         }
-        .context(error::ExecuteSqlSnafu { sql })
+        .context(error::ExecuteStatementSnafu)
+    }
+
+    async fn handle_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Vec<Output>> {
+        let stmts = parse_stmt(sql)?;
+        let mut results = Vec::with_capacity(stmts.len());
+
+        for stmt in stmts {
+            let result = self.handle_statement(stmt, query_ctx.clone()).await?;
+            results.push(result);
+        }
+
+        Ok(results)
     }
 
     /// Handles distributed database creation
@@ -300,7 +315,7 @@ impl SqlQueryHandler for DistInstance {
         &self,
         query: &str,
         query_ctx: QueryContextRef,
-    ) -> server_error::Result<Output> {
+    ) -> server_error::Result<Vec<Output>> {
         self.handle_sql(query, query_ctx)
             .await
             .map_err(BoxedError::new)
@@ -538,7 +553,7 @@ mod test {
         let cases = [
             (
                 r"
-CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )  
+CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
 PARTITION BY RANGE COLUMNS (b) (
   PARTITION r0 VALUES LESS THAN ('hz'),
   PARTITION r1 VALUES LESS THAN ('sh'),
@@ -585,7 +600,7 @@ ENGINE=mito",
             .handle_sql(sql, QueryContext::arc())
             .await
             .unwrap();
-        match output {
+        match output[0] {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
             _ => unreachable!(),
         }
@@ -595,7 +610,7 @@ ENGINE=mito",
             .handle_sql(sql, QueryContext::arc())
             .await
             .unwrap();
-        match output {
+        match &output[0] {
             Output::RecordBatches(r) => {
                 let expected1 = vec![
                     "+---------------------+",
@@ -652,7 +667,7 @@ ENGINE=mito",
         async fn assert_show_tables(instance: SqlQueryHandlerRef) {
             let sql = "show tables in test_show_tables";
             let output = instance.do_query(sql, QueryContext::arc()).await.unwrap();
-            match output {
+            match &output[0] {
                 Output::RecordBatches(r) => {
                     let expected = vec![
                         "+--------------+",
