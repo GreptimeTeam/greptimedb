@@ -61,9 +61,8 @@ macro_rules! impl_min_max_values {
         let scalar_values = $self
             .meta_data
             .iter()
-            .map(|meta| meta.column(column_index).statistics())
-            .map(|stats| {
-                let stats = stats?;
+            .map(|meta| {
+                let stats = meta.column(column_index).statistics()?;
                 if !stats.has_min_max_set() {
                     return None;
                 }
