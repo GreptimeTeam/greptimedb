@@ -49,6 +49,8 @@ pub enum AlterTableOperation {
     AddColumn { column_def: ColumnDef },
     /// `DROP COLUMN <name>`
     DropColumn { name: Ident },
+    /// `RENAME <new_table_name>`
+    RenameTable { new_table_name: ObjectName },
 }
 
 /// Convert `AlterTable` statement to `AlterExpr` for gRPC
@@ -77,6 +79,13 @@ impl TryFrom<AlterTable> for AlterExpr {
                 alter_expr::Kind::DropColumns(api::v1::DropColumns {
                     drop_columns: vec![DropColumn { name: name.value }],
                 })
+            }
+            AlterTableOperation::RenameTable { .. } => {
+                // TODO update proto to support alter table name
+                return UnsupportedAlterTableStatementSnafu {
+                    msg: "rename table not supported yet",
+                }
+                .fail();
             }
         };
         let expr = AlterExpr {
