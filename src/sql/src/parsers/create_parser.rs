@@ -271,18 +271,10 @@ impl<'a> ParserContext<'a> {
         constraints: &mut Vec<TableConstraint>,
     ) -> Result<()> {
         self.parser
-            .expect_keyword(Keyword::TIME)
+            .expect_keywords(&[Keyword::TIME, Keyword::INDEX])
             .context(error::UnexpectedSnafu {
                 sql: self.sql,
-                expected: "TIME",
-                actual: self.peek_token_as_string(),
-            })?;
-
-        self.parser
-            .expect_keyword(Keyword::INDEX)
-            .context(error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "INDEX",
+                expected: "TIME INDEX",
                 actual: self.peek_token_as_string(),
             })?;
 
@@ -305,33 +297,15 @@ impl<'a> ParserContext<'a> {
         columns.push(column);
         constraints.push(constraint);
 
-        match self.parser.peek_token() {
-            Token::Comma => return Ok(()),
-            Token::Word(w) if &w.value != "NOT" => {
-                self.parser
-                    .expect_keyword(Keyword::INDEX)
-                    .context(error::UnexpectedSnafu {
-                        sql: self.sql,
-                        expected: ", or NOT NULL",
-                        actual: self.peek_token_as_string(),
-                    })?;
-            }
-            _ => {}
-        };
+        if let Token::Comma = self.parser.peek_token() {
+            return Ok(());
+        }
 
         self.parser
-            .expect_keyword(Keyword::NOT)
+            .expect_keywords(&[Keyword::NOT, Keyword::NULL])
             .context(error::UnexpectedSnafu {
                 sql: self.sql,
-                expected: "NOT",
-                actual: self.peek_token_as_string(),
-            })?;
-
-        self.parser
-            .expect_keyword(Keyword::NULL)
-            .context(error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "NULL",
+                expected: "NOT NULL",
                 actual: self.peek_token_as_string(),
             })?;
 
