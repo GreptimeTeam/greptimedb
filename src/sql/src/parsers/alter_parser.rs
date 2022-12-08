@@ -51,6 +51,9 @@ impl<'a> ParserContext<'a> {
                     parser.peek_token()
                 )));
             }
+        } else if parser.parse_keyword(Keyword::RENAME) {
+            let new_table_name = parser.parse_object_name()?;
+            AlterTableOperation::RenameTable { new_table_name }
         } else {
             return Err(ParserError::ParserError(format!(
                 "expect keyword ADD or DROP after ALTER TABLE, found {}",
