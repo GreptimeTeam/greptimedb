@@ -64,7 +64,7 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let kvs = res.kvs().iter().map(to_key_value).collect::<Vec<_>>();
+        let kvs = res.kvs().iter().map(KvPair::to_kv).collect::<Vec<_>>();
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(RangeResponse {
@@ -89,7 +89,7 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kv = res.prev_key().map(to_key_value);
+        let prev_kv = res.prev_key().map(KvPair::to_kv);
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(PutResponse { header, prev_kv })
@@ -120,7 +120,7 @@ impl KvStore for EtcdStore {
             match op_res {
                 TxnOpResponse::Put(put_res) => {
                     if let Some(prev_kv) = put_res.prev_key() {
-                        prev_kvs.push(to_key_value(prev_kv));
+                        prev_kvs.push(KvPair::to_kv(prev_kv));
                     }
                 }
                 _ => unreachable!(), // never get here
@@ -171,8 +171,8 @@ impl KvStore for EtcdStore {
             })?;
 
         let prev_kv = match op_res {
-            TxnOpResponse::Put(res) => res.prev_key().map(to_key_value),
-            TxnOpResponse::Get(res) => res.kvs().first().map(to_key_value),
+            TxnOpResponse::Put(res) => res.prev_key().map(KvPair::to_kv),
+            TxnOpResponse::Get(res) => res.kvs().first().map(KvPair::to_kv),
             _ => unreachable!(), // never get here
         };
 
@@ -198,7 +198,7 @@ impl KvStore for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kvs = res.prev_kvs().iter().map(to_key_value).collect::<Vec<_>>();
+        let prev_kvs = res.prev_kvs().iter().map(KvPair::to_kv).collect::<Vec<_>>();
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(DeleteRangeResponse {
@@ -260,10 +260,10 @@ impl KvStore for EtcdStore {
             for op_res in txn_res.op_responses() {
                 match op_res {
                     TxnOpResponse::Get(res) => {
-                        break 'success res.kvs().first().map(to_key_value);
+                        break 'success res.kvs().first().map(KvPair::to_kv);
                     }
                     TxnOpResponse::Delete(res) => {
-                        break 'success res.prev_kvs().first().map(to_key_value)
+                        break 'success res.prev_kvs().first().map(KvPair::to_kv)
                     }
                     _ => {}
                 }
@@ -473,6 +473,11 @@ impl<'a> KvPair<'a> {
     fn new(kv: &'a etcd_client::KeyValue) -> Self {
         Self(kv)
     }
+
+    #[inline]
+    fn to_kv(kv: &etcd_client::KeyValue) -> KeyValue {
+        KeyValue::from(KvPair::new(kv))
+    }
 }
 
 impl<'a> From<KvPair<'a>> for KeyValue {
@@ -482,10 +487,6 @@ impl<'a> From<KvPair<'a>> for KeyValue {
             value: kv.0.value().to_vec(),
         }
     }
-}
-
-fn to_key_value(kv: &etcd_client::KeyValue) -> KeyValue {
-    KeyValue::from(KvPair::new(kv))
 }
 
 #[cfg(test)]
