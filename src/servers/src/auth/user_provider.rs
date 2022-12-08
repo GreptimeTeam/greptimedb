@@ -4,20 +4,61 @@ use async_trait::async_trait;
 use digest;
 use digest::Digest;
 use sha1::Sha1;
+use snafu::OptionExt;
 
 use crate::auth::{
-    Error, Identity, Password, UserInfo, UserNotExistSnafu, UserProvider, WrongPwdSnafu,
+    Error, Identity, InvalidConfigValueSnafu, Password, UserInfo, UserNotExistSnafu, UserProvider,
+    WrongPwdSnafu,
 };
+
+pub enum MemUserProviderOption {
+    FilePath(String),
+    Inline(HashMap<String, Vec<u8>>),
+}
+
+impl TryFrom<&str> for MemUserProviderOption {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let (mode, content) = value.split_once(':').context(InvalidConfigValueSnafu {
+            value: value.to_string(),
+        })?;
+        return match mode {
+            "file" => {
+                unimplemented!()
+            }
+            "inline" => content
+                .split(',')
+                .map(|kv| {
+                    let (k, v) = kv.split_once('=').context(InvalidConfigValueSnafu {
+                        value: kv.to_string(),
+                    })?;
+                    Ok((k.to_string(), v.as_bytes().to_vec()))
+                })
+                .collect::<Result<HashMap<String, Vec<u8>>, Error>>()
+                .map(MemUserProviderOption::Inline),
+            _ => InvalidConfigValueSnafu {
+                value: mode.to_string(),
+            }
+            .fail(),
+        };
+    }
+}
 
 pub struct MemUserProvider {
     users: HashMap<String, Vec<u8>>,
 }
 
 impl MemUserProvider {
-    pub fn new() -> Self {
-        Self {
-            users: HashMap::new(),
-        }
+    pub fn new(opts: MemUserProviderOption) -> Self {
+        let users = match opts {
+            MemUserProviderOption::FilePath(_path) => {
+                unimplemented!()
+            }
+            MemUserProviderOption::Inline(users) => users,
+        };
+
+        Self { users }
     }
 
     pub fn add_user(&mut self, name: String, password: Vec<u8>) {
@@ -91,5 +132,5 @@ fn sha1_one(data: &[u8]) -> Vec<u8> {
 }
 
 fn double_sha1(data: &[u8]) -> Vec<u8> {
-    return sha1_one(&sha1_one(data));
+    sha1_one(&sha1_one(data))
 }

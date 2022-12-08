@@ -14,8 +14,9 @@
 
 use std::sync::Arc;
 
+use anymap::AnyMap;
 use clap::Parser;
-use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::frontend::{Frontend, FrontendOptions, FrontendPlugin};
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::Instance;
@@ -23,12 +24,13 @@ use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use meta_client::MetaClientOpts;
+use servers::auth::user_provider::{MemUserProvider, MemUserProviderOption};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, Result};
+use crate::error::{self, IllegalAuthConfigSnafu, IllegalConfigSnafu, Result};
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -56,7 +58,7 @@ impl SubCommand {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
@@ -80,16 +82,21 @@ pub struct StartCommand {
     tls_cert_path: Option<String>,
     #[clap(long)]
     tls_key_path: Option<String>,
+    #[clap(long)]
+    user_provider: Option<String>,
 }
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        let opts: FrontendOptions = self.try_into()?;
+        // maybe too expensive to clone?
+        let opts: FrontendOptions = self.clone().try_into()?;
+        let plugins: AnyMap = self.try_into()?;
         let mut frontend = Frontend::new(
             opts.clone(),
             Instance::try_new_distributed(&opts)
                 .await
                 .context(error::StartFrontendSnafu)?,
+            plugins,
         );
         frontend.start().await.context(error::StartFrontendSnafu)
     }
@@ -156,6 +163,39 @@ impl TryFrom<StartCommand> for FrontendOptions {
     }
 }
 
+impl TryFrom<StartCommand> for AnyMap {
+    type Error = error::Error;
+
+    fn try_from(cmd: StartCommand) -> Result<Self> {
+        let mut plugins = AnyMap::new();
+        if let Some(provider_config) = cmd.user_provider {
+            let (name, content) = provider_config
+                .split_once(':')
+                .context(IllegalConfigSnafu {
+                    msg: "user provider config must be in format of `provider_name:config...`",
+                })?;
+            match name {
+                "mem_user_provider" => {
+                    let mem_opts: MemUserProviderOption =
+                        content.try_into().context(IllegalAuthConfigSnafu)?;
+                    let provider = MemUserProvider::new(mem_opts);
+                    let fe_plugin = FrontendPlugin {
+                        user_provider: Some(Arc::new(provider)),
+                    };
+                    plugins.insert(fe_plugin);
+                }
+                _ => {
+                    return IllegalConfigSnafu {
+                        msg: "unknown provider name: ".to_string() + name,
+                    }
+                    .fail()
+                }
+            }
+        }
+        Ok(plugins)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -176,6 +216,7 @@ mod tests {
             tls_mode: None,
             tls_cert_path: None,
             tls_key_path: None,
+            user_provider: None,
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();
@@ -228,6 +269,7 @@ mod tests {
             tls_mode: None,
             tls_cert_path: None,
             tls_key_path: None,
+            user_provider: None,
         };
 
         let fe_opts = FrontendOptions::try_from(command).unwrap();

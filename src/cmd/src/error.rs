@@ -55,6 +55,12 @@ pub enum Error {
 
     #[snafu(display("Illegal config: {}", msg))]
     IllegalConfig { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Illegal auth config: {}", source))]
+    IllegalAuthConfig {
+        #[snafu(backtrace)]
+        source: servers::auth::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -69,6 +75,7 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             Error::IllegalConfig { .. } => StatusCode::InvalidArguments,
+            Error::IllegalAuthConfig { .. } => StatusCode::InvalidArguments,
         }
     }
 

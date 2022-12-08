@@ -78,6 +78,9 @@ impl UserInfo {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Invalid config value: {}", value))]
+    InvalidConfigValue { value: String, backtrace: Backtrace },
+
     #[snafu(display("User not found"))]
     UserNotFound { backtrace: Backtrace },
 
@@ -94,9 +97,11 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
+            Error::InvalidConfigValue { .. } => StatusCode::InvalidArguments,
+
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
-            Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,
-            Error::UserPasswordMismatch { .. } => StatusCode::UserPasswordMismatch,
+            Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPwdType,
+            Error::UserPasswordMismatch { .. } => StatusCode::UserPwdMismatch,
         }
     }
 

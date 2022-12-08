@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::info;
+use anymap::AnyMap;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
 use servers::auth::UserProviderRef;
@@ -61,33 +61,27 @@ impl Default for FrontendOptions {
     }
 }
 
+#[derive(Default)]
+pub struct FrontendPlugin {
+    pub user_provider: Option<UserProviderRef>,
+}
+
 pub struct Frontend<T>
 where
     T: FrontendInstance,
 {
     opts: FrontendOptions,
     instance: Option<T>,
-    user_provider: Option<UserProviderRef>,
+    plugins: AnyMap,
 }
 
-impl<T> Frontend<T>
-where
-    T: FrontendInstance,
-{
-    pub fn new(opts: FrontendOptions, instance: T) -> Self {
+impl<T: FrontendInstance> Frontend<T> {
+    pub fn new(opts: FrontendOptions, instance: T, plugins: AnyMap) -> Self {
         Self {
             opts,
             instance: Some(instance),
-            user_provider: None,
+            plugins,
         }
-    }
-
-    pub fn set_user_provider(&mut self, user_provider: Option<UserProviderRef>) {
-        info!(
-            "Configured user provider: {:?}",
-            user_provider.as_ref().map(|u| u.name())
-        );
-        self.user_provider = user_provider;
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -100,6 +94,12 @@ where
         instance.start().await?;
 
         let instance = Arc::new(instance);
-        Services::start(&self.opts, instance, self.user_provider.clone()).await
+
+        let provider = self
+            .plugins
+            .get::<FrontendPlugin>()
+            .and_then(|f| f.user_provider.clone());
+
+        Services::start(&self.opts, instance, provider).await
     }
 }

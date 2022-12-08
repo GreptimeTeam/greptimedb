@@ -14,11 +14,12 @@
 
 use std::sync::Arc;
 
+use anymap::AnyMap;
 use clap::Parser;
 use common_telemetry::info;
 use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
 use datanode::instance::InstanceRef;
-use frontend::frontend::{Frontend, FrontendOptions};
+use frontend::frontend::{Frontend, FrontendOptions, FrontendPlugin};
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::Instance as FeInstance;
@@ -27,12 +28,16 @@ use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
 use serde::{Deserialize, Serialize};
+use servers::auth::user_provider::{MemUserProvider, MemUserProviderOption};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{Error, IllegalConfigSnafu, Result, StartDatanodeSnafu, StartFrontendSnafu};
+use crate::error::{
+    Error, IllegalAuthConfigSnafu, IllegalConfigSnafu, Result, StartDatanodeSnafu,
+    StartFrontendSnafu,
+};
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -118,7 +123,7 @@ impl StandaloneOptions {
     }
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
@@ -142,13 +147,15 @@ struct StartCommand {
     tls_cert_path: Option<String>,
     #[clap(long)]
     tls_key_path: Option<String>,
+    #[clap(long)]
+    user_provider: Option<String>,
 }
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
         let enable_memory_catalog = self.enable_memory_catalog;
         let config_file = self.config_file.clone();
-        let fe_opts = FrontendOptions::try_from(self)?;
+        let fe_opts = FrontendOptions::try_from(self.clone())?;
         let dn_opts: DatanodeOptions = {
             let mut opts: StandaloneOptions = if let Some(path) = config_file {
                 toml_loader::from_file!(&path)?
@@ -167,7 +174,8 @@ impl StartCommand {
         let mut datanode = Datanode::new(dn_opts.clone())
             .await
             .context(StartDatanodeSnafu)?;
-        let mut frontend = build_frontend(fe_opts, datanode.get_instance()).await?;
+        let plugin: AnyMap = self.try_into()?;
+        let mut frontend = build_frontend(fe_opts, plugin, datanode.get_instance()).await?;
 
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
         datanode
@@ -184,12 +192,47 @@ impl StartCommand {
 /// Build frontend instance in standalone mode
 async fn build_frontend(
     fe_opts: FrontendOptions,
+    fe_plugin: AnyMap,
     datanode_instance: InstanceRef,
 ) -> Result<Frontend<FeInstance>> {
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
     frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
     frontend_instance.set_script_handler(datanode_instance);
-    Ok(Frontend::new(fe_opts, frontend_instance))
+    // todo(shuiyisong): remove this
+    Ok(Frontend::new(fe_opts, frontend_instance, fe_plugin))
+}
+
+impl TryFrom<StartCommand> for AnyMap {
+    type Error = Error;
+
+    fn try_from(cmd: StartCommand) -> Result<Self> {
+        let mut plugins = AnyMap::new();
+        if let Some(provider_config) = cmd.user_provider {
+            let (name, content) = provider_config
+                .split_once(':')
+                .context(IllegalConfigSnafu {
+                    msg: "user provider config must be in format of `provider_name:config...`",
+                })?;
+            match name {
+                "mem_user_provider" => {
+                    let mem_opts: MemUserProviderOption =
+                        content.try_into().context(IllegalAuthConfigSnafu)?;
+                    let provider = MemUserProvider::new(mem_opts);
+                    let fe_plugin = FrontendPlugin {
+                        user_provider: Some(Arc::new(provider)),
+                    };
+                    plugins.insert(fe_plugin);
+                }
+                _ => {
+                    return IllegalConfigSnafu {
+                        msg: "unknown provider name: ".to_string() + name,
+                    }
+                    .fail()
+                }
+            }
+        }
+        Ok(plugins)
+    }
 }
 
 impl TryFrom<StartCommand> for FrontendOptions {
@@ -293,6 +336,7 @@ mod tests {
             tls_mode: None,
             tls_cert_path: None,
             tls_key_path: None,
+            user_provider: None,
         };
 
         let fe_opts = FrontendOptions::try_from(cmd).unwrap();
