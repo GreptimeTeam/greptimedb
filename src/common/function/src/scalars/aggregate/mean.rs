@@ -181,7 +181,7 @@ impl AggregateFunctionCreator for MeanAccumulatorCreator {
 
 #[cfg(test)]
 mod test {
-    use datatypes::vectors::PrimitiveVector;
+    use datatypes::vectors::Int32Vector;
 
     use super::*;
     #[test]
@@ -193,21 +193,19 @@ mod test {
 
         // test update one not-null value
         let mut mean = Mean::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Some(42)]))];
         assert!(mean.update_batch(&v).is_ok());
         assert_eq!(Value::from(42.0_f64), mean.evaluate().unwrap());
 
         // test update one null value
         let mut mean = Mean::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
-            Option::<i32>::None,
-        ]))];
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Option::<i32>::None]))];
         assert!(mean.update_batch(&v).is_ok());
         assert_eq!(Value::Null, mean.evaluate().unwrap());
 
         // test update no null-value batch
         let mut mean = Mean::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![
             Some(-1i32),
             Some(1),
             Some(2),
@@ -217,7 +215,7 @@ mod test {
 
         // test update null-value batch
         let mut mean = Mean::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![
             Some(-2i32),
             None,
             Some(3),
@@ -229,7 +227,7 @@ mod test {
         // test update with constant vector
         let mut mean = Mean::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(ConstantVector::new(
-            Arc::new(PrimitiveVector::<i32>::from_vec(vec![4])),
+            Arc::new(Int32Vector::from_vec(vec![4])),
             10,
         ))];
         assert!(mean.update_batch(&v).is_ok());

@@ -63,6 +63,7 @@ where
     T::Native: AsPrimitive<PolyT::Native>,
     PolyT: WrapperType + std::iter::Sum<<PolyT as WrapperType>::Native>,
     PolyT::Native: std::ops::Mul<Output = PolyT::Native> + std::iter::Sum<PolyT::Native>,
+    i64: AsPrimitive<<PolyT as WrapperType>::Native>,
 {
     fn state(&self) -> Result<Vec<Value>> {
         let nums = self
@@ -201,7 +202,7 @@ where
             .values
             .iter()
             .enumerate()
-            .map(|(i, &value)| value.into_native().as_() * (x.pow((len - 1 - i) as u32)))
+            .map(|(i, &value)| value.into_native().as_() * x.pow((len - 1 - i) as u32).as_())
             .sum();
         Ok(polyval.into())
     }
@@ -259,7 +260,7 @@ impl AggregateFunctionCreator for PolyvalAccumulatorCreator {
 
 #[cfg(test)]
 mod test {
-    use datatypes::vectors::PrimitiveVector;
+    use datatypes::vectors::Int32Vector;
 
     use super::*;
     #[test]
@@ -273,8 +274,8 @@ mod test {
         // test update one not-null value
         let mut polyval = Polyval::<i32, i64>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![Some(3)])),
-            Arc::new(PrimitiveVector::<i64>::from(vec![Some(2_i64)])),
+            Arc::new(Int32Vector::from(vec![Some(3)])),
+            Arc::new(Int64Vector::from(vec![Some(2_i64)])),
         ];
         assert!(polyval.update_batch(&v).is_ok());
         assert_eq!(Value::Int64(3), polyval.evaluate().unwrap());
@@ -282,8 +283,8 @@ mod test {
         // test update one null value
         let mut polyval = Polyval::<i32, i64>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![Option::<i32>::None])),
-            Arc::new(PrimitiveVector::<i64>::from(vec![Some(2_i64)])),
+            Arc::new(Int32Vector::from(vec![Option::<i32>::None])),
+            Arc::new(Int64Vector::from(vec![Some(2_i64)])),
         ];
         assert!(polyval.update_batch(&v).is_ok());
         assert_eq!(Value::Null, polyval.evaluate().unwrap());
@@ -291,12 +292,8 @@ mod test {
         // test update no null-value batch
         let mut polyval = Polyval::<i32, i64>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(3),
-                Some(0),
-                Some(1),
-            ])),
-            Arc::new(PrimitiveVector::<i64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(3), Some(0), Some(1)])),
+            Arc::new(Int64Vector::from(vec![
                 Some(2_i64),
                 Some(2_i64),
                 Some(2_i64),
@@ -308,13 +305,8 @@ mod test {
         // test update null-value batch
         let mut polyval = Polyval::<i32, i64>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(3),
-                Some(0),
-                None,
-                Some(1),
-            ])),
-            Arc::new(PrimitiveVector::<i64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(3), Some(0), None, Some(1)])),
+            Arc::new(Int64Vector::from(vec![
                 Some(2_i64),
                 Some(2_i64),
                 Some(2_i64),
@@ -328,10 +320,10 @@ mod test {
         let mut polyval = Polyval::<i32, i64>::default();
         let v: Vec<VectorRef> = vec![
             Arc::new(ConstantVector::new(
-                Arc::new(PrimitiveVector::<i32>::from_vec(vec![4])),
+                Arc::new(Int32Vector::from_vec(vec![4])),
                 2,
             )),
-            Arc::new(PrimitiveVector::<i64>::from(vec![Some(5_i64), Some(5_i64)])),
+            Arc::new(Int64Vector::from(vec![Some(5_i64), Some(5_i64)])),
         ];
         assert!(polyval.update_batch(&v).is_ok());
         assert_eq!(Value::Int64(24), polyval.evaluate().unwrap());

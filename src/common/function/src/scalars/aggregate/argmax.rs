@@ -35,7 +35,7 @@ pub struct Argmax<T> {
 
 impl<T> Argmax<T>
 where
-    T: PartialOrd,
+    T: PartialOrd + Copy,
 {
     fn update(&mut self, value: T, index: u64) {
         if let Some(Ordering::Less) = self.max.partial_cmp(&Some(value)) {
