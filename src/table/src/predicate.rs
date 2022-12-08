@@ -16,8 +16,8 @@ mod stats;
 
 use common_query::logical_plan::Expr;
 use common_telemetry::{error, warn};
+use datafusion::parquet::file::metadata::RowGroupMetaData;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
-use datatypes::arrow::io::parquet::read::RowGroupMetaData;
 use datatypes::schema::SchemaRef;
 
 use crate::predicate::stats::RowGroupPruningStatistics;
@@ -70,19 +70,17 @@ impl Predicate {
 mod tests {
     use std::sync::Arc;
 
-    pub use datafusion::parquet::schema::types::{BasicTypeInfo, PhysicalType};
-    use datafusion_common::Column;
-    use datafusion_expr::{Expr, Literal, Operator};
-    use datatypes::arrow::array::{Int32Array, Utf8Array};
-    use datatypes::arrow::chunk::Chunk;
+    use datafusion::parquet::arrow::ArrowWriter;
+    pub use datafusion::parquet::schema::types::BasicTypeInfo;
+    use datafusion_common::{Column, ScalarValue};
+    use datafusion_expr::{BinaryExpr, Expr, Literal, Operator};
+    use datatypes::arrow::array::Int32Array;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
-    use datatypes::arrow::io::parquet::read::FileReader;
-    use datatypes::arrow::io::parquet::write::{
-        Compression, Encoding, FileSink, Version, WriteOptions,
-    };
-    use futures::{AsyncWriteExt, SinkExt};
+    use datatypes::arrow::record_batch::RecordBatch;
+    use datatypes::arrow_array::StringArray;
+    use parquet::arrow::ParquetRecordBatchStreamBuilder;
+    use parquet::file::properties::WriterProperties;
     use tempdir::TempDir;
-    use tokio_util::compat::TokioAsyncWriteCompatExt;
 
     use super::*;
 
@@ -95,80 +93,62 @@ mod tests {
 
         let name_field = Field::new("name", DataType::Utf8, true);
         let count_field = Field::new("cnt", DataType::Int32, true);
+        let schema = Arc::new(Schema::new(vec![name_field, count_field]));
 
-        let schema = Schema::from(vec![name_field, count_field]);
-
-        // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
-        let encodings = vec![Encoding::Plain].repeat(schema.fields.len());
-
-        let mut writer = tokio::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .open(&path)
-            .await
-            .unwrap()
-            .compat_write();
+            .open(path.clone())
+            .unwrap();
 
-        let mut sink = FileSink::try_new(
-            &mut writer,
-            schema.clone(),
-            encodings,
-            WriteOptions {
-                write_statistics: true,
-                compression: Compression::Gzip,
-                version: Version::V2,
-            },
-        )
-        .unwrap();
+        let write_props = WriterProperties::builder()
+            .set_max_row_group_size(10)
+            .build();
+        let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(write_props)).unwrap();
 
         for i in (0..cnt).step_by(10) {
-            let name_array = Utf8Array::<i64>::from(
-                &(i..(i + 10).min(cnt))
-                    .map(|i| Some(i.to_string()))
+            let name_array = Arc::new(StringArray::from(
+                (i..(i + 10).min(cnt))
+                    .map(|i| i.to_string())
                     .collect::<Vec<_>>(),
-            );
-            let count_array = Int32Array::from(
-                &(i..(i + 10).min(cnt))
-                    .map(|i| Some(i as i32))
-                    .collect::<Vec<_>>(),
-            );
-
-            sink.send(Chunk::new(vec![
-                Arc::new(name_array),
-                Arc::new(count_array),
-            ]))
-            .await
-            .unwrap();
+            )) as Arc<_>;
+            let count_array = Arc::new(Int32Array::from(
+                (i..(i + 10).min(cnt)).map(|i| i as i32).collect::<Vec<_>>(),
+            )) as Arc<_>;
+            let rb = RecordBatch::try_new(schema.clone(), vec![name_array, count_array]).unwrap();
+            writer.write(&rb).unwrap();
         }
-        sink.close().await.unwrap();
-
-        drop(sink);
-        writer.flush().await.unwrap();
-
-        (path, Arc::new(schema))
+        writer.close().unwrap();
+        (path, schema)
     }
 
     async fn assert_prune(array_cnt: usize, predicate: Predicate, expect: Vec<bool>) {
         let dir = TempDir::new("prune_parquet").unwrap();
         let (path, schema) = gen_test_parquet_file(&dir, array_cnt).await;
-        let file_reader =
-            FileReader::try_new(std::fs::File::open(path).unwrap(), None, None, None, None)
-                .unwrap();
-
         let schema = Arc::new(datatypes::schema::Schema::try_from(schema).unwrap());
-
-        let vec = file_reader.metadata().row_groups.clone();
-        let res = predicate.prune_row_groups(schema, &vec);
+        let builder = ParquetRecordBatchStreamBuilder::new(
+            tokio::fs::OpenOptions::new()
+                .read(true)
+                .open(path)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let metadata = builder.metadata().clone();
+        let row_groups = metadata.row_groups().clone();
+        let res = predicate.prune_row_groups(schema, &row_groups);
         assert_eq!(expect, res);
     }
 
     fn gen_predicate(max_val: i32, op: Operator) -> Predicate {
-        Predicate::new(vec![Expr::BinaryExpr {
-            left: Box::new(Expr::Column(Column::from_name("cnt".to_string()))),
-            op,
-            right: Box::new(max_val.lit()),
-        }
-        .into()])
+        Predicate::new(vec![common_query::logical_plan::Expr::from(
+            Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(Expr::Column(Column::from_name("cnt"))),
+                op,
+                right: Box::new(Expr::Literal(ScalarValue::Int32(Some(max_val)))),
+            }),
+        )])
     }
 
     #[tokio::test]

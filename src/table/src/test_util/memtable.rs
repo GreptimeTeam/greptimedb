@@ -197,28 +197,27 @@ impl Stream for MemtableStream {
 
 #[cfg(test)]
 mod test {
-    use common_query::physical_plan::RuntimeEnv;
     use common_recordbatch::util;
+    use datafusion::prelude::SessionContext;
     use datatypes::prelude::*;
     use datatypes::schema::ColumnSchema;
-    use datatypes::vectors::{Int32Vector, StringVector};
+    use datatypes::vectors::{Helper, Int32Vector, StringVector};
 
     use super::*;
 
     #[tokio::test]
     async fn test_scan_with_projection() {
+        let ctx = SessionContext::new();
         let table = build_testing_table();
 
         let scan_stream = table.scan(&Some(vec![1]), &[], None).await.unwrap();
-        let scan_stream = scan_stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .unwrap();
+        let scan_stream = scan_stream.execute(0, ctx.task_ctx()).unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
         let columns = recordbatch[0].df_recordbatch.columns();
         assert_eq!(1, columns.len());
 
-        let string_column = VectorHelper::try_into_vector(&columns[0]).unwrap();
+        let string_column = Helper::try_into_vector(&columns[0]).unwrap();
         let string_column = string_column
             .as_any()
             .downcast_ref::<StringVector>()
@@ -229,23 +228,22 @@ mod test {
 
     #[tokio::test]
     async fn test_scan_with_limit() {
+        let ctx = SessionContext::new();
         let table = build_testing_table();
 
         let scan_stream = table.scan(&None, &[], Some(2)).await.unwrap();
-        let scan_stream = scan_stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .unwrap();
+        let scan_stream = scan_stream.execute(0, ctx.task_ctx()).unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
         let columns = recordbatch[0].df_recordbatch.columns();
         assert_eq!(2, columns.len());
 
-        let i32_column = VectorHelper::try_into_vector(&columns[0]).unwrap();
+        let i32_column = Helper::try_into_vector(&columns[0]).unwrap();
         let i32_column = i32_column.as_any().downcast_ref::<Int32Vector>().unwrap();
         let i32_column = i32_column.iter_data().flatten().collect::<Vec<i32>>();
         assert_eq!(vec![-100], i32_column);
 
-        let string_column = VectorHelper::try_into_vector(&columns[1]).unwrap();
+        let string_column = Helper::try_into_vector(&columns[1]).unwrap();
         let string_column = string_column
             .as_any()
             .downcast_ref::<StringVector>()
