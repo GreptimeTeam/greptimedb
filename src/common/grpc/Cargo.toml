@@ -14,6 +14,7 @@ common-recordbatch = { path = "../recordbatch" }
 common-runtime = { path = "../runtime" }
 dashmap = "5.4"
 datafusion = "14.0.0"
+datatypes = { path = "../../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.0", features = ["full"] }
 tonic = "0.8"

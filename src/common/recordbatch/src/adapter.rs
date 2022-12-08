@@ -63,7 +63,7 @@ impl Stream for DfRecordBatchStreamAdapter {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(recordbatch)) => match recordbatch {
-                Ok(recordbatch) => Poll::Ready(Some(Ok(recordbatch.df_recordbatch))),
+                Ok(recordbatch) => Poll::Ready(Some(Ok(recordbatch.into_df_record_batch()))),
                 Err(e) => Poll::Ready(Some(Err(ArrowError::ExternalError(Box::new(e))))),
             },
             Poll::Ready(None) => Poll::Ready(None),
@@ -102,10 +102,13 @@ impl Stream for RecordBatchStreamAdapter {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(df_recordbatch)) => Poll::Ready(Some(Ok(RecordBatch {
-                schema: self.schema(),
-                df_recordbatch: df_recordbatch.context(error::PollStreamSnafu)?,
-            }))),
+            Poll::Ready(Some(df_record_batch)) => {
+                let df_record_batch = df_record_batch.context(error::PollStreamSnafu)?;
+                Poll::Ready(Some(RecordBatch::try_from_df_record_batch(
+                    self.schema(),
+                    df_record_batch,
+                )))
+            }
             Poll::Ready(None) => Poll::Ready(None),
         }
     }
@@ -157,10 +160,8 @@ impl Stream for AsyncRecordBatchStreamAdapter {
                 AsyncRecordBatchStreamAdapterState::Inited(stream) => match stream {
                     Ok(stream) => {
                         return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)).map(|df| {
-                            Ok(RecordBatch {
-                                schema: self.schema(),
-                                df_recordbatch: df.context(error::PollStreamSnafu)?,
-                            })
+                            let df_record_batch = df.context(error::PollStreamSnafu)?;
+                            RecordBatch::try_from_df_record_batch(self.schema(), df_record_batch)
                         }));
                     }
                     Err(e) => {
