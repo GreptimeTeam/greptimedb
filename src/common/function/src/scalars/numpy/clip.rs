@@ -158,10 +158,7 @@ impl fmt::Display for ClipFunction {
 mod tests {
     use common_query::prelude::TypeSignature;
     use datatypes::value::Value;
-    use datatypes::vectors::{
-        ConstantVector, Float32Vector, Float64Vector, Int32Vector, Int64Vector, UInt32Vector,
-        UInt64Vector,
-    };
+    use datatypes::vectors::{ConstantVector, Float64Vector, Int64Vector, UInt64Vector};
 
     use super::*;
 
