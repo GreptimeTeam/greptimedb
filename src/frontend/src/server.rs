@@ -99,7 +99,6 @@ impl Services {
 
             let pg_server = Box::new(PostgresServer::new(
                 instance.clone(),
-                opts.check_pwd,
                 opts.tls.clone(),
                 pg_io_runtime,
                 user_provider,
