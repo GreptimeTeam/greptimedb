@@ -288,11 +288,11 @@ mod tests {
                 let ts = &columns_values["ts"];
                 assert_eq!(2, ts.len());
                 assert_eq!(
-                    Value::from(Timestamp::from_millis(1655276557000i64)),
+                    Value::from(Timestamp::new_millisecond(1655276557000i64)),
                     ts.get(0)
                 );
                 assert_eq!(
-                    Value::from(Timestamp::from_millis(1655276558000i64)),
+                    Value::from(Timestamp::new_millisecond(1655276558000i64)),
                     ts.get(1)
                 );
             }

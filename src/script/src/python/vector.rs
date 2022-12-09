@@ -875,7 +875,7 @@ pub fn pyobj_try_to_typed_val(
                             // FIXME(dennis): we always consider the timestamp unit is millis, it's not correct if user define timestamp column with other units.
                             obj.try_into_value::<i64>(vm)
                                 .ok()
-                                .map(Timestamp::from_millis)
+                                .map(Timestamp::new_millisecond)
                                 .map(value::Value::Timestamp)
                         }
                         _ => unreachable!(),

@@ -185,22 +185,22 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
         }
         ColumnDataType::TimestampSecond => {
             collect_values!(values.ts_second_values, |v| ValueRef::Timestamp(
-                Timestamp::from_second(*v)
+                Timestamp::new_second(*v)
             ))
         }
         ColumnDataType::TimestampMillisecond => {
             collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
-                Timestamp::from_millis(*v)
+                Timestamp::new_millisecond(*v)
             ))
         }
         ColumnDataType::TimestampMicrosecond => {
             collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
-                Timestamp::from_micro(*v)
+                Timestamp::new_microsecond(*v)
             ))
         }
         ColumnDataType::TimestampNanosecond => {
             collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
-                Timestamp::from_nano(*v)
+                Timestamp::new_nanosecond(*v)
             ))
         }
     }
@@ -447,7 +447,7 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
         ConcreteDataType::Timestamp(_) => values
             .ts_millisecond_values
             .into_iter()
-            .map(|v| Value::Timestamp(Timestamp::from_millis(v)))
+            .map(|v| Value::Timestamp(Timestamp::new_millisecond(v)))
             .collect(),
         ConcreteDataType::Null(_) => unreachable!(),
         ConcreteDataType::List(_) => unreachable!(),
@@ -651,8 +651,8 @@ mod tests {
         assert_eq!(Value::Float64(0.1.into()), memory.get(1));
 
         let ts = insert_req.columns_values.get("ts").unwrap();
-        assert_eq!(Value::Timestamp(Timestamp::from_millis(100)), ts.get(0));
-        assert_eq!(Value::Timestamp(Timestamp::from_millis(101)), ts.get(1));
+        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(100)), ts.get(0));
+        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(101)), ts.get(1));
     }
 
     #[test]

@@ -222,7 +222,9 @@ pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> 
     // Timestamp in key part is intentionally left to 0
     columns_values.insert(
         "timestamp".to_string(),
-        Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(0)])) as _,
+        Arc::new(TimestampVector::from_slice(&[Timestamp::new_millisecond(
+            0,
+        )])) as _,
     );
 
     columns_values.insert(
@@ -232,14 +234,14 @@ pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> 
 
     columns_values.insert(
         "gmt_created".to_string(),
-        Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
+        Arc::new(TimestampVector::from_slice(&[Timestamp::new_millisecond(
             util::current_time_millis(),
         )])) as _,
     );
 
     columns_values.insert(
         "gmt_modified".to_string(),
-        Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
+        Arc::new(TimestampVector::from_slice(&[Timestamp::new_millisecond(
             util::current_time_millis(),
         )])) as _,
     );

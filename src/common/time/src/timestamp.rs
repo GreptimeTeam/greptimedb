@@ -35,28 +35,28 @@ impl Timestamp {
         Self { unit, value }
     }
 
-    pub fn from_second(value: i64) -> Self {
+    pub fn new_second(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Second,
         }
     }
 
-    pub fn from_millis(value: i64) -> Self {
+    pub fn new_millisecond(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Millisecond,
         }
     }
 
-    pub fn from_micro(value: i64) -> Self {
+    pub fn new_microsecond(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Microsecond,
         }
     }
 
-    pub fn from_nano(value: i64) -> Self {
+    pub fn new_nanosecond(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Nanosecond,
@@ -362,19 +362,19 @@ mod tests {
         assert_eq!(datetime_str, ts.to_iso8601_string());
 
         let ts_millis = 1668070237000;
-        let ts = Timestamp::from_millis(ts_millis);
+        let ts = Timestamp::new_millisecond(ts_millis);
         assert_eq!("2022-11-10 08:50:37+0000", ts.to_iso8601_string());
 
         let ts_millis = -1000;
-        let ts = Timestamp::from_millis(ts_millis);
+        let ts = Timestamp::new_millisecond(ts_millis);
         assert_eq!("1969-12-31 23:59:59+0000", ts.to_iso8601_string());
 
         let ts_millis = -1;
-        let ts = Timestamp::from_millis(ts_millis);
+        let ts = Timestamp::new_millisecond(ts_millis);
         assert_eq!("1969-12-31 23:59:59.999+0000", ts.to_iso8601_string());
 
         let ts_millis = -1001;
-        let ts = Timestamp::from_millis(ts_millis);
+        let ts = Timestamp::new_millisecond(ts_millis);
         assert_eq!("1969-12-31 23:59:58.999+0000", ts.to_iso8601_string());
     }
 
