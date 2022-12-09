@@ -295,10 +295,11 @@ mod tests {
     // but expected timestamp is in UTC timezone
     fn check_from_str(s: &str, expect: &str) {
         let ts = Timestamp::from_str(s).unwrap();
-        let time = NaiveDateTime::from_timestamp(
+        let time = NaiveDateTime::from_timestamp_opt(
             ts.value / 1_000_000_000,
             (ts.value % 1_000_000_000) as u32,
-        );
+        )
+        .unwrap();
         assert_eq!(expect, time.to_string());
     }
 
@@ -311,7 +312,13 @@ mod tests {
         check_from_str(
             "2020-09-08 13:42:29",
             &NaiveDateTime::from_timestamp_opt(
-                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                1599572549
+                    - Local
+                        .timestamp_opt(0, 0)
+                        .unwrap()
+                        .offset()
+                        .fix()
+                        .local_minus_utc() as i64,
                 0,
             )
             .unwrap()
@@ -321,7 +328,13 @@ mod tests {
         check_from_str(
             "2020-09-08T13:42:29",
             &NaiveDateTime::from_timestamp_opt(
-                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                1599572549
+                    - Local
+                        .timestamp_opt(0, 0)
+                        .unwrap()
+                        .offset()
+                        .fix()
+                        .local_minus_utc() as i64,
                 0,
             )
             .unwrap()
@@ -331,7 +344,13 @@ mod tests {
         check_from_str(
             "2020-09-08 13:42:29.042",
             &NaiveDateTime::from_timestamp_opt(
-                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                1599572549
+                    - Local
+                        .timestamp_opt(0, 0)
+                        .unwrap()
+                        .offset()
+                        .fix()
+                        .local_minus_utc() as i64,
                 42000000,
             )
             .unwrap()
@@ -342,7 +361,13 @@ mod tests {
         check_from_str(
             "2020-09-08T13:42:29.042",
             &NaiveDateTime::from_timestamp_opt(
-                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                1599572549
+                    - Local
+                        .timestamp_opt(0, 0)
+                        .unwrap()
+                        .offset()
+                        .fix()
+                        .local_minus_utc() as i64,
                 42000000,
             )
             .unwrap()

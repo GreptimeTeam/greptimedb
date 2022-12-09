@@ -33,8 +33,8 @@ mod tests {
             .duration_since(time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        let datetime_now = chrono::Utc.timestamp_millis(now);
-        let datetime_std = chrono::Utc.timestamp_millis(millis_from_std);
+        let datetime_now = chrono::Utc.timestamp_millis_opt(now).unwrap();
+        let datetime_std = chrono::Utc.timestamp_millis_opt(millis_from_std).unwrap();
 
         assert_eq!(datetime_std.year(), datetime_now.year());
         assert_eq!(datetime_std.month(), datetime_now.month());
