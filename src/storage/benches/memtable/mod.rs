@@ -73,7 +73,7 @@ fn kvs_with_index(
         UInt64VectorBuilder::with_capacity(keys.len()),
     );
     for key in keys {
-        key_builders.0.push(Some(Timestamp::from_millis(key.0)));
+        key_builders.0.push(Some(Timestamp::new_millisecond(key.0)));
         key_builders.1.push(Some(key.1));
     }
     let row_keys = vec![

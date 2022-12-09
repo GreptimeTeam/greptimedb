@@ -208,9 +208,9 @@ mod tests {
         let cpu = columns.get("cpu").unwrap();
 
         let expected: Vec<Value> = vec![
-            Value::Timestamp(Timestamp::from_millis(1665893727685_i64)),
-            Value::Timestamp(Timestamp::from_millis(1665893727686_i64)),
-            Value::Timestamp(Timestamp::from_millis(1665893727689_i64)),
+            Value::Timestamp(Timestamp::new_millisecond(1665893727685_i64)),
+            Value::Timestamp(Timestamp::new_millisecond(1665893727686_i64)),
+            Value::Timestamp(Timestamp::new_millisecond(1665893727689_i64)),
         ];
         assert_vector(&expected, ts);
 

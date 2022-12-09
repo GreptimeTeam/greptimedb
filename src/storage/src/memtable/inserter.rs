@@ -195,7 +195,10 @@ mod tests {
             for i in 0..row_num {
                 let ts = batch.column(0).get(i);
                 let v = batch.column(1).get(i);
-                assert_eq!(Value::Timestamp(Timestamp::from_millis(data[index].0)), ts);
+                assert_eq!(
+                    Value::Timestamp(Timestamp::new_millisecond(data[index].0)),
+                    ts
+                );
                 assert_eq!(Value::from(data[index].1), v);
                 assert_eq!(Value::from(sequence), batch.column(2).get(i));
 

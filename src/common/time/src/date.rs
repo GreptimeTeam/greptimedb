@@ -98,7 +98,7 @@ mod tests {
             Date::from_str("1969-01-01").unwrap().to_string()
         );
 
-        let now = Utc::now().date().format("%F").to_string();
+        let now = Utc::now().date_naive().format("%F").to_string();
         assert_eq!(now, Date::from_str(&now).unwrap().to_string());
     }
 
