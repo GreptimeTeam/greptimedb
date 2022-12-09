@@ -33,10 +33,33 @@ struct PgPwdVerifier {
     user_provider: Option<UserProviderRef>,
 }
 
+#[allow(dead_code)]
+struct LoginInfo {
+    user: Option<String>,
+    database: Option<String>,
+    host: String,
+}
+
+impl LoginInfo {
+    pub fn from_client_info<C>(client: &C) -> LoginInfo
+    where
+        C: ClientInfo,
+    {
+        LoginInfo {
+            user: client.metadata().get(super::METADATA_USER).map(Into::into),
+            database: client
+                .metadata()
+                .get(super::METADATA_DATABASE)
+                .map(Into::into),
+            host: client.socket_addr().ip().to_string(),
+        }
+    }
+}
+
 impl PgPwdVerifier {
-    async fn verify_pwd(&self, pwd: &str, meta: HashMap<String, String>) -> Result<bool> {
+    async fn verify_pwd(&self, pwd: &str, login: LoginInfo) -> Result<bool> {
         if let Some(user_provider) = &self.user_provider {
-            let user_name = match meta.get("user") {
+            let user_name = match login.user {
                 Some(name) => name,
                 None => return Ok(false),
             };
@@ -44,7 +67,7 @@ impl PgPwdVerifier {
             // TODO(fys): pass user_info to context
             let _user_info = user_provider
                 .auth(
-                    Identity::UserId(user_name, None),
+                    Identity::UserId(&user_name, None),
                     Password::PlainText(pwd.as_bytes()),
                 )
                 .await
@@ -140,8 +163,8 @@ impl StartupHandler for PgAuthStartupHandler {
                 }
             }
             PgWireFrontendMessage::Password(ref pwd) => {
-                let meta = client.metadata().clone();
-                if let Ok(true) = self.verifier.verify_pwd(pwd.password(), meta).await {
+                let login_info = LoginInfo::from_client_info(client);
+                if let Ok(true) = self.verifier.verify_pwd(pwd.password(), login_info).await {
                     auth::finish_authentication(client, &self.param_provider).await
                 } else {
                     let error_info = ErrorInfo::new(
