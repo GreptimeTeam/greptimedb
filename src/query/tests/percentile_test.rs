@@ -54,11 +54,11 @@ async fn test_percentile_aggregator() -> Result<()> {
 async fn test_percentile_correctness() -> Result<()> {
     let engine = create_correctness_engine();
     let sql = String::from("select PERCENTILE(corr_number,88.0) as percentile from corr_numbers");
-    let plan = &engine
+    let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
-        .unwrap()[0];
+        .unwrap();
 
-    let output = engine.execute(plan).await.unwrap();
+    let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
         Output::Stream(batch) => batch,
         _ => unreachable!(),
@@ -116,11 +116,11 @@ async fn execute_percentile<'a>(
         "select PERCENTILE({},50.0) as percentile from {}",
         column_name, table_name
     );
-    let plan = &engine
+    let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
-        .unwrap()[0];
+        .unwrap();
 
-    let output = engine.execute(plan).await.unwrap();
+    let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
         Output::Stream(batch) => batch,
         _ => unreachable!(),

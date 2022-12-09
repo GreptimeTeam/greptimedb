@@ -93,11 +93,11 @@ async fn execute_polyval<'a>(
         "select POLYVAL({}, 0) as polyval from {}",
         column_name, table_name
     );
-    let plan = &engine
+    let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
-        .unwrap()[0];
+        .unwrap();
 
-    let output = engine.execute(plan).await.unwrap();
+    let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
         Output::Stream(batch) => batch,
         _ => unreachable!(),

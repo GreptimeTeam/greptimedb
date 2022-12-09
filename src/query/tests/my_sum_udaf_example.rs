@@ -229,9 +229,9 @@ where
         "select MY_SUM({}) as my_sum from {}",
         column_name, table_name
     );
-    let plan = &engine.sql_to_plan(&sql, Arc::new(QueryContext::new()))?[0];
+    let plan = engine.sql_to_plan(&sql, Arc::new(QueryContext::new()))?;
 
-    let output = engine.execute(plan).await?;
+    let output = engine.execute(&plan).await?;
     let recordbatch_stream = match output {
         Output::Stream(batch) => batch,
         _ => unreachable!(),

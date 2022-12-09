@@ -95,11 +95,11 @@ async fn execute_scipy_stats_norm_cdf<'a>(
         "select SCIPYSTATSNORMCDF({},2.0) as scipy_stats_norm_cdf from {}",
         column_name, table_name
     );
-    let plan = &engine
+    let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
-        .unwrap()[0];
+        .unwrap();
 
-    let output = engine.execute(plan).await.unwrap();
+    let output = engine.execute(&plan).await.unwrap();
     let recordbatch_stream = match output {
         Output::Stream(batch) => batch,
         _ => unreachable!(),

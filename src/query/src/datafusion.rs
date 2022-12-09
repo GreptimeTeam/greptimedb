@@ -69,10 +69,11 @@ impl QueryEngine for DatafusionQueryEngine {
         "datafusion"
     }
 
-    fn sql_to_statement(&self, sql: &str) -> Result<Vec<Statement>> {
-        let stmts = ParserContext::create_with_dialect(sql, &GenericDialect {})
+    fn sql_to_statement(&self, sql: &str) -> Result<Statement> {
+        let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
             .context(error::ParseSqlSnafu)?;
-        Ok(stmts)
+        assert!(1 == statement.len());
+        Ok(statement.remove(0))
     }
 
     fn statement_to_plan(
@@ -86,13 +87,10 @@ impl QueryEngine for DatafusionQueryEngine {
         planner.statement_to_plan(stmt)
     }
 
-    fn sql_to_plan(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Vec<LogicalPlan>> {
+    fn sql_to_plan(&self, sql: &str, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
-        let stmts = self.sql_to_statement(sql)?;
-        stmts
-            .into_iter()
-            .map(|stmt| self.statement_to_plan(stmt, query_ctx.clone()))
-            .collect()
+        let stmt = self.sql_to_statement(sql)?;
+        self.statement_to_plan(stmt, query_ctx)
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
@@ -285,9 +283,9 @@ mod tests {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
-        let plan = &engine
+        let plan = engine
             .sql_to_plan(sql, Arc::new(QueryContext::new()))
-            .unwrap()[0];
+            .unwrap();
 
         // TODO(sunng87): do not rely on to_string for compare
         assert_eq!(
@@ -304,11 +302,11 @@ mod tests {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
-        let plan = &engine
+        let plan = engine
             .sql_to_plan(sql, Arc::new(QueryContext::new()))
-            .unwrap()[0];
+            .unwrap();
 
-        let output = engine.execute(plan).await.unwrap();
+        let output = engine.execute(&plan).await.unwrap();
 
         match output {
             Output::Stream(recordbatch) => {
