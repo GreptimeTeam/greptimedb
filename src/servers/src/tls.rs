@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use strum::EnumString;
 
 /// TlsMode is used for Mysql and Postgres server start up.
-#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, EnumString)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, EnumString)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsMode {
     #[default]
@@ -43,7 +43,7 @@ pub enum TlsMode {
     VerifyFull,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TlsOption {
     pub mode: TlsMode,
