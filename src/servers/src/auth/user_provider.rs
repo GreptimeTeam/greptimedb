@@ -1,15 +1,20 @@
 use std::collections::HashMap;
+use std::fs::File;
+use std::io;
+use std::io::BufRead;
+use std::path::Path;
 
 use async_trait::async_trait;
 use digest;
 use digest::Digest;
 use sha1::Sha1;
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::auth::{
-    Error, Identity, InvalidConfigValueSnafu, Password, UserInfo, UserNotExistSnafu, UserProvider,
+    Error, Identity, InvalidConfigSnafu, Password, UserInfo, UserNotExistSnafu, UserProvider,
     WrongPwdSnafu,
 };
+use crate::error::InternalIoSnafu;
 
 pub enum MemUserProviderOption {
     FilePath(String),
@@ -20,25 +25,38 @@ impl TryFrom<&str> for MemUserProviderOption {
     type Error = Error;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let (mode, content) = value.split_once(':').context(InvalidConfigValueSnafu {
+        let (mode, content) = value.split_once(':').context(InvalidConfigSnafu {
             value: value.to_string(),
+            msg: "MemUserProviderOption must be in format `<option>:<value>`",
         })?;
         return match mode {
             "file" => {
-                unimplemented!()
+                // check valid path
+                let path = Path::new(content);
+                if !path.exists() || !path.is_file() {
+                    return InvalidConfigSnafu {
+                        value: content.to_string(),
+                        msg: "MemUserProviderOption file path must be a valid file",
+                    }
+                    .fail();
+                }
+
+                Ok(MemUserProviderOption::FilePath(content.to_string()))
             }
             "inline" => content
                 .split(',')
                 .map(|kv| {
-                    let (k, v) = kv.split_once('=').context(InvalidConfigValueSnafu {
+                    let (k, v) = kv.split_once('=').context(InvalidConfigSnafu {
                         value: kv.to_string(),
+                        msg: "MemUserProviderOption inline values must be in format `user=pwd[,user=pwd]`",
                     })?;
                     Ok((k.to_string(), v.as_bytes().to_vec()))
                 })
                 .collect::<Result<HashMap<String, Vec<u8>>, Error>>()
                 .map(MemUserProviderOption::Inline),
-            _ => InvalidConfigValueSnafu {
+            _ => InvalidConfigSnafu {
                 value: mode.to_string(),
+                msg: "MemUserProviderOption must be in format `file:<path>` or `inline:<values>`",
             }
             .fail(),
         };
@@ -52,12 +70,23 @@ pub struct MemUserProvider {
 impl MemUserProvider {
     pub fn new(opts: MemUserProviderOption) -> Self {
         let users = match opts {
-            MemUserProviderOption::FilePath(_path) => {
-                unimplemented!()
+            MemUserProviderOption::FilePath(path) => {
+                // todo(shuiyisong): figure out how to process error
+                let file = File::open(&path).context(InternalIoSnafu).unwrap();
+                io::BufReader::new(file)
+                    .lines()
+                    .filter_map(|line| line.ok())
+                    .filter_map(|line| {
+                        if let Some((k, v)) = line.split_once('=') {
+                            Some((k.to_string(), v.as_bytes().to_vec()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<HashMap<String, Vec<u8>>>()
             }
             MemUserProviderOption::Inline(users) => users,
         };
-
         Self { users }
     }
 
