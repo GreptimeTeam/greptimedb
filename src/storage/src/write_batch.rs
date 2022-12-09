@@ -502,6 +502,8 @@ impl<'a> IntoIterator for &'a WriteBatch {
     }
 }
 
+// TODO(hl): remove this allow
+#[allow(unused)]
 pub mod codec {
 
     use std::io::Cursor;

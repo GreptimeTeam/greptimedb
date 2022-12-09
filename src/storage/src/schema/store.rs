@@ -182,10 +182,10 @@ impl StoreSchema {
     }
 }
 
-impl TryFrom<ArrowSchema> for StoreSchema {
+impl TryFrom<Arc<ArrowSchema>> for StoreSchema {
     type Error = Error;
 
-    fn try_from(arrow_schema: ArrowSchema) -> Result<StoreSchema> {
+    fn try_from(arrow_schema: Arc<ArrowSchema>) -> std::result::Result<Self, Self::Error> {
         let schema = Schema::try_from(arrow_schema).context(metadata::ConvertArrowSchemaSnafu)?;
         // Recover other metadata from schema.
         let row_key_end = parse_index_from_metadata(schema.metadata(), ROW_KEY_END_KEY)?;
@@ -214,6 +214,14 @@ impl TryFrom<ArrowSchema> for StoreSchema {
             row_key_end,
             user_column_end,
         })
+    }
+}
+
+impl TryFrom<ArrowSchema> for StoreSchema {
+    type Error = Error;
+
+    fn try_from(arrow_schema: ArrowSchema) -> Result<StoreSchema> {
+        StoreSchema::try_from(Arc::new(arrow_schema))
     }
 }
 

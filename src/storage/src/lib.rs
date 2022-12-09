@@ -37,7 +37,7 @@ mod version;
 mod wal;
 pub mod write_batch;
 
-use datatypes::arrow::array::{Array, ArrayRef};
+use datatypes::arrow::array::Array;
 pub use engine::EngineImpl;
 
 #[derive(Debug, Clone, PartialEq)]

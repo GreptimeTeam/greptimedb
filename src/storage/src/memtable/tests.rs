@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datatypes::arrow::array::{ArrayRef, TimestampMicrosecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::*;
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;

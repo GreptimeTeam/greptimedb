@@ -138,7 +138,6 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::timestamp::Timestamp;
-    use datatypes::prelude::ScalarVector;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::value::Value;
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
