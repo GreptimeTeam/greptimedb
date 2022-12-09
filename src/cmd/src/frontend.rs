@@ -129,7 +129,7 @@ impl TryFrom<StartCommand> for FrontendOptions {
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_options = Some(PostgresOptions {
                 addr,
-                tls: Arc::new(tls_option.clone()),
+                tls: Arc::new(tls_option),
                 ..Default::default()
             });
         }

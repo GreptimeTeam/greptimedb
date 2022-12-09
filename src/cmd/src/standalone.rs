@@ -262,7 +262,7 @@ impl TryFrom<StartCommand> for FrontendOptions {
         }
 
         if let Some(mut postgres_options) = opts.postgres_options {
-            postgres_options.tls = Arc::new(tls_option.clone());
+            postgres_options.tls = Arc::new(tls_option);
             opts.postgres_options = Some(postgres_options);
         }
 
