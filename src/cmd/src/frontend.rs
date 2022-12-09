@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
@@ -22,6 +24,7 @@ use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use meta_client::MetaClientOpts;
 use servers::http::HttpOptions;
+use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -71,6 +74,12 @@ pub struct StartCommand {
     influxdb_enable: Option<bool>,
     #[clap(long)]
     metasrv_addr: Option<String>,
+    #[clap(long)]
+    tls_mode: Option<TlsMode>,
+    #[clap(long)]
+    tls_cert_path: Option<String>,
+    #[clap(long)]
+    tls_key_path: Option<String>,
 }
 
 impl StartCommand {
@@ -96,6 +105,8 @@ impl TryFrom<StartCommand> for FrontendOptions {
             FrontendOptions::default()
         };
 
+        let tls_option = TlsOption::new(cmd.tls_mode, cmd.tls_cert_path, cmd.tls_key_path);
+
         if let Some(addr) = cmd.http_addr {
             opts.http_options = Some(HttpOptions {
                 addr,
@@ -111,12 +122,14 @@ impl TryFrom<StartCommand> for FrontendOptions {
         if let Some(addr) = cmd.mysql_addr {
             opts.mysql_options = Some(MysqlOptions {
                 addr,
+                tls: Arc::new(tls_option.clone()),
                 ..Default::default()
             });
         }
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_options = Some(PostgresOptions {
                 addr,
+                tls: Arc::new(tls_option.clone()),
                 ..Default::default()
             });
         }
@@ -160,6 +173,9 @@ mod tests {
             influxdb_enable: Some(false),
             config_file: None,
             metasrv_addr: None,
+            tls_mode: None,
+            tls_cert_path: None,
+            tls_key_path: None,
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();
@@ -209,6 +225,9 @@ mod tests {
                 std::env::current_dir().unwrap().as_path().to_str().unwrap()
             )),
             metasrv_addr: None,
+            tls_mode: None,
+            tls_cert_path: None,
+            tls_key_path: None,
         };
 
         let fe_opts = FrontendOptions::try_from(command).unwrap();
