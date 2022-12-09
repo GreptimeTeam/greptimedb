@@ -89,7 +89,7 @@ pub enum Error {
     IOErr { source: std::io::Error },
 
     #[snafu(display("User not found"))]
-    UserNotFound { backtrace: Backtrace },
+    UserNotFound {},
 
     #[snafu(display("Unsupported password type: {}", password_type))]
     UnsupportedPasswordType {
@@ -98,7 +98,7 @@ pub enum Error {
     },
 
     #[snafu(display("Username and password does not match"))]
-    UserPasswordMismatch { backtrace: Backtrace },
+    UserPasswordMismatch {},
 }
 
 impl ErrorExt for Error {
@@ -113,7 +113,7 @@ impl ErrorExt for Error {
         }
     }
 
-    fn backtrace_opt(&self) -> Option<&common_error::snafu::Backtrace> {
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
         ErrorCompat::backtrace(self)
     }
 
