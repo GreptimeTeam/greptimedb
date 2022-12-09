@@ -35,10 +35,31 @@ impl Timestamp {
         Self { unit, value }
     }
 
+    pub fn from_second(value: i64) -> Self {
+        Self {
+            value,
+            unit: TimeUnit::Second,
+        }
+    }
+
     pub fn from_millis(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Millisecond,
+        }
+    }
+
+    pub fn from_micro(value: i64) -> Self {
+        Self {
+            value,
+            unit: TimeUnit::Microsecond,
+        }
+    }
+
+    pub fn from_nano(value: i64) -> Self {
+        Self {
+            value,
+            unit: TimeUnit::Nanosecond,
         }
     }
 

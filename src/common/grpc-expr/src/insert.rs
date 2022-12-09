@@ -22,11 +22,11 @@ use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateEx
 use common_base::BitVec;
 use common_time::timestamp::Timestamp;
 use common_time::{Date, DateTime};
-use datatypes::data_type::ConcreteDataType;
+use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{ValueRef, VectorRef};
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
-use datatypes::vectors::VectorBuilder;
+use datatypes::vectors::MutableVector;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
@@ -99,7 +99,8 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
     let column_datatype = wrapper.datatype();
 
     let rows = rows as usize;
-    let mut vector = VectorBuilder::with_capacity(wrapper.into(), rows);
+    // let mut vector = VectorBuilder::with_capacity(wrapper.into(), rows);
+    let mut vector = ConcreteDataType::from(wrapper).create_mutable_vector(rows);
 
     if let Some(values) = &column.values {
         let values = collect_column_values(column_datatype, values);
@@ -110,7 +111,9 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
 
         for i in 0..rows {
             if let Some(true) = nulls_iter.next() {
-                vector.push_null();
+                vector
+                    .push_value_ref(ValueRef::Null)
+                    .context(CreateVectorSnafu)?;
             } else {
                 let value_ref = values_iter.next().context(InvalidColumnProtoSnafu {
                     err_msg: format!(
@@ -118,13 +121,19 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
                         i, &column.column_name
                     ),
                 })?;
-                vector.try_push_ref(value_ref).context(CreateVectorSnafu)?;
+                vector
+                    .push_value_ref(value_ref)
+                    .context(CreateVectorSnafu)?;
             }
         }
     } else {
-        (0..rows).for_each(|_| vector.push_null());
+        (0..rows).try_for_each(|_| {
+            vector
+                .push_value_ref(ValueRef::Null)
+                .context(CreateVectorSnafu)
+        })?;
     }
-    Ok(vector.finish())
+    Ok(vector.to_vector())
 }
 
 fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Vec<ValueRef> {
@@ -174,9 +183,24 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
                 DateTime::new(*v)
             ))
         }
-        ColumnDataType::Timestamp => {
+        ColumnDataType::TimestampSecond => {
+            collect_values!(values.ts_second_values, |v| ValueRef::Timestamp(
+                Timestamp::from_second(*v)
+            ))
+        }
+        ColumnDataType::TimestampMillisecond => {
             collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
                 Timestamp::from_millis(*v)
+            ))
+        }
+        ColumnDataType::TimestampMicrosecond => {
+            collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
+                Timestamp::from_micro(*v)
+            ))
+        }
+        ColumnDataType::TimestampNanosecond => {
+            collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
+                Timestamp::from_nano(*v)
             ))
         }
     }
@@ -289,10 +313,7 @@ pub fn insertion_expr_to_request(
                         },
                     )?;
                     let data_type = &column_schema.data_type;
-                    entry.insert(VectorBuilder::with_capacity(
-                        data_type.clone(),
-                        row_count as usize,
-                    ))
+                    entry.insert(data_type.create_mutable_vector(row_count as usize))
                 }
             };
             add_values_to_builder(vector_builder, values, row_count as usize, null_mask)?;
@@ -300,7 +321,7 @@ pub fn insertion_expr_to_request(
     }
     let columns_values = columns_builders
         .into_iter()
-        .map(|(column_name, mut vector_builder)| (column_name, vector_builder.finish()))
+        .map(|(column_name, mut vector_builder)| (column_name, vector_builder.to_vector()))
         .collect();
 
     Ok(InsertRequest {
@@ -312,7 +333,7 @@ pub fn insertion_expr_to_request(
 }
 
 fn add_values_to_builder(
-    builder: &mut VectorBuilder,
+    builder: &mut Box<dyn MutableVector>,
     values: Values,
     row_count: usize,
     null_mask: Vec<u8>,
@@ -323,9 +344,11 @@ fn add_values_to_builder(
     if null_mask.is_empty() {
         ensure!(values.len() == row_count, IllegalInsertDataSnafu);
 
-        values.iter().for_each(|value| {
-            builder.push(value);
-        });
+        values.iter().try_for_each(|value| {
+            builder
+                .push_value_ref(value.as_value_ref())
+                .context(CreateVectorSnafu)
+        })?;
     } else {
         let null_mask = BitVec::from_vec(null_mask);
         ensure!(
@@ -336,9 +359,13 @@ fn add_values_to_builder(
         let mut idx_of_values = 0;
         for idx in 0..row_count {
             match is_null(&null_mask, idx) {
-                Some(true) => builder.push(&Value::Null),
+                Some(true) => builder
+                    .push_value_ref(ValueRef::Null)
+                    .context(CreateVectorSnafu)?,
                 _ => {
-                    builder.push(&values[idx_of_values]);
+                    builder
+                        .push_value_ref(values[idx_of_values].as_value_ref())
+                        .context(CreateVectorSnafu)?;
                     idx_of_values += 1
                 }
             }
@@ -753,7 +780,7 @@ mod tests {
             semantic_type: TIMESTAMP_SEMANTIC_TYPE,
             values: Some(ts_vals),
             null_mask: vec![0],
-            datatype: ColumnDataType::Timestamp as i32,
+            datatype: ColumnDataType::TimestampMillisecond as i32,
         };
 
         (
