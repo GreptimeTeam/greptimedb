@@ -99,7 +99,6 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
     let column_datatype = wrapper.datatype();
 
     let rows = rows as usize;
-    // let mut vector = VectorBuilder::with_capacity(wrapper.into(), rows);
     let mut vector = ConcreteDataType::from(wrapper).create_mutable_vector(rows);
 
     if let Some(values) = &column.values {
@@ -115,12 +114,14 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
                     .push_value_ref(ValueRef::Null)
                     .context(CreateVectorSnafu)?;
             } else {
-                let value_ref = values_iter.next().context(InvalidColumnProtoSnafu {
-                    err_msg: format!(
-                        "value not found at position {} of column {}",
-                        i, &column.column_name
-                    ),
-                })?;
+                let value_ref = values_iter
+                    .next()
+                    .with_context(|| InvalidColumnProtoSnafu {
+                        err_msg: format!(
+                            "value not found at position {} of column {}",
+                            i, &column.column_name
+                        ),
+                    })?;
                 vector
                     .push_value_ref(value_ref)
                     .context(CreateVectorSnafu)?;
