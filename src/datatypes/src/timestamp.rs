@@ -104,6 +104,12 @@ macro_rules! define_timestamp_with_unit {
                     [<Timestamp $unit>]::from_native(val)
                 }
             }
+
+            impl From<[<Timestamp $unit>]> for i64{
+                fn from(val: [<Timestamp $unit>]) -> Self {
+                    val.0.value()
+                }
+            }
         }
     };
 }

@@ -472,7 +472,7 @@ mod tests {
     #[test]
     pub fn test_arrow_error() {
         fn throw_arrow_error() -> std::result::Result<(), ArrowError> {
-            Err(ArrowError::ExternalFormat("Lorem ipsum".to_string()))
+            Err(ArrowError::IoError("Lorem ipsum".to_string()))
         }
 
         let error = throw_arrow_error()

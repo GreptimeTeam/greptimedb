@@ -337,7 +337,7 @@ impl BatchOp for ProjectedSchema {
 mod tests {
     use datatypes::prelude::ScalarVector;
     use datatypes::type_id::LogicalTypeId;
-    use datatypes::vectors::{TimestampVector, VectorRef};
+    use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
     use store_api::storage::OpType;
 
     use super::*;
@@ -398,7 +398,7 @@ mod tests {
         let expect_user = schema_util::new_schema_with_version(
             &[
                 ("v1", LogicalTypeId::Int64, true),
-                ("timestamp", LogicalTypeId::Timestamp, false),
+                ("timestamp", LogicalTypeId::TimestampMillisecond, false),
             ],
             Some(1),
             123,
@@ -524,7 +524,7 @@ mod tests {
         let filter = BooleanVector::from_slice(&[true, false, true]);
 
         let res = schema.filter(&batch, &filter).unwrap();
-        let expect: VectorRef = Arc::new(TimestampVector::from_values([1000, 3000]));
+        let expect: VectorRef = Arc::new(TimestampMillisecondVector::from_values([1000, 3000]));
         assert_eq!(expect, *res.column(0));
     }
 }

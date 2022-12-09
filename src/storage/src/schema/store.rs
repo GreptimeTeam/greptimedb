@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_error::prelude::*;
 use datatypes::arrow::array::Array;
-use datatypes::arrow::chunk::Chunk as ArrowChunk;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
-use datatypes::schema::{Metadata, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{Schema, SchemaBuilder, SchemaRef};
 use store_api::storage::consts;
 
 use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, Error, Result};
 use crate::read::Batch;
+use crate::ArrowChunk;
 
 const ROW_KEY_END_KEY: &str = "greptime:storage:row_key_end";
 const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
@@ -216,7 +217,7 @@ impl TryFrom<ArrowSchema> for StoreSchema {
     }
 }
 
-fn parse_index_from_metadata(metadata: &Metadata, key: &str) -> Result<usize> {
+fn parse_index_from_metadata(metadata: &HashMap<String, String>, key: &str) -> Result<usize> {
     let value = metadata
         .get(key)
         .context(metadata::MetaNotFoundSnafu { key })?;
@@ -228,7 +229,6 @@ fn parse_index_from_metadata(metadata: &Metadata, key: &str) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use datatypes::arrow::array::Array;
-    use datatypes::arrow::chunk::Chunk as ArrowChunk;
 
     use super::*;
     use crate::read::Batch;
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(3, chunk.len());
 
         for i in 0..5 {
-            assert_eq!(chunk[i], batch.column(i).to_arrow_array());
+            assert_eq!(&chunk[i], &batch.column(i).to_arrow_array());
         }
     }
 

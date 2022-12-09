@@ -20,9 +20,7 @@ use std::sync::{Arc, RwLock};
 
 use datatypes::prelude::*;
 use datatypes::value::Value;
-use datatypes::vectors::{
-    UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder, VectorBuilder,
-};
+use datatypes::vectors::{UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder};
 use store_api::storage::{OpType, SequenceNumber};
 
 use crate::error::Result;
@@ -428,6 +426,7 @@ impl<'a> RowsProvider for &'a [&RowValue] {
     }
 }
 
+use datatypes::data_type::DataType;
 fn rows_to_vectors<I: Iterator<Item = ConcreteDataType>, T: RowsProvider>(
     data_types: I,
     column_needed: &[bool],
@@ -441,7 +440,7 @@ fn rows_to_vectors<I: Iterator<Item = ConcreteDataType>, T: RowsProvider>(
     let row_num = provider.row_num();
     let mut builders = Vec::with_capacity(column_num);
     for data_type in data_types {
-        builders.push(VectorBuilder::with_capacity(data_type, row_num));
+        builders.push(data_type.create_mutable_vector(row_num));
     }
 
     let mut vectors = Vec::with_capacity(column_num);
@@ -453,10 +452,13 @@ fn rows_to_vectors<I: Iterator<Item = ConcreteDataType>, T: RowsProvider>(
         for row_idx in 0..row_num {
             let row = provider.row_by_index(row_idx);
             let value = &row[col_idx];
-            builder.push(value);
+            builder
+                .as_mut()
+                .push_value_ref(value.as_value_ref())
+                .unwrap();
         }
 
-        vectors.push(builder.finish());
+        vectors.push(builder.to_vector());
     }
 
     vectors

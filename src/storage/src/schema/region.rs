@@ -162,7 +162,7 @@ mod tests {
         let expect_schema = schema_util::new_schema_with_version(
             &[
                 ("k0", LogicalTypeId::Int64, false),
-                ("timestamp", LogicalTypeId::Timestamp, false),
+                ("timestamp", LogicalTypeId::TimestampMillisecond, false),
                 ("v0", LogicalTypeId::Int64, true),
             ],
             Some(1),
