@@ -1,3 +1,17 @@
+// Copyright 2022 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
@@ -11,17 +25,11 @@ use sha1::Sha1;
 use snafu::{OptionExt, ResultExt};
 
 use crate::auth::{
-    Error, Identity, InvalidConfigSnafu, Password, UserInfo, UserNotExistSnafu, UserProvider,
-    WrongPwdSnafu,
+    Error, IOErrSnafu, Identity, InvalidConfigSnafu, Password, UserInfo, UserNotExistSnafu,
+    UserProvider, WrongPwdSnafu,
 };
-use crate::error::InternalIoSnafu;
 
-pub enum MemUserProviderOption {
-    FilePath(String),
-    Inline(HashMap<String, Vec<u8>>),
-}
-
-impl TryFrom<&str> for MemUserProviderOption {
+impl TryFrom<&str> for MemUserProvider {
     type Error = Error;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
@@ -41,7 +49,27 @@ impl TryFrom<&str> for MemUserProviderOption {
                     .fail();
                 }
 
-                Ok(MemUserProviderOption::FilePath(content.to_string()))
+                let file = File::open(path).context(IOErrSnafu)?;
+                let credential = io::BufReader::new(file)
+                    .lines()
+                    .filter_map(|line| line.ok())
+                    .filter_map(|line| {
+                        if let Some((k, v)) = line.split_once('=') {
+                            Some((k.to_string(), v.as_bytes().to_vec()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<HashMap<String, Vec<u8>>>();
+                if credential.is_empty() {
+                    return InvalidConfigSnafu {
+                        value: content.to_string(),
+                        msg: "MemUserProviderOption file must contain at least one valid credential",
+                    }
+                    .fail();
+                }
+
+                Ok(MemUserProvider { users: credential, })
             }
             "inline" => content
                 .split(',')
@@ -53,7 +81,7 @@ impl TryFrom<&str> for MemUserProviderOption {
                     Ok((k.to_string(), v.as_bytes().to_vec()))
                 })
                 .collect::<Result<HashMap<String, Vec<u8>>, Error>>()
-                .map(MemUserProviderOption::Inline),
+                .map(|users| MemUserProvider { users }),
             _ => InvalidConfigSnafu {
                 value: mode.to_string(),
                 msg: "MemUserProviderOption must be in format `file:<path>` or `inline:<values>`",
@@ -65,34 +93,6 @@ impl TryFrom<&str> for MemUserProviderOption {
 
 pub struct MemUserProvider {
     users: HashMap<String, Vec<u8>>,
-}
-
-impl MemUserProvider {
-    pub fn new(opts: MemUserProviderOption) -> Self {
-        let users = match opts {
-            MemUserProviderOption::FilePath(path) => {
-                // todo(shuiyisong): figure out how to process error
-                let file = File::open(&path).context(InternalIoSnafu).unwrap();
-                io::BufReader::new(file)
-                    .lines()
-                    .filter_map(|line| line.ok())
-                    .filter_map(|line| {
-                        if let Some((k, v)) = line.split_once('=') {
-                            Some((k.to_string(), v.as_bytes().to_vec()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<HashMap<String, Vec<u8>>>()
-            }
-            MemUserProviderOption::Inline(users) => users,
-        };
-        Self { users }
-    }
-
-    pub fn add_user(&mut self, name: String, password: Vec<u8>) {
-        self.users.insert(name, password);
-    }
 }
 
 #[async_trait]

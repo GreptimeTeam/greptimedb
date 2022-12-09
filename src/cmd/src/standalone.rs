@@ -28,7 +28,7 @@ use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
 use serde::{Deserialize, Serialize};
-use servers::auth::user_provider::{MemUserProvider, MemUserProviderOption};
+use servers::auth::user_provider::MemUserProvider;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
@@ -215,9 +215,8 @@ impl TryFrom<StartCommand> for AnyMap {
                 })?;
             match name {
                 "mem_user_provider" => {
-                    let mem_opts: MemUserProviderOption =
+                    let provider: MemUserProvider =
                         content.try_into().context(IllegalAuthConfigSnafu)?;
-                    let provider = MemUserProvider::new(mem_opts);
                     let fe_plugin = FrontendPlugin {
                         user_provider: Some(Arc::new(provider)),
                     };

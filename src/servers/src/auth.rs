@@ -85,6 +85,9 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Encounter IO error, source: {}", source))]
+    IOErr { source: std::io::Error },
+
     #[snafu(display("User not found"))]
     UserNotFound { backtrace: Backtrace },
 
@@ -102,6 +105,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::InvalidConfig { .. } => StatusCode::InvalidArguments,
+            Error::IOErr { .. } => StatusCode::Internal,
 
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
             Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPwdType,
