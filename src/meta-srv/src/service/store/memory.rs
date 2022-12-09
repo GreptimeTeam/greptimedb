@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use api::v1::meta::{
     BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, KeyValue, PutRequest, PutResponse, RangeRequest,
-    RangeResponse, ResponseHeader,
+    DeleteRangeRequest, DeleteRangeResponse, KeyValue, MoveValueRequest, MoveValueResponse,
+    PutRequest, PutResponse, RangeRequest, RangeResponse, ResponseHeader,
 };
 use parking_lot::RwLock;
 
@@ -218,5 +218,29 @@ impl KvStore for MemStore {
                 Default::default()
             },
         })
+    }
+
+    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
+        let MoveValueRequest {
+            header,
+            from_key,
+            to_key,
+        } = req;
+
+        let mut memory = self.inner.write();
+
+        let kv = match memory.remove(&from_key) {
+            Some(v) => {
+                memory.insert(to_key, v.clone());
+                Some((from_key, v))
+            }
+            None => memory.get(&to_key).map(|v| (to_key, v.clone())),
+        };
+
+        let kv = kv.map(|(key, value)| KeyValue { key, value });
+
+        let cluster_id = header.map_or(0, |h| h.cluster_id);
+        let header = Some(ResponseHeader::success(cluster_id));
+        Ok(MoveValueResponse { header, kv })
     }
 }

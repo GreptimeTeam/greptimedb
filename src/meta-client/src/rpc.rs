@@ -28,7 +28,8 @@ pub use router::{
 use serde::{Deserialize, Serialize};
 pub use store::{
     BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
+    PutResponse, RangeRequest, RangeResponse,
 };
 
 #[derive(Debug, Clone)]

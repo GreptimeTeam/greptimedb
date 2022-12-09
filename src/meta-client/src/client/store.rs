@@ -18,7 +18,8 @@ use std::sync::Arc;
 use api::v1::meta::store_client::StoreClient;
 use api::v1::meta::{
     BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
+    PutResponse, RangeRequest, RangeResponse,
 };
 use common_grpc::channel_manager::ChannelManager;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -85,6 +86,11 @@ impl Client {
     pub async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let inner = self.inner.read().await;
         inner.delete_range(req).await
+    }
+
+    pub async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
+        let inner = self.inner.read().await;
+        inner.move_value(req).await
     }
 }
 
@@ -165,6 +171,17 @@ impl Inner {
         req.set_header(self.id);
         let res = client
             .delete_range(req)
+            .await
+            .context(error::TonicStatusSnafu)?;
+
+        Ok(res.into_inner())
+    }
+
+    async fn move_value(&self, mut req: MoveValueRequest) -> Result<MoveValueResponse> {
+        let mut client = self.random_client()?;
+        req.set_header(self.id);
+        let res = client
+            .move_value(req)
             .await
             .context(error::TonicStatusSnafu)?;
 

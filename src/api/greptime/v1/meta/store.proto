@@ -20,6 +20,9 @@ service Store {
 
   // DeleteRange deletes the given range from the key-value store.
   rpc DeleteRange(DeleteRangeRequest) returns (DeleteRangeResponse);
+
+  // MoveValue atomically renames the key to the given updated key.
+  rpc MoveValue(MoveValueRequest) returns (MoveValueResponse);
 }
 
 message RangeRequest {
@@ -135,4 +138,22 @@ message DeleteRangeResponse {
   // If prev_kv is set in the request, the previous key-value pairs will be
   // returned.
   repeated KeyValue prev_kvs = 3;
+}
+
+message MoveValueRequest {
+  RequestHeader header = 1;
+
+  // If from_key dose not exist, return the value of to_key (if it exists).
+  // If from_key exists, move the value of from_key to to_key (i.e. rename),
+  // and return the value.
+  bytes from_key = 2;
+  bytes to_key = 3;
+}
+
+message MoveValueResponse {
+  ResponseHeader header = 1;
+
+  // If from_key dose not exist, return the value of to_key (if it exists).
+  // If from_key exists, return the value of from_key.
+  KeyValue kv = 2;
 }

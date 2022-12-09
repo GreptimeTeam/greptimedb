@@ -145,10 +145,12 @@ gen_set_header!(HeartbeatRequest);
 gen_set_header!(RouteRequest);
 gen_set_header!(CreateRequest);
 gen_set_header!(RangeRequest);
+gen_set_header!(DeleteRequest);
 gen_set_header!(PutRequest);
 gen_set_header!(BatchPutRequest);
 gen_set_header!(CompareAndPutRequest);
 gen_set_header!(DeleteRangeRequest);
+gen_set_header!(MoveValueRequest);
 
 #[cfg(test)]
 mod tests {

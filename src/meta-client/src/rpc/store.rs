@@ -17,6 +17,7 @@ use api::v1::meta::{
     CompareAndPutRequest as PbCompareAndPutRequest,
     CompareAndPutResponse as PbCompareAndPutResponse, DeleteRangeRequest as PbDeleteRangeRequest,
     DeleteRangeResponse as PbDeleteRangeResponse, KeyValue as PbKeyValue,
+    MoveValueRequest as PbMoveValueRequest, MoveValueResponse as PbMoveValueResponse,
     PutRequest as PbPutRequest, PutResponse as PbPutResponse, RangeRequest as PbRangeRequest,
     RangeResponse as PbRangeResponse,
 };
@@ -511,6 +512,7 @@ impl DeleteRangeResponse {
         self.0.header.take().map(ResponseHeader::new)
     }
 
+    #[inline]
     pub fn deleted(&self) -> i64 {
         self.0.deleted
     }
@@ -521,6 +523,65 @@ impl DeleteRangeResponse {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct MoveValueRequest {
+    /// If from_key dose not exist, return the value of to_key (if it exists).
+    /// If from_key exists, move the value of from_key to to_key (i.e. rename),
+    /// and return the value.
+    pub from_key: Vec<u8>,
+    pub to_key: Vec<u8>,
+}
+
+impl From<MoveValueRequest> for PbMoveValueRequest {
+    fn from(req: MoveValueRequest) -> Self {
+        Self {
+            header: None,
+            from_key: req.from_key,
+            to_key: req.to_key,
+        }
+    }
+}
+
+impl MoveValueRequest {
+    #[inline]
+    pub fn new(from_key: impl Into<Vec<u8>>, to_key: impl Into<Vec<u8>>) -> Self {
+        Self {
+            from_key: from_key.into(),
+            to_key: to_key.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MoveValueResponse(PbMoveValueResponse);
+
+impl TryFrom<PbMoveValueResponse> for MoveValueResponse {
+    type Error = error::Error;
+
+    fn try_from(pb: PbMoveValueResponse) -> Result<Self> {
+        util::check_response_header(pb.header.as_ref())?;
+
+        Ok(Self::new(pb))
+    }
+}
+
+impl MoveValueResponse {
+    #[inline]
+    pub fn new(res: PbMoveValueResponse) -> Self {
+        Self(res)
+    }
+
+    #[inline]
+    pub fn take_header(&mut self) -> Option<ResponseHeader> {
+        self.0.header.take().map(ResponseHeader::new)
+    }
+
+    #[inline]
+    pub fn take_kv(&mut self) -> Option<KeyValue> {
+        self.0.kv.take().map(KeyValue::new)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use api::v1::meta::{
@@ -528,8 +589,10 @@ mod tests {
         CompareAndPutRequest as PbCompareAndPutRequest,
         CompareAndPutResponse as PbCompareAndPutResponse,
         DeleteRangeRequest as PbDeleteRangeRequest, DeleteRangeResponse as PbDeleteRangeResponse,
-        KeyValue as PbKeyValue, PutRequest as PbPutRequest, PutResponse as PbPutResponse,
-        RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse,
+        KeyValue as PbKeyValue, MoveValueRequest as PbMoveValueRequest,
+        MoveValueResponse as PbMoveValueResponse, PutRequest as PbPutRequest,
+        PutResponse as PbPutResponse, RangeRequest as PbRangeRequest,
+        RangeResponse as PbRangeResponse,
     };
 
     use super::*;
@@ -774,5 +837,36 @@ mod tests {
         assert_eq!(b"k2".to_vec(), kv1.take_key());
         assert_eq!(b"v2".to_vec(), kv1.value().to_vec());
         assert_eq!(b"v2".to_vec(), kv1.take_value());
+    }
+
+    #[test]
+    fn test_move_value_request_trans() {
+        let (from_key, to_key) = (b"test_key1".to_vec(), b"test_key2".to_vec());
+
+        let req = MoveValueRequest::new(from_key.clone(), to_key.clone());
+
+        let into_req: PbMoveValueRequest = req.into();
+        assert!(into_req.header.is_none());
+        assert_eq!(from_key, into_req.from_key);
+        assert_eq!(to_key, into_req.to_key);
+    }
+
+    #[test]
+    fn test_move_value_response_trans() {
+        let pb_res = PbMoveValueResponse {
+            header: None,
+            kv: Some(PbKeyValue {
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+            }),
+        };
+
+        let mut res = MoveValueResponse::new(pb_res);
+        assert!(res.take_header().is_none());
+        let mut kv = res.take_kv().unwrap();
+        assert_eq!(b"k1".to_vec(), kv.key().to_vec());
+        assert_eq!(b"k1".to_vec(), kv.take_key());
+        assert_eq!(b"v1".to_vec(), kv.value().to_vec());
+        assert_eq!(b"v1".to_vec(), kv.take_value());
     }
 }
