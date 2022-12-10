@@ -579,10 +579,11 @@ impl SqlQueryHandler for Instance {
 
         // TODO(sunng87): this is temporary solution to get sql query string for
         // each statement.
-        // Currently we use sql query string for grpc select calls between
+        //
+        // Currently we use sql query string for some sql calls between
         // frontend and datanode in standalone mode, so here we have to extract
-        // it. This is to be REMOVED when frontend-datanode calls refactored,
-        // which is expected soon, very soon.
+        // it. This is to be REMOVED when frontend-datanode calls refactored to
+        // use statement for standalone and logic plans for distributed
         //
         // There is a chance that this parser returns error for our customized
         // sql. We will ignore the error temporarily.

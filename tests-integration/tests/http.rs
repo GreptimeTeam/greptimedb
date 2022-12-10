@@ -59,8 +59,7 @@ macro_rules! http_tests {
 
 pub async fn test_sql_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    // TODO(sunng87): make this test through frontend
-    let (app, mut guard) = setup_test_app(store_type, "sql_api").await;
+    let (app, mut guard) = setup_test_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app);
     let res = client.get("/v1/sql").send().await;
     assert_eq!(res.status(), StatusCode::OK);
