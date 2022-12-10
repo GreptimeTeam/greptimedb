@@ -11,6 +11,10 @@ build: ## Build debug version greptime.
 release:  ## Build release version greptime.
 	cargo build --release
 
+.PHONY: clean
+clean: ## Clean the project.
+	cargo clean
+
 .PHONY: fmt
 fmt: ## Format all the Rust code.
 	cargo fmt --all
@@ -20,6 +24,10 @@ docker-image: ## Build Docker image.
 	docker build --network host -f docker/Dockerfile -t ${IMAGE_REGISTRY}:${IMAGE_TAG} .
 
 ##@ Test
+
+.PHONY: unit-test
+unit-test: ## Run unit test.
+	cargo test --workspace
 
 .PHONY: integration-test
 integration-test: ## Run integation test.
