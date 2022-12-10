@@ -33,23 +33,12 @@ use crate::metric;
 use crate::sql::SqlRequest;
 
 impl Instance {
-    pub async fn execute_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Vec<Output>> {
-        let stmts = self
+    pub async fn execute_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
+        let stmt = self
             .query_engine
             .sql_to_statement(sql)
             .context(ExecuteSqlSnafu)?;
 
-        let mut results = Vec::with_capacity(stmts.len());
-
-        for stmt in stmts {
-            let output = self.execute_stmt(stmt, query_ctx.clone()).await?;
-            results.push(output);
-        }
-
-        Ok(results)
-    }
-
-    async fn execute_stmt(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {
                 let logical_plan = self
@@ -206,8 +195,10 @@ impl SqlQueryHandler for Instance {
         query_ctx: QueryContextRef,
     ) -> servers::error::Result<Vec<Output>> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
+        // we assume sql string has only 1 statement in datanode
         self.execute_sql(query, query_ctx)
             .await
+            .map(|output| vec![output])
             .map_err(|e| {
                 error!(e; "Instance failed to execute sql");
                 BoxedError::new(e)

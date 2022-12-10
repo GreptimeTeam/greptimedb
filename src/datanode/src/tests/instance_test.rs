@@ -605,9 +605,5 @@ async fn execute_sql(instance: &Instance, sql: &str) -> Output {
 
 async fn execute_sql_in_db(instance: &Instance, sql: &str, db: &str) -> Output {
     let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
-    instance
-        .execute_sql(sql, query_ctx)
-        .await
-        .unwrap()
-        .remove(0)
+    instance.execute_sql(sql, query_ctx).await.unwrap()
 }

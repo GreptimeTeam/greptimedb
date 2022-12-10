@@ -250,7 +250,7 @@ mod tests {
         let query_engine = factory.query_engine();
         let sql_handler = SqlHandler::new(table_engine, catalog_list.clone(), query_engine.clone());
 
-        let stmt = match query_engine.sql_to_statement(sql).unwrap().remove(0) {
+        let stmt = match query_engine.sql_to_statement(sql).unwrap() {
             Statement::Insert(i) => i,
             _ => {
                 unreachable!()
