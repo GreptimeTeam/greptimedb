@@ -32,7 +32,9 @@ use snafu::ResultExt;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
-use crate::error::{self, Result};
+use crate::error::{
+    self, NewRecordBatchSnafu, ReadParquetSnafu, Result, WriteObjectSnafu, WriteParquetSnafu,
+};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
@@ -86,10 +88,10 @@ impl<'a> ParquetWriter<'a> {
             .build();
 
         let mut buf = vec![];
-        let mut arrow_writer =
-            ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props)).unwrap();
+        let mut arrow_writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props))
+            .context(WriteParquetSnafu)?;
         for batch in self.iter {
-            let batch = batch.unwrap();
+            let batch = batch?;
             let arrow_batch = RecordBatch::try_new(
                 schema.clone(),
                 batch
@@ -98,12 +100,15 @@ impl<'a> ParquetWriter<'a> {
                     .map(|v| v.to_arrow_array())
                     .collect::<Vec<_>>(),
             )
-            .unwrap();
-            arrow_writer.write(&arrow_batch).unwrap();
+            .context(NewRecordBatchSnafu)?;
+            arrow_writer
+                .write(&arrow_batch)
+                .context(WriteParquetSnafu)?;
         }
-        arrow_writer.close().unwrap();
-        object.write(buf).await.unwrap();
-
+        arrow_writer.close().context(WriteParquetSnafu)?;
+        object.write(buf).await.context(WriteObjectSnafu {
+            path: object.path(),
+        })?;
         Ok(())
     }
 }
@@ -136,7 +141,9 @@ impl<'a> ParquetReader<'a> {
         let buf_reader = BufReader::new(reader);
         let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
             .await
-            .unwrap();
+            .context(ReadParquetSnafu {
+                file: self.file_path,
+            })?;
         let arrow_schema = builder.schema().clone();
 
         let store_schema = Arc::new(StoreSchema::try_from(arrow_schema).context(
@@ -163,13 +170,16 @@ impl<'a> ParquetReader<'a> {
         let mut masked_stream = builder
             .with_projection(projection)
             .build()
-            .unwrap()
+            .context(ReadParquetSnafu {
+                file: self.file_path,
+            })?
             .zip(futures_util::stream::iter(pruned_row_groups.into_iter()));
 
+        let file_name = self.file_path.to_string();
         let chunk_stream = try_stream!({
             while let Some((record_batch, valid)) = masked_stream.next().await {
                 if valid {
-                    yield record_batch.unwrap()
+                    yield record_batch.context(ReadParquetSnafu { file: &file_name })?
                 }
             }
         });
@@ -206,7 +216,6 @@ impl BatchReader for ChunkStream {
 mod tests {
     use std::sync::Arc;
 
-    use common_telemetry::info;
     use datatypes::arrow::array::{Array, ArrayRef, UInt64Array, UInt8Array};
     use datatypes::prelude::Vector;
     use datatypes::vectors::TimestampMillisecondVector;
@@ -378,10 +387,15 @@ mod tests {
         );
 
         let mut stream = reader.chunk_stream().await.unwrap();
-        while let Some(r) = stream.next_batch().await.transpose() {
-            info!("r: {}", r.is_ok());
-            let batch = r.unwrap();
-            println!("batch: {:?}", batch);
-        }
+        assert_eq!(
+            6,
+            stream
+                .next_batch()
+                .await
+                .transpose()
+                .unwrap()
+                .unwrap()
+                .num_rows()
+        );
     }
 }

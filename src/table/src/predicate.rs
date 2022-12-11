@@ -136,8 +136,8 @@ mod tests {
         .await
         .unwrap();
         let metadata = builder.metadata().clone();
-        let row_groups = metadata.row_groups().clone();
-        let res = predicate.prune_row_groups(schema, &row_groups);
+        let row_groups = metadata.row_groups();
+        let res = predicate.prune_row_groups(schema, row_groups);
         assert_eq!(expect, res);
     }
 

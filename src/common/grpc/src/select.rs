@@ -345,21 +345,21 @@ mod tests {
     fn test_null_mask() {
         let a1: VectorRef = Arc::new(Int32Vector::from(vec![None, Some(2), None]));
         let a2: VectorRef = Arc::new(Int32Vector::from(vec![Some(1), Some(2), None, Some(4)]));
-        let mask = null_mask(&vec![a1, a2], 3 + 4);
+        let mask = null_mask(&[a1, a2], 3 + 4);
         assert_eq!(vec![0b0010_0101], mask);
 
         let empty: VectorRef = Arc::new(Int32Vector::from(vec![None, None, None]));
-        let mask = null_mask(&vec![empty.clone(), empty.clone(), empty], 9);
+        let mask = null_mask(&[empty.clone(), empty.clone(), empty], 9);
         assert_eq!(vec![0b1111_1111, 0b0000_0001], mask);
 
         let a1: VectorRef = Arc::new(Int32Vector::from(vec![Some(1), Some(2), Some(3)]));
         let a2: VectorRef = Arc::new(Int32Vector::from(vec![Some(4), Some(5), Some(6)]));
-        let mask = null_mask(&vec![a1, a2], 3 + 3);
+        let mask = null_mask(&[a1, a2], 3 + 3);
         assert_eq!(Vec::<u8>::default(), mask);
 
         let a1: VectorRef = Arc::new(Int32Vector::from(vec![Some(1), Some(2), Some(3)]));
         let a2: VectorRef = Arc::new(Int32Vector::from(vec![Some(4), Some(5), None]));
-        let mask = null_mask(&vec![a1, a2], 3 + 3);
+        let mask = null_mask(&[a1, a2], 3 + 3);
         assert_eq!(vec![0b0010_0000], mask);
     }
 

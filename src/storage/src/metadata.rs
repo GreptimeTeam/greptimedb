@@ -186,7 +186,7 @@ pub type VersionNumber = u32;
 // TODO(yingwen): We may need to hold a list of history schema.
 
 /// In memory metadata of region.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegionMetadata {
     // The following fields are immutable.
     id: RegionId,
@@ -376,7 +376,7 @@ const METADATA_CF_ID_KEY: &str = "greptime:storage:cf_id";
 const METADATA_COLUMN_ID_KEY: &str = "greptime:storage:column_id";
 const METADATA_COMMENT_KEY: &str = "greptime:storage:comment";
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnMetadata {
     pub cf_id: ColumnFamilyId,
     pub desc: ColumnDescriptor,
@@ -458,7 +458,7 @@ where
     default_value.context(MetaNotFoundSnafu { key })
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnsMetadata {
     /// All columns.
     ///

@@ -14,9 +14,6 @@
 
 //! Utilities for resolving schema compatibility problems.
 
-use std::sync::Arc;
-
-use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::Field;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SchemaRef;
@@ -324,6 +321,8 @@ impl ReadAdapter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use store_api::storage::{consts, ColumnDescriptorBuilder};

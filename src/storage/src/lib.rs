@@ -37,10 +37,4 @@ mod version;
 mod wal;
 pub mod write_batch;
 
-use datatypes::arrow::array::Array;
 pub use engine::EngineImpl;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ArrowChunk<A: AsRef<dyn Array>> {
-    arrays: Vec<A>,
-}

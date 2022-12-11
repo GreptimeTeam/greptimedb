@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_error::prelude::*;
-use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{Schema, SchemaBuilder, SchemaRef};
@@ -32,7 +31,7 @@ const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
 ///
 /// Used internally, contains all row key columns, internal columns and a sub set of
 /// value columns in a region. The columns are organized in `key, value, internal` order.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct StoreSchema {
     columns: Vec<ColumnMetadata>,
     schema: SchemaRef,
@@ -239,8 +238,6 @@ fn parse_index_from_metadata(metadata: &HashMap<String, String>, key: &str) -> R
 
 #[cfg(test)]
 mod tests {
-    use datatypes::arrow::array::Array;
-
     use super::*;
     use crate::read::Batch;
     use crate::schema::tests;

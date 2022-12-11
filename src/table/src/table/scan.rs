@@ -75,7 +75,7 @@ impl PhysicalPlan for SimpleTableScan {
         _context: Arc<TaskContext>,
     ) -> QueryResult<SendableRecordBatchStream> {
         let mut stream = self.stream.lock().unwrap();
-        Ok(stream.take().context(query_error::ExecuteRepeatedlySnafu)?)
+        stream.take().context(query_error::ExecuteRepeatedlySnafu)
     }
 }
 

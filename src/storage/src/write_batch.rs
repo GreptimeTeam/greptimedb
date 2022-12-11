@@ -527,7 +527,6 @@ pub mod codec {
         MissingColumnSnafu, Mutation, ParseSchemaSnafu, PutData, Result, StreamWaitingSnafu,
         ToProtobufSnafu, WriteBatch,
     };
-    use crate::ArrowChunk;
 
     // TODO(jiachun): We can make a comparison with protobuf, including performance, storage cost,
     // CPU consumption, etc
@@ -600,7 +599,7 @@ pub mod codec {
             let arrow_schema = reader.schema();
             let mut chunks = Vec::with_capacity(self.mutation_types.len());
 
-            while let Some(maybe_record_batch) = reader.next() {
+            for maybe_record_batch in reader.by_ref() {
                 let record_batch = maybe_record_batch.context(DecodeArrowSnafu)?;
                 chunks.push(record_batch);
             }

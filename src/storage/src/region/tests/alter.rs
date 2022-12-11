@@ -15,8 +15,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use common_time::Timestamp;
 use datatypes::prelude::*;
+use datatypes::timestamp::TimestampMillisecond;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
 use log_store::fs::log::LocalFileLogStore;
 use store_api::storage::{
@@ -53,7 +53,7 @@ struct AlterTester {
 #[derive(Debug, Clone, PartialEq)]
 struct DataRow {
     key: Option<i64>,
-    ts: Timestamp,
+    ts: TimestampMillisecond,
     v0: Option<i64>,
     v1: Option<i64>,
 }
@@ -74,7 +74,7 @@ fn new_put_data(data: &[DataRow]) -> PutData {
     let keys = Int64Vector::from(data.iter().map(|v| v.key).collect::<Vec<_>>());
     let timestamps = TimestampMillisecondVector::from(
         data.iter()
-            .map(|v| v.key.map(|v| v.into()))
+            .map(|v| Some(v.ts.into_native()))
             .collect::<Vec<_>>(),
     );
     let values1 = Int64Vector::from(data.iter().map(|kv| kv.v0).collect::<Vec<_>>());

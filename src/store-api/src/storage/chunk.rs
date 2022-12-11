@@ -19,6 +19,7 @@ use datatypes::vectors::VectorRef;
 use crate::storage::SchemaRef;
 
 /// A bunch of rows in columnar format.
+#[derive(Debug)]
 pub struct Chunk {
     pub columns: Vec<VectorRef>,
     // TODO(yingwen): Sequences.

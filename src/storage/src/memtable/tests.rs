@@ -16,7 +16,7 @@ use datatypes::prelude::*;
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{
-    TimestampMicrosecondVector, TimestampMillisecondVectorBuilder, UInt64Vector,
+    TimestampMillisecondVector, TimestampMillisecondVectorBuilder, UInt64Vector,
     UInt64VectorBuilder, UInt8Vector,
 };
 
@@ -242,7 +242,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
     );
 
     // 9 key value pairs (6 + 3).
-    assert_eq!(288, ctx.memtable.bytes_allocated());
+    assert_eq!(704, ctx.memtable.bytes_allocated());
 
     let batch_sizes = [1, 4, 8, consts::READ_BATCH_SIZE];
     for batch_size in batch_sizes {
@@ -579,7 +579,7 @@ fn test_memtable_projection() {
         assert!(iter.next().is_none());
 
         assert_eq!(5, batch.num_columns());
-        let k0 = Arc::new(TimestampMicrosecondVector::from(vec![
+        let k0 = Arc::new(TimestampMillisecondVector::from(vec![
             Some(1000),
             Some(1001),
             Some(1002),

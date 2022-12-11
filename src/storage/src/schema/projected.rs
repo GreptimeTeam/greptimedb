@@ -161,11 +161,9 @@ impl ProjectedSchema {
 
     #[inline]
     pub fn projection(&self) -> Option<&Vec<usize>> {
-        self.projection.as_ref().map(|p| {
-            &p.projected_columns
-        })
+        self.projection.as_ref().map(|p| &p.projected_columns)
     }
-    
+
     #[inline]
     pub fn schema_to_read(&self) -> &StoreSchemaRef {
         &self.schema_to_read
@@ -193,7 +191,6 @@ impl ProjectedSchema {
                     .collect()
             }
         };
-
         Chunk::new(columns)
     }
 

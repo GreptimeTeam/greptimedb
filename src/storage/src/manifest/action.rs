@@ -30,7 +30,7 @@ use crate::metadata::{ColumnFamilyMetadata, ColumnMetadata, VersionNumber};
 use crate::sst::FileMeta;
 
 /// Minimal data that could be used to persist and recover [RegionMetadata](crate::metadata::RegionMetadata).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RawRegionMetadata {
     pub id: RegionId,
     pub name: String,
@@ -40,7 +40,7 @@ pub struct RawRegionMetadata {
 }
 
 /// Minimal data that could be used to persist and recover [ColumnsMetadata](crate::metadata::ColumnsMetadata).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawColumnsMetadata {
     pub columns: Vec<ColumnMetadata>,
     pub row_key_end: usize,
@@ -55,7 +55,7 @@ pub struct RawColumnFamiliesMetadata {
     pub column_families: Vec<ColumnFamilyMetadata>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionChange {
     /// The committed sequence of the region when this change happens. So the
     /// data with sequence **greater than** this sequence would use the new
@@ -78,7 +78,7 @@ pub struct RegionEdit {
     pub files_to_remove: Vec<FileMeta>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum RegionMetaAction {
     Protocol(ProtocolAction),
     Change(RegionChange),
@@ -86,7 +86,7 @@ pub enum RegionMetaAction {
     Edit(RegionEdit),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionMetaActionList {
     pub actions: Vec<RegionMetaAction>,
     pub prev_version: ManifestVersion,
