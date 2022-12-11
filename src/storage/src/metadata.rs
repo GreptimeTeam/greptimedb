@@ -657,7 +657,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
 }
 
 #[derive(Default)]
-struct ColumnsMetadataBuilder {
+pub struct ColumnsMetadataBuilder {
     columns: Vec<ColumnMetadata>,
     name_to_col_index: HashMap<String, usize>,
     /// Column id set, used to validate column id uniqueness.
@@ -670,7 +670,7 @@ struct ColumnsMetadataBuilder {
 }
 
 impl ColumnsMetadataBuilder {
-    fn row_key(&mut self, key: RowKeyDescriptor) -> Result<&mut Self> {
+    pub fn row_key(&mut self, key: RowKeyDescriptor) -> Result<&mut Self> {
         for col in key.columns {
             self.push_row_key_column(col)?;
         }
@@ -691,11 +691,11 @@ impl ColumnsMetadataBuilder {
         Ok(self)
     }
 
-    fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<&mut Self> {
+    pub fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<&mut Self> {
         self.push_value_column(consts::KEY_CF_ID, desc)
     }
 
-    fn push_value_column(
+    pub fn push_value_column(
         &mut self,
         cf_id: ColumnFamilyId,
         desc: ColumnDescriptor,
@@ -708,7 +708,7 @@ impl ColumnsMetadataBuilder {
         self.push_new_column(cf_id, desc)
     }
 
-    fn push_new_column(
+    pub fn push_new_column(
         &mut self,
         cf_id: ColumnFamilyId,
         desc: ColumnDescriptor,
@@ -734,7 +734,7 @@ impl ColumnsMetadataBuilder {
         Ok(self)
     }
 
-    fn build(mut self) -> Result<ColumnsMetadata> {
+    pub fn build(mut self) -> Result<ColumnsMetadata> {
         let timestamp_key_index = self.timestamp_key_index.context(MissingTimestampSnafu)?;
 
         let user_column_end = self.columns.len();

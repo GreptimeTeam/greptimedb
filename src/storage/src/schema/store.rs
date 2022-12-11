@@ -18,12 +18,12 @@ use std::sync::Arc;
 use common_error::prelude::*;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{Schema, SchemaBuilder, SchemaRef};
 use store_api::storage::consts;
 
 use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, Error, Result};
 use crate::read::Batch;
-use crate::ArrowChunk;
 
 const ROW_KEY_END_KEY: &str = "greptime:storage:row_key_end";
 const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
@@ -58,10 +58,13 @@ impl StoreSchema {
         self.schema.arrow_schema()
     }
 
-    pub fn batch_to_arrow_chunk(&self, batch: &Batch) -> ArrowChunk<Arc<dyn Array>> {
+    pub fn batch_to_arrow_record_batch(&self, batch: &Batch) -> RecordBatch {
         assert_eq!(self.schema.num_columns(), batch.num_columns());
-
-        ArrowChunk::new(batch.columns().iter().map(|v| v.to_arrow_array()).collect())
+        RecordBatch::try_new(
+            self.schema.arrow_schema().clone(),
+            batch.columns().iter().map(|v| v.to_arrow_array()).collect(),
+        )
+        .unwrap()
     }
 
     pub(crate) fn contains_column(&self, name: &str) -> bool {
@@ -243,12 +246,12 @@ mod tests {
     use crate::schema::tests;
     use crate::test_util::schema_util;
 
-    fn check_chunk_batch(chunk: &ArrowChunk<Arc<dyn Array>>, batch: &Batch) {
-        assert_eq!(5, chunk.columns().len());
-        assert_eq!(3, chunk.len());
+    fn check_chunk_batch(record_batch: &RecordBatch, batch: &Batch) {
+        assert_eq!(5, record_batch.num_columns());
+        assert_eq!(3, record_batch.num_rows());
 
         for i in 0..5 {
-            assert_eq!(&chunk[i], &batch.column(i).to_arrow_array());
+            assert_eq!(record_batch.column(i), &batch.column(i).to_arrow_array());
         }
     }
 
@@ -288,7 +291,7 @@ mod tests {
         // Test batch and chunk conversion.
         let batch = tests::new_batch();
         // Convert batch to chunk.
-        let chunk = store_schema.batch_to_arrow_chunk(&batch);
+        let chunk = store_schema.batch_to_arrow_record_batch(&batch);
         check_chunk_batch(&chunk, &batch);
     }
 }

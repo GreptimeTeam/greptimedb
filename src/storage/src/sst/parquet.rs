@@ -22,7 +22,6 @@ use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::vectors::Helper;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use parquet::arrow::{ArrowWriter, ParquetRecordBatchStreamBuilder, ProjectionMask};
@@ -131,7 +130,7 @@ impl<'a> ParquetReader<'a> {
         }
     }
 
-    pub async fn chunk_stream(&self, chunk_size: usize) -> Result<ChunkStream> {
+    pub async fn chunk_stream(&self) -> Result<ChunkStream> {
         let operator = self.object_store.clone();
         let reader = operator.object(self.file_path).seekable_reader(..).compat();
         let buf_reader = BufReader::new(reader);
@@ -170,13 +169,7 @@ impl<'a> ParquetReader<'a> {
         let chunk_stream = try_stream!({
             while let Some((record_batch, valid)) = masked_stream.next().await {
                 if valid {
-                    let record_batch = record_batch.unwrap();
-                    let vectors = record_batch
-                        .columns()
-                        .iter()
-                        .map(|col| Helper::try_into_vector(col.clone()).unwrap())
-                        .collect::<Vec<_>>();
-                    yield Batch::new(vectors)
+                    yield record_batch.unwrap()
                 }
             }
         });
@@ -185,7 +178,7 @@ impl<'a> ParquetReader<'a> {
     }
 }
 
-pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Batch>> + Send>>;
+pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>;
 
 pub struct ChunkStream {
     adapter: ReadAdapter,
@@ -201,15 +194,19 @@ impl ChunkStream {
 #[async_trait]
 impl BatchReader for ChunkStream {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        self.stream.try_next().await
+        self.stream
+            .try_next()
+            .await?
+            .map(|rb| self.adapter.arrow_record_batch_to_batch(&rb))
+            .transpose()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::Arc;
 
+    use common_telemetry::info;
     use datatypes::arrow::array::{Array, ArrayRef, UInt64Array, UInt8Array};
     use datatypes::prelude::Vector;
     use datatypes::vectors::TimestampMillisecondVector;
@@ -221,6 +218,7 @@ mod tests {
     use crate::memtable::{
         tests as memtable_tests, DefaultMemtableBuilder, IterContext, MemtableBuilder,
     };
+    use crate::schema::ProjectedSchema;
 
     #[tokio::test]
     async fn test_parquet_writer() {
@@ -263,15 +261,6 @@ mod tests {
             .unwrap();
 
         // verify parquet file
-
-        let mut path_buf = PathBuf::from(path);
-        path_buf.push(sst_file_name);
-        let file = tokio::fs::OpenOptions::new()
-            .read(true)
-            .open(path_buf)
-            .await
-            .unwrap();
-
         let reader = BufReader::new(
             object_store
                 .object(sst_file_name)
@@ -330,5 +319,69 @@ mod tests {
             &(Arc::new(UInt8Array::from(vec![0, 0, 0, 0, 0, 0])) as Arc<dyn Array>),
             chunk.column(5)
         );
+    }
+
+    #[tokio::test]
+    async fn test_parquet_reader() {
+        common_telemetry::init_default_ut_logging();
+        let schema = memtable_tests::schema_for_test();
+        let memtable = DefaultMemtableBuilder::default().build(schema.clone());
+
+        memtable_tests::write_kvs(
+            &*memtable,
+            10, // sequence
+            OpType::Put,
+            &[
+                (1000, 1),
+                (1000, 2),
+                (2002, 1),
+                (2003, 1),
+                (2003, 5),
+                (1001, 1),
+            ], // keys
+            &[
+                (Some(1), Some(1234)),
+                (Some(2), Some(1234)),
+                (Some(7), Some(1234)),
+                (Some(8), Some(1234)),
+                (Some(9), Some(1234)),
+                (Some(3), Some(1234)),
+            ], // values
+        );
+
+        let dir = TempDir::new("write_parquet").unwrap();
+        let path = dir.path().to_str().unwrap();
+        let backend = Builder::default().root(path).build().unwrap();
+        let object_store = ObjectStore::new(backend);
+        let sst_file_name = "test-read.parquet";
+        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
+
+        writer
+            .write_sst(&sst::WriteOptions::default())
+            .await
+            .unwrap();
+
+        let operator = ObjectStore::new(
+            object_store::backend::fs::Builder::default()
+                .root(dir.path().to_str().unwrap())
+                .build()
+                .unwrap(),
+        );
+
+        let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
+        let reader = ParquetReader::new(
+            "test-read.parquet",
+            operator,
+            projected_schema,
+            Predicate::empty(),
+        );
+
+        let mut stream = reader.chunk_stream().await.unwrap();
+        while let Some(r) = stream.next_batch().await.transpose() {
+            info!("r: {}", r.is_ok());
+            let batch = r.unwrap();
+            println!("batch: {:?}", batch);
+        }
     }
 }
