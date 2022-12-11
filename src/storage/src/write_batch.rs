@@ -509,6 +509,9 @@ pub mod codec {
     use std::io::Cursor;
     use std::sync::Arc;
 
+    use datatypes::arrow::ipc::reader::StreamReader;
+    use datatypes::arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+    use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::schema::{Schema, SchemaRef};
     use datatypes::vectors::Helper;
     use prost::Message;
@@ -542,38 +545,36 @@ pub mod codec {
         type Error = WriteBatchError;
 
         fn encode(&self, item: &WriteBatch, dst: &mut Vec<u8>) -> Result<()> {
-            // let item_schema = item.schema();
-            // let arrow_schema = item_schema.arrow_schema();
-            //
-            // let opts = WriteOptions { compression: None };
-            // let mut writer = StreamWriter::new(dst, opts);
-            // writer.start(arrow_schema, None).context(EncodeArrowSnafu)?;
-            //
-            // for mutation in item.iter() {
-            //     let chunk = match mutation {
-            //         Mutation::Put(put) => {
-            //             let arrays = item_schema
-            //                 .column_schemas()
-            //                 .iter()
-            //                 .map(|column_schema| {
-            //                     let vector = put.column_by_name(&column_schema.name).context(
-            //                         MissingColumnSnafu {
-            //                             name: &column_schema.name,
-            //                         },
-            //                     )?;
-            //                     Ok(vector.to_arrow_array())
-            //                 })
-            //                 .collect::<Result<Vec<_>>>()?;
-            //
-            //             ArrowChunk::try_new(arrays).context(EncodeArrowSnafu)?
-            //         }
-            //     };
-            //
-            //     writer.write(&chunk, None).context(EncodeArrowSnafu)?;
-            // }
-            //
-            // writer.finish().context(EncodeArrowSnafu)?;
+            let item_schema = item.schema();
+            let arrow_schema = item_schema.arrow_schema();
 
+            let opts = IpcWriteOptions::default();
+            let mut writer = StreamWriter::try_new_with_options(dst, arrow_schema, opts)
+                .context(EncodeArrowSnafu)?;
+
+            for mutation in item.iter() {
+                let rb = match mutation {
+                    Mutation::Put(put) => {
+                        let arrays = item_schema
+                            .column_schemas()
+                            .iter()
+                            .map(|column_schema| {
+                                let vector = put.column_by_name(&column_schema.name).context(
+                                    MissingColumnSnafu {
+                                        name: &column_schema.name,
+                                    },
+                                )?;
+                                Ok(vector.to_arrow_array())
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+
+                        RecordBatch::try_new(arrow_schema.clone(), arrays)
+                            .context(EncodeArrowSnafu)?
+                    }
+                };
+                writer.write(&rb).context(EncodeArrowSnafu)?;
+            }
+            writer.finish().context(EncodeArrowSnafu)?;
             Ok(())
         }
     }
@@ -593,70 +594,67 @@ pub mod codec {
         type Error = WriteBatchError;
 
         fn decode(&self, src: &[u8]) -> Result<WriteBatch> {
-            // let mut reader = Cursor::new(src);
+            let mut reader = Cursor::new(src);
             // let metadata = read::read_stream_metadata(&mut reader).context(DecodeArrowSnafu)?;
-            // let mut reader = StreamReader::new(reader, metadata);
-            // let arrow_schema = reader.metadata().schema.clone();
-            //
-            // let mut chunks = Vec::with_capacity(self.mutation_types.len());
-            // for stream_state in reader.by_ref() {
-            //     let stream_state = stream_state.context(DecodeArrowSnafu)?;
-            //     let chunk = match stream_state {
-            //         StreamState::Some(chunk) => chunk,
-            //         StreamState::Waiting => return StreamWaitingSnafu {}.fail(),
-            //     };
-            //
-            //     chunks.push(chunk);
-            // }
-            //
-            // // check if exactly finished
-            // ensure!(
-            //     reader.is_finished(),
-            //     DataCorruptedSnafu {
-            //         message: "Impossible, the num of data chunks is different than expected."
-            //     }
-            // );
-            //
-            // ensure!(
-            //     chunks.len() == self.mutation_types.len(),
-            //     DataCorruptedSnafu {
-            //         message: format!(
-            //             "expected {} mutations, but got {}",
-            //             self.mutation_types.len(),
-            //             chunks.len()
-            //         )
-            //     }
-            // );
-            //
-            // let schema = Arc::new(Schema::try_from(arrow_schema).context(ParseSchemaSnafu)?);
-            // let mut write_batch = WriteBatch::new(schema.clone());
-            //
-            // for (mutation_type, chunk) in self.mutation_types.iter().zip(chunks.into_iter()) {
-            //     match MutationType::from_i32(*mutation_type) {
-            //         Some(MutationType::Put) => {
-            //             let mut put_data = PutData::with_num_columns(schema.num_columns());
-            //             for (column_schema, array) in
-            //                 schema.column_schemas().iter().zip(chunk.arrays().iter())
-            //             {
-            //                 let vector =
-            //                     Helper::try_into_vector(array).context(DecodeVectorSnafu)?;
-            //                 put_data.add_column_by_name(&column_schema.name, vector)?;
-            //             }
-            //
-            //             write_batch.put(put_data)?;
-            //         }
-            //         Some(MutationType::Delete) => {
-            //             unimplemented!("delete mutation is not implemented")
-            //         }
-            //         _ => {
-            //             return DataCorruptedSnafu {
-            //                 message: format!("Unexpceted mutation type: {}", mutation_type),
-            //             }
-            //             .fail()
-            //         }
-            //     }
-            // }
-            let write_batch = todo!();
+            let mut reader = StreamReader::try_new(reader, None).context(DecodeArrowSnafu)?;
+            let arrow_schema = reader.schema();
+            let mut chunks = Vec::with_capacity(self.mutation_types.len());
+
+            while let Some(maybe_record_batch) = reader.next() {
+                let record_batch = maybe_record_batch.context(DecodeArrowSnafu)?;
+                chunks.push(record_batch);
+            }
+
+            // check if exactly finished
+            ensure!(
+                reader.is_finished(),
+                DataCorruptedSnafu {
+                    message: "Impossible, the num of data chunks is different than expected."
+                }
+            );
+
+            ensure!(
+                chunks.len() == self.mutation_types.len(),
+                DataCorruptedSnafu {
+                    message: format!(
+                        "expected {} mutations, but got {}",
+                        self.mutation_types.len(),
+                        chunks.len()
+                    )
+                }
+            );
+
+            let schema = Arc::new(Schema::try_from(arrow_schema).context(ParseSchemaSnafu)?);
+            let mut write_batch = WriteBatch::new(schema.clone());
+
+            for (mutation_type, record_batch) in self.mutation_types.iter().zip(chunks.into_iter())
+            {
+                match MutationType::from_i32(*mutation_type) {
+                    Some(MutationType::Put) => {
+                        let mut put_data = PutData::with_num_columns(schema.num_columns());
+                        for (column_schema, array) in schema
+                            .column_schemas()
+                            .iter()
+                            .zip(record_batch.columns().iter())
+                        {
+                            let vector =
+                                Helper::try_into_vector(array).context(DecodeVectorSnafu)?;
+                            put_data.add_column_by_name(&column_schema.name, vector)?;
+                        }
+
+                        write_batch.put(put_data)?;
+                    }
+                    Some(MutationType::Delete) => {
+                        unimplemented!("delete mutation is not implemented")
+                    }
+                    _ => {
+                        return DataCorruptedSnafu {
+                            message: format!("Unexpceted mutation type: {}", mutation_type),
+                        }
+                        .fail()
+                    }
+                }
+            }
             Ok(write_batch)
         }
     }
