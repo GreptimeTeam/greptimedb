@@ -20,7 +20,7 @@ fmt: ## Format all the Rust code.
 	cargo fmt --all
 
 .PHONY: docker-image
-docker-image: ## Build Docker image.
+docker-image: ## Build docker image.
 	docker build --network host -f docker/Dockerfile -t ${IMAGE_REGISTRY}:${IMAGE_TAG} .
 
 ##@ Test
@@ -33,12 +33,16 @@ unit-test: ## Run unit test.
 integration-test: ## Run integation test.
 	cargo test integration
 
+.PHONY: sqlness-test
+sqlness-test: ## Run sqlness test.
+	cargo run --bin sqlness-runner
+
 .PHONY: check
 check: ## Cargo check all the targets.
 	cargo check --workspace --all-targets
 
 .PHONY: clippy
-clippy: ## Check Clippy rules.
+clippy: ## Check clippy rules.
 	cargo clippy --workspace --all-targets -- -D warnings -D clippy::print_stdout -D clippy::print_stderr
 
 .PHONY: fmt-check
