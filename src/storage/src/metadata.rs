@@ -691,7 +691,7 @@ impl ColumnsMetadataBuilder {
         Ok(self)
     }
 
-    pub fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<&mut Self> {
+    fn push_row_key_column(&mut self, desc: ColumnDescriptor) -> Result<&mut Self> {
         self.push_value_column(consts::KEY_CF_ID, desc)
     }
 

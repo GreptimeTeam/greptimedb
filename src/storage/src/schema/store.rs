@@ -226,7 +226,7 @@ impl TryFrom<Arc<ArrowSchema>> for StoreSchema {
 impl TryFrom<ArrowSchema> for StoreSchema {
     type Error = Error;
 
-    fn try_from(arrow_schema: ArrowSchema) -> Result<StoreSchema> {
+    fn try_from(arrow_schema: ArrowSchema) -> std::result::Result<StoreSchema, Self::Error> {
         StoreSchema::try_from(Arc::new(arrow_schema))
     }
 }

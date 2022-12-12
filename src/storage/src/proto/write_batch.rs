@@ -24,10 +24,11 @@ use datatypes::prelude::{ScalarVector, ScalarVectorBuilder};
 use datatypes::schema;
 use datatypes::types::TimestampType;
 use datatypes::vectors::{
-    BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, Float32Vector,
-    Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder,
-    Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector,
-    Int8VectorBuilder, StringVector, StringVectorBuilder, TimestampMicrosecondVector,
+    BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, DateTimeVector,
+    DateTimeVectorBuilder, DateVector, DateVectorBuilder, Float32Vector, Float32VectorBuilder,
+    Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder, Int32Vector,
+    Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector, Int8VectorBuilder,
+    StringVector, StringVectorBuilder, TimestampMicrosecondVector,
     TimestampMicrosecondVectorBuilder, TimestampMillisecondVector,
     TimestampMillisecondVectorBuilder, TimestampNanosecondVector, TimestampNanosecondVectorBuilder,
     TimestampSecondVector, TimestampSecondVectorBuilder, UInt16Vector, UInt16VectorBuilder,
@@ -253,6 +254,8 @@ gen_columns!(f64, Float64Vector, v, v);
 gen_columns!(bool, BooleanVector, v, v);
 gen_columns!(binary, BinaryVector, v, v.to_vec());
 gen_columns!(string, StringVector, v, v.to_string());
+gen_columns!(date, DateVector, v, v.val());
+gen_columns!(datetime, DateTimeVector, v, v.val());
 gen_columns!(ts_second, TimestampSecondVector, v, v.into());
 gen_columns!(ts_millisecond, TimestampMillisecondVector, v, v.into());
 gen_columns!(ts_microsecond, TimestampMicrosecondVector, v, v.into());
@@ -304,6 +307,8 @@ gen_put_data!(f64, Float64VectorBuilder, v, *v as f64);
 gen_put_data!(bool, BooleanVectorBuilder, v, *v);
 gen_put_data!(binary, BinaryVectorBuilder, v, v.as_slice());
 gen_put_data!(string, StringVectorBuilder, v, v.as_str());
+gen_put_data!(date, DateVectorBuilder, v, (*v).into());
+gen_put_data!(datetime, DateTimeVectorBuilder, v, (*v).into());
 gen_put_data!(ts_second, TimestampSecondVectorBuilder, v, (*v).into());
 gen_put_data!(
     ts_millisecond,

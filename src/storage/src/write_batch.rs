@@ -589,7 +589,6 @@ pub mod codec {
 
         fn decode(&self, src: &[u8]) -> Result<WriteBatch> {
             let reader = Cursor::new(src);
-            // let metadata = read::read_stream_metadata(&mut reader).context(DecodeArrowSnafu)?;
             let mut reader = StreamReader::try_new(reader, None).context(DecodeArrowSnafu)?;
             let arrow_schema = reader.schema();
             let mut chunks = Vec::with_capacity(self.mutation_types.len());
