@@ -55,7 +55,7 @@ mod tests {
     #[snafu(visibility(pub))]
     pub struct Error {}
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Eq, PartialEq, Hash)]
     pub struct Namespace {}
 
     impl crate::logstore::Namespace for Namespace {

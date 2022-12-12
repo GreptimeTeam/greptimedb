@@ -3309,6 +3309,7 @@ dependencies = [
  "store-api",
  "tempdir",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

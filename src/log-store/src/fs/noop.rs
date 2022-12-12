@@ -33,6 +33,14 @@ impl LogStore for NoopLogStore {
     type Entry = EntryImpl;
     type AppendResponse = AppendResponseImpl;
 
+    async fn start(&self) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
     async fn append(&self, mut _e: Self::Entry) -> Result<Self::AppendResponse> {
         Ok(AppendResponseImpl {
             entry_id: 0,
@@ -71,5 +79,15 @@ impl LogStore for NoopLogStore {
 
     fn namespace(&self, id: NamespaceId) -> Self::Namespace {
         LocalNamespace::new(id)
+    }
+
+    async fn mark_stable(
+        &self,
+        namespace: Self::Namespace,
+        id: Id,
+    ) -> std::result::Result<(), Self::Error> {
+        let _ = namespace;
+        let _ = id;
+        Ok(())
     }
 }

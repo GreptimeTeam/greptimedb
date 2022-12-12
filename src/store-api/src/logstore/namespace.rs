@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::hash::Hash;
+
 pub type Id = u64;
 
-pub trait Namespace: Send + Sync + Clone + std::fmt::Debug {
+pub trait Namespace: Send + Sync + Clone + std::fmt::Debug + Hash + Eq {
     fn id(&self) -> Id;
 }

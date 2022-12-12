@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::logging;
+use common_telemetry::{error, logging};
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
 use crate::error::{self, Result};
-use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
+use crate::flush::{FlushCallback, FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
@@ -544,6 +544,18 @@ impl WriterInner {
             return Ok(());
         }
 
+        let wal = ctx.wal.clone();
+        let flush_callback: FlushCallback = Box::new(move |res, seq| {
+            let wal = wal.clone();
+            Box::pin(async move {
+                if res {
+                    if let Err(e) = wal.mark_stable(seq).await {
+                        error!(e;"Failed to mark wal as stable");
+                    }
+                }
+            })
+        });
+
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
@@ -554,6 +566,7 @@ impl WriterInner {
             writer: ctx.writer.clone(),
             wal: ctx.wal.clone(),
             manifest: ctx.manifest.clone(),
+            flush_callbacks: vec![flush_callback],
         };
 
         let flush_handle = ctx

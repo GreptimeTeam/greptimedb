@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -25,11 +25,13 @@ use store_api::logstore::entry::{Encode, Entry, Id};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::logstore::LogStore;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{
     CreateDirSnafu, DuplicateFileSnafu, Error, FileNameIllegalSnafu, InternalSnafu, IoSnafu,
-    ReadPathSnafu, Result,
+    ReadPathSnafu, Result, StateInvalidSnafu, WaitGcTaskStopSnafu,
 };
 use crate::fs::config::LogConfig;
 use crate::fs::entry::EntryImpl;
@@ -42,9 +44,12 @@ type FileMap = BTreeMap<u64, LogFileRef>;
 
 #[derive(Debug)]
 pub struct LocalFileLogStore {
-    files: RwLock<FileMap>,
+    files: Arc<RwLock<FileMap>>,
     active: ArcSwap<LogFile>,
     config: LogConfig,
+    stable_ids: Arc<RwLock<HashMap<LocalNamespace, u64>>>,
+    cancel_token: Mutex<Option<CancellationToken>>,
+    gc_task_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl LocalFileLogStore {
@@ -101,9 +106,12 @@ impl LocalFileLogStore {
 
         let active_file_cloned = active_file.clone();
         Ok(Self {
-            files: RwLock::new(files),
+            files: Arc::new(RwLock::new(files)),
             active: ArcSwap::new(active_file_cloned),
             config: config.clone(),
+            stable_ids: Arc::new(Default::default()),
+            cancel_token: Mutex::new(None),
+            gc_task_handle: Mutex::new(None),
         })
     }
 
@@ -185,12 +193,115 @@ impl LocalFileLogStore {
     }
 }
 
+async fn gc(
+    files: Arc<RwLock<FileMap>>,
+    stables_ids: Arc<RwLock<HashMap<LocalNamespace, u64>>>,
+) -> Result<()> {
+    if let Some(lowest) = find_lowest_id(stables_ids).await {
+        gc_inner(files, lowest).await
+    } else {
+        Ok(())
+    }
+}
+
+async fn find_lowest_id(stable_ids: Arc<RwLock<HashMap<LocalNamespace, u64>>>) -> Option<u64> {
+    let mut lowest_stable = None;
+    {
+        let stable_ids = stable_ids.read().await;
+        for (ns, id) in stable_ids.iter() {
+            if *id <= *lowest_stable.get_or_insert(*id) {
+                lowest_stable = Some(*id);
+                info!("Current lowest stable id: {}, namespace: {:?}", *id, ns);
+            }
+        }
+    }
+    lowest_stable
+}
+
+async fn gc_inner(files: Arc<RwLock<FileMap>>, stable_id: u64) -> Result<()> {
+    let mut files = files.write().await;
+    let files_to_delete = find_files_to_delete(&files, stable_id);
+    info!(
+        "Compacting log file up to entry id: {}, files to delete: {:?}",
+        stable_id, files_to_delete
+    );
+    for entry_id in files_to_delete {
+        if let Some(f) = files.remove(&entry_id) {
+            if !f.is_stopped() {
+                f.stop().await?;
+            }
+            f.destroy().await?;
+            info!("Destroyed log file: {}", f.file_name());
+        }
+    }
+    Ok(())
+}
+
+fn find_files_to_delete<T>(offset_map: &BTreeMap<u64, T>, entry_id: u64) -> Vec<u64> {
+    let mut res = vec![];
+    for (cur, next) in offset_map.keys().zip(offset_map.keys().skip(1)) {
+        if *cur < entry_id && *next <= entry_id {
+            res.push(*cur);
+        }
+    }
+    res
+}
+
 #[async_trait::async_trait]
 impl LogStore for LocalFileLogStore {
     type Error = Error;
     type Namespace = LocalNamespace;
     type Entry = EntryImpl;
     type AppendResponse = AppendResponseImpl;
+
+    async fn start(&self) -> Result<()> {
+        let files = self.files.clone();
+        let stable_ids = self.stable_ids.clone();
+        let interval = self.config.gc_interval;
+        let token = tokio_util::sync::CancellationToken::new();
+        let child = token.child_token();
+
+        let handle = common_runtime::spawn_bg(async move {
+            loop {
+                if let Err(e) = gc(files.clone(), stable_ids.clone()).await {
+                    error!(e; "Failed to gc log store");
+                }
+
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = child.cancelled() => {
+                        info!("LogStore gc task has been cancelled");
+                        return;
+                    }
+                }
+            }
+        });
+
+        *self.gc_task_handle.lock().await = Some(handle);
+        *self.cancel_token.lock().await = Some(token);
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        let handle = self
+            .gc_task_handle
+            .lock()
+            .await
+            .take()
+            .context(StateInvalidSnafu {
+                msg: "Logstore gc task not spawned",
+            })?;
+        let token = self
+            .cancel_token
+            .lock()
+            .await
+            .take()
+            .context(StateInvalidSnafu {
+                msg: "Logstore gc task not spawned",
+            })?;
+        token.cancel();
+        Ok(handle.await.context(WaitGcTaskStopSnafu)?)
+    }
 
     async fn append(&self, mut entry: Self::Entry) -> Result<Self::AppendResponse> {
         // TODO(hl): configurable retry times
@@ -280,10 +391,24 @@ impl LogStore for LocalFileLogStore {
     fn namespace(&self, id: NamespaceId) -> Self::Namespace {
         LocalNamespace::new(id)
     }
+
+    async fn mark_stable(
+        &self,
+        namespace: Self::Namespace,
+        id: Id,
+    ) -> std::result::Result<(), Self::Error> {
+        info!("Mark namespace stable entry id, {:?}:{}", namespace, id);
+        let mut map = self.stable_ids.write().await;
+        let prev = map.insert(namespace, id);
+        info!("Prev: {:?}", prev);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use futures_util::StreamExt;
     use rand::distributions::Alphanumeric;
     use rand::Rng;
@@ -300,6 +425,7 @@ mod tests {
             append_buffer_size: 128,
             max_log_file_size: 128,
             log_file_dir: dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
         };
 
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
@@ -351,6 +477,7 @@ mod tests {
             append_buffer_size: 128,
             max_log_file_size: 128,
             log_file_dir: dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
         };
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
         let ns = LocalNamespace::new(42);
@@ -382,6 +509,7 @@ mod tests {
             append_buffer_size: 128,
             max_log_file_size: 1024 * 1024,
             log_file_dir: dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
         };
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
         assert_eq!(
@@ -425,5 +553,199 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id(), 1);
         assert_eq!(43, entries[0].namespace_id);
+    }
+
+    #[test]
+    fn test_find_files_to_delete() {
+        let file_map = vec![(1u64, ()), (11u64, ()), (21u64, ()), (31u64, ())]
+            .into_iter()
+            .collect::<BTreeMap<u64, ()>>();
+
+        assert!(find_files_to_delete(&file_map, 0).is_empty());
+        assert!(find_files_to_delete(&file_map, 1).is_empty());
+        assert!(find_files_to_delete(&file_map, 2).is_empty());
+        assert!(find_files_to_delete(&file_map, 10).is_empty());
+
+        assert_eq!(vec![1], find_files_to_delete(&file_map, 11));
+        assert_eq!(vec![1], find_files_to_delete(&file_map, 20));
+        assert_eq!(vec![1, 11], find_files_to_delete(&file_map, 21));
+
+        assert_eq!(vec![1, 11, 21], find_files_to_delete(&file_map, 31));
+        assert_eq!(vec![1, 11, 21], find_files_to_delete(&file_map, 100));
+    }
+
+    #[tokio::test]
+    async fn test_find_lowest_id() {
+        common_telemetry::logging::init_default_ut_logging();
+        let dir = TempDir::new("greptimedb-log-compact").unwrap();
+        let config = LogConfig {
+            append_buffer_size: 128,
+            max_log_file_size: 4096,
+            log_file_dir: dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let logstore = LocalFileLogStore::open(&config).await.unwrap();
+        assert!(find_lowest_id(logstore.stable_ids.clone()).await.is_none());
+
+        logstore
+            .mark_stable(LocalNamespace::new(1), 100)
+            .await
+            .unwrap();
+        assert_eq!(Some(100), find_lowest_id(logstore.stable_ids.clone()).await);
+
+        logstore
+            .mark_stable(LocalNamespace::new(2), 200)
+            .await
+            .unwrap();
+        assert_eq!(Some(100), find_lowest_id(logstore.stable_ids.clone()).await);
+
+        logstore
+            .mark_stable(LocalNamespace::new(1), 101)
+            .await
+            .unwrap();
+        assert_eq!(Some(101), find_lowest_id(logstore.stable_ids.clone()).await);
+
+        logstore
+            .mark_stable(LocalNamespace::new(2), 202)
+            .await
+            .unwrap();
+        assert_eq!(Some(101), find_lowest_id(logstore.stable_ids.clone()).await);
+
+        logstore
+            .mark_stable(LocalNamespace::new(1), 300)
+            .await
+            .unwrap();
+        assert_eq!(Some(202), find_lowest_id(logstore.stable_ids.clone()).await);
+    }
+
+    #[tokio::test]
+    async fn test_compact_log_file() {
+        common_telemetry::logging::init_default_ut_logging();
+        let dir = TempDir::new("greptimedb-log-compact").unwrap();
+        let config = LogConfig {
+            append_buffer_size: 128,
+            max_log_file_size: 4096,
+            log_file_dir: dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let logstore = LocalFileLogStore::open(&config).await.unwrap();
+
+        for id in 0..50 {
+            logstore
+                .append(EntryImpl::new(
+                    generate_data(990),
+                    id,
+                    LocalNamespace::new(42),
+                ))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            vec![0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48],
+            logstore
+                .files
+                .read()
+                .await
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+        );
+
+        gc_inner(logstore.files.clone(), 10).await.unwrap();
+
+        assert_eq!(
+            vec![8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48],
+            logstore
+                .files
+                .read()
+                .await
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+        );
+
+        gc_inner(logstore.files.clone(), 28).await.unwrap();
+
+        assert_eq!(
+            vec![28, 32, 36, 40, 44, 48],
+            logstore
+                .files
+                .read()
+                .await
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+        );
+
+        gc_inner(logstore.files.clone(), 50).await.unwrap();
+
+        assert_eq!(
+            vec![48],
+            logstore
+                .files
+                .read()
+                .await
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gc_task() {
+        common_telemetry::logging::init_default_ut_logging();
+        let dir = TempDir::new("greptimedb-log-compact").unwrap();
+        let config = LogConfig {
+            append_buffer_size: 128,
+            max_log_file_size: 4096,
+            log_file_dir: dir.path().to_str().unwrap().to_string(),
+            gc_interval: Duration::from_millis(100),
+        };
+        let logstore = LocalFileLogStore::open(&config).await.unwrap();
+        logstore.start().await.unwrap();
+
+        for id in 0..50 {
+            logstore
+                .append(EntryImpl::new(
+                    generate_data(990),
+                    id,
+                    LocalNamespace::new(42),
+                ))
+                .await
+                .unwrap();
+        }
+        logstore
+            .mark_stable(LocalNamespace::new(42), 30)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let file_ids = logstore
+            .files
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(vec![28, 32, 36, 40, 44, 48], file_ids);
+
+        let mut files = vec![];
+        let mut readir = tokio::fs::read_dir(dir.path()).await.unwrap();
+        while let Some(r) = readir.next_entry().await.transpose() {
+            let entry = r.unwrap();
+            files.push(entry.file_name().to_str().unwrap().to_string());
+        }
+
+        assert_eq!(
+            vec![
+                "00000000000000000028.log".to_string(),
+                "00000000000000000048.log".to_string(),
+                "00000000000000000040.log".to_string(),
+                "00000000000000000044.log".to_string(),
+                "00000000000000000036.log".to_string(),
+                "00000000000000000032.log".to_string()
+            ],
+            files
+        );
     }
 }

@@ -14,7 +14,7 @@
 
 use store_api::logstore::namespace::{Id, Namespace};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LocalNamespace {
     pub(crate) id: Id,
 }

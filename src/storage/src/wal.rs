@@ -24,7 +24,7 @@ use store_api::logstore::{AppendResponse, LogStore};
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::codec::{Decoder, Encoder};
-use crate::error::{self, Error, Result};
+use crate::error::{self, Error, MarkWalStableSnafu, Result};
 use crate::proto::wal::{self, PayloadType, WalHeader};
 use crate::write_batch::codec::{
     WriteBatchArrowDecoder, WriteBatchArrowEncoder, WriteBatchProtobufDecoder,
@@ -62,6 +62,14 @@ impl<S: LogStore> Wal<S> {
             namespace,
             store,
         }
+    }
+
+    pub async fn mark_stable(&self, seq: SequenceNumber) -> Result<()> {
+        self.store
+            .mark_stable(self.namespace.clone(), seq)
+            .await
+            .map_err(BoxedError::new)
+            .context(MarkWalStableSnafu)
     }
 
     #[inline]

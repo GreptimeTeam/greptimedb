@@ -225,6 +225,7 @@ impl<S: LogStore> RegionImpl<S> {
         }
 
         let wal = Wal::new(metadata.id(), store_config.log_store);
+        wal.mark_stable(flushed_sequence).await?;
         let shared = Arc::new(SharedData {
             id: metadata.id(),
             name,

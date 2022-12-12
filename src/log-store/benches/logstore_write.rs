@@ -1,10 +1,9 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use log_store::fs::config::LogConfig;
 use log_store::fs::log::LocalFileLogStore;
 use log_store::fs::namespace::LocalNamespace;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use store_api::logstore::namespace::{Id, Namespace};
 use store_api::logstore::LogStore;
 
 fn generate_data(size: usize) -> Vec<u8> {
@@ -28,6 +27,7 @@ fn test_benchmark(c: &mut Criterion) {
         append_buffer_size: 1024,
         max_log_file_size: 1024 * 1024 * 128,
         log_file_dir: "/Users/lei/wal-bench".to_string(),
+        ..Default::default()
     };
     let data = generate_data(1024);
     let logstore = rt.block_on(LocalFileLogStore::open(&config)).unwrap();

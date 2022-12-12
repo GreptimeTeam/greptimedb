@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -142,6 +144,9 @@ impl FlushScheduler for FlushSchedulerImpl {
 
 pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
 
+pub type FlushCallback =
+    Box<dyn Fn(bool, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 pub struct FlushJob<S: LogStore> {
     /// Max memtable id in these memtables,
     /// used to remove immutable memtables in current version.
@@ -160,6 +165,8 @@ pub struct FlushJob<S: LogStore> {
     pub wal: Wal<S>,
     /// Region manifest service, used to persist metadata.
     pub manifest: RegionManifest,
+
+    pub flush_callbacks: Vec<FlushCallback>,
 }
 
 impl<S: LogStore> FlushJob<S> {
@@ -236,8 +243,11 @@ impl<S: LogStore> FlushJob<S> {
 impl<S: LogStore> Job for FlushJob<S> {
     // TODO(yingwen): [flush] Support in-job parallelism (Flush memtables concurrently)
     async fn run(&mut self, ctx: &Context) -> Result<()> {
-        let file_metas = self.write_memtables_to_layer(ctx).await?;
-
+        let res = self.write_memtables_to_layer(ctx).await;
+        for cb in self.flush_callbacks.iter() {
+            cb(res.is_ok(), self.flush_sequence).await;
+        }
+        let file_metas = res?;
         self.write_manifest_and_apply(&file_metas).await?;
 
         Ok(())

@@ -55,11 +55,12 @@ const LOG_WRITER_BATCH_SIZE: usize = 16;
 /// Wraps File operation to get rid of `&mut self` requirements
 struct FileWriter {
     inner: Arc<File>,
+    path: String,
 }
 
 impl FileWriter {
-    pub fn new(file: Arc<File>) -> Self {
-        Self { inner: file }
+    pub fn new(file: Arc<File>, path: String) -> Self {
+        Self { inner: file, path }
     }
 
     pub async fn write(&self, data: Bytes, offset: u64) -> Result<()> {
@@ -100,6 +101,11 @@ impl FileWriter {
             .await
             .context(WaitWriteSnafu)?
     }
+
+    pub async fn destroy(&self) -> Result<()> {
+        tokio::fs::remove_file(&self.path).await.context(IoSnafu)?;
+        Ok(())
+    }
 }
 
 pub type LogFileRef = Arc<LogFile>;
@@ -128,7 +134,7 @@ pub struct LogFile {
 impl Drop for LogFile {
     fn drop(&mut self) {
         self.state.stopped.store(true, Ordering::Relaxed);
-        info!("Stopping log file {}", self.name);
+        info!("Dropping log file {}", self.name);
     }
 }
 
@@ -143,12 +149,12 @@ impl LogFile {
             .open(path.clone())
             .context(OpenLogSnafu { file_name: &path })?;
 
-        let file_name: FileName = path.as_str().try_into()?;
+        let file_name = FileName::try_from(path.as_str())?;
         let start_entry_id = file_name.entry_id();
 
         let mut log = Self {
             name: file_name,
-            writer: Arc::new(FileWriter::new(Arc::new(file))),
+            writer: Arc::new(FileWriter::new(Arc::new(file), path.clone())),
             start_entry_id,
             pending_request_tx: None,
             notify: Arc::new(Notify::new()),
@@ -205,6 +211,7 @@ impl LogFile {
         let handle = tokio::spawn(async move {
             while !state.is_stopped() {
                 let batch = Self::recv_batch(&mut rx, &state, &notify, true).await;
+                debug!("Receive write request, size: {}", batch.len());
                 if !batch.is_empty() {
                     Self::handle_batch(batch, &state, &writer).await;
                 }
@@ -242,6 +249,11 @@ impl LogFile {
         res
     }
 
+    pub async fn destroy(&self) -> Result<()> {
+        self.writer.destroy().await?;
+        Ok(())
+    }
+
     async fn handle_batch(
         mut batch: Vec<AppendRequest>,
         state: &Arc<State>,
@@ -261,8 +273,8 @@ impl LogFile {
         match writer.write_batch(&batch).await {
             Ok(max_offset) => match writer.flush().await {
                 Ok(_) => {
-                    let prev_ofs = state.flush_offset.swap(max_offset, Ordering::Acquire);
-                    let prev_id = state.last_entry_id.swap(last_id, Ordering::Acquire);
+                    let _prev_ofs = state.flush_offset.swap(max_offset, Ordering::Acquire);
+                    let _prev_id = state.last_entry_id.swap(last_id, Ordering::Acquire);
                     batch.into_iter().for_each(AppendRequest::complete);
                 }
                 Err(e) => {
@@ -465,6 +477,11 @@ impl LogFile {
     #[inline]
     pub fn is_seal(&self) -> bool {
         self.state.sealed.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn is_stopped(&self) -> bool {
+        self.state.stopped.load(Ordering::Acquire)
     }
 
     #[inline]

@@ -25,6 +25,7 @@ async fn main() {
         append_buffer_size: 1024,
         max_log_file_size: 1024 * 1024 * 128,
         log_file_dir: "/Users/lei/wal-bench".to_string(),
+        ..Default::default()
     };
     let logstore = Arc::new(LocalFileLogStore::open(&config).await.unwrap());
     let data = Arc::new(generate_data(1024));
@@ -54,5 +55,5 @@ async fn main() {
     }
 
     let handler = common_telemetry::metric::try_handle();
-    println!("handler.unwrap().render(): {}", handler.unwrap().render());
+    handler.unwrap();
 }
