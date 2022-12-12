@@ -33,11 +33,11 @@ impl LogStore for NoopLogStore {
     type Entry = EntryImpl;
     type AppendResponse = AppendResponseImpl;
 
-    async fn start(&self) -> std::result::Result<(), Self::Error> {
+    async fn start(&self) -> Result<()> {
         Ok(())
     }
 
-    async fn stop(&self) -> std::result::Result<(), Self::Error> {
+    async fn stop(&self) -> Result<()> {
         Ok(())
     }
 
