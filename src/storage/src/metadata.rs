@@ -657,7 +657,7 @@ impl TryFrom<RegionDescriptor> for RegionMetadata {
 }
 
 #[derive(Default)]
-pub struct ColumnsMetadataBuilder {
+struct ColumnsMetadataBuilder {
     columns: Vec<ColumnMetadata>,
     name_to_col_index: HashMap<String, usize>,
     /// Column id set, used to validate column id uniqueness.
@@ -708,7 +708,7 @@ impl ColumnsMetadataBuilder {
         self.push_new_column(cf_id, desc)
     }
 
-    pub fn push_new_column(
+    fn push_new_column(
         &mut self,
         cf_id: ColumnFamilyId,
         desc: ColumnDescriptor,

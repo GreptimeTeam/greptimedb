@@ -18,6 +18,7 @@ use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 
+use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use datatypes::value::Value;
 use datatypes::vectors::{UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder};
@@ -426,7 +427,6 @@ impl<'a> RowsProvider for &'a [&RowValue] {
     }
 }
 
-use datatypes::data_type::DataType;
 fn rows_to_vectors<I: Iterator<Item = ConcreteDataType>, T: RowsProvider>(
     data_types: I,
     column_needed: &[bool],

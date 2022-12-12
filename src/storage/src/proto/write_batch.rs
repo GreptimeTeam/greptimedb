@@ -340,7 +340,7 @@ pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
         ConcreteDataType::Float64(_) => gen_columns_f64(vector),
         ConcreteDataType::Binary(_) => gen_columns_binary(vector),
         ConcreteDataType::String(_) => gen_columns_string(vector),
-        ConcreteDataType::Timestamp(ty) => match ty {
+        ConcreteDataType::Timestamp(t) => match t {
             TimestampType::Second(_) => gen_columns_ts_second(vector),
             TimestampType::Millisecond(_) => gen_columns_ts_millisecond(vector),
             TimestampType::Microsecond(_) => gen_columns_ts_microsecond(vector),
@@ -371,7 +371,7 @@ pub fn gen_put_data_vector(data_type: ConcreteDataType, column: Column) -> Resul
         ConcreteDataType::Float64(_) => gen_put_data_f64(column),
         ConcreteDataType::Binary(_) => gen_put_data_binary(column),
         ConcreteDataType::String(_) => gen_put_data_string(column),
-        ConcreteDataType::Timestamp(ty) => match ty {
+        ConcreteDataType::Timestamp(t) => match t {
             TimestampType::Second(_) => gen_put_data_ts_second(column),
             TimestampType::Millisecond(_) => gen_put_data_ts_millisecond(column),
             TimestampType::Microsecond(_) => gen_put_data_ts_microsecond(column),

@@ -116,9 +116,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to decode, in stream waiting state"))]
-    StreamWaiting { backtrace: Backtrace },
-
     #[snafu(display("Failed to decode, corrupted data {}", message))]
     DataCorrupted {
         message: String,
@@ -502,8 +499,6 @@ impl<'a> IntoIterator for &'a WriteBatch {
     }
 }
 
-// TODO(hl): remove this allow
-#[allow(unused)]
 pub mod codec {
 
     use std::io::Cursor;
@@ -524,8 +519,8 @@ pub mod codec {
     use crate::write_batch::{
         DataCorruptedSnafu, DecodeArrowSnafu, DecodeProtobufSnafu, DecodeVectorSnafu,
         EncodeArrowSnafu, EncodeProtobufSnafu, Error as WriteBatchError, FromProtobufSnafu,
-        MissingColumnSnafu, Mutation, ParseSchemaSnafu, PutData, Result, StreamWaitingSnafu,
-        ToProtobufSnafu, WriteBatch,
+        MissingColumnSnafu, Mutation, ParseSchemaSnafu, PutData, Result, ToProtobufSnafu,
+        WriteBatch,
     };
 
     // TODO(jiachun): We can make a comparison with protobuf, including performance, storage cost,
@@ -593,7 +588,7 @@ pub mod codec {
         type Error = WriteBatchError;
 
         fn decode(&self, src: &[u8]) -> Result<WriteBatch> {
-            let mut reader = Cursor::new(src);
+            let reader = Cursor::new(src);
             // let metadata = read::read_stream_metadata(&mut reader).context(DecodeArrowSnafu)?;
             let mut reader = StreamReader::try_new(reader, None).context(DecodeArrowSnafu)?;
             let arrow_schema = reader.schema();

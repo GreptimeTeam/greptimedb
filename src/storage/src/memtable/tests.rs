@@ -579,15 +579,13 @@ fn test_memtable_projection() {
         assert!(iter.next().is_none());
 
         assert_eq!(5, batch.num_columns());
-        let k0 = Arc::new(TimestampMillisecondVector::from(vec![
-            Some(1000),
-            Some(1001),
-            Some(1002),
+        let k0 = Arc::new(TimestampMillisecondVector::from_slice(vec![
+            1000, 1001, 1002,
         ])) as VectorRef;
-        let k1 = Arc::new(UInt64Vector::from(vec![Some(0), Some(1), Some(2)])) as VectorRef;
-        let v0 = Arc::new(UInt64Vector::from(vec![Some(10), Some(11), Some(12)])) as VectorRef;
-        let sequences = Arc::new(UInt64Vector::from(vec![Some(9), Some(9), Some(9)])) as VectorRef;
-        let op_types = Arc::new(UInt8Vector::from(vec![Some(0), Some(0), Some(0)])) as VectorRef;
+        let k1 = Arc::new(UInt64Vector::from_slice(&[0, 1, 2])) as VectorRef;
+        let v0 = Arc::new(UInt64Vector::from_slice(&[10, 11, 12])) as VectorRef;
+        let sequences = Arc::new(UInt64Vector::from_slice(&[9, 9, 9])) as VectorRef;
+        let op_types = Arc::new(UInt8Vector::from_slice(&[0, 0, 0])) as VectorRef;
 
         assert_eq!(k0, *batch.column(0));
         assert_eq!(k1, *batch.column(1));
