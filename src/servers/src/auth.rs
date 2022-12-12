@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
-use snafu::{Backtrace, ErrorCompat, Snafu};
+use snafu::{Backtrace, ErrorCompat, OptionExt, Snafu};
+
+use crate::auth::user_provider::MemUserProvider;
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
@@ -72,6 +74,25 @@ impl UserInfo {
         Self {
             username: username.into(),
         }
+    }
+}
+
+pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef, Error> {
+    let (name, content) = opt.split_once(':').context(InvalidConfigSnafu {
+        value: opt.to_string(),
+        msg: "UserProviderOption must be in format `<option>:<value>`",
+    })?;
+    match name {
+        "mem_user_provider" => {
+            let provider =
+                MemUserProvider::try_from(content).map(|p| Arc::new(p) as UserProviderRef)?;
+            Ok(provider)
+        }
+        _ => InvalidConfigSnafu {
+            value: name.to_string(),
+            msg: "Invalid UserProviderOption",
+        }
+        .fail(),
     }
 }
 

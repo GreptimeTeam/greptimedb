@@ -28,11 +28,10 @@ use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
 use serde::{Deserialize, Serialize};
-use servers::auth::user_provider::MemUserProvider;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
-use servers::Mode;
-use snafu::{OptionExt, ResultExt};
+use servers::{auth, Mode};
+use snafu::ResultExt;
 
 use crate::error::{
     Error, IllegalAuthConfigSnafu, IllegalConfigSnafu, Result, StartDatanodeSnafu,
@@ -198,7 +197,6 @@ async fn build_frontend(
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
     frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
     frontend_instance.set_script_handler(datanode_instance);
-    // todo(shuiyisong): remove this
     Ok(Frontend::new(fe_opts, frontend_instance, fe_plugin))
 }
 
@@ -207,29 +205,15 @@ impl TryFrom<StartCommand> for AnyMap {
 
     fn try_from(cmd: StartCommand) -> Result<Self> {
         let mut plugins = AnyMap::new();
+        let mut fe_plugin = FrontendPlugin::default();
+
         if let Some(provider_config) = cmd.user_provider {
-            let (name, content) = provider_config
-                .split_once(':')
-                .context(IllegalConfigSnafu {
-                    msg: "user provider config must be in format of `provider_name:config...`",
-                })?;
-            match name {
-                "mem_user_provider" => {
-                    let provider: MemUserProvider =
-                        content.try_into().context(IllegalAuthConfigSnafu)?;
-                    let fe_plugin = FrontendPlugin {
-                        user_provider: Some(Arc::new(provider)),
-                    };
-                    plugins.insert(fe_plugin);
-                }
-                _ => {
-                    return IllegalConfigSnafu {
-                        msg: "unknown provider name: ".to_string() + name,
-                    }
-                    .fail()
-                }
-            }
+            let user_provider = auth::user_provider_from_option(&provider_config)
+                .context(IllegalAuthConfigSnafu)?;
+            fe_plugin.user_provider = Some(user_provider);
         }
+
+        plugins.insert(fe_plugin);
         Ok(plugins)
     }
 }
