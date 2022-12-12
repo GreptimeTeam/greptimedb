@@ -16,6 +16,7 @@ use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
+use common_telemetry::error;
 use futures::future::BoxFuture;
 use http_body::Body;
 use snafu::{OptionExt, ResultExt};
@@ -68,12 +69,21 @@ where
 
             let (scheme, credential) = match auth_header(&request) {
                 Ok(auth_header) => auth_header,
-                Err(_) => return Err(unauthorized_resp()),
+                Err(e) => {
+                    error!("failed to get http authorize header, err: {:?}", e);
+                    return Err(unauthorized_resp());
+                }
             };
 
             match scheme {
                 AuthScheme::Basic => {
-                    let (username, pwd) = decode_basic(credential).unwrap();
+                    let (username, pwd) = match decode_basic(credential) {
+                        Ok(basic_auth) => basic_auth,
+                        Err(e) => {
+                            error!("failed to decode basic authorize, err: {:?}", e);
+                            return Err(unauthorized_resp());
+                        }
+                    };
                     match user_provider
                         .auth(
                             Identity::UserId(&username, None),
@@ -85,7 +95,10 @@ where
                             request.extensions_mut().insert(user_info);
                             Ok(request)
                         }
-                        Err(_) => Err(unauthorized_resp()),
+                        Err(e) => {
+                            error!("failed to auth, err: {:?}", e);
+                            Err(unauthorized_resp())
+                        }
                     }
                 }
             }
@@ -155,22 +168,68 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
 
 #[cfg(test)]
 mod tests {
+    use std::marker::PhantomData;
+    use std::sync::Arc;
+
+    use axum::body::BoxBody;
     use axum::http;
     use hyper::Request;
+    use tower_http::auth::AsyncAuthorizeRequest;
 
-    use super::{auth_header, decode_basic, AuthScheme};
+    use super::{auth_header, decode_basic, AuthScheme, HttpAuth};
+    use crate::auth::test::MockUserProvider;
+    use crate::auth::{UserInfo, UserProvider};
     use crate::error;
     use crate::error::Result;
 
+    #[tokio::test]
+    async fn test_http_auth() {
+        let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
+            user_provider: None,
+            _ty: PhantomData,
+        };
+
+        // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
+        let req = mock_http_request("Basic dXNlcm5hbWU6cGFzc3dvcmQ=").unwrap();
+        let auth_res = http_auth.authorize(req).await.unwrap();
+        let user_info: &UserInfo = auth_res.extensions().get().unwrap();
+        let default = UserInfo::default();
+        assert_eq!(default.user_name(), user_info.user_name());
+
+        // In mock user provider, right username:password == "greptime:greptime"
+        let mock_user_provider = Some(Arc::new(MockUserProvider {}) as Arc<dyn UserProvider>);
+        let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
+            user_provider: mock_user_provider,
+            _ty: PhantomData,
+        };
+
+        // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
+        let req = mock_http_request("Basic Z3JlcHRpbWU6Z3JlcHRpbWU=").unwrap();
+        let req = http_auth.authorize(req).await.unwrap();
+        let user_info: &UserInfo = req.extensions().get().unwrap();
+        let default = UserInfo::default();
+        assert_eq!(default.user_name(), user_info.user_name());
+
+        let req = mock_http_request_no_auth().unwrap();
+        let auth_res = http_auth.authorize(req).await;
+        assert!(auth_res.is_err());
+
+        // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
+        let wrong_req = mock_http_request("Basic dXNlcm5hbWU6cGFzc3dvcmQ=").unwrap();
+        let auth_res = http_auth.authorize(wrong_req).await;
+        assert!(auth_res.is_err());
+    }
+
     #[test]
     fn test_decode_basic() {
+        // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
         let credential = "dXNlcm5hbWU6cGFzc3dvcmQ=";
         let (username, pwd) = decode_basic(credential).unwrap();
         assert_eq!("username", username);
         assert_eq!("password", pwd);
 
-        let credential = "dXNlcm5hbWU6cG Fzc3dvcmQ=";
-        let result = decode_basic(credential);
+        let wrong_credential = "dXNlcm5hbWU6cG Fzc3dvcmQ=";
+        let result = decode_basic(wrong_credential);
         matches!(result.err(), Some(error::Error::InvalidBase64Value { .. }));
     }
 
@@ -186,22 +245,23 @@ mod tests {
     }
 
     #[test]
-    fn test_split_auth_header() {
+    fn test_auth_header() {
+        // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
         let req = mock_http_request("Basic dXNlcm5hbWU6cGFzc3dvcmQ=").unwrap();
 
         let (auth_scheme, credential) = auth_header(&req).unwrap();
         matches!(auth_scheme, AuthScheme::Basic);
         assert_eq!("dXNlcm5hbWU6cGFzc3dvcmQ=", credential);
 
-        let req = mock_http_request("Basic dXNlcm5hbWU6 cGFzc3dvcmQ=").unwrap();
-        let res = auth_header(&req);
+        let wrong_req = mock_http_request("Basic dXNlcm5hbWU6 cGFzc3dvcmQ=").unwrap();
+        let res = auth_header(&wrong_req);
         matches!(
             res.err(),
             Some(error::Error::InvalidAuthorizationHeader { .. })
         );
 
-        let req = mock_http_request("Digest dXNlcm5hbWU6cGFzc3dvcmQ=").unwrap();
-        let res = auth_header(&req);
+        let wrong_req = mock_http_request("Digest dXNlcm5hbWU6cGFzc3dvcmQ=").unwrap();
+        let res = auth_header(&wrong_req);
         matches!(res.err(), Some(error::Error::UnsupportedAuthScheme { .. }));
     }
 
@@ -209,6 +269,13 @@ mod tests {
         Ok(Request::builder()
             .uri("https://www.rust-lang.org/")
             .header(http::header::AUTHORIZATION, auth_header)
+            .body(())
+            .unwrap())
+    }
+
+    fn mock_http_request_no_auth() -> Result<Request<()>> {
+        Ok(Request::builder()
+            .uri("https://www.rust-lang.org/")
             .body(())
             .unwrap())
     }

@@ -208,7 +208,7 @@ pub enum Error {
     },
 
     #[snafu(display("Not found http authorization header"))]
-    NotFoundAuthHeader { backtrace: Backtrace },
+    NotFoundAuthHeader {},
 
     #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
     InvisibleASCII {
@@ -217,18 +217,18 @@ pub enum Error {
     },
 
     #[snafu(display("Unsupported http auth scheme, name: {}", name))]
-    UnsupportedAuthScheme { name: String, backtrace: Backtrace },
+    UnsupportedAuthScheme { name: String },
 
     #[snafu(display("Invalid http authorization header"))]
     InvalidAuthorizationHeader { backtrace: Backtrace },
 
-    #[snafu(display("Invalid base64 value"))]
+    #[snafu(display("Invalid base64 value, source: {:?}", source))]
     InvalidBase64Value {
         source: DecodeError,
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Invalid utf-8 value"))]
+    #[snafu(display("Invalid utf-8 value, source: {:?}", source))]
     InvalidUtf8Value {
         source: FromUtf8Error,
         backtrace: Backtrace,

@@ -47,7 +47,7 @@ pub enum Password<'a> {
     PgMD5(HashedPassword<'a>, Salt<'a>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct UserInfo {
     username: String,
 }
@@ -108,11 +108,10 @@ impl ErrorExt for Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod test {
     use super::{Identity, Password, UserInfo, UserProvider};
-    use crate::auth;
 
-    struct MockUserProvider {}
+    pub struct MockUserProvider {}
 
     #[async_trait::async_trait]
     impl UserProvider for MockUserProvider {
@@ -148,6 +147,13 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test::MockUserProvider;
+    use super::{Identity, Password, UserProvider};
+    use crate::auth;
 
     #[tokio::test]
     async fn test_auth_by_plain_text() {
