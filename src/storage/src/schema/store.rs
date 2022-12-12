@@ -21,6 +21,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{Schema, SchemaBuilder, SchemaRef};
 use store_api::storage::consts;
 
+use crate::error::NewRecordBatchSnafu;
 use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, Error, Result};
 use crate::read::Batch;
 
@@ -57,13 +58,16 @@ impl StoreSchema {
         self.schema.arrow_schema()
     }
 
-    pub fn batch_to_arrow_record_batch(&self, batch: &Batch) -> RecordBatch {
-        assert_eq!(self.schema.num_columns(), batch.num_columns());
+    pub fn batch_to_arrow_record_batch(
+        &self,
+        batch: &Batch,
+    ) -> std::result::Result<RecordBatch, crate::error::Error> {
+        assert_eq!(self.schema.num_columns(), batch.num_columns(),);
         RecordBatch::try_new(
             self.schema.arrow_schema().clone(),
             batch.columns().iter().map(|v| v.to_arrow_array()).collect(),
         )
-        .unwrap()
+        .context(NewRecordBatchSnafu)
     }
 
     pub(crate) fn contains_column(&self, name: &str) -> bool {
@@ -288,7 +292,7 @@ mod tests {
         // Test batch and chunk conversion.
         let batch = tests::new_batch();
         // Convert batch to chunk.
-        let chunk = store_schema.batch_to_arrow_record_batch(&batch);
+        let chunk = store_schema.batch_to_arrow_record_batch(&batch).unwrap();
         check_chunk_batch(&chunk, &batch);
     }
 }
