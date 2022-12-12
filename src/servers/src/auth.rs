@@ -42,7 +42,7 @@ pub type Salt<'a> = &'a [u8];
 
 /// Authentication information sent by the client.
 pub enum Password<'a> {
-    PlainText(&'a [u8]),
+    PlainText(&'a str),
     MysqlNativePassword(HashedPassword<'a>, Salt<'a>),
     PgMD5(HashedPassword<'a>, Salt<'a>),
 }
@@ -128,7 +128,7 @@ pub mod test {
                 Identity::UserId(username, _host) => match password {
                     Password::PlainText(password) => {
                         if username == "greptime" {
-                            if password == b"greptime" {
+                            if password == "greptime" {
                                 return Ok(UserInfo {
                                     username: "greptime".to_string(),
                                 });
@@ -164,7 +164,7 @@ mod tests {
         let auth_result = user_provider
             .auth(
                 Identity::UserId("greptime", None),
-                Password::PlainText(b"greptime"),
+                Password::PlainText("greptime"),
             )
             .await;
         assert!(auth_result.is_ok());
@@ -187,7 +187,7 @@ mod tests {
         let auth_result = user_provider
             .auth(
                 Identity::UserId("not_exist_username", None),
-                Password::PlainText(b"greptime"),
+                Password::PlainText("greptime"),
             )
             .await;
         assert!(auth_result.is_err());
@@ -197,7 +197,7 @@ mod tests {
         let auth_result = user_provider
             .auth(
                 Identity::UserId("greptime", None),
-                Password::PlainText(b"wrong_password"),
+                Password::PlainText("wrong_password"),
             )
             .await;
         assert!(auth_result.is_err());

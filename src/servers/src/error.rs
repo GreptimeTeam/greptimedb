@@ -279,7 +279,7 @@ impl ErrorExt for Error {
             StartFrontend { source, .. } => source.status_code(),
             Auth { source, .. } => source.status_code(),
 
-            NotFoundAuthHeader { .. } => StatusCode::NotFoundAuthHeader,
+            NotFoundAuthHeader { .. } => StatusCode::AuthHeaderNotFound,
             InvisibleASCII { .. }
             | UnsupportedAuthScheme { .. }
             | InvalidAuthorizationHeader { .. }

@@ -71,7 +71,7 @@ pub enum StatusCode {
     /// Username and password does not match
     UserPasswordMismatch = 7002,
     /// Not found http authorization header
-    NotFoundAuthHeader = 7003,
+    AuthHeaderNotFound = 7003,
     /// Invalid http authorization header
     InvalidAuthHeader = 7004,
     // ====== End of auth related status code =====

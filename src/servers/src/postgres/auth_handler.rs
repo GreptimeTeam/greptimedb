@@ -68,7 +68,7 @@ impl PgPwdVerifier {
             let _user_info = user_provider
                 .auth(
                     Identity::UserId(&user_name, None),
-                    Password::PlainText(password.as_bytes()),
+                    Password::PlainText(password),
                 )
                 .await
                 .context(error::AuthSnafu)?;

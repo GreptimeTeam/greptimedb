@@ -27,7 +27,7 @@ use tokio::io::AsyncWrite;
 use tokio::sync::RwLock;
 
 use crate::auth::{Identity, Password, UserProviderRef};
-use crate::context::Channel::MYSQL;
+use crate::context::Channel::Mysql;
 use crate::context::{Context, CtxBuilder};
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
@@ -142,7 +142,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         return match CtxBuilder::new()
             .client_addr(client_addr)
-            .set_channel(MYSQL)
+            .set_channel(Mysql)
             .set_user_info(user_info)
             .build()
         {

@@ -60,10 +60,10 @@ where
     fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
         let user_provider = self.user_provider.clone();
         Box::pin(async move {
-            request.extensions_mut().insert(UserInfo::default());
             let user_provider = if let Some(user_provider) = &user_provider {
                 user_provider
             } else {
+                request.extensions_mut().insert(UserInfo::default());
                 return Ok(request);
             };
 
@@ -77,7 +77,7 @@ where
 
             match scheme {
                 AuthScheme::Basic => {
-                    let (username, pwd) = match decode_basic(credential) {
+                    let (username, password) = match decode_basic(credential) {
                         Ok(basic_auth) => basic_auth,
                         Err(e) => {
                             error!("failed to decode basic authorize, err: {:?}", e);
@@ -87,7 +87,7 @@ where
                     match user_provider
                         .auth(
                             Identity::UserId(&username, None),
-                            crate::auth::Password::PlainText(pwd.as_bytes()),
+                            crate::auth::Password::PlainText(&password),
                         )
                         .await
                     {
