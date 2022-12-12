@@ -268,13 +268,22 @@ impl LogFile {
                 .write_offset
                 .fetch_add(req.data.len(), Ordering::AcqRel);
             last_id = req.id;
+            debug!("Entry id: {}, offset: {}", req.id, req.offset,);
         }
 
         match writer.write_batch(&batch).await {
             Ok(max_offset) => match writer.flush().await {
                 Ok(_) => {
-                    let _prev_ofs = state.flush_offset.swap(max_offset, Ordering::Acquire);
-                    let _prev_id = state.last_entry_id.swap(last_id, Ordering::Acquire);
+                    let prev_ofs = state.flush_offset.swap(max_offset, Ordering::Acquire);
+                    let prev_id = state.last_entry_id.swap(last_id, Ordering::Acquire);
+                    debug!(
+                        "Flush offset: {} -> {}, max offset in batch: {}, entry id: {}->{}",
+                        prev_ofs,
+                        state.flush_offset.load(Ordering::Acquire),
+                        max_offset,
+                        prev_id,
+                        state.last_entry_id.load(Ordering::Acquire),
+                    );
                     batch.into_iter().for_each(AppendRequest::complete);
                 }
                 Err(e) => {

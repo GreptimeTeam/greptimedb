@@ -24,7 +24,7 @@ mod file_name;
 mod index;
 mod io;
 pub mod log;
-pub mod namespace;
+mod namespace;
 pub mod noop;
 
 #[derive(Debug, PartialEq, Eq)]
