@@ -407,6 +407,7 @@ impl LogStore for LocalFileLogStore {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::time::Duration;
 
     use futures_util::StreamExt;
@@ -744,8 +745,10 @@ mod tests {
                 "00000000000000000044.log".to_string(),
                 "00000000000000000036.log".to_string(),
                 "00000000000000000032.log".to_string()
-            ],
-            files
+            ]
+            .into_iter()
+            .collect::<HashSet<String>>(),
+            files.into_iter().collect::<HashSet<String>>()
         );
     }
 }
