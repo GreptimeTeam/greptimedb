@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use clap::Parser;
 use common_telemetry::info;
 use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
@@ -26,6 +28,7 @@ use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
+use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -133,6 +136,12 @@ struct StartCommand {
     config_file: Option<String>,
     #[clap(short = 'm', long = "memory-catalog")]
     enable_memory_catalog: bool,
+    #[clap(long)]
+    tls_mode: Option<TlsMode>,
+    #[clap(long)]
+    tls_cert_path: Option<String>,
+    #[clap(long)]
+    tls_key_path: Option<String>,
 }
 
 impl StartCommand {
@@ -245,6 +254,18 @@ impl TryFrom<StartCommand> for FrontendOptions {
             opts.influxdb_options = Some(InfluxdbOptions { enable: true });
         }
 
+        let tls_option = TlsOption::new(cmd.tls_mode, cmd.tls_cert_path, cmd.tls_key_path);
+
+        if let Some(mut mysql_options) = opts.mysql_options {
+            mysql_options.tls = Arc::new(tls_option.clone());
+            opts.mysql_options = Some(mysql_options);
+        }
+
+        if let Some(mut postgres_options) = opts.postgres_options {
+            postgres_options.tls = Arc::new(tls_option);
+            opts.postgres_options = Some(postgres_options);
+        }
+
         Ok(opts)
     }
 }
@@ -269,6 +290,9 @@ mod tests {
             )),
             influxdb_enable: false,
             enable_memory_catalog: false,
+            tls_mode: None,
+            tls_cert_path: None,
+            tls_key_path: None,
         };
 
         let fe_opts = FrontendOptions::try_from(cmd).unwrap();
