@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="/docs/logo-text-padding.png" width="400px">
-  <source media="(prefers-color-scheme: light)" srcset="/docs/logo-text-tinted.png" width="400px">
+  <source media="(prefers-color-scheme: light)" srcset="/docs/logo-text-padding.png" width="400px">
+  <source media="(prefers-color-scheme: dark)" srcset="/docs/logo-text-tinted.png" width="400px">
   <img alt="GreptimeDB Logo" src="/docs/logo-text-padding.png">
 </picture>
 
