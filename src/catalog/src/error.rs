@@ -17,7 +17,7 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::prelude::{Snafu, StatusCode};
 use datafusion::error::DataFusionError;
-use datatypes::arrow;
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use snafu::{Backtrace, ErrorCompat};
 
@@ -51,14 +51,12 @@ pub enum Error {
     SystemCatalog { msg: String, backtrace: Backtrace },
 
     #[snafu(display(
-        "System catalog table type mismatch, expected: binary, found: {:?} source: {}",
+        "System catalog table type mismatch, expected: binary, found: {:?}",
         data_type,
-        source
     ))]
     SystemCatalogTypeMismatch {
-        data_type: arrow::datatypes::DataType,
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
+        data_type: ConcreteDataType,
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Invalid system catalog entry type: {:?}", entry_type))]
@@ -222,10 +220,11 @@ impl ErrorExt for Error {
             | Error::ValueDeserialize { .. }
             | Error::Io { .. } => StatusCode::StorageUnavailable,
 
-            Error::RegisterTable { .. } => StatusCode::Internal,
+            Error::RegisterTable { .. } | Error::SystemCatalogTypeMismatch { .. } => {
+                StatusCode::Internal
+            }
 
             Error::ReadSystemCatalog { source, .. } => source.status_code(),
-            Error::SystemCatalogTypeMismatch { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
 
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
@@ -265,7 +264,6 @@ impl From<Error> for DataFusionError {
 #[cfg(test)]
 mod tests {
     use common_error::mock::MockError;
-    use datatypes::arrow::datatypes::DataType;
     use snafu::GenerateImplicitData;
 
     use super::*;
@@ -314,11 +312,8 @@ mod tests {
         assert_eq!(
             StatusCode::Internal,
             Error::SystemCatalogTypeMismatch {
-                data_type: DataType::Boolean,
-                source: datatypes::error::Error::UnsupportedArrowType {
-                    arrow_type: DataType::Boolean,
-                    backtrace: Backtrace::generate()
-                }
+                data_type: ConcreteDataType::binary_datatype(),
+                backtrace: Backtrace::generate(),
             }
             .status_code()
         );

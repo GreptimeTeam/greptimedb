@@ -145,27 +145,34 @@ impl LocalCatalogManager {
     /// Convert `RecordBatch` to a vector of `Entry`.
     fn record_batch_to_entry(rb: RecordBatch) -> Result<Vec<Entry>> {
         ensure!(
-            rb.df_recordbatch.columns().len() >= 6,
+            rb.num_columns() >= 6,
             SystemCatalogSnafu {
-                msg: format!("Length mismatch: {}", rb.df_recordbatch.columns().len())
+                msg: format!("Length mismatch: {}", rb.num_columns())
             }
         );
 
-        let entry_type = UInt8Vector::try_from_arrow_array(&rb.df_recordbatch.columns()[0])
-            .with_context(|_| SystemCatalogTypeMismatchSnafu {
-                data_type: rb.df_recordbatch.columns()[ENTRY_TYPE_INDEX]
-                    .data_type()
-                    .clone(),
+        let entry_type = rb
+            .column(ENTRY_TYPE_INDEX)
+            .as_any()
+            .downcast_ref::<UInt8Vector>()
+            .with_context(|| SystemCatalogTypeMismatchSnafu {
+                data_type: rb.column(ENTRY_TYPE_INDEX).data_type(),
             })?;
 
-        let key = BinaryVector::try_from_arrow_array(&rb.df_recordbatch.columns()[1])
-            .with_context(|_| SystemCatalogTypeMismatchSnafu {
-                data_type: rb.df_recordbatch.columns()[KEY_INDEX].data_type().clone(),
+        let key = rb
+            .column(KEY_INDEX)
+            .as_any()
+            .downcast_ref::<BinaryVector>()
+            .with_context(|| SystemCatalogTypeMismatchSnafu {
+                data_type: rb.column(KEY_INDEX).data_type(),
             })?;
 
-        let value = BinaryVector::try_from_arrow_array(&rb.df_recordbatch.columns()[3])
-            .with_context(|_| SystemCatalogTypeMismatchSnafu {
-                data_type: rb.df_recordbatch.columns()[VALUE_INDEX].data_type().clone(),
+        let value = rb
+            .column(VALUE_INDEX)
+            .as_any()
+            .downcast_ref::<BinaryVector>()
+            .with_context(|| SystemCatalogTypeMismatchSnafu {
+                data_type: rb.column(VALUE_INDEX).data_type(),
             })?;
 
         let mut res = Vec::with_capacity(rb.num_rows());
