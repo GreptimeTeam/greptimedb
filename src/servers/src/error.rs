@@ -14,11 +14,14 @@
 
 use std::any::Any;
 use std::net::SocketAddr;
+use std::string::FromUtf8Error;
 
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use base64::DecodeError;
 use common_error::prelude::*;
+use hyper::header::ToStrError;
 use serde_json::json;
 
 use crate::auth;
@@ -203,6 +206,33 @@ pub enum Error {
         #[snafu(backtrace)]
         source: auth::Error,
     },
+
+    #[snafu(display("Not found http authorization header"))]
+    NotFoundAuthHeader {},
+
+    #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
+    InvisibleASCII {
+        source: ToStrError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Unsupported http auth scheme, name: {}", name))]
+    UnsupportedAuthScheme { name: String },
+
+    #[snafu(display("Invalid http authorization header"))]
+    InvalidAuthorizationHeader { backtrace: Backtrace },
+
+    #[snafu(display("Invalid base64 value, source: {:?}", source))]
+    InvalidBase64Value {
+        source: DecodeError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid utf-8 value, source: {:?}", source))]
+    InvalidUtf8Value {
+        source: FromUtf8Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -248,6 +278,13 @@ impl ErrorExt for Error {
             TlsRequired { .. } => StatusCode::Unknown,
             StartFrontend { source, .. } => source.status_code(),
             Auth { source, .. } => source.status_code(),
+
+            NotFoundAuthHeader { .. } => StatusCode::AuthHeaderNotFound,
+            InvisibleASCII { .. }
+            | UnsupportedAuthScheme { .. }
+            | InvalidAuthorizationHeader { .. }
+            | InvalidBase64Value { .. }
+            | InvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
         }
     }
 

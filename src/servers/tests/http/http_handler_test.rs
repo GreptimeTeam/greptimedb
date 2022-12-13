@@ -18,6 +18,7 @@ use axum::body::Body;
 use axum::extract::{Json, Query, RawBody, State};
 use common_telemetry::metric;
 use metrics::counter;
+use servers::auth::UserInfo;
 use servers::http::{handler as http_handler, script as script_handler, ApiState, JsonOutput};
 use table::test_util::MemTable;
 
@@ -32,6 +33,7 @@ async fn test_sql_not_provided() {
             script_handler: None,
         }),
         Query(http_handler::SqlQuery::default()),
+        axum::Extension(UserInfo::default()),
     )
     .await;
     assert!(!json.success());
@@ -55,6 +57,7 @@ async fn test_sql_output_rows() {
             script_handler: None,
         }),
         query,
+        axum::Extension(UserInfo::default()),
     )
     .await;
     assert!(json.success(), "{:?}", json);

@@ -57,7 +57,7 @@ impl LoginInfo {
 }
 
 impl PgPwdVerifier {
-    async fn verify_pwd(&self, pwd: &str, login: LoginInfo) -> Result<bool> {
+    async fn verify_pwd(&self, password: &str, login: LoginInfo) -> Result<bool> {
         if let Some(user_provider) = &self.user_provider {
             let user_name = match login.user {
                 Some(name) => name,
@@ -68,7 +68,7 @@ impl PgPwdVerifier {
             let _user_info = user_provider
                 .auth(
                     Identity::UserId(&user_name, None),
-                    Password::PlainText(pwd.as_bytes()),
+                    Password::PlainText(password),
                 )
                 .await
                 .context(error::AuthSnafu)?;

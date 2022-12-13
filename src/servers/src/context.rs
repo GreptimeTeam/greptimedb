@@ -85,11 +85,11 @@ pub struct ClientInfo {
     pub channel: Channel,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Channel {
-    GRPC,
-    HTTP,
-    MYSQL,
+    Grpc,
+    Http,
+    Mysql,
 }
 
 #[derive(Default)]
@@ -105,7 +105,7 @@ mod test {
     use std::sync::Arc;
 
     use crate::auth::UserInfo;
-    use crate::context::Channel::{self, HTTP};
+    use crate::context::Channel::{self, Http};
     use crate::context::{ClientInfo, Context, CtxBuilder};
 
     #[test]
@@ -113,7 +113,7 @@ mod test {
         let mut ctx = Context {
             client_info: ClientInfo {
                 client_host: Default::default(),
-                channel: Channel::GRPC,
+                channel: Channel::Grpc,
             },
             user_info: UserInfo::new("greptime"),
             quota: Default::default(),
@@ -137,7 +137,7 @@ mod test {
     fn test_build() {
         let ctx = CtxBuilder::new()
             .client_addr("127.0.0.1:4001".to_string())
-            .set_channel(HTTP)
+            .set_channel(Http)
             .set_user_info(UserInfo::new("greptime"))
             .build()
             .unwrap();

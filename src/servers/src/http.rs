@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod context;
+mod authorize;
 pub mod handler;
 pub mod influxdb;
 pub mod opentsdb;
@@ -26,8 +26,8 @@ use std::time::Duration;
 use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
+use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
-use axum::middleware::{self};
 use axum::response::{Html, Json};
 use axum::{routing, BoxError, Extension, Router};
 use common_error::prelude::ErrorExt;
@@ -45,9 +45,12 @@ use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::timeout::TimeoutLayer;
 use tower::ServiceBuilder;
+use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
+use self::authorize::HttpAuth;
 use self::influxdb::influxdb_write;
+use crate::auth::UserProviderRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::query_handler::{
     InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef, PrometheusProtocolHandlerRef,
@@ -65,6 +68,7 @@ pub struct HttpServer {
     prom_handler: Option<PrometheusProtocolHandlerRef>,
     script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
+    user_provider: Option<UserProviderRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -295,6 +299,7 @@ impl HttpServer {
             opentsdb_handler: None,
             influxdb_handler: None,
             prom_handler: None,
+            user_provider: None,
             script_handler: None,
             shutdown_tx: Mutex::new(None),
         }
@@ -330,6 +335,14 @@ impl HttpServer {
             "Prometheus protocol handler can be set only once!"
         );
         self.prom_handler.get_or_insert(handler);
+    }
+
+    pub fn set_user_provider(&mut self, user_provider: UserProviderRef) {
+        debug_assert!(
+            self.user_provider.is_none(),
+            "User provider can be set only once!"
+        );
+        self.user_provider.get_or_insert(user_provider);
     }
 
     pub fn make_app(&self) -> Router {
@@ -393,7 +406,9 @@ impl HttpServer {
                     .layer(TraceLayer::new_for_http())
                     .layer(TimeoutLayer::new(self.options.timeout))
                     // custom layer
-                    .layer(middleware::from_fn(context::build_ctx)),
+                    .layer(AsyncRequireAuthorizationLayer::new(
+                        HttpAuth::<BoxBody>::new(self.user_provider.clone()),
+                    )),
             )
     }
 

@@ -10,6 +10,7 @@ api = { path = "../api" }
 async-trait = "0.1"
 axum = "0.6"
 axum-macros = "0.3"
+base64 = "0.13"
 bytes = "1.2"
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
@@ -23,6 +24,7 @@ common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 hex = { version = "0.4" }
+http-body = "0.4"
 humantime-serde = "1.1"
 hyper = { version = "0.14", features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
