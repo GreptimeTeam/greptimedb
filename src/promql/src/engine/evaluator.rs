@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-/// An evaluator evaluates given expressions over given fixed timestamps.
 use promql_parser::parser::{Expr, Value};
 
 use crate::engine::Context;
 use crate::error::Result;
 
+/// An evaluator evaluates given expressions over given fixed timestamps.
 pub struct Evaluator {}
 
 impl Evaluator {
