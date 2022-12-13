@@ -47,7 +47,7 @@ pub struct LocalFileLogStore {
     files: Arc<RwLock<FileMap>>,
     active: ArcSwap<LogFile>,
     config: LogConfig,
-    stable_ids: Arc<RwLock<HashMap<LocalNamespace, u64>>>,
+    obsolete_ids: Arc<RwLock<HashMap<LocalNamespace, u64>>>,
     cancel_token: Mutex<Option<CancellationToken>>,
     gc_task_handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -109,7 +109,7 @@ impl LocalFileLogStore {
             files: Arc::new(RwLock::new(files)),
             active: ArcSwap::new(active_file_cloned),
             config: config.clone(),
-            stable_ids: Arc::new(Default::default()),
+            obsolete_ids: Arc::new(Default::default()),
             cancel_token: Mutex::new(None),
             gc_task_handle: Mutex::new(None),
         })
@@ -195,35 +195,35 @@ impl LocalFileLogStore {
 
 async fn gc(
     files: Arc<RwLock<FileMap>>,
-    stables_ids: Arc<RwLock<HashMap<LocalNamespace, u64>>>,
+    obsolete_ids: Arc<RwLock<HashMap<LocalNamespace, u64>>>,
 ) -> Result<()> {
-    if let Some(lowest) = find_lowest_id(stables_ids).await {
+    if let Some(lowest) = find_lowest_id(obsolete_ids).await {
         gc_inner(files, lowest).await
     } else {
         Ok(())
     }
 }
 
-async fn find_lowest_id(stable_ids: Arc<RwLock<HashMap<LocalNamespace, u64>>>) -> Option<u64> {
-    let mut lowest_stable = None;
+async fn find_lowest_id(obsolete_ids: Arc<RwLock<HashMap<LocalNamespace, u64>>>) -> Option<u64> {
+    let mut lowest_obsolete = None;
     {
-        let stable_ids = stable_ids.read().await;
-        for (ns, id) in stable_ids.iter() {
-            if *id <= *lowest_stable.get_or_insert(*id) {
-                lowest_stable = Some(*id);
-                info!("Current lowest stable id: {}, namespace: {:?}", *id, ns);
+        let obsolete_ids = obsolete_ids.read().await;
+        for (ns, id) in obsolete_ids.iter() {
+            if *id <= *lowest_obsolete.get_or_insert(*id) {
+                lowest_obsolete = Some(*id);
+                info!("Current lowest obsolete id: {}, namespace: {:?}", *id, ns);
             }
         }
     }
-    lowest_stable
+    lowest_obsolete
 }
 
-async fn gc_inner(files: Arc<RwLock<FileMap>>, stable_id: u64) -> Result<()> {
+async fn gc_inner(files: Arc<RwLock<FileMap>>, obsolete_id: u64) -> Result<()> {
     let mut files = files.write().await;
-    let files_to_delete = find_files_to_delete(&files, stable_id);
+    let files_to_delete = find_files_to_delete(&files, obsolete_id);
     info!(
         "Compacting log file up to entry id: {}, files to delete: {:?}",
-        stable_id, files_to_delete
+        obsolete_id, files_to_delete
     );
     for entry_id in files_to_delete {
         if let Some(f) = files.remove(&entry_id) {
@@ -256,14 +256,14 @@ impl LogStore for LocalFileLogStore {
 
     async fn start(&self) -> Result<()> {
         let files = self.files.clone();
-        let stable_ids = self.stable_ids.clone();
+        let obsolete_ids = self.obsolete_ids.clone();
         let interval = self.config.gc_interval;
         let token = tokio_util::sync::CancellationToken::new();
         let child = token.child_token();
 
         let handle = common_runtime::spawn_bg(async move {
             loop {
-                if let Err(e) = gc(files.clone(), stable_ids.clone()).await {
+                if let Err(e) = gc(files.clone(), obsolete_ids.clone()).await {
                     error!(e; "Failed to gc log store");
                 }
 
@@ -397,8 +397,8 @@ impl LogStore for LocalFileLogStore {
         namespace: Self::Namespace,
         id: Id,
     ) -> std::result::Result<(), Self::Error> {
-        info!("Mark namespace stable entry id, {:?}:{}", namespace, id);
-        let mut map = self.stable_ids.write().await;
+        info!("Mark namespace obsolete entry id, {:?}:{}", namespace, id);
+        let mut map = self.obsolete_ids.write().await;
         let prev = map.insert(namespace, id);
         info!("Prev: {:?}", prev);
         Ok(())
@@ -586,37 +586,54 @@ mod tests {
             ..Default::default()
         };
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
-        assert!(find_lowest_id(logstore.stable_ids.clone()).await.is_none());
+        assert!(find_lowest_id(logstore.obsolete_ids.clone())
+            .await
+            .is_none());
 
         logstore
             .obsolete(LocalNamespace::new(1), 100)
             .await
             .unwrap();
-        assert_eq!(Some(100), find_lowest_id(logstore.stable_ids.clone()).await);
+        assert_eq!(
+            Some(100),
+            find_lowest_id(logstore.obsolete_ids.clone()).await
+        );
 
         logstore
             .obsolete(LocalNamespace::new(2), 200)
             .await
             .unwrap();
-        assert_eq!(Some(100), find_lowest_id(logstore.stable_ids.clone()).await);
+        assert_eq!(
+            Some(100),
+            find_lowest_id(logstore.obsolete_ids.clone()).await
+        );
 
         logstore
             .obsolete(LocalNamespace::new(1), 101)
             .await
             .unwrap();
-        assert_eq!(Some(101), find_lowest_id(logstore.stable_ids.clone()).await);
+        assert_eq!(
+            Some(101),
+            find_lowest_id(logstore.obsolete_ids.clone()).await
+        );
 
         logstore
             .obsolete(LocalNamespace::new(2), 202)
             .await
             .unwrap();
-        assert_eq!(Some(101), find_lowest_id(logstore.stable_ids.clone()).await);
+        assert_eq!(
+            Some(101),
+            find_lowest_id(logstore.obsolete_ids.clone()).await
+        );
 
         logstore
             .obsolete(LocalNamespace::new(1), 300)
             .await
             .unwrap();
-        assert_eq!(Some(202), find_lowest_id(logstore.stable_ids.clone()).await);
+        assert_eq!(
+            Some(202),
+            find_lowest_id(logstore.obsolete_ids.clone()).await
+        );
     }
 
     #[tokio::test]
