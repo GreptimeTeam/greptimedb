@@ -70,10 +70,10 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     // TODO(sunng87): confusion with `create_namespace`
     fn namespace(&self, id: namespace::Id) -> Self::Namespace;
 
-    /// Mark the entry id of given `namespace` as stable so that logstore can safely delete
-    /// the log files if all entries inside are stable. This method would not delete log
+    /// Mark all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
+    /// the log files if all entries inside are obsolete. This method may not delete log
     /// files immediately.
-    async fn mark_stable(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error>;
+    async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error>;
 }
 
 pub trait AppendResponse: Send + Sync {

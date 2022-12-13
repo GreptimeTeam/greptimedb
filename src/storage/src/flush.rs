@@ -224,7 +224,7 @@ impl<S: LogStore> FlushJob<S> {
                 self.max_memtable_id,
             )
             .await?;
-        self.wal.mark_stable(self.flush_sequence).await
+        self.wal.obsolete(self.flush_sequence).await
     }
 
     /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`

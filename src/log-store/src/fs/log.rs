@@ -392,7 +392,7 @@ impl LogStore for LocalFileLogStore {
         LocalNamespace::new(id)
     }
 
-    async fn mark_stable(
+    async fn obsolete(
         &self,
         namespace: Self::Namespace,
         id: Id,
@@ -589,31 +589,31 @@ mod tests {
         assert!(find_lowest_id(logstore.stable_ids.clone()).await.is_none());
 
         logstore
-            .mark_stable(LocalNamespace::new(1), 100)
+            .obsolete(LocalNamespace::new(1), 100)
             .await
             .unwrap();
         assert_eq!(Some(100), find_lowest_id(logstore.stable_ids.clone()).await);
 
         logstore
-            .mark_stable(LocalNamespace::new(2), 200)
+            .obsolete(LocalNamespace::new(2), 200)
             .await
             .unwrap();
         assert_eq!(Some(100), find_lowest_id(logstore.stable_ids.clone()).await);
 
         logstore
-            .mark_stable(LocalNamespace::new(1), 101)
+            .obsolete(LocalNamespace::new(1), 101)
             .await
             .unwrap();
         assert_eq!(Some(101), find_lowest_id(logstore.stable_ids.clone()).await);
 
         logstore
-            .mark_stable(LocalNamespace::new(2), 202)
+            .obsolete(LocalNamespace::new(2), 202)
             .await
             .unwrap();
         assert_eq!(Some(101), find_lowest_id(logstore.stable_ids.clone()).await);
 
         logstore
-            .mark_stable(LocalNamespace::new(1), 300)
+            .obsolete(LocalNamespace::new(1), 300)
             .await
             .unwrap();
         assert_eq!(Some(202), find_lowest_id(logstore.stable_ids.clone()).await);
@@ -717,7 +717,7 @@ mod tests {
                 .unwrap();
         }
         logstore
-            .mark_stable(LocalNamespace::new(42), 30)
+            .obsolete(LocalNamespace::new(42), 30)
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;

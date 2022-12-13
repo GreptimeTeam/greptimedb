@@ -64,9 +64,9 @@ impl<S: LogStore> Wal<S> {
         }
     }
 
-    pub async fn mark_stable(&self, seq: SequenceNumber) -> Result<()> {
+    pub async fn obsolete(&self, seq: SequenceNumber) -> Result<()> {
         self.store
-            .mark_stable(self.namespace.clone(), seq)
+            .obsolete(self.namespace.clone(), seq)
             .await
             .map_err(BoxedError::new)
             .context(MarkWalStableSnafu {

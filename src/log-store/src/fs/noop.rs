@@ -81,7 +81,7 @@ impl LogStore for NoopLogStore {
         LocalNamespace::new(id)
     }
 
-    async fn mark_stable(
+    async fn obsolete(
         &self,
         namespace: Self::Namespace,
         id: Id,
