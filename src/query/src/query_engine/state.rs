@@ -14,25 +14,26 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use catalog::CatalogListRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::{SessionContext, TaskContext};
 use common_query::prelude::ScalarUdf;
-use datafusion::execution::context::{SessionConfig, SessionState};
-use crate::datafusion::DfCatalogListAdapter;
-use crate::optimizer::TypeConversionRule;
-use datafusion::execution::runtime_env::{RuntimeEnv};
-use datafusion_optimizer::optimizer::{OptimizerConfig, Optimizer};
 use datafusion::catalog::TableReference;
 use datafusion::datasource::TableProvider;
+use datafusion::error::Result as DfResult;
+use datafusion::execution::context::{SessionConfig, SessionState};
+use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
-use datafusion::error::Result as DfResult;
 use datafusion_expr::TableSource;
+use datafusion_optimizer::optimizer::{Optimizer, OptimizerConfig};
 use datatypes::arrow::datatypes::DataType;
+
+use crate::datafusion::DfCatalogListAdapter;
+use crate::optimizer::TypeConversionRule;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -56,7 +57,8 @@ impl fmt::Debug for QueryEngineState {
 impl QueryEngineState {
     pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
-        let session_config = SessionConfig::new().with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let session_config = SessionConfig::new()
+            .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         let mut optimizer = Optimizer::new(&OptimizerConfig::new());
         // Apply the type conversion rule first.
         optimizer.rules.insert(0, Arc::new(TypeConversionRule {}));
@@ -137,8 +139,8 @@ impl QueryEngineState {
 
     pub(crate) fn get_table_provider(
         &self,
-        schema: &str,
-        name: TableReference
+        schema: Option<&str>,
+        name: TableReference,
     ) -> DfResult<Arc<dyn TableSource>> {
         let df_context = self.df_context.lock().unwrap();
         match name {
@@ -153,11 +155,14 @@ impl QueryEngineState {
         }
     }
 
-    fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
+    pub(crate) fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
         self.df_context.lock().unwrap().get_function_meta(name)
     }
 
-    fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
-        self.df_context.lock().unwrap().get_variable_type(variable_names)
+    pub(crate) fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
+        self.df_context
+            .lock()
+            .unwrap()
+            .get_variable_type(variable_names)
     }
 }

@@ -49,7 +49,7 @@ impl Insert {
 
     pub fn values(&self) -> Result<Vec<Vec<Value>>> {
         let values = match &self.inner {
-            Statement::Insert { source, .. } => match &source.body {
+            Statement::Insert { source, .. } => match &*source.body {
                 SetExpr::Values(Values(exprs)) => sql_exprs_to_values(exprs)?,
                 _ => unreachable!(),
             },

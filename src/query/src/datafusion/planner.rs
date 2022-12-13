@@ -12,23 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use common_query::logical_plan::create_aggregate_function;
 use datafusion::catalog::TableReference;
 use datafusion::datasource::TableProvider;
+use datafusion::error::Result as DfResult;
 use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::sql::planner::{ContextProvider, SqlToRel};
+use datafusion_expr::TableSource;
 use datatypes::arrow::datatypes::DataType;
-use datafusion::error::Result as DfResult;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::explain::Explain;
 use sql::statements::query::Query;
 use sql::statements::statement::Statement;
-use datafusion_expr::TableSource;
 
 use crate::datafusion::error;
 use crate::error::Result;
@@ -53,7 +53,7 @@ impl<'a, S: ContextProvider + Send + Sync> DfPlanner<'a, S> {
         let sql = query.inner.to_string();
         let result = self
             .sql_to_rel
-            .query_to_plan(*query.inner, &mut HashMap::new())
+            .query_to_plan(query.inner, &mut HashMap::new())
             .context(error::PlanSqlSnafu { sql })?;
 
         Ok(LogicalPlan::DfPlan(result))
@@ -109,12 +109,10 @@ impl DfContextProviderAdapter {
 /// TODO(dennis): Delegate all requests to ExecutionContext right now,
 ///                           manage UDFs, UDAFs, variables by ourself in future.
 impl ContextProvider for DfContextProviderAdapter {
-    fn get_table_provider(
-        &self,
-        name: TableReference
-    ) -> DfResult<Arc<dyn TableSource>> {
+    fn get_table_provider(&self, name: TableReference) -> DfResult<Arc<dyn TableSource>> {
         let schema = self.query_ctx.current_schema();
-        self.state.get_table_provider(schema, name)
+        self.state
+            .get_table_provider(schema.map(|v| v.as_str()), name)
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
@@ -130,7 +128,6 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
-        self.state
-            .get_variable_type(variable_names)
+        self.state.get_variable_type(variable_names)
     }
 }
