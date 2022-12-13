@@ -261,10 +261,9 @@ mod test {
     use common_query::Output;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use common_time::timestamp::TimeUnit;
-    use datatypes::arrow::array::PrimitiveArray;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
-    use datatypes::vectors::{StringVector, TimestampVector, UInt32Vector, VectorRef};
+    use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt32Vector, VectorRef};
     use snafu::ResultExt;
     use sql::statements::describe::DescribeTable;
     use table::test_util::MemTable;
@@ -379,8 +378,8 @@ mod test {
             .with_time_index(true),
         ];
         let data = vec![
-            Arc::new(UInt32Vector::from_vec(vec![0])) as _,
-            Arc::new(TimestampVector::new(PrimitiveArray::from_vec(vec![0]))) as _,
+            Arc::new(UInt32Vector::from_slice(&[0])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
         ];
         let expected_columns = vec![
             Arc::new(StringVector::from(vec!["t1", "t2"])) as _,

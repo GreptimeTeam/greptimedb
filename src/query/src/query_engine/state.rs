@@ -24,8 +24,15 @@ use common_query::prelude::ScalarUdf;
 use datafusion::execution::context::{SessionConfig, SessionState};
 use crate::datafusion::DfCatalogListAdapter;
 use crate::optimizer::TypeConversionRule;
-use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeConfig};
+use datafusion::execution::runtime_env::{RuntimeEnv};
 use datafusion_optimizer::optimizer::{OptimizerConfig, Optimizer};
+use datafusion::catalog::TableReference;
+use datafusion::datasource::TableProvider;
+use datafusion::physical_plan::udaf::AggregateUDF;
+use datafusion::physical_plan::udf::ScalarUDF;
+use datafusion::error::Result as DfResult;
+use datafusion_expr::TableSource;
+use datatypes::arrow::datatypes::DataType;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -34,7 +41,7 @@ use datafusion_optimizer::optimizer::{OptimizerConfig, Optimizer};
 #[derive(Clone)]
 pub struct QueryEngineState {
     // TODO(yingwen): Remove this mutex.
-    df_context: Mutex<SessionContext>,
+    df_context: Arc<Mutex<SessionContext>>,
     catalog_list: CatalogListRef,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
 }
@@ -48,17 +55,17 @@ impl fmt::Debug for QueryEngineState {
 
 impl QueryEngineState {
     pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
-        let runtime_env = RuntimeEnv::new(RuntimeConfig::new());
+        let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         let mut optimizer = Optimizer::new(&OptimizerConfig::new());
         // Apply the type conversion rule first.
         optimizer.rules.insert(0, Arc::new(TypeConversionRule {}));
 
         let mut session_state = SessionState::with_config_rt(session_config, runtime_env);
-        session_state.optimizer = Arc::new(optimizer);
+        session_state.optimizer = optimizer;
         session_state.catalog_list = Arc::new(DfCatalogListAdapter::new(catalog_list.clone()));
 
-        let df_context = SessionContext::with_state(session_state);
+        let df_context = Arc::new(Mutex::new(SessionContext::with_state(session_state)));
 
         // let config = ExecutionConfig::new()
         //     .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
@@ -92,7 +99,8 @@ impl QueryEngineState {
     pub fn register_udf(&self, udf: ScalarUdf) {
         self.df_context
             .lock()
-            .register_udf(udf.name.clone(), Arc::new(udf.into_df_udf()));
+            .unwrap()
+            .register_udf(udf.into_df_udf());
     }
 
     pub fn aggregate_function(&self, function_name: &str) -> Option<AggregateFunctionMetaRef> {
@@ -117,13 +125,39 @@ impl QueryEngineState {
         &self.catalog_list
     }
 
-    #[inline]
-    pub(crate) fn df_context(&self) -> &SessionContext {
-        &self.df_context
-    }
+    // #[inline]
+    // pub(crate) fn df_context(&self) -> &SessionContext {
+    //     &self.df_context
+    // }
 
     #[inline]
     pub(crate) fn task_ctx(&self) -> Arc<TaskContext> {
-        self.df_context.task_ctx()
+        self.df_context.lock().unwrap().task_ctx()
+    }
+
+    pub(crate) fn get_table_provider(
+        &self,
+        schema: &str,
+        name: TableReference
+    ) -> DfResult<Arc<dyn TableSource>> {
+        let df_context = self.df_context.lock().unwrap();
+        match name {
+            TableReference::Bare { table } if schema.is_some() => {
+                df_context.get_table_provider(TableReference::Partial {
+                    // unwrap safety: checked in this match's arm
+                    schema: &schema.unwrap(),
+                    table,
+                })
+            }
+            _ => df_context.get_table_provider(name),
+        }
+    }
+
+    fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
+        self.df_context.lock().unwrap().get_function_meta(name)
+    }
+
+    fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
+        self.df_context.lock().unwrap().get_variable_type(variable_names)
     }
 }

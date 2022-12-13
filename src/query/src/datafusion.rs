@@ -254,7 +254,6 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
-    use datafusion::field_util::{FieldExt, SchemaExt};
     use datatypes::arrow::array::UInt64Array;
     use session::context::QueryContext;
     use table::table::numbers::NumbersTable;
