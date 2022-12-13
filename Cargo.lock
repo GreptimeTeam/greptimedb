@@ -4951,6 +4951,7 @@ dependencies = [
  "datafusion-expr",
  "datafusion-optimizer",
  "datafusion-physical-expr",
+ "datafusion-sql",
  "datatypes",
  "format_num",
  "futures",

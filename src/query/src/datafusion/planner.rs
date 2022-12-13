@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use common_query::logical_plan::create_aggregate_function;
 use datafusion::catalog::TableReference;
-use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DfResult;
 use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
@@ -112,7 +111,7 @@ impl ContextProvider for DfContextProviderAdapter {
     fn get_table_provider(&self, name: TableReference) -> DfResult<Arc<dyn TableSource>> {
         let schema = self.query_ctx.current_schema();
         self.state
-            .get_table_provider(schema.map(|v| v.as_str()), name)
+            .get_table_provider(schema.as_ref().map(|v| v.as_str()), name)
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {

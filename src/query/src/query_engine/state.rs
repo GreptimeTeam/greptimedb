@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use catalog::CatalogListRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -22,14 +22,14 @@ use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::{SessionContext, TaskContext};
 use common_query::prelude::ScalarUdf;
 use datafusion::catalog::TableReference;
-use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
-use datafusion_expr::TableSource;
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion_expr::{LogicalPlan as DfLogicalPlan, TableSource};
 use datafusion_optimizer::optimizer::{Optimizer, OptimizerConfig};
+use datafusion_sql::planner::ContextProvider;
 use datatypes::arrow::datatypes::DataType;
 
 use crate::datafusion::DfCatalogListAdapter;
@@ -41,8 +41,7 @@ use crate::optimizer::TypeConversionRule;
 // type in QueryEngine trait.
 #[derive(Clone)]
 pub struct QueryEngineState {
-    // TODO(yingwen): Remove this mutex.
-    df_context: Arc<Mutex<SessionContext>>,
+    df_context: SessionContext,
     catalog_list: CatalogListRef,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
 }
@@ -67,27 +66,7 @@ impl QueryEngineState {
         session_state.optimizer = optimizer;
         session_state.catalog_list = Arc::new(DfCatalogListAdapter::new(catalog_list.clone()));
 
-        let df_context = Arc::new(Mutex::new(SessionContext::with_state(session_state)));
-
-        // let config = ExecutionConfig::new()
-        //     .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
-        //     .with_optimizer_rules(vec![
-        //         // TODO(hl): SimplifyExpressions is not exported.
-        //         Arc::new(TypeConversionRule {}),
-        //         // These are the default optimizer in datafusion
-        //         Arc::new(CommonSubexprEliminate::new()),
-        //         Arc::new(EliminateLimit::new()),
-        //         Arc::new(ProjectionPushDown::new()),
-        //         Arc::new(FilterPushDown::new()),
-        //         Arc::new(LimitPushDown::new()),
-        //         Arc::new(SingleDistinctToGroupBy::new()),
-        //         Arc::new(ToApproxPerc::new()),
-        //     ]);
-
-        // let df_context = ExecutionContext::with_config(config);
-
-        // df_context.state.lock().catalog_list =
-        //     Arc::new(DfCatalogListAdapter::new(catalog_list.clone()));
+        let df_context = SessionContext::with_state(session_state);
 
         Self {
             df_context,
@@ -99,10 +78,13 @@ impl QueryEngineState {
     /// Register a udf function
     /// TODO(dennis): manage UDFs by ourself.
     pub fn register_udf(&self, udf: ScalarUdf) {
+        // `SessionContext` has a `register_udf()` method, which requires `&mut self`, this is
+        // a workaround.
         self.df_context
-            .lock()
-            .unwrap()
-            .register_udf(udf.into_df_udf());
+            .state
+            .write()
+            .scalar_functions
+            .insert(udf.name.clone(), Arc::new(udf.into_df_udf()));
     }
 
     pub fn aggregate_function(&self, function_name: &str) -> Option<AggregateFunctionMetaRef> {
@@ -127,14 +109,9 @@ impl QueryEngineState {
         &self.catalog_list
     }
 
-    // #[inline]
-    // pub(crate) fn df_context(&self) -> &SessionContext {
-    //     &self.df_context
-    // }
-
     #[inline]
     pub(crate) fn task_ctx(&self) -> Arc<TaskContext> {
-        self.df_context.lock().unwrap().task_ctx()
+        self.df_context.task_ctx()
     }
 
     pub(crate) fn get_table_provider(
@@ -142,27 +119,50 @@ impl QueryEngineState {
         schema: Option<&str>,
         name: TableReference,
     ) -> DfResult<Arc<dyn TableSource>> {
-        let df_context = self.df_context.lock().unwrap();
+        let state = self.df_context.state.read();
         match name {
             TableReference::Bare { table } if schema.is_some() => {
-                df_context.get_table_provider(TableReference::Partial {
+                state.get_table_provider(TableReference::Partial {
                     // unwrap safety: checked in this match's arm
                     schema: &schema.unwrap(),
                     table,
                 })
             }
-            _ => df_context.get_table_provider(name),
+            _ => state.get_table_provider(name),
         }
     }
 
     pub(crate) fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
-        self.df_context.lock().unwrap().get_function_meta(name)
+        let state = self.df_context.state.read();
+        state.get_function_meta(name)
     }
 
     pub(crate) fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
-        self.df_context
-            .lock()
-            .unwrap()
-            .get_variable_type(variable_names)
+        let state = self.df_context.state.read();
+        state.get_variable_type(variable_names)
+    }
+
+    pub(crate) fn optimize(&self, plan: &DfLogicalPlan) -> DfResult<DfLogicalPlan> {
+        self.df_context.optimize(plan)
+    }
+
+    pub(crate) async fn create_physical_plan(
+        &self,
+        logical_plan: &DfLogicalPlan,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        self.df_context.create_physical_plan(logical_plan).await
+    }
+
+    pub(crate) fn optimize_physical_plan(
+        &self,
+        mut plan: Arc<dyn ExecutionPlan>,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        let state = self.df_context.state.read();
+        let config = &state.config;
+        for optimizer in &state.physical_optimizers {
+            plan = optimizer.optimize(plan, config)?;
+        }
+
+        Ok(plan)
     }
 }
