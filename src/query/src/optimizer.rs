@@ -44,13 +44,12 @@ impl OptimizerRule for TypeConversionRule {
         };
 
         match plan {
-            LogicalPlan::Filter(Filter { predicate, input }) => Ok(LogicalPlan::Filter(
-                Filter::try_new(
+            LogicalPlan::Filter(Filter { predicate, input }) => {
+                Ok(LogicalPlan::Filter(Filter::try_new(
                     predicate.clone().rewrite(&mut converter)?,
                     Arc::new(self.optimize(input, optimizer_config)?),
-                )
-                .unwrap(),
-            )),
+                )?))
+            }
             LogicalPlan::TableScan(TableScan {
                 table_name,
                 source,
