@@ -4950,6 +4950,7 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-optimizer",
  "datafusion-physical-expr",
  "datatypes",
  "format_num",

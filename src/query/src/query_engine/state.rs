@@ -14,23 +14,18 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex};
 
 use catalog::CatalogListRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::{SessionContext, TaskContext};
 use common_query::prelude::ScalarUdf;
-use datafusion::optimizer::common_subexpr_eliminate::CommonSubexprEliminate;
-use datafusion::optimizer::eliminate_limit::EliminateLimit;
-use datafusion::optimizer::filter_push_down::FilterPushDown;
-use datafusion::optimizer::limit_push_down::LimitPushDown;
-use datafusion::optimizer::projection_push_down::ProjectionPushDown;
-use datafusion::optimizer::single_distinct_to_groupby::SingleDistinctToGroupBy;
-use datafusion::optimizer::to_approx_perc::ToApproxPerc;
-use datafusion::execution::context::SessionConfig;
+use datafusion::execution::context::{SessionConfig, SessionState};
 use crate::datafusion::DfCatalogListAdapter;
 use crate::optimizer::TypeConversionRule;
+use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeConfig};
+use datafusion_optimizer::optimizer::{OptimizerConfig, Optimizer};
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -38,7 +33,8 @@ use crate::optimizer::TypeConversionRule;
 // type in QueryEngine trait.
 #[derive(Clone)]
 pub struct QueryEngineState {
-    df_context: ExecutionContext,
+    // TODO(yingwen): Remove this mutex.
+    df_context: Mutex<SessionContext>,
     catalog_list: CatalogListRef,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
 }
@@ -52,25 +48,37 @@ impl fmt::Debug for QueryEngineState {
 
 impl QueryEngineState {
     pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
-        let config = ExecutionConfig::new()
-            .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
-            .with_optimizer_rules(vec![
-                // TODO(hl): SimplifyExpressions is not exported.
-                Arc::new(TypeConversionRule {}),
-                // These are the default optimizer in datafusion
-                Arc::new(CommonSubexprEliminate::new()),
-                Arc::new(EliminateLimit::new()),
-                Arc::new(ProjectionPushDown::new()),
-                Arc::new(FilterPushDown::new()),
-                Arc::new(LimitPushDown::new()),
-                Arc::new(SingleDistinctToGroupBy::new()),
-                Arc::new(ToApproxPerc::new()),
-            ]);
+        let runtime_env = RuntimeEnv::new(RuntimeConfig::new());
+        let session_config = SessionConfig::new().with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let mut optimizer = Optimizer::new(&OptimizerConfig::new());
+        // Apply the type conversion rule first.
+        optimizer.rules.insert(0, Arc::new(TypeConversionRule {}));
 
-        let df_context = ExecutionContext::with_config(config);
+        let mut session_state = SessionState::with_config_rt(session_config, runtime_env);
+        session_state.optimizer = Arc::new(optimizer);
+        session_state.catalog_list = Arc::new(DfCatalogListAdapter::new(catalog_list.clone()));
 
-        df_context.state.lock().catalog_list =
-            Arc::new(DfCatalogListAdapter::new(catalog_list.clone()));
+        let df_context = SessionContext::with_state(session_state);
+
+        // let config = ExecutionConfig::new()
+        //     .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+        //     .with_optimizer_rules(vec![
+        //         // TODO(hl): SimplifyExpressions is not exported.
+        //         Arc::new(TypeConversionRule {}),
+        //         // These are the default optimizer in datafusion
+        //         Arc::new(CommonSubexprEliminate::new()),
+        //         Arc::new(EliminateLimit::new()),
+        //         Arc::new(ProjectionPushDown::new()),
+        //         Arc::new(FilterPushDown::new()),
+        //         Arc::new(LimitPushDown::new()),
+        //         Arc::new(SingleDistinctToGroupBy::new()),
+        //         Arc::new(ToApproxPerc::new()),
+        //     ]);
+
+        // let df_context = ExecutionContext::with_config(config);
+
+        // df_context.state.lock().catalog_list =
+        //     Arc::new(DfCatalogListAdapter::new(catalog_list.clone()));
 
         Self {
             df_context,
@@ -83,10 +91,8 @@ impl QueryEngineState {
     /// TODO(dennis): manage UDFs by ourself.
     pub fn register_udf(&self, udf: ScalarUdf) {
         self.df_context
-            .state
             .lock()
-            .scalar_functions
-            .insert(udf.name.clone(), Arc::new(udf.into_df_udf()));
+            .register_udf(udf.name.clone(), Arc::new(udf.into_df_udf()));
     }
 
     pub fn aggregate_function(&self, function_name: &str) -> Option<AggregateFunctionMetaRef> {
@@ -112,12 +118,12 @@ impl QueryEngineState {
     }
 
     #[inline]
-    pub(crate) fn df_context(&self) -> &ExecutionContext {
+    pub(crate) fn df_context(&self) -> &SessionContext {
         &self.df_context
     }
 
     #[inline]
-    pub(crate) fn runtime(&self) -> Arc<RuntimeEnv> {
-        self.df_context.runtime_env()
+    pub(crate) fn task_ctx(&self) -> Arc<TaskContext> {
+        self.df_context.task_ctx()
     }
 }
