@@ -154,7 +154,8 @@ impl StartCommand {
     async fn run(self) -> Result<()> {
         let enable_memory_catalog = self.enable_memory_catalog;
         let config_file = self.config_file.clone();
-        let fe_opts = FrontendOptions::try_from(self.clone())?;
+        let plugins: AnyMap = AnyMap::try_from(&self)?;
+        let fe_opts = FrontendOptions::try_from(self)?;
         let dn_opts: DatanodeOptions = {
             let mut opts: StandaloneOptions = if let Some(path) = config_file {
                 toml_loader::from_file!(&path)?
@@ -173,7 +174,6 @@ impl StartCommand {
         let mut datanode = Datanode::new(dn_opts.clone())
             .await
             .context(StartDatanodeSnafu)?;
-        let plugins: AnyMap = self.try_into()?;
         let mut frontend = build_frontend(fe_opts, plugins, datanode.get_instance()).await?;
 
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
@@ -200,14 +200,14 @@ async fn build_frontend(
     Ok(Frontend::new(fe_opts, frontend_instance, plugins))
 }
 
-impl TryFrom<StartCommand> for AnyMap {
+impl TryFrom<&StartCommand> for AnyMap {
     type Error = Error;
 
-    fn try_from(cmd: StartCommand) -> Result<Self> {
+    fn try_from(cmd: &StartCommand) -> Result<Self> {
         let mut plugins = AnyMap::new();
         let mut fe_plugin = FrontendPlugin::default();
 
-        if let Some(provider_config) = cmd.user_provider {
+        if let Some(provider_config) = &cmd.user_provider {
             let user_provider = auth::user_provider_from_option(&provider_config)
                 .context(IllegalAuthConfigSnafu)?;
             fe_plugin.user_provider = Some(user_provider);

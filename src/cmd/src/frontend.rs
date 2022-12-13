@@ -88,8 +88,8 @@ pub struct StartCommand {
 impl StartCommand {
     async fn run(self) -> Result<()> {
         // maybe too expensive to clone?
+        let plugins: AnyMap = AnyMap::try_from(&self)?;
         let opts: FrontendOptions = self.clone().try_into()?;
-        let plugins: AnyMap = self.try_into()?;
         let mut frontend = Frontend::new(
             opts.clone(),
             Instance::try_new_distributed(&opts)
@@ -162,14 +162,14 @@ impl TryFrom<StartCommand> for FrontendOptions {
     }
 }
 
-impl TryFrom<StartCommand> for AnyMap {
+impl TryFrom<&StartCommand> for AnyMap {
     type Error = error::Error;
 
-    fn try_from(cmd: StartCommand) -> Result<Self> {
+    fn try_from(cmd: &StartCommand) -> Result<Self> {
         let mut plugins = AnyMap::new();
         let mut fe_plugin = FrontendPlugin::default();
 
-        if let Some(provider_config) = cmd.user_provider {
+        if let Some(provider_config) = &cmd.user_provider {
             let user_provider = auth::user_provider_from_option(&provider_config)
                 .context(IllegalAuthConfigSnafu)?;
             fe_plugin.user_provider = Some(user_provider);
