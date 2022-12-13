@@ -173,8 +173,8 @@ impl StartCommand {
         let mut datanode = Datanode::new(dn_opts.clone())
             .await
             .context(StartDatanodeSnafu)?;
-        let plugin: AnyMap = self.try_into()?;
-        let mut frontend = build_frontend(fe_opts, plugin, datanode.get_instance()).await?;
+        let plugins: AnyMap = self.try_into()?;
+        let mut frontend = build_frontend(fe_opts, plugins, datanode.get_instance()).await?;
 
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
         datanode
@@ -191,13 +191,13 @@ impl StartCommand {
 /// Build frontend instance in standalone mode
 async fn build_frontend(
     fe_opts: FrontendOptions,
-    fe_plugin: AnyMap,
+    plugins: AnyMap,
     datanode_instance: InstanceRef,
 ) -> Result<Frontend<FeInstance>> {
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
     frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
     frontend_instance.set_script_handler(datanode_instance);
-    Ok(Frontend::new(fe_opts, frontend_instance, fe_plugin))
+    Ok(Frontend::new(fe_opts, frontend_instance, plugins))
 }
 
 impl TryFrom<StartCommand> for AnyMap {
