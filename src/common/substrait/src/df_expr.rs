@@ -15,8 +15,10 @@
 use std::collections::VecDeque;
 use std::str::FromStr;
 
-use datafusion::logical_plan::{Column, Expr};
-use datafusion_expr::{expr_fn, lit, BuiltinScalarFunction, Operator};
+use datafusion::common::Column;
+use datafusion_expr::{expr_fn, lit, BinaryExpr, BuiltinScalarFunction, Operator};
+// use datafusion::logical_plan::{Column, Expr};
+use datafusion_expr::{Between, Expr};
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt};
 use substrait_proto::protobuf::expression::field_reference::ReferenceType as FieldReferenceType;
@@ -311,21 +313,21 @@ pub fn convert_scalar_function(
         // skip GetIndexedField, unimplemented.
         "between" => {
             ensure_arg_len(3)?;
-            Expr::Between {
+            Expr::Between(Between {
                 expr: Box::new(inputs.pop_front().unwrap()),
                 negated: false,
                 low: Box::new(inputs.pop_front().unwrap()),
                 high: Box::new(inputs.pop_front().unwrap()),
-            }
+            })
         }
         "not_between" => {
             ensure_arg_len(3)?;
-            Expr::Between {
+            Expr::Between(Between {
                 expr: Box::new(inputs.pop_front().unwrap()),
                 negated: true,
                 low: Box::new(inputs.pop_front().unwrap()),
                 high: Box::new(inputs.pop_front().unwrap()),
-            }
+            })
         }
         // skip Case, is covered in substrait::SwitchExpression.
         // skip Cast and TryCast, is covered in substrait::Cast.
@@ -477,7 +479,7 @@ pub fn expression_from_df_expr(
                 rex_type: Some(RexType::Literal(l)),
             }
         }
-        Expr::BinaryExpr { left, op, right } => {
+        Expr::BinaryExpr(BinaryExpr { left, op, right }) => {
             let left = expression_from_df_expr(ctx, left, schema)?;
             let right = expression_from_df_expr(ctx, right, schema)?;
             let arguments = utils::expression_to_argument(vec![left, right]);
@@ -518,12 +520,12 @@ pub fn expression_from_df_expr(
             name: expr.to_string(),
         }
         .fail()?,
-        Expr::Between {
+        Expr::Between(Between {
             expr,
             negated,
             low,
             high,
-        } => {
+        }) => {
             let expr = expression_from_df_expr(ctx, expr, schema)?;
             let low = expression_from_df_expr(ctx, low, schema)?;
             let high = expression_from_df_expr(ctx, high, schema)?;
@@ -564,7 +566,21 @@ pub fn expression_from_df_expr(
         | Expr::WindowFunction { .. }
         | Expr::AggregateUDF { .. }
         | Expr::InList { .. }
-        | Expr::Wildcard => UnsupportedExprSnafu {
+        | Expr::Wildcard
+        | Expr::Like(_)
+        | Expr::ILike(_)
+        | Expr::SimilarTo(_)
+        | Expr::IsTrue(_)
+        | Expr::IsFalse(_)
+        | Expr::IsUnknown(_)
+        | Expr::IsNotTrue(_)
+        | Expr::IsNotFalse(_)
+        | Expr::IsNotUnknown(_)
+        | Expr::Exists { .. }
+        | Expr::InSubquery { .. }
+        | Expr::ScalarSubquery(..)
+        | Expr::QualifiedWildcard { .. } => todo!(),
+        Expr::GroupingSet(_) => UnsupportedExprSnafu {
             name: expr.to_string(),
         }
         .fail()?,
@@ -628,6 +644,10 @@ mod utils {
             Operator::RegexNotIMatch => "regex_not_i_match",
             Operator::BitwiseAnd => "bitwise_and",
             Operator::BitwiseOr => "bitwise_or",
+            Operator::BitwiseXor => "bitwise_xor",
+            Operator::BitwiseShiftRight => "bitwise_shift_right",
+            Operator::BitwiseShiftLeft => "bitwise_shift_left",
+            Operator::StringConcat => "string_concat",
         }
     }
 
@@ -679,7 +699,6 @@ mod utils {
             BuiltinScalarFunction::Sqrt => "sqrt",
             BuiltinScalarFunction::Tan => "tan",
             BuiltinScalarFunction::Trunc => "trunc",
-            BuiltinScalarFunction::Array => "make_array",
             BuiltinScalarFunction::Ascii => "ascii",
             BuiltinScalarFunction::BitLength => "bit_length",
             BuiltinScalarFunction::Btrim => "btrim",
@@ -723,6 +742,17 @@ mod utils {
             BuiltinScalarFunction::Trim => "trim",
             BuiltinScalarFunction::Upper => "upper",
             BuiltinScalarFunction::RegexpMatch => "regexp_match",
+            BuiltinScalarFunction::Atan2 => "atan2",
+            BuiltinScalarFunction::Coalesce => "coalesce",
+            BuiltinScalarFunction::Power => "power",
+            BuiltinScalarFunction::MakeArray => "make_array",
+            BuiltinScalarFunction::DateBin => "date_bin",
+            BuiltinScalarFunction::FromUnixtime => "from_unixtime",
+            BuiltinScalarFunction::CurrentDate => "current_date",
+            BuiltinScalarFunction::CurrentTime => "current_time",
+            BuiltinScalarFunction::Uuid => "uuid",
+            BuiltinScalarFunction::Struct => "struct",
+            BuiltinScalarFunction::ArrowTypeof => "arrow_type_of",
         }
     }
 }
