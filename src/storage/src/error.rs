@@ -204,8 +204,13 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to mark WAL as stable, source: {}", source))]
+    #[snafu(display(
+        "Failed to mark WAL as stable, region id: {}, source: {}",
+        region_id,
+        source
+    ))]
     MarkWalStable {
+        region_id: u64,
         #[snafu(backtrace)]
         source: BoxedError,
     },

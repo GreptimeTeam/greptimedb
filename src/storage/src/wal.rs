@@ -69,7 +69,9 @@ impl<S: LogStore> Wal<S> {
             .mark_stable(self.namespace.clone(), seq)
             .await
             .map_err(BoxedError::new)
-            .context(MarkWalStableSnafu)
+            .context(MarkWalStableSnafu {
+                region_id: self.region_id,
+            })
     }
 
     #[inline]
