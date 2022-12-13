@@ -210,9 +210,10 @@ fn build_values(column: &ArrayRef) -> Values {
         | DataType::FixedSizeList(_, _)
         | DataType::LargeList(_)
         | DataType::Struct(_)
-        | DataType::Union(_, _)
+        | DataType::Union(_, _, _)
         | DataType::Dictionary(_, _)
-        | DataType::Decimal(_, _)
+        | DataType::Decimal128(_, _)
+        | DataType::Decimal256(_, _)
         | DataType::Map(_, _) => todo!(),
     }
 }
