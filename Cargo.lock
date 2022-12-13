@@ -6448,6 +6448,7 @@ name = "storage"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "async-compat",
  "async-stream",
  "async-trait",
  "atomic_float",
@@ -6465,6 +6466,7 @@ dependencies = [
  "lazy_static",
  "log-store",
  "object-store",
+ "parquet",
  "paste",
  "planus",
  "prost 0.11.3",

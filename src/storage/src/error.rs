@@ -18,7 +18,6 @@ use std::str::Utf8Error;
 
 use common_error::prelude::*;
 use datatypes::arrow;
-use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use serde_json::error::Error as JsonError;
 use store_api::manifest::action::ProtocolVersion;
@@ -54,8 +53,14 @@ pub enum Error {
 
     #[snafu(display("Failed to write parquet file, source: {}", source))]
     WriteParquet {
-        source: arrow::error::ArrowError,
+        source: parquet::errors::ParquetError,
         backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to create RecordBatch from vectors, source: {}", source))]
+    NewRecordBatch {
+        backtrace: Backtrace,
+        source: arrow::error::ArrowError,
     },
 
     #[snafu(display("Fail to read object from path: {}, source: {}", path, source))]
@@ -180,7 +185,7 @@ pub enum Error {
     #[snafu(display("Failed to read Parquet file: {}, source: {}", file, source))]
     ReadParquet {
         file: String,
-        source: ArrowError,
+        source: parquet::errors::ParquetError,
         backtrace: Backtrace,
     },
 
@@ -385,7 +390,8 @@ impl ErrorExt for Error {
             | AlterMetadata { .. }
             | CompatRead { .. }
             | CreateDefaultToRead { .. }
-            | NoDefaultToRead { .. } => StatusCode::Unexpected,
+            | NoDefaultToRead { .. }
+            | NewRecordBatch { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | WriteParquet { .. }
@@ -472,14 +478,14 @@ mod tests {
     #[test]
     pub fn test_arrow_error() {
         fn throw_arrow_error() -> std::result::Result<(), ArrowError> {
-            Err(ArrowError::ExternalFormat("Lorem ipsum".to_string()))
+            Err(ArrowError::IoError("Lorem ipsum".to_string()))
         }
 
         let error = throw_arrow_error()
-            .context(WriteParquetSnafu)
+            .context(NewRecordBatchSnafu)
             .err()
             .unwrap();
-        assert_eq!(StorageUnavailable, error.status_code());
+        assert_eq!(Unexpected, error.status_code());
         assert!(error.backtrace_opt().is_some());
     }
 }

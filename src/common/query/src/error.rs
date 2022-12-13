@@ -237,35 +237,28 @@ mod tests {
 
     #[test]
     fn test_datafusion_as_source() {
-        let err: Error = throw_df_error()
+        let err = throw_df_error()
             .context(ExecuteFunctionSnafu)
             .err()
-            .unwrap()
-            .into();
+            .unwrap();
         assert_error(&err, StatusCode::EngineExecuteQuery);
 
         let err: Error = throw_df_error()
             .context(GeneralDataFusionSnafu)
             .err()
-            .unwrap()
-            .into();
+            .unwrap();
         assert_error(&err, StatusCode::Unexpected);
 
-        let err: Error = throw_df_error()
+        let err = throw_df_error()
             .context(DataFusionExecutionPlanSnafu)
             .err()
-            .unwrap()
-            .into();
+            .unwrap();
         assert_error(&err, StatusCode::Unexpected);
     }
 
     #[test]
     fn test_execute_repeatedly_error() {
-        let error: Error = None::<i32>
-            .context(ExecuteRepeatedlySnafu)
-            .err()
-            .unwrap()
-            .into();
+        let error = None::<i32>.context(ExecuteRepeatedlySnafu).err().unwrap();
         assert_eq!(error.status_code(), StatusCode::Unexpected);
         assert!(error.backtrace_opt().is_some());
     }
@@ -276,13 +269,11 @@ mod tests {
             Err(common_recordbatch::error::Error::PollStream {
                 source: ArrowError::DivideByZero,
                 backtrace: Backtrace::generate(),
-            }
-            .into());
-        let error: Error = result
+            });
+        let error = result
             .context(ConvertDfRecordBatchStreamSnafu)
             .err()
-            .unwrap()
-            .into();
+            .unwrap();
         assert_eq!(error.status_code(), StatusCode::Internal);
         assert!(error.backtrace_opt().is_some());
     }
@@ -296,13 +287,12 @@ mod tests {
 
     #[test]
     fn test_into_vector_error() {
-        let err: Error = raise_datatype_error()
+        let err = raise_datatype_error()
             .context(IntoVectorSnafu {
                 data_type: ArrowDatatype::Int32,
             })
             .err()
-            .unwrap()
-            .into();
+            .unwrap();
         assert!(err.backtrace_opt().is_some());
         let datatype_err = raise_datatype_error().err().unwrap();
         assert_eq!(datatype_err.status_code(), err.status_code());

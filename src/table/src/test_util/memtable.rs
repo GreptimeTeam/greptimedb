@@ -162,9 +162,7 @@ impl Table for MemTable {
         let df_recordbatch = df_recordbatch.slice(0, limit);
 
         let recordbatch = RecordBatch::try_from_df_record_batch(
-            Arc::new(
-                Schema::try_from(df_recordbatch.schema().clone()).context(SchemaConversionSnafu)?,
-            ),
+            Arc::new(Schema::try_from(df_recordbatch.schema()).context(SchemaConversionSnafu)?),
             df_recordbatch,
         )
         .map_err(BoxedError::new)

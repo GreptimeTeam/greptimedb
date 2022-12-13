@@ -18,28 +18,23 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
-use common_telemetry::debug;
-use datatypes::arrow::array::Array;
-use datatypes::arrow::chunk::Chunk;
-use datatypes::arrow::datatypes::{DataType, Schema};
-use datatypes::arrow::io::parquet::read::{
-    infer_schema, read_columns_many_async, read_metadata_async, RowGroupDeserializer,
-};
-use datatypes::arrow::io::parquet::write::{
-    Compression, Encoding, FileSink, Version, WriteOptions,
-};
-use futures::io::BufReader;
-use futures::AsyncWriteExt;
-use futures_util::sink::SinkExt;
-use futures_util::{try_join, Stream, TryStreamExt};
-use object_store::{ObjectStore, SeekableReader};
-use sluice::pipe;
+use datatypes::arrow::record_batch::RecordBatch;
+use futures_util::{Stream, StreamExt, TryStreamExt};
+use object_store::ObjectStore;
+use parquet::arrow::{ArrowWriter, ParquetRecordBatchStreamBuilder, ProjectionMask};
+use parquet::basic::{Compression, Encoding};
+use parquet::file::metadata::KeyValue;
+use parquet::file::properties::WriterProperties;
 use snafu::ResultExt;
 use table::predicate::Predicate;
+use tokio::io::BufReader;
 
-use crate::error::{self, Result};
+use crate::error::{
+    self, NewRecordBatchSnafu, ReadParquetSnafu, Result, WriteObjectSnafu, WriteParquetSnafu,
+};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
@@ -51,6 +46,7 @@ pub struct ParquetWriter<'a> {
     file_path: &'a str,
     iter: BoxedBatchIterator,
     object_store: ObjectStore,
+    max_row_group_size: usize,
 }
 
 impl<'a> ParquetWriter<'a> {
@@ -63,6 +59,7 @@ impl<'a> ParquetWriter<'a> {
             file_path,
             iter,
             object_store,
+            max_row_group_size: 4096, // TODO(hl): make this configurable
         }
     }
 
@@ -76,122 +73,46 @@ impl<'a> ParquetWriter<'a> {
     async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
         let projected_schema = self.iter.schema();
         let store_schema = projected_schema.schema_to_read();
-        let schema = store_schema.arrow_schema();
+        let schema = store_schema.arrow_schema().clone();
         let object = self.object_store.object(self.file_path);
 
-        let (reader, mut writer) = pipe::pipe();
+        let writer_props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD)
+            .set_encoding(Encoding::PLAIN)
+            .set_max_row_group_size(self.max_row_group_size)
+            .set_key_value_metadata(extra_meta.map(|map| {
+                map.iter()
+                    .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+                    .collect::<Vec<_>>()
+            }))
+            .build();
 
-        // now all physical types use plain encoding, maybe let caller to choose encoding for each type.
-        let encodings = get_encoding_for_schema(schema, |_| Encoding::Plain);
-        try_join!(
-            async {
-                // FIXME(hl): writer size is not used in fs backend so just leave it to 0,
-                // but in s3/azblob backend the Content-Length field of HTTP request is set
-                // to this value.
-                object
-                    .write_from(0, reader)
-                    .await
-                    .context(error::FlushIoSnafu)
-            },
-            async {
-                let mut sink = FileSink::try_new(
-                    &mut writer,
-                    // The file sink needs the `Schema` instead of a reference.
-                    (**schema).clone(),
-                    encodings,
-                    WriteOptions {
-                        write_statistics: true,
-                        compression: Compression::Gzip,
-                        version: Version::V2,
-                    },
-                )
-                .context(error::WriteParquetSnafu)?;
-
-                for batch in self.iter {
-                    let batch = batch?;
-                    sink.send(store_schema.batch_to_arrow_chunk(&batch))
-                        .await
-                        .context(error::WriteParquetSnafu)?;
-                }
-
-                if let Some(meta) = extra_meta {
-                    for (k, v) in meta {
-                        sink.metadata.insert(k, Some(v));
-                    }
-                }
-                sink.close().await.context(error::WriteParquetSnafu)?;
-                drop(sink);
-
-                writer
-                    .close()
-                    .await
-                    .map_err(|err| {
-                        object_store::Error::new(
-                            object_store::ErrorKind::Unexpected,
-                            "writer close failed",
-                        )
-                        .set_source(err)
-                    })
-                    .context(error::WriteObjectSnafu {
-                        path: self.file_path,
-                    })
-            }
-        )
-        .map(|_| ())
-    }
-}
-
-fn get_encoding_for_schema<F: Fn(&DataType) -> Encoding + Clone>(
-    schema: &Schema,
-    map: F,
-) -> Vec<Encoding> {
-    schema
-        .fields
-        .iter()
-        .flat_map(|f| transverse(&f.data_type, map.clone()))
-        .collect()
-}
-
-// TODO(hl): backport from arrow2 v0.12 (https://github.com/jorgecarleitao/arrow2/blob/f57dbd5dbc61b940a71decd5f81d0fd4c93b158d/src/io/parquet/write/mod.rs#L454-L509)
-// remove it when upgrade to newer version
-pub fn transverse<T, F: Fn(&DataType) -> T + Clone>(data_type: &DataType, map: F) -> Vec<T> {
-    let mut encodings = vec![];
-    transverse_recursive(data_type, map, &mut encodings);
-    encodings
-}
-
-fn transverse_recursive<T, F: Fn(&DataType) -> T + Clone>(
-    data_type: &DataType,
-    map: F,
-    encodings: &mut Vec<T>,
-) {
-    use datatypes::arrow::datatypes::PhysicalType::*;
-    match data_type.to_physical_type() {
-        Null | Boolean | Primitive(_) | Binary | FixedSizeBinary | LargeBinary | Utf8
-        | Dictionary(_) | LargeUtf8 => encodings.push(map(data_type)),
-        List | FixedSizeList | LargeList => {
-            let a = data_type.to_logical_type();
-            if let DataType::List(inner) = a {
-                transverse_recursive(&inner.data_type, map, encodings)
-            } else if let DataType::LargeList(inner) = a {
-                transverse_recursive(&inner.data_type, map, encodings)
-            } else if let DataType::FixedSizeList(inner, _) = a {
-                transverse_recursive(&inner.data_type, map, encodings)
-            } else {
-                unreachable!()
-            }
+        // TODO(hl): Since OpenDAL's writer is async and ArrowWriter requires a `std::io::Write`,
+        // here we use a Vec<u8> to buffer all parquet bytes in memory and write to object store
+        // at a time. Maybe we should find a better way to brige ArrowWriter and OpenDAL's object.
+        let mut buf = vec![];
+        let mut arrow_writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props))
+            .context(WriteParquetSnafu)?;
+        for batch in self.iter {
+            let batch = batch?;
+            let arrow_batch = RecordBatch::try_new(
+                schema.clone(),
+                batch
+                    .columns()
+                    .iter()
+                    .map(|v| v.to_arrow_array())
+                    .collect::<Vec<_>>(),
+            )
+            .context(NewRecordBatchSnafu)?;
+            arrow_writer
+                .write(&arrow_batch)
+                .context(WriteParquetSnafu)?;
         }
-        Struct => {
-            if let DataType::Struct(fields) = data_type.to_logical_type() {
-                for field in fields {
-                    transverse_recursive(field.data_type(), map.clone(), encodings)
-                }
-            } else {
-                unreachable!()
-            }
-        }
-        Union => todo!(),
-        Map => todo!(),
+        arrow_writer.close().context(WriteParquetSnafu)?;
+        object.write(buf).await.context(WriteObjectSnafu {
+            path: object.path(),
+        })?;
+        Ok(())
     }
 }
 
@@ -201,9 +122,6 @@ pub struct ParquetReader<'a> {
     projected_schema: ProjectedSchemaRef,
     predicate: Predicate,
 }
-
-type ReaderFactoryFuture<'a, R> =
-    Pin<Box<dyn futures_util::Future<Output = std::io::Result<R>> + Send + 'a>>;
 
 impl<'a> ParquetReader<'a> {
     pub fn new(
@@ -220,61 +138,48 @@ impl<'a> ParquetReader<'a> {
         }
     }
 
-    pub async fn chunk_stream(&self, chunk_size: usize) -> Result<ChunkStream> {
-        let file_path = self.file_path.to_string();
+    pub async fn chunk_stream(&self) -> Result<ChunkStream> {
         let operator = self.object_store.clone();
-        let reader_factory = move || -> ReaderFactoryFuture<SeekableReader> {
-            let file_path = file_path.clone();
-            let operator = operator.clone();
-            Box::pin(async move { Ok(operator.object(&file_path).seekable_reader(..)) })
-        };
-
-        let file_path = self.file_path.to_string();
-        let reader = reader_factory()
+        let reader = operator.object(self.file_path).seekable_reader(..).compat();
+        let buf_reader = BufReader::new(reader);
+        let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
             .await
-            .context(error::ReadParquetIoSnafu { file: &file_path })?;
-        // Use BufReader to alleviate consumption bring by random seek and small IO.
-        let mut buf_reader = BufReader::new(reader);
-        let metadata = read_metadata_async(&mut buf_reader)
-            .await
-            .context(error::ReadParquetSnafu { file: &file_path })?;
+            .context(ReadParquetSnafu {
+                file: self.file_path,
+            })?;
+        let arrow_schema = builder.schema().clone();
 
-        let arrow_schema =
-            infer_schema(&metadata).context(error::ReadParquetSnafu { file: &file_path })?;
-        let store_schema = Arc::new(
-            StoreSchema::try_from(arrow_schema)
-                .context(error::ConvertStoreSchemaSnafu { file: &file_path })?,
-        );
+        let store_schema = Arc::new(StoreSchema::try_from(arrow_schema).context(
+            error::ConvertStoreSchemaSnafu {
+                file: self.file_path,
+            },
+        )?);
 
         let adapter = ReadAdapter::new(store_schema.clone(), self.projected_schema.clone())?;
 
-        let pruned_row_groups = self
-            .predicate
-            .prune_row_groups(store_schema.schema().clone(), &metadata.row_groups);
+        let pruned_row_groups = self.predicate.prune_row_groups(
+            store_schema.schema().clone(),
+            builder.metadata().row_groups(),
+        );
 
-        let projected_fields = adapter.fields_to_read();
+        let projection = ProjectionMask::roots(
+            builder.metadata().file_metadata().schema_descr(),
+            adapter.fields_to_read(),
+        );
+
+        let mut masked_stream = builder
+            .with_projection(projection)
+            .build()
+            .context(ReadParquetSnafu {
+                file: self.file_path,
+            })?
+            .zip(futures_util::stream::iter(pruned_row_groups.into_iter()));
+
+        let file_name = self.file_path.to_string();
         let chunk_stream = try_stream!({
-            for (idx, valid) in pruned_row_groups.iter().enumerate() {
-                if !valid {
-                    debug!("Pruned {} row groups", idx);
-                    continue;
-                }
-
-                let rg = &metadata.row_groups[idx];
-                let column_chunks = read_columns_many_async(
-                    &reader_factory,
-                    rg,
-                    projected_fields.clone(),
-                    Some(chunk_size),
-                )
-                .await
-                .context(error::ReadParquetSnafu { file: &file_path })?;
-
-                let chunks = RowGroupDeserializer::new(column_chunks, rg.num_rows() as usize, None);
-                for maybe_chunk in chunks {
-                    let columns_in_chunk =
-                        maybe_chunk.context(error::ReadParquetSnafu { file: &file_path })?;
-                    yield columns_in_chunk;
+            while let Some((record_batch, valid)) = masked_stream.next().await {
+                if valid {
+                    yield record_batch.context(ReadParquetSnafu { file: &file_name })?
                 }
             }
         });
@@ -283,7 +188,7 @@ impl<'a> ParquetReader<'a> {
     }
 }
 
-pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<Chunk<Arc<dyn Array>>>> + Send>>;
+pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>;
 
 pub struct ChunkStream {
     adapter: ReadAdapter,
@@ -302,7 +207,7 @@ impl BatchReader for ChunkStream {
         self.stream
             .try_next()
             .await?
-            .map(|chunk| self.adapter.arrow_chunk_to_batch(&chunk))
+            .map(|rb| self.adapter.arrow_record_batch_to_batch(&rb))
             .transpose()
     }
 }
@@ -311,10 +216,9 @@ impl BatchReader for ChunkStream {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{Array, UInt64Array, UInt8Array};
-    use datatypes::arrow::io::parquet::read::FileReader;
-    use datatypes::prelude::{ScalarVector, Vector};
-    use datatypes::vectors::TimestampVector;
+    use datatypes::arrow::array::{Array, ArrayRef, UInt64Array, UInt8Array};
+    use datatypes::prelude::Vector;
+    use datatypes::vectors::TimestampMillisecondVector;
     use object_store::backend::fs::Builder;
     use store_api::storage::OpType;
     use tempdir::TempDir;
@@ -323,6 +227,7 @@ mod tests {
     use crate::memtable::{
         tests as memtable_tests, DefaultMemtableBuilder, IterContext, MemtableBuilder,
     };
+    use crate::schema::ProjectedSchema;
 
     #[tokio::test]
     async fn test_parquet_writer() {
@@ -357,7 +262,7 @@ mod tests {
         let object_store = ObjectStore::new(backend);
         let sst_file_name = "test-flush.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, iter, object_store);
+        let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
 
         writer
             .write_sst(&sst::WriteOptions::default())
@@ -365,17 +270,23 @@ mod tests {
             .unwrap();
 
         // verify parquet file
+        let reader = BufReader::new(
+            object_store
+                .object(sst_file_name)
+                .seekable_reader(..)
+                .compat(),
+        );
 
-        let reader = std::fs::File::open(dir.path().join(sst_file_name)).unwrap();
-        let mut file_reader = FileReader::try_new(reader, None, Some(128), None, None).unwrap();
+        let builder = ParquetRecordBatchStreamBuilder::new(reader).await.unwrap();
 
+        let mut stream = builder.build().unwrap();
         // chunk schema: timestamp, __version, v1, __sequence, __op_type
-        let chunk = file_reader.next().unwrap().unwrap();
-        assert_eq!(6, chunk.arrays().len());
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(6, chunk.columns().len());
 
         // timestamp
         assert_eq!(
-            TimestampVector::from_slice(&[
+            &TimestampMillisecondVector::from_slice(&[
                 1000.into(),
                 1000.into(),
                 1001.into(),
@@ -384,39 +295,107 @@ mod tests {
                 2003.into()
             ])
             .to_arrow_array(),
-            chunk.arrays()[0]
+            chunk.column(0)
         );
 
         // version
         assert_eq!(
-            Arc::new(UInt64Array::from_slice(&[1, 2, 1, 1, 1, 5])) as Arc<dyn Array>,
-            chunk.arrays()[1]
+            &(Arc::new(UInt64Array::from(vec![1, 2, 1, 1, 1, 5])) as ArrayRef),
+            chunk.column(1)
         );
 
         // v0
         assert_eq!(
-            Arc::new(UInt64Array::from_slice(&[1, 2, 3, 7, 8, 9])) as Arc<dyn Array>,
-            chunk.arrays()[2]
+            &(Arc::new(UInt64Array::from(vec![1, 2, 3, 7, 8, 9])) as Arc<dyn Array>),
+            chunk.column(2)
         );
 
         // v1
         assert_eq!(
-            Arc::new(UInt64Array::from_slice(&[
-                1234, 1234, 1234, 1234, 1234, 1234
-            ])) as Arc<dyn Array>,
-            chunk.arrays()[3]
+            &(Arc::new(UInt64Array::from(vec![1234, 1234, 1234, 1234, 1234, 1234]))
+                as Arc<dyn Array>),
+            chunk.column(3)
         );
 
         // sequence
         assert_eq!(
-            Arc::new(UInt64Array::from_slice(&[10, 10, 10, 10, 10, 10])) as Arc<dyn Array>,
-            chunk.arrays()[4]
+            &(Arc::new(UInt64Array::from(vec![10, 10, 10, 10, 10, 10])) as Arc<dyn Array>),
+            chunk.column(4)
         );
 
         // op_type
         assert_eq!(
-            Arc::new(UInt8Array::from_slice(&[0, 0, 0, 0, 0, 0])) as Arc<dyn Array>,
-            chunk.arrays()[5]
+            &(Arc::new(UInt8Array::from(vec![0, 0, 0, 0, 0, 0])) as Arc<dyn Array>),
+            chunk.column(5)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parquet_reader() {
+        common_telemetry::init_default_ut_logging();
+        let schema = memtable_tests::schema_for_test();
+        let memtable = DefaultMemtableBuilder::default().build(schema.clone());
+
+        memtable_tests::write_kvs(
+            &*memtable,
+            10, // sequence
+            OpType::Put,
+            &[
+                (1000, 1),
+                (1000, 2),
+                (2002, 1),
+                (2003, 1),
+                (2003, 5),
+                (1001, 1),
+            ], // keys
+            &[
+                (Some(1), Some(1234)),
+                (Some(2), Some(1234)),
+                (Some(7), Some(1234)),
+                (Some(8), Some(1234)),
+                (Some(9), Some(1234)),
+                (Some(3), Some(1234)),
+            ], // values
+        );
+
+        let dir = TempDir::new("write_parquet").unwrap();
+        let path = dir.path().to_str().unwrap();
+        let backend = Builder::default().root(path).build().unwrap();
+        let object_store = ObjectStore::new(backend);
+        let sst_file_name = "test-read.parquet";
+        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
+
+        writer
+            .write_sst(&sst::WriteOptions::default())
+            .await
+            .unwrap();
+
+        let operator = ObjectStore::new(
+            object_store::backend::fs::Builder::default()
+                .root(dir.path().to_str().unwrap())
+                .build()
+                .unwrap(),
+        );
+
+        let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
+        let reader = ParquetReader::new(
+            "test-read.parquet",
+            operator,
+            projected_schema,
+            Predicate::empty(),
+        );
+
+        let mut stream = reader.chunk_stream().await.unwrap();
+        assert_eq!(
+            6,
+            stream
+                .next_batch()
+                .await
+                .transpose()
+                .unwrap()
+                .unwrap()
+                .num_rows()
         );
     }
 }

@@ -68,7 +68,7 @@ pub struct TableIdent {
     pub version: TableVersion,
 }
 
-#[derive(Clone, Debug, Builder, PartialEq)]
+#[derive(Clone, Debug, Builder, PartialEq, Eq)]
 #[builder(pattern = "mutable")]
 pub struct TableMeta {
     pub schema: SchemaRef,
@@ -322,7 +322,7 @@ impl TableMeta {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Builder)]
+#[derive(Clone, Debug, PartialEq, Eq, Builder)]
 #[builder(pattern = "owned")]
 pub struct TableInfo {
     /// Id and version of the table.
@@ -383,7 +383,7 @@ impl From<TableId> for TableIdent {
 }
 
 /// Struct used to serialize and deserialize [`TableMeta`].
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct RawTableMeta {
     pub schema: RawSchema,
     pub primary_key_indices: Vec<usize>,
@@ -431,7 +431,7 @@ impl TryFrom<RawTableMeta> for TableMeta {
 }
 
 /// Struct used to serialize and deserialize [`TableInfo`].
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct RawTableInfo {
     pub ident: TableIdent,
     pub name: String,

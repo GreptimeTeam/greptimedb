@@ -174,12 +174,12 @@ pub trait MutableVector: Send + Sync {
 
     /// Push value ref to this mutable vector.
     ///
-    /// Returns error if data type unmatch.
+    /// Returns error if data types mismatch.
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()>;
 
     /// Extend this mutable vector by slice of `vector`.
     ///
-    /// Returns error if data type unmatch.
+    /// Returns error if data types mismatch.
     ///
     /// # Panics
     /// Panics if `offset + length > vector.len()`.
