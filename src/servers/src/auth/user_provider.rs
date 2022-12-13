@@ -25,8 +25,8 @@ use sha1::Sha1;
 use snafu::{OptionExt, ResultExt};
 
 use crate::auth::{
-    Error, IOErrSnafu, Identity, InvalidConfigSnafu, Password, UserInfo, UserNotExistSnafu,
-    UserProvider, WrongPwdSnafu,
+    Error, IOErrSnafu, Identity, InvalidConfigSnafu, Password, UserInfo, UserNotFoundSnafu,
+    UserPasswordMismatchSnafu, UserProvider,
 };
 
 impl TryFrom<&str> for MemUserProvider {
@@ -111,15 +111,15 @@ impl UserProvider for MemUserProvider {
                 if let Some(save_pwd) = self.users.get(username) {
                     match input_pwd {
                         Password::PlainText(pwd) => {
-                            return if save_pwd == pwd {
+                            return if save_pwd == pwd.as_bytes() {
                                 Ok(UserInfo {
                                     username: username.to_string(),
                                 })
                             } else {
-                                UserNotExistSnafu {}.fail()
+                                UserNotFoundSnafu {}.fail()
                             }
                         }
-                        Password::MysqlNativePwd(auth_data, salt) => {
+                        Password::MysqlNativePassword(auth_data, salt) => {
                             // ref: https://github.com/mysql/mysql-server/blob/a246bad76b9271cb4333634e954040a970222e0a/sql/auth/password.cc#L62
                             let hash_stage_2 = double_sha1(save_pwd);
                             let tmp = sha1_two(salt, &hash_stage_2);
@@ -134,13 +134,13 @@ impl UserProvider for MemUserProvider {
                                     username: username.to_string(),
                                 })
                             } else {
-                                WrongPwdSnafu {}.fail()
+                                UserPasswordMismatchSnafu {}.fail()
                             };
                         }
                         _ => unimplemented!(),
                     }
                 } else {
-                    UserNotExistSnafu {}.fail()
+                    UserNotFoundSnafu {}.fail()
                 }
             }
         }
@@ -200,7 +200,7 @@ pub mod test {
         let re = provider
             .auth(
                 Identity::UserId(username, None),
-                Password::PlainText(password.as_bytes()),
+                Password::PlainText(password),
             )
             .await;
         assert!(re.is_ok());

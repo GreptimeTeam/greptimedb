@@ -129,8 +129,8 @@ impl ErrorExt for Error {
             Error::IOErr { .. } => StatusCode::Internal,
 
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
-            Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPwdType,
-            Error::UserPasswordMismatch { .. } => StatusCode::UserPwdMismatch,
+            Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,
+            Error::UserPasswordMismatch { .. } => StatusCode::UserPasswordMismatch,
         }
     }
 
