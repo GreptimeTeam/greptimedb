@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datatypes::arrow::util::pretty;
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
 use datatypes::vectors::{Helper, VectorRef};
@@ -97,6 +98,13 @@ impl RecordBatch {
     /// Create an iterator to traverse the data by row
     pub fn rows(&self) -> RecordBatchRowIterator<'_> {
         RecordBatchRowIterator::new(self)
+    }
+
+    pub fn pretty_print(&self) -> Result<String> {
+        let df_batch = self.df_record_batch.clone();
+        let result = pretty::pretty_format_batches(&[df_batch]).context(error::FormatSnafu)?;
+
+        Ok(result.to_string())
     }
 }
 

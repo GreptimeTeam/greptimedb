@@ -13,6 +13,11 @@
 // limitations under the License.
 
 mod pow;
+// This is used to suppress the warning: function `create_query_engine` is never used.
+// FIXME(yingwen): We finally need to refactor these tests and move them to `query/src`
+// so tests can share codes with other mods.
+#[allow(unused)]
+mod function;
 
 use std::sync::Arc;
 
@@ -23,14 +28,13 @@ use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
-use datafusion::field_util::{FieldExt, SchemaExt};
-use datafusion::logical_plan::LogicalPlanBuilder;
-use datatypes::arrow::array::UInt32Array;
+use datafusion::datasource::DefaultTableSource;
+use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::{OrdPrimitive, PrimitiveElement};
-use datatypes::vectors::{PrimitiveVector, UInt32Vector};
+use datatypes::types::{OrdPrimitive, WrapperType};
+use datatypes::vectors::UInt32Vector;
 use num::NumCast;
 use query::error::Result;
 use query::plan::LogicalPlan;
@@ -66,12 +70,16 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let limit = 10;
     let table_provider = Arc::new(DfTableProviderAdapter::new(table.clone()));
     let plan = LogicalPlan::DfPlan(
-        LogicalPlanBuilder::scan("numbers", table_provider, None)
-            .unwrap()
-            .limit(limit)
-            .unwrap()
-            .build()
-            .unwrap(),
+        LogicalPlanBuilder::scan(
+            "numbers",
+            Arc::new(DefaultTableSource { table_provider }),
+            None,
+        )
+        .unwrap()
+        .limit(0, Some(limit))
+        .unwrap()
+        .build()
+        .unwrap(),
     );
 
     let output = engine.execute(&plan).await?;
@@ -84,17 +92,17 @@ async fn test_datafusion_query_engine() -> Result<()> {
     let numbers = util::collect(recordbatch).await.unwrap();
 
     assert_eq!(1, numbers.len());
-    assert_eq!(numbers[0].df_recordbatch.num_columns(), 1);
-    assert_eq!(1, numbers[0].schema.arrow_schema().fields().len());
-    assert_eq!("number", numbers[0].schema.arrow_schema().field(0).name());
+    assert_eq!(numbers[0].num_columns(), 1);
+    assert_eq!(1, numbers[0].schema.num_columns());
+    assert_eq!("number", numbers[0].schema.column_schemas()[0].name);
 
-    let columns = numbers[0].df_recordbatch.columns();
-    assert_eq!(1, columns.len());
-    assert_eq!(columns[0].len(), limit);
+    let batch = &numbers[0];
+    assert_eq!(1, batch.num_columns());
+    assert_eq!(batch.column(0).len(), limit);
     let expected: Vec<u32> = (0u32..limit as u32).collect();
     assert_eq!(
-        *columns[0].as_any().downcast_ref::<UInt32Array>().unwrap(),
-        UInt32Array::from_slice(&expected)
+        *batch.column(0),
+        Arc::new(UInt32Vector::from_slice(&expected)) as VectorRef
     );
 
     Ok(())
@@ -148,17 +156,17 @@ async fn test_udf() -> Result<()> {
 
     let numbers = util::collect(recordbatch).await.unwrap();
     assert_eq!(1, numbers.len());
-    assert_eq!(numbers[0].df_recordbatch.num_columns(), 1);
-    assert_eq!(1, numbers[0].schema.arrow_schema().fields().len());
-    assert_eq!("p", numbers[0].schema.arrow_schema().field(0).name());
+    assert_eq!(numbers[0].num_columns(), 1);
+    assert_eq!(1, numbers[0].schema.num_columns());
+    assert_eq!("p", numbers[0].schema.column_schemas()[0].name);
 
-    let columns = numbers[0].df_recordbatch.columns();
-    assert_eq!(1, columns.len());
-    assert_eq!(columns[0].len(), 10);
+    let batch = &numbers[0];
+    assert_eq!(1, batch.num_columns());
+    assert_eq!(batch.column(0).len(), 10);
     let expected: Vec<u32> = vec![1, 1, 4, 27, 256, 3125, 46656, 823543, 16777216, 387420489];
     assert_eq!(
-        *columns[0].as_any().downcast_ref::<UInt32Array>().unwrap(),
-        UInt32Array::from_slice(&expected)
+        *batch.column(0),
+        Arc::new(UInt32Vector::from_slice(&expected)) as VectorRef
     );
 
     Ok(())
@@ -182,7 +190,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
                 column_schemas.push(column_schema);
 
                 let numbers = (1..=100).map(|_| rng.gen::<$T>()).collect::<Vec<$T>>();
-                let column: VectorRef = Arc::new(PrimitiveVector::<$T>::from_vec(numbers.to_vec()));
+                let column: VectorRef = Arc::new(<$T as Scalar>::VectorType::from_vec(numbers.to_vec()));
                 columns.push(column);
             )*
         }
@@ -212,7 +220,7 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
                 column_schemas.push(column_schema);
 
                 let numbers = (1..=99).map(|_| rng.gen::<$T>()).collect::<Vec<$T>>();
-                let column: VectorRef = Arc::new(PrimitiveVector::<$T>::from_vec(numbers.to_vec()));
+                let column: VectorRef = Arc::new(<$T as Scalar>::VectorType::from_vec(numbers.to_vec()));
                 columns.push(column);
             )*
         }
@@ -234,37 +242,6 @@ fn create_query_engine() -> Arc<dyn QueryEngine> {
         .unwrap();
 
     QueryEngineFactory::new(catalog_list).query_engine()
-}
-
-async fn get_numbers_from_table<'s, T>(
-    column_name: &'s str,
-    table_name: &'s str,
-    engine: Arc<dyn QueryEngine>,
-) -> Vec<OrdPrimitive<T>>
-where
-    T: PrimitiveElement,
-    for<'a> T: Scalar<RefType<'a> = T>,
-{
-    let sql = format!("SELECT {} FROM {}", column_name, table_name);
-    let plan = engine
-        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
-        .unwrap();
-
-    let output = engine.execute(&plan).await.unwrap();
-    let recordbatch_stream = match output {
-        Output::Stream(batch) => batch,
-        _ => unreachable!(),
-    };
-    let numbers = util::collect(recordbatch_stream).await.unwrap();
-
-    let columns = numbers[0].df_recordbatch.columns();
-    let column = VectorHelper::try_into_vector(&columns[0]).unwrap();
-    let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(&column) };
-    column
-        .iter_data()
-        .flatten()
-        .map(|x| OrdPrimitive::<T>(x))
-        .collect::<Vec<OrdPrimitive<T>>>()
 }
 
 #[tokio::test]
@@ -294,25 +271,17 @@ async fn test_median_success<T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Result<()>
 where
-    T: PrimitiveElement,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    T: WrapperType,
+    T::Native: NumCast,
 {
     let result = execute_median(column_name, table_name, engine.clone())
         .await
         .unwrap();
-    assert_eq!(1, result.len());
-    assert_eq!(result[0].df_recordbatch.num_columns(), 1);
-    assert_eq!(1, result[0].schema.arrow_schema().fields().len());
-    assert_eq!("median", result[0].schema.arrow_schema().field(0).name());
+    let median = function::get_value_from_batches("median", result);
 
-    let columns = result[0].df_recordbatch.columns();
-    assert_eq!(1, columns.len());
-    assert_eq!(columns[0].len(), 1);
-    let v = VectorHelper::try_into_vector(&columns[0]).unwrap();
-    assert_eq!(1, v.len());
-    let median = v.get(0);
-
-    let mut numbers = get_numbers_from_table::<T>(column_name, table_name, engine.clone()).await;
+    let numbers =
+        function::get_numbers_from_table::<T>(column_name, table_name, engine.clone()).await;
+    let mut numbers: Vec<_> = numbers.into_iter().map(|v| OrdPrimitive(v)).collect();
     numbers.sort();
     let len = numbers.len();
     let expected_median: Value = if len % 2 == 1 {
@@ -320,7 +289,7 @@ where
     } else {
         let a: f64 = NumCast::from(numbers[len / 2 - 1].as_primitive()).unwrap();
         let b: f64 = NumCast::from(numbers[len / 2].as_primitive()).unwrap();
-        OrdPrimitive::<T>(NumCast::from(a / 2.0 + b / 2.0).unwrap())
+        OrdPrimitive::<T>(T::from_native(NumCast::from(a / 2.0 + b / 2.0).unwrap()))
     }
     .into();
     assert_eq!(expected_median, median);

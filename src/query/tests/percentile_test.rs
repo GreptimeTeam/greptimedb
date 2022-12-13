@@ -20,12 +20,10 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
-use datafusion::field_util::{FieldExt, SchemaExt};
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::PrimitiveElement;
-use datatypes::vectors::PrimitiveVector;
+use datatypes::vectors::Int32Vector;
 use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
 use query::error::Result;
@@ -64,9 +62,8 @@ async fn test_percentile_correctness() -> Result<()> {
         _ => unreachable!(),
     };
     let record_batch = util::collect(recordbatch_stream).await.unwrap();
-    let columns = record_batch[0].df_recordbatch.columns();
-    let v = VectorHelper::try_into_vector(&columns[0]).unwrap();
-    let value = v.get(0);
+    let column = record_batch[0].column(0);
+    let value = column.get(0);
     assert_eq!(value, Value::from(9.280_000_000_000_001_f64));
     Ok(())
 }
@@ -77,26 +74,12 @@ async fn test_percentile_success<T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Result<()>
 where
-    T: PrimitiveElement + AsPrimitive<f64>,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    T: WrapperType + AsPrimitive<f64>,
 {
     let result = execute_percentile(column_name, table_name, engine.clone())
         .await
         .unwrap();
-    assert_eq!(1, result.len());
-    assert_eq!(result[0].df_recordbatch.num_columns(), 1);
-    assert_eq!(1, result[0].schema.arrow_schema().fields().len());
-    assert_eq!(
-        "percentile",
-        result[0].schema.arrow_schema().field(0).name()
-    );
-
-    let columns = result[0].df_recordbatch.columns();
-    assert_eq!(1, columns.len());
-    assert_eq!(columns[0].len(), 1);
-    let v = VectorHelper::try_into_vector(&columns[0]).unwrap();
-    assert_eq!(1, v.len());
-    let value = v.get(0);
+    let value = function::get_value_from_batches("percentile", result);
 
     let numbers = get_numbers_from_table::<T>(column_name, table_name, engine.clone()).await;
     let expected_value = numbers.iter().map(|&n| n.as_()).collect::<Vec<f64>>();
@@ -142,7 +125,7 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
 
     let numbers = vec![3_i32, 6_i32, 8_i32, 10_i32];
 
-    let column: VectorRef = Arc::new(PrimitiveVector::<i32>::from_vec(numbers.to_vec()));
+    let column: VectorRef = Arc::new(Int32Vector::from_vec(numbers.to_vec()));
     columns.push(column);
 
     let schema = Arc::new(Schema::new(column_schemas));
