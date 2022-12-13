@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use api::v1::InsertExpr;
 use async_trait::async_trait;
-use axum::Router;
+use axum::{http, Router};
 use axum_test_helper::TestClient;
 use common_query::Output;
+use servers::auth::user_provider::MemUserProvider;
 use servers::error::Result;
 use servers::http::{HttpOptions, HttpServer};
 use servers::influxdb::InfluxdbRequest;
@@ -53,6 +54,9 @@ impl SqlQueryHandler for DummyInstance {
 fn make_test_app(tx: mpsc::Sender<(String, String)>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
     let mut server = HttpServer::new(instance.clone(), HttpOptions::default());
+    let up = MemUserProvider::try_from("inline:greptime=greptime").unwrap();
+    server.set_user_provider(Arc::new(up));
+
     server.set_influxdb_handler(instance);
     server.make_app()
 }
@@ -68,6 +72,10 @@ async fn test_influxdb_write() {
     let result = client
         .post("/v1/influxdb/write")
         .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(
+            http::header::AUTHORIZATION,
+            "basic Z3JlcHRpbWU6Z3JlcHRpbWU=",
+        )
         .send()
         .await;
     assert_eq!(result.status(), 204);
@@ -76,6 +84,10 @@ async fn test_influxdb_write() {
     let result = client
         .post("/v1/influxdb/write?db=influxdb")
         .body("monitor,host=host1 cpu=1.2 1664370459457010101")
+        .header(
+            http::header::AUTHORIZATION,
+            "basic Z3JlcHRpbWU6Z3JlcHRpbWU=",
+        )
         .send()
         .await;
     assert_eq!(result.status(), 204);
@@ -85,6 +97,10 @@ async fn test_influxdb_write() {
     let result = client
         .post("/v1/influxdb/write")
         .body("monitor,   host=host1 cpu=1.2 1664370459457010101")
+        .header(
+            http::header::AUTHORIZATION,
+            "basic Z3JlcHRpbWU6Z3JlcHRpbWU=",
+        )
         .send()
         .await;
     assert_eq!(result.status(), 400);

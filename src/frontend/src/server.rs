@@ -101,7 +101,7 @@ impl Services {
                 instance.clone(),
                 opts.tls.clone(),
                 pg_io_runtime,
-                user_provider,
+                user_provider.clone(),
             )) as Box<dyn Server>;
 
             Some((pg_server, pg_addr))
@@ -131,6 +131,10 @@ impl Services {
             let http_addr = parse_addr(&http_options.addr)?;
 
             let mut http_server = HttpServer::new(instance.clone(), http_options.clone());
+            if let Some(user_provider) = user_provider {
+                http_server.set_user_provider(user_provider);
+            }
+
             if opentsdb_server_and_addr.is_some() {
                 http_server.set_opentsdb_handler(instance.clone());
             }
