@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 use catalog::CatalogListRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
-use common_query::physical_plan::RuntimeEnv;
+use common_query::physical_plan::{SessionContext, TaskContext};
 use common_query::prelude::ScalarUdf;
 use datafusion::optimizer::common_subexpr_eliminate::CommonSubexprEliminate;
 use datafusion::optimizer::eliminate_limit::EliminateLimit;
@@ -28,8 +28,7 @@ use datafusion::optimizer::limit_push_down::LimitPushDown;
 use datafusion::optimizer::projection_push_down::ProjectionPushDown;
 use datafusion::optimizer::single_distinct_to_groupby::SingleDistinctToGroupBy;
 use datafusion::optimizer::to_approx_perc::ToApproxPerc;
-use datafusion::prelude::{ExecutionConfig, ExecutionContext};
-
+use datafusion::execution::context::SessionConfig;
 use crate::datafusion::DfCatalogListAdapter;
 use crate::optimizer::TypeConversionRule;
 

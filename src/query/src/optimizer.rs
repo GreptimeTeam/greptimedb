@@ -17,15 +17,12 @@ use std::sync::Arc;
 
 use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion::execution::context::ExecutionProps;
-use datafusion::logical_plan::plan::Filter;
-use datafusion::logical_plan::{
-    Expr, ExprRewritable, ExprRewriter, ExprSchemable, LogicalPlan, Operator, TableScan,
-};
+use datafusion_expr::{Expr, ExprSchemable, LogicalPlan, Operator, TableScan};
+use datafusion_expr::expr_rewriter::{ExprRewriter, ExprRewritable};
 use datafusion::optimizer::optimizer::OptimizerRule;
 use datafusion::optimizer::utils;
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
 use datatypes::arrow::compute;
-use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::DataType;
 
 /// TypeConversionRule converts some literal values in logical plan to other types according
@@ -139,7 +136,7 @@ impl<'a> TypeConverter<'a> {
             (target_type, value) => {
                 let value_arr = value.to_array();
                 let arr =
-                    compute::cast::cast(value_arr.as_ref(), target_type, CastOptions::default())
+                    compute::cast(&value_arr, target_type)
                         .map_err(DataFusionError::ArrowError)?;
 
                 ScalarValue::try_from_array(
