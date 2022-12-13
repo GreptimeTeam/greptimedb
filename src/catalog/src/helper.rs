@@ -138,7 +138,7 @@ impl TableGlobalKey {
 
 /// Table global info contains necessary info for a datanode to create table regions, including
 /// table id, table meta(schema...), region id allocation across datanodes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TableGlobalValue {
     /// Id of datanode that created the global table info kv. only for debugging.
     pub node_id: u64,

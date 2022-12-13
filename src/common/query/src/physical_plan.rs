@@ -20,7 +20,7 @@ use common_recordbatch::adapter::{DfRecordBatchStreamAdapter, RecordBatchStreamA
 use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
 use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::error::Result as DfResult;
-pub use datafusion::execution::context::TaskContext;
+pub use datafusion::execution::context::{SessionContext, TaskContext};
 use datafusion::physical_plan::expressions::PhysicalSortExpr;
 pub use datafusion::physical_plan::Partitioning;
 use datafusion::physical_plan::Statistics;

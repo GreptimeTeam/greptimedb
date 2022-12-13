@@ -26,7 +26,7 @@ use store_api::manifest::action::{ProtocolAction, ProtocolVersion, VersionHeader
 use store_api::manifest::{ManifestVersion, MetaAction};
 use table::metadata::{RawTableInfo, TableIdent};
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TableChange {
     pub table_info: RawTableInfo,
 }
@@ -37,7 +37,7 @@ pub struct TableRemove {
     pub table_name: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum TableMetaAction {
     Protocol(ProtocolAction),
     // Boxed TableChange to reduce the total size of enum
@@ -45,7 +45,7 @@ pub enum TableMetaAction {
     Remove(TableRemove),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct TableMetaActionList {
     pub actions: Vec<TableMetaAction>,
     pub prev_version: ManifestVersion,
