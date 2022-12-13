@@ -1,0 +1,9 @@
+[package]
+name = "promql"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common-error = { path = "../common/error" }
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "71d8a90" }
+snafu = { version = "0.7", features = ["backtraces"] }
