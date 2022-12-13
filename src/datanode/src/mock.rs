@@ -40,7 +40,7 @@ impl Instance {
         use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 
         let mock_info = meta_srv::mocks::mock_with_memstore().await;
-        let meta_client = Some(Arc::new(mock_meta_client(mock_info, 0).await));
+        let meta_client = Arc::new(mock_meta_client(mock_info, 0).await);
         let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
         let mock_engine = Arc::new(MockMitoEngine::new(
             TableEngineConfig::default(),
@@ -69,7 +69,7 @@ impl Instance {
         let heartbeat_task = Some(HeartbeatTask::new(
             0,
             "127.0.0.1:3302".to_string(),
-            meta_client.as_ref().unwrap().clone(),
+            meta_client,
         ));
 
         let table_id_provider = Some(catalog_manager.clone() as TableIdProviderRef);
@@ -78,7 +78,6 @@ impl Instance {
             sql_handler,
             catalog_manager,
             script_executor,
-            meta_client,
             heartbeat_task,
             table_id_provider,
         })
@@ -132,7 +131,6 @@ impl Instance {
             catalog_manager,
             script_executor,
             table_id_provider: Some(Arc::new(LocalTableIdProvider::default())),
-            meta_client: Some(meta_client),
             heartbeat_task: Some(heartbeat_task),
         })
     }

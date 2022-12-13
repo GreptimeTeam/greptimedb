@@ -60,8 +60,6 @@ pub struct Instance {
     pub(crate) catalog_manager: CatalogManagerRef,
     pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
-    #[allow(unused)]
-    pub(crate) meta_client: Option<Arc<MetaClient>>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
 }
 
@@ -158,7 +156,6 @@ impl Instance {
             ),
             catalog_manager,
             script_executor,
-            meta_client,
             heartbeat_task,
             table_id_provider,
         })
