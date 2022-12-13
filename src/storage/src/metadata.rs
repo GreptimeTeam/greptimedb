@@ -670,7 +670,7 @@ struct ColumnsMetadataBuilder {
 }
 
 impl ColumnsMetadataBuilder {
-    pub fn row_key(&mut self, key: RowKeyDescriptor) -> Result<&mut Self> {
+    fn row_key(&mut self, key: RowKeyDescriptor) -> Result<&mut Self> {
         for col in key.columns {
             self.push_row_key_column(col)?;
         }
@@ -695,7 +695,7 @@ impl ColumnsMetadataBuilder {
         self.push_value_column(consts::KEY_CF_ID, desc)
     }
 
-    pub fn push_value_column(
+    fn push_value_column(
         &mut self,
         cf_id: ColumnFamilyId,
         desc: ColumnDescriptor,
@@ -734,7 +734,7 @@ impl ColumnsMetadataBuilder {
         Ok(self)
     }
 
-    pub fn build(mut self) -> Result<ColumnsMetadata> {
+    fn build(mut self) -> Result<ColumnsMetadata> {
         let timestamp_key_index = self.timestamp_key_index.context(MissingTimestampSnafu)?;
 
         let user_column_end = self.columns.len();

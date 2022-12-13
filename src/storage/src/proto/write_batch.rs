@@ -345,16 +345,15 @@ pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
         ConcreteDataType::Float64(_) => gen_columns_f64(vector),
         ConcreteDataType::Binary(_) => gen_columns_binary(vector),
         ConcreteDataType::String(_) => gen_columns_string(vector),
+        ConcreteDataType::Date(_) => gen_columns_date(vector),
+        ConcreteDataType::DateTime(_) => gen_columns_datetime(vector),
         ConcreteDataType::Timestamp(t) => match t {
             TimestampType::Second(_) => gen_columns_ts_second(vector),
             TimestampType::Millisecond(_) => gen_columns_ts_millisecond(vector),
             TimestampType::Microsecond(_) => gen_columns_ts_microsecond(vector),
             TimestampType::Nanosecond(_) => gen_columns_ts_nanosecond(vector),
         },
-        ConcreteDataType::Null(_)
-        | ConcreteDataType::Date(_)
-        | ConcreteDataType::DateTime(_)
-        | ConcreteDataType::List(_) => {
+        ConcreteDataType::Null(_) | ConcreteDataType::List(_) => {
             // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
             unimplemented!("data type {:?} is not supported", data_type)
         }
@@ -376,16 +375,15 @@ pub fn gen_put_data_vector(data_type: ConcreteDataType, column: Column) -> Resul
         ConcreteDataType::Float64(_) => gen_put_data_f64(column),
         ConcreteDataType::Binary(_) => gen_put_data_binary(column),
         ConcreteDataType::String(_) => gen_put_data_string(column),
+        ConcreteDataType::Date(_) => gen_put_data_date(column),
+        ConcreteDataType::DateTime(_) => gen_put_data_datetime(column),
         ConcreteDataType::Timestamp(t) => match t {
             TimestampType::Second(_) => gen_put_data_ts_second(column),
             TimestampType::Millisecond(_) => gen_put_data_ts_millisecond(column),
             TimestampType::Microsecond(_) => gen_put_data_ts_microsecond(column),
             TimestampType::Nanosecond(_) => gen_put_data_ts_nanosecond(column),
         },
-        ConcreteDataType::Null(_)
-        | ConcreteDataType::Date(_)
-        | ConcreteDataType::DateTime(_)
-        | ConcreteDataType::List(_) => {
+        ConcreteDataType::Null(_) | ConcreteDataType::List(_) => {
             // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
             unimplemented!("data type {:?} is not supported", data_type)
         }
