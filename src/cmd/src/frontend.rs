@@ -170,8 +170,8 @@ impl TryFrom<&StartCommand> for AnyMap {
         let mut fe_plugin = FrontendPlugin::default();
 
         if let Some(provider_config) = &cmd.user_provider {
-            let user_provider = auth::user_provider_from_option(&provider_config)
-                .context(IllegalAuthConfigSnafu)?;
+            let user_provider =
+                auth::user_provider_from_option(provider_config).context(IllegalAuthConfigSnafu)?;
             fe_plugin.user_provider = Some(user_provider);
         }
 
