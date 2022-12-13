@@ -19,10 +19,10 @@ use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
-use datafusion::datasource::TableProvider;
-use datafusion::logical_plan::plan::Filter;
-use datafusion::logical_plan::{LogicalPlan, TableScan, ToDFSchema};
+use datafusion::common::ToDFSchema;
+use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_plan::project_schema;
+use datafusion_expr::{Filter, LogicalPlan, TableScan, TableSource};
 use prost::Message;
 use snafu::{ensure, OptionExt, ResultExt};
 use substrait_proto::protobuf::expression::mask_expression::{StructItem, StructSelect};
@@ -144,7 +144,7 @@ impl DFLogicalSubstraitConvertor {
                     .context(error::ConvertDfSchemaSnafu)?;
                 let predicate = to_df_expr(ctx, *condition, &schema)?;
 
-                LogicalPlan::Filter(Filter { predicate, input })
+                LogicalPlan::Filter(Filter::try_new(predicate, input).context(DFInternalSnafu)?)
             }
             RelType::Fetch(_fetch_rel) => UnsupportedPlanSnafu {
                 name: "Fetch Relation",
@@ -238,7 +238,9 @@ impl DFLogicalSubstraitConvertor {
             .context(TableNotFoundSnafu {
                 name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
             })?;
-        let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
+        let adapter = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(table_ref),
+        )));
 
         // Get schema directly from the table, and compare it with the schema retrieved from substrait proto.
         let stored_schema = adapter.schema();
@@ -267,14 +269,14 @@ impl DFLogicalSubstraitConvertor {
 
         ctx.set_df_schema(projected_schema.clone());
 
-        // TODO(ruihang): Support limit
+        // TODO(ruihang): Support limit(fetch)
         Ok(LogicalPlan::TableScan(TableScan {
             table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
             source: adapter,
             projection,
             projected_schema,
             filters,
-            limit: None,
+            fetch: None,
         }))
     }
 
@@ -302,7 +304,7 @@ impl DFLogicalSubstraitConvertor {
             .fail()?,
             LogicalPlan::Filter(filter) => {
                 let input = Some(Box::new(
-                    self.logical_plan_to_rel(ctx, filter.input.clone())?,
+                    self.logical_plan_to_rel(ctx, filter.input().clone())?,
                 ));
 
                 let schema = plan
@@ -312,7 +314,7 @@ impl DFLogicalSubstraitConvertor {
                     .context(error::ConvertDfSchemaSnafu)?;
                 let condition = Some(Box::new(expression_from_df_expr(
                     ctx,
-                    &filter.predicate,
+                    filter.predicate(),
                     &schema,
                 )?));
 
@@ -368,7 +370,16 @@ impl DFLogicalSubstraitConvertor {
                 name: "DataFusion Logical Limit",
             }
             .fail()?,
-            LogicalPlan::CreateExternalTable(_)
+
+            LogicalPlan::Subquery(_)
+            | LogicalPlan::SubqueryAlias(_)
+            | LogicalPlan::CreateView(_)
+            | LogicalPlan::CreateCatalogSchema(_)
+            | LogicalPlan::CreateCatalog(_)
+            | LogicalPlan::DropView(_)
+            | LogicalPlan::Distinct(_)
+            | LogicalPlan::SetVariable(_)
+            | LogicalPlan::CreateExternalTable(_)
             | LogicalPlan::CreateMemoryTable(_)
             | LogicalPlan::DropTable(_)
             | LogicalPlan::Values(_)
@@ -485,7 +496,9 @@ impl DFLogicalSubstraitConvertor {
 fn same_schema_without_metadata(lhs: &ArrowSchemaRef, rhs: &ArrowSchemaRef) -> bool {
     lhs.fields.len() == rhs.fields.len()
         && lhs.fields.iter().zip(rhs.fields.iter()).all(|(x, y)| {
-            x.name == y.name && x.data_type == y.data_type && x.is_nullable == y.is_nullable
+            x.name() == y.name()
+                && x.data_type() == y.data_type()
+                && x.is_nullable() == y.is_nullable()
         })
 }
 
@@ -494,7 +507,7 @@ mod test {
     use catalog::local::{LocalCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
     use catalog::{CatalogList, CatalogProvider, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datafusion::logical_plan::DFSchema;
+    use datafusion::common::{DFSchema, ToDFSchema};
     use datatypes::schema::Schema;
     use table::requests::CreateTableRequest;
     use table::test_util::{EmptyTable, MockTableEngine};
@@ -564,7 +577,9 @@ mod test {
             })
             .await
             .unwrap();
-        let adapter = Arc::new(DfTableProviderAdapter::new(table_ref));
+        let adapter = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(table_ref),
+        )));
 
         let projection = vec![1, 3, 5];
         let df_schema = adapter.schema().to_dfschema().unwrap();
@@ -584,7 +599,7 @@ mod test {
             projection: Some(projection),
             projected_schema,
             filters: vec![],
-            limit: None,
+            fetch: None,
         });
 
         logical_plan_round_trip(table_scan_plan, catalog_manager).await;

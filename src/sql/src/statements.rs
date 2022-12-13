@@ -21,12 +21,12 @@ pub mod insert;
 pub mod query;
 pub mod show;
 pub mod statement;
-
 use std::str::FromStr;
 
 use api::helper::ColumnDataTypeWrapper;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::Timestamp;
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::DateTimeType;
@@ -79,7 +79,7 @@ fn parse_string_to_value(
     data_type: &ConcreteDataType,
 ) -> Result<Value> {
     ensure!(
-        data_type.stringifiable(),
+        data_type.is_stringifiable(),
         ColumnTypeMismatchSnafu {
             column_name,
             expect: data_type.clone(),
@@ -112,8 +112,8 @@ fn parse_string_to_value(
         ConcreteDataType::Timestamp(t) => {
             if let Ok(ts) = Timestamp::from_str(&s) {
                 Ok(Value::Timestamp(Timestamp::new(
-                    ts.convert_to(t.unit),
-                    t.unit,
+                    ts.convert_to(t.unit()),
+                    t.unit(),
                 )))
             } else {
                 ParseSqlValueSnafu {
@@ -301,7 +301,10 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
         SqlDataType::Custom(obj_name) => match &obj_name.0[..] {
             [type_name] => {
-                if type_name.value.eq_ignore_ascii_case(DateTimeType::name()) {
+                if type_name
+                    .value
+                    .eq_ignore_ascii_case(DateTimeType::default().name())
+                {
                     Ok(ConcreteDataType::datetime_datatype())
                 } else {
                     error::SqlTypeNotSupportedSnafu {
