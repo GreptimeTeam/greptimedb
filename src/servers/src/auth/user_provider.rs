@@ -163,3 +163,78 @@ fn sha1_one(data: &[u8]) -> Vec<u8> {
 fn double_sha1(data: &[u8]) -> Vec<u8> {
     sha1_one(&sha1_one(data))
 }
+
+#[cfg(test)]
+pub mod test {
+    use std::fs::File;
+    use std::io::{LineWriter, Write};
+
+    use crate::auth::user_provider::{double_sha1, sha1_one, sha1_two, MemUserProvider};
+    use crate::auth::{Identity, Password, UserProvider};
+
+    #[test]
+    fn test_sha() {
+        let sha_1_answer: Vec<u8> = vec![
+            124, 74, 141, 9, 202, 55, 98, 175, 97, 229, 149, 32, 148, 61, 194, 100, 148, 248, 148,
+            27,
+        ];
+        let sha_1 = sha1_one("123456".as_bytes());
+        assert_eq!(sha_1, sha_1_answer);
+
+        let double_sha1_answer: Vec<u8> = vec![
+            107, 180, 131, 126, 183, 67, 41, 16, 94, 228, 86, 141, 218, 125, 198, 126, 210, 202,
+            42, 217,
+        ];
+        let double_sha1 = double_sha1("123456".as_bytes());
+        assert_eq!(double_sha1, double_sha1_answer);
+
+        let sha1_2_answer: Vec<u8> = vec![
+            132, 115, 215, 211, 99, 186, 164, 206, 168, 152, 217, 192, 117, 47, 240, 252, 142, 244,
+            37, 204,
+        ];
+        let sha1_2 = sha1_two("123456".as_bytes(), "654321".as_bytes());
+        assert_eq!(sha1_2, sha1_2_answer);
+    }
+
+    async fn test_auth(provider: &dyn UserProvider, username: &str, password: &str) {
+        let re = provider
+            .auth(
+                Identity::UserId(username, None),
+                Password::PlainText(password.as_bytes()),
+            )
+            .await;
+        assert!(re.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_inline_provider() {
+        let provider = MemUserProvider::try_from("inline:root=123456,admin=654321").unwrap();
+        test_auth(&provider, "root", "123456").await;
+        test_auth(&provider, "admin", "654321").await;
+    }
+
+    #[tokio::test]
+    async fn test_file_provider() {
+        {
+            // write a tmp file
+            let file = File::create("/tmp/test_file_provider");
+            assert!(file.is_ok());
+            let file = file.unwrap();
+            let mut lw = LineWriter::new(file);
+            assert!(lw
+                .write_all(
+                    b"root=123456
+admin=654321",
+                )
+                .is_ok());
+            assert!(lw.flush().is_ok());
+        }
+
+        let provider = MemUserProvider::try_from("file:/tmp/test_file_provider").unwrap();
+        test_auth(&provider, "root", "123456").await;
+        test_auth(&provider, "admin", "654321").await;
+
+        // remove test file
+        std::fs::remove_file("/tmp/test_file_provider").unwrap();
+    }
+}
