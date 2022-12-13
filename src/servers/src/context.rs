@@ -21,7 +21,6 @@ use crate::error::{BuildingContextSnafu, Result};
 
 type CtxFnRef = Arc<dyn Fn(&Context) -> bool + Send + Sync>;
 
-#[derive(Clone)]
 pub struct Context {
     pub client_info: ClientInfo,
     pub user_info: UserInfo,
@@ -81,7 +80,6 @@ impl CtxBuilder {
     }
 }
 
-#[derive(Clone)]
 pub struct ClientInfo {
     pub client_host: String,
     pub channel: Channel,
@@ -94,7 +92,7 @@ pub enum Channel {
     Mysql,
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct Quota {
     pub total: u64,
     pub consumed: u64,
