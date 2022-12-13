@@ -122,7 +122,7 @@ impl StandaloneOptions {
     }
 }
 
-#[derive(Debug, Clone, Parser)]
+#[derive(Debug, Parser)]
 struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,

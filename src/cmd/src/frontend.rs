@@ -57,7 +57,7 @@ impl SubCommand {
     }
 }
 
-#[derive(Debug, Clone, Parser)]
+#[derive(Debug, Parser)]
 pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
@@ -89,7 +89,7 @@ impl StartCommand {
     async fn run(self) -> Result<()> {
         // maybe too expensive to clone?
         let plugins: AnyMap = AnyMap::try_from(&self)?;
-        let opts: FrontendOptions = self.clone().try_into()?;
+        let opts: FrontendOptions = self.try_into()?;
         let mut frontend = Frontend::new(
             opts.clone(),
             Instance::try_new_distributed(&opts)
