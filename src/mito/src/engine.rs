@@ -524,7 +524,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder};
     use datatypes::value::Value;
-    use datatypes::vectors::{TimestampMillisecondVector, *};
+    use datatypes::vectors::TimestampMillisecondVector;
     use log_store::fs::noop::NoopLogStore;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
