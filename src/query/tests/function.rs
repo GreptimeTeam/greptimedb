@@ -22,7 +22,7 @@ use common_recordbatch::{util, RecordBatch};
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::PrimitiveElement;
+use datatypes::types::WrapperType;
 use datatypes::vectors::PrimitiveVector;
 use query::query_engine::QueryEngineFactory;
 use query::QueryEngine;
@@ -77,8 +77,7 @@ pub async fn get_numbers_from_table<'s, T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Vec<T>
 where
-    T: PrimitiveElement,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    T: WrapperType,
 {
     let sql = format!("SELECT {} FROM {}", column_name, table_name);
     let plan = engine
@@ -92,8 +91,7 @@ where
     };
     let numbers = util::collect(recordbatch_stream).await.unwrap();
 
-    let columns = numbers[0].df_recordbatch.columns();
-    let column = VectorHelper::try_into_vector(&columns[0]).unwrap();
-    let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(&column) };
+    let column = numbers[0].column(0);
+    let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(column) };
     column.iter_data().flatten().collect::<Vec<T>>()
 }
