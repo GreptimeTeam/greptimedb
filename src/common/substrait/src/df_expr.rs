@@ -16,9 +16,7 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 
 use datafusion::common::Column;
-use datafusion_expr::{expr_fn, lit, BinaryExpr, BuiltinScalarFunction, Operator};
-// use datafusion::logical_plan::{Column, Expr};
-use datafusion_expr::{Between, Expr};
+use datafusion_expr::{expr_fn, lit, Between, BinaryExpr, BuiltinScalarFunction, Expr, Operator};
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt};
 use substrait_proto::protobuf::expression::field_reference::ReferenceType as FieldReferenceType;

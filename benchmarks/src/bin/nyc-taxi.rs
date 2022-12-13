@@ -20,7 +20,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
 
 use arrow::array::{ArrayRef, PrimitiveArray, StringArray, TimestampNanosecondArray};
@@ -32,9 +31,7 @@ use client::api::v1::column::Values;
 use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateExpr, InsertExpr};
 use client::{Client, Database, Select};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use parquet::arrow::{ArrowReader, ParquetFileArrowReader};
-use parquet::file::reader::FileReader;
-use parquet::file::serialized_reader::SerializedFileReader;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tokio::task::JoinSet;
 
 const DATABASE_NAME: &str = "greptime";
@@ -86,10 +83,14 @@ async fn write_data(
     pb_style: ProgressStyle,
 ) -> u128 {
     let file = std::fs::File::open(&path).unwrap();
-    let file_reader = Arc::new(SerializedFileReader::new(file).unwrap());
-    let row_num = file_reader.metadata().file_metadata().num_rows();
-    let record_batch_reader = ParquetFileArrowReader::new(file_reader)
-        .get_record_reader(batch_size)
+    let record_batch_reader_builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+    let row_num = record_batch_reader_builder
+        .metadata()
+        .file_metadata()
+        .num_rows();
+    let record_batch_reader = record_batch_reader_builder
+        .with_batch_size(batch_size)
+        .build()
         .unwrap();
     let progress_bar = mpb.add(ProgressBar::new(row_num as _));
     progress_bar.set_style(pb_style);
