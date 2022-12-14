@@ -171,10 +171,10 @@ impl ScriptsTable {
         let script_column = records[0].column(0);
         let script_column = script_column
             .as_any()
-            .downcast_ref::<Arc<StringVector>>()
+            .downcast_ref::<StringVector>()
             .with_context(|| CastTypeSnafu {
                 msg: format!(
-                    "can't downcast {:?} array into utf8 string vector",
+                    "can't downcast {:?} array into string vector",
                     script_column.data_type()
                 ),
             })?;
