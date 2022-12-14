@@ -173,10 +173,10 @@ async fn assert_query_result(instance: &Instance, sql: &str, ts: i64, host: &str
     }
 }
 
-async fn setup_test_instance() -> Instance {
+async fn setup_test_instance(test_name: &str) -> Instance {
     common_telemetry::init_default_ut_logging();
 
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_insert");
+    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts(test_name);
     let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
     instance.start().await.unwrap();
 
@@ -193,7 +193,7 @@ async fn setup_test_instance() -> Instance {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_execute_insert() {
-    let instance = setup_test_instance().await;
+    let instance = setup_test_instance("test_execute_insert").await;
     let output = execute_sql(
         &instance,
         r#"insert into demo(host, cpu, memory, ts) values
@@ -409,18 +409,10 @@ async fn check_output_stream(output: Output, expected: Vec<&str>) {
     assert_eq!(pretty_print, expected);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_alter_table() {
-    let instance = Instance::new_mock().await.unwrap();
-    instance.start().await.unwrap();
+    let instance = setup_test_instance("test_alter_table").await;
 
-    test_util::create_test_table(
-        instance.catalog_manager(),
-        instance.sql_handler(),
-        ConcreteDataType::timestamp_millis_datatype(),
-    )
-    .await
-    .unwrap();
     // make sure table insertion is ok before altering table
     execute_sql(
         &instance,

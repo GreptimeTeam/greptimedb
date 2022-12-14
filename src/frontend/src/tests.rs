@@ -29,6 +29,7 @@ use meta_srv::mocks::MockInfo;
 use meta_srv::service::store::kv::KvStoreRef;
 use meta_srv::service::store::memory::MemStore;
 use servers::grpc::GrpcServer;
+use servers::Mode;
 use tempdir::TempDir;
 use tonic::transport::Server;
 use tower::service_fn;
@@ -39,21 +40,42 @@ use crate::instance::distributed::DistInstance;
 use crate::instance::Instance;
 use crate::table::route::TableRoutes;
 
-async fn create_datanode_instance() -> Arc<DatanodeInstance> {
-    // TODO(LFC) Use real Mito engine when we can alter its region schema,
-    //   and delete the `new_mock` method.
-    let instance = Arc::new(DatanodeInstance::new_mock().await.unwrap());
-    instance.start().await.unwrap();
-    instance
+/// Guard against the `TempDir`s that used in unit tests.
+/// (The `TempDir` will be deleted once it goes out of scope.)
+pub struct TestGuard {
+    _wal_tmp_dir: TempDir,
+    _data_tmp_dir: TempDir,
 }
 
-pub(crate) async fn create_frontend_instance() -> Arc<Instance> {
-    let datanode_instance: Arc<DatanodeInstance> = create_datanode_instance().await;
-    let dn_catalog_manager = datanode_instance.catalog_manager().clone();
+pub(crate) async fn create_frontend_instance(test_name: &str) -> (Arc<Instance>, TestGuard) {
+    let (opts, guard) = create_tmp_dir_and_datanode_opts(test_name);
+    let datanode_instance = DatanodeInstance::with_mock_meta_client(&opts)
+        .await
+        .unwrap();
+    datanode_instance.start().await.unwrap();
 
-    let mut frontend_instance = Instance::new_standalone(datanode_instance);
-    frontend_instance.set_catalog_manager(dn_catalog_manager);
-    Arc::new(frontend_instance)
+    let frontend_instance = Instance::new_standalone(Arc::new(datanode_instance));
+    (Arc::new(frontend_instance), guard)
+}
+
+fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
+    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{}", name)).unwrap();
+    let data_tmp_dir = TempDir::new(&format!("gt_data_{}", name)).unwrap();
+    let opts = DatanodeOptions {
+        wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+        storage: ObjectStoreConfig::File {
+            data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+        },
+        mode: Mode::Standalone,
+        ..Default::default()
+    };
+    (
+        opts,
+        TestGuard {
+            _wal_tmp_dir: wal_tmp_dir,
+            _data_tmp_dir: data_tmp_dir,
+        },
+    )
 }
 
 pub(crate) async fn create_datanode_client(
