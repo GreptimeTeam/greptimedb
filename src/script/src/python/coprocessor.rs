@@ -22,11 +22,12 @@ use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::info;
-use datatypes::arrow;
 use datatypes::arrow::array::{Array, ArrayRef};
+use datatypes::arrow::compute;
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
-use datatypes::schema::Schema;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector, VectorRef};
 use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
@@ -42,7 +43,8 @@ use vm::{Interpreter, PyObjectRef, VirtualMachine};
 use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::DecoratorArgs;
 use crate::python::error::{
-    ensure, ret_other_error_with, ArrowSnafu, OtherSnafu, Result, TypeCastSnafu,
+    ensure, ret_other_error_with, ArrowSnafu, NewRecordBatchSnafu, OtherSnafu, Result,
+    TypeCastSnafu,
 };
 use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
 use crate::python::PyVector;
@@ -53,6 +55,7 @@ thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::n
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnotationInfo {
     /// if None, use types inferred by PyVector
+    // TODO(yingwen): We should use our data type. i.e. ConcreteDataType.
     pub datatype: Option<DataType>,
     pub is_nullable: bool,
 }
@@ -94,7 +97,7 @@ impl Coprocessor {
     /// generate [`Schema`] according to return names, types,
     /// if no annotation
     /// the datatypes of the actual columns is used directly
-    fn gen_schema(&self, cols: &[ArrayRef]) -> Result<Arc<ArrowSchema>> {
+    fn gen_schema(&self, cols: &[VectorRef]) -> Result<SchemaRef> {
         let names = &self.deco_args.ret_names;
         let anno = &self.return_types;
         ensure!(
@@ -108,35 +111,38 @@ impl Coprocessor {
                 )
             }
         );
-        Ok(Arc::new(ArrowSchema::from(
-            names
-                .iter()
-                .enumerate()
-                .map(|(idx, name)| {
-                    let real_ty = cols[idx].data_type().to_owned();
-                    let AnnotationInfo {
-                        datatype: ty,
-                        is_nullable,
-                    } = anno[idx].to_owned().unwrap_or_else(|| {
-                        // default to be not nullable and use DataType inferred by PyVector itself
-                        AnnotationInfo {
-                            datatype: Some(real_ty.to_owned()),
-                            is_nullable: false,
-                        }
-                    });
-                    Field::new(
-                        name,
-                        // if type is like `_` or `_ | None`
-                        ty.unwrap_or(real_ty),
-                        is_nullable,
-                    )
-                })
-                .collect::<Vec<Field>>(),
-        )))
+
+        let column_schemas = names
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| {
+                let real_ty = cols[idx].data_type();
+                let AnnotationInfo {
+                    datatype: ty,
+                    is_nullable,
+                } = anno[idx].to_owned().unwrap_or_else(|| {
+                    // default to be not nullable and use DataType inferred by PyVector itself
+                    AnnotationInfo {
+                        datatype: Some(real_ty.as_arrow_type()),
+                        is_nullable: false,
+                    }
+                });
+                let column_type = match ty {
+                    Some(arrow_type) => {
+                        ConcreteDataType::try_from(arrow_type).context(TypeCastSnafu)?
+                    }
+                    // if type is like `_` or `_ | None`
+                    None => real_ty.clone(),
+                };
+                ColumnSchema::new(name, column_type, is_nullable)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Arc::new(Schema::new(column_schemas)))
     }
 
     /// check if real types and annotation types(if have) is the same, if not try cast columns to annotated type
-    fn check_and_cast_type(&self, cols: &mut [ArrayRef]) -> Result<()> {
+    fn check_and_cast_type(&self, cols: &mut [VectorRef]) -> Result<()> {
         let return_types = &self.return_types;
         // allow ignore Return Type Annotation
         if return_types.is_empty() {
@@ -161,20 +167,9 @@ impl Coprocessor {
                 let real_ty = col.data_type();
                 let anno_ty = datatype;
                 if real_ty != anno_ty {
-                    {
-                        // This`CastOption` allow for overflowly cast and int to float loosely cast etc..,
-                        // check its doc for more information
-                        *col = arrow::compute::cast::cast(
-                            col.as_ref(),
-                            anno_ty,
-                            CastOptions {
-                                wrapped: true,
-                                partial: true,
-                            },
-                        )
-                        .context(ArrowSnafu)?
-                        .into();
-                    }
+                    let array = col.to_arrow_array();
+                    let array = compute::cast(&*array, anno_ty).context(ArrowSnafu)?;
+                    *col = Helper::try_into_vector(&*array).context(TypeCastSnafu)?;
                 }
             }
         }
@@ -182,46 +177,46 @@ impl Coprocessor {
     }
 }
 
-/// cast a `dyn Array` of type unsigned/int/float into a `dyn Vector`
-fn try_into_vector<T: datatypes::types::Primitive>(arg: Arc<dyn Array>) -> Result<Arc<dyn Vector>> {
-    // wrap try_into_vector in here to convert `datatypes::error::Error` to `python::error::Error`
-    Helper::try_into_vector(arg).context(TypeCastSnafu)
-}
+// /// cast a `dyn Array` of type unsigned/int/float into a `dyn Vector`
+// fn try_into_vector<T: datatypes::types::Primitive>(arg: Arc<dyn Array>) -> Result<Arc<dyn Vector>> {
+//     // wrap try_into_vector in here to convert `datatypes::error::Error` to `python::error::Error`
+//     Helper::try_into_vector(arg).context(TypeCastSnafu)
+// }
 
-/// convert a `Vec<ArrayRef>` into a `Vec<PyVector>` only when they are of supported types
-/// PyVector now only support unsigned&int8/16/32/64, float32/64 and bool when doing meanful arithmetics operation
-fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
-    let mut args: Vec<PyVector> = Vec::with_capacity(fetch_args.len());
-    for (idx, arg) in fetch_args.into_iter().enumerate() {
-        let v: VectorRef = match arg.data_type() {
-            DataType::Float32 => try_into_vector::<f32>(arg)?,
-            DataType::Float64 => try_into_vector::<f64>(arg)?,
-            DataType::UInt8 => try_into_vector::<u8>(arg)?,
-            DataType::UInt16 => try_into_vector::<u16>(arg)?,
-            DataType::UInt32 => try_into_vector::<u32>(arg)?,
-            DataType::UInt64 => try_into_vector::<u64>(arg)?,
-            DataType::Int8 => try_into_vector::<i8>(arg)?,
-            DataType::Int16 => try_into_vector::<i16>(arg)?,
-            DataType::Int32 => try_into_vector::<i32>(arg)?,
-            DataType::Int64 => try_into_vector::<i64>(arg)?,
-            DataType::Utf8 => {
-                Arc::new(StringVector::try_from_arrow_array(arg).context(TypeCastSnafu)?) as _
-            }
-            DataType::Boolean => {
-                Arc::new(BooleanVector::try_from_arrow_array(arg).context(TypeCastSnafu)?) as _
-            }
-            _ => {
-                return ret_other_error_with(format!(
-                    "Unsupported data type at column {idx}: {:?} for coprocessor",
-                    arg.data_type()
-                ))
-                .fail()
-            }
-        };
-        args.push(PyVector::from(v));
-    }
-    Ok(args)
-}
+// /// convert a `Vec<ArrayRef>` into a `Vec<PyVector>` only when they are of supported types
+// /// PyVector now only support unsigned&int8/16/32/64, float32/64 and bool when doing meanful arithmetics operation
+// fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
+//     let mut args: Vec<PyVector> = Vec::with_capacity(fetch_args.len());
+//     for (idx, arg) in fetch_args.into_iter().enumerate() {
+//         let v: VectorRef = match arg.data_type() {
+//             DataType::Float32 => try_into_vector::<f32>(arg)?,
+//             DataType::Float64 => try_into_vector::<f64>(arg)?,
+//             DataType::UInt8 => try_into_vector::<u8>(arg)?,
+//             DataType::UInt16 => try_into_vector::<u16>(arg)?,
+//             DataType::UInt32 => try_into_vector::<u32>(arg)?,
+//             DataType::UInt64 => try_into_vector::<u64>(arg)?,
+//             DataType::Int8 => try_into_vector::<i8>(arg)?,
+//             DataType::Int16 => try_into_vector::<i16>(arg)?,
+//             DataType::Int32 => try_into_vector::<i32>(arg)?,
+//             DataType::Int64 => try_into_vector::<i64>(arg)?,
+//             DataType::Utf8 => {
+//                 Arc::new(StringVector::try_from_arrow_array(arg).context(TypeCastSnafu)?) as _
+//             }
+//             DataType::Boolean => {
+//                 Arc::new(BooleanVector::try_from_arrow_array(arg).context(TypeCastSnafu)?) as _
+//             }
+//             _ => {
+//                 return ret_other_error_with(format!(
+//                     "Unsupported data type at column {idx}: {:?} for coprocessor",
+//                     arg.data_type()
+//                 ))
+//                 .fail()
+//             }
+//         };
+//         args.push(PyVector::from(v));
+//     }
+//     Ok(args)
+// }
 
 /// convert a tuple of `PyVector` or one `PyVector`(wrapped in a Python Object Ref[`PyObjectRef`])
 /// to a `Vec<ArrayRef>`
@@ -230,7 +225,7 @@ fn try_into_columns(
     obj: &PyObjectRef,
     vm: &VirtualMachine,
     col_len: usize,
-) -> Result<Vec<ArrayRef>> {
+) -> Result<Vec<VectorRef>> {
     if is_instance::<PyTuple>(obj, vm) {
         let tuple = obj.payload::<PyTuple>().with_context(|| {
             ret_other_error_with(format!("can't cast obj {:?} to PyTuple)", obj))
@@ -238,7 +233,7 @@ fn try_into_columns(
         let cols = tuple
             .iter()
             .map(|obj| py_vec_obj_to_array(obj, vm, col_len))
-            .collect::<Result<Vec<ArrayRef>>>()?;
+            .collect::<Result<Vec<VectorRef>>>()?;
         Ok(cols)
     } else {
         let col = py_vec_obj_to_array(obj, vm, col_len)?;
@@ -265,12 +260,12 @@ fn select_from_rb(rb: &RecordBatch, fetch_names: &[String]) -> Result<Vec<PyVect
 fn check_args_anno_real_type(
     args: &[PyVector],
     copr: &Coprocessor,
-    rb: &DfRecordBatch,
+    rb: &RecordBatch,
 ) -> Result<()> {
     for (idx, arg) in args.iter().enumerate() {
         let anno_ty = copr.arg_types[idx].to_owned();
         let real_ty = arg.to_arrow_array().data_type().to_owned();
-        let is_nullable: bool = rb.schema().fields[idx].is_nullable;
+        let is_nullable: bool = rb.schema.column_schemas()[idx].is_nullable();
         ensure!(
             anno_ty
                 .to_owned()
@@ -311,31 +306,32 @@ fn set_items_in_scope(
 
 /// The coprocessor function accept a python script and a Record Batch:
 /// ## What it does
-/// 1. it take a python script and a [`DfRecordBatch`], extract columns and annotation info according to `args` given in decorator in python script
+/// 1. it take a python script and a [`RecordBatch`], extract columns and annotation info according to `args` given in decorator in python script
 /// 2. execute python code and return a vector or a tuple of vector,
-/// 3. the returning vector(s) is assembled into a new [`DfRecordBatch`] according to `returns` in python decorator and return to caller
+/// 3. the returning vector(s) is assembled into a new [`RecordBatch`] according to `returns` in python decorator and return to caller
 ///
 /// # Example
 ///
 /// ```ignore
 /// use std::sync::Arc;
-/// use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-/// use datatypes::arrow::array::PrimitiveArray;
-/// use datatypes::arrow::datatypes::{DataType, Field, Schema};
+/// use common_recordbatch::RecordBatch;
+/// use datatypes::prelude::*;
+/// use datatypes::schema::{ColumnSchema, Schema};
+/// use datatypes::vectors::{Float32Vector, Float64Vector};
 /// use common_function::scalars::python::exec_coprocessor;
 /// let python_source = r#"
 /// @copr(args=["cpu", "mem"], returns=["perf", "what"])
 /// def a(cpu, mem):
 ///     return cpu + mem, cpu - mem
 /// "#;
-/// let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
-/// let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
-/// let schema = Arc::new(Schema::from(vec![
-///  Field::new("cpu", DataType::Float32, false),
-///  Field::new("mem", DataType::Float64, false),
+/// let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.6]);
+/// let mem_array = Float64Vector::from_slice([0.1f64, 0.2, 0.3, 0.4]);
+/// let schema = Arc::new(Schema::new(vec![
+///  ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), false),
+///  ColumnSchema::new("mem", ConcreteDataType::float64_datatype(), false),
 /// ]));
 /// let rb =
-/// DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
+/// RecordBatch::new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
 /// let ret = exec_coprocessor(python_source, &rb).unwrap();
 /// assert_eq!(ret.column(0).len(), 4);
 /// ```
@@ -345,7 +341,7 @@ fn set_items_in_scope(
 ///
 /// Currently support types are `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64` and `f16`, `f32`, `f64`
 ///
-/// use `f64 | None` to mark if returning column is nullable like in [`DfRecordBatch`]'s schema's [`Field`]'s is_nullable
+/// use `f64 | None` to mark if returning column is nullable like in [`RecordBatch`]'s schema's [`ColumnSchema`]'s is_nullable
 ///
 /// you can also use single underscore `_` to let coprocessor infer what type it is, so `_` and `_ | None` are both valid in type annotation.
 /// Note: using `_` means not nullable column, using `_ | None` means nullable column
@@ -361,7 +357,7 @@ fn set_items_in_scope(
 /// You can return constant in python code like `return 1, 1.0, True`
 /// which create a constant array(with same value)(currently support int, float and bool) as column on return
 #[cfg(test)]
-pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<RecordBatch> {
+pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
@@ -371,7 +367,7 @@ pub fn exec_coprocessor(script: &str, rb: &DfRecordBatch) -> Result<RecordBatch>
 
 pub(crate) fn exec_with_cached_vm(
     copr: &Coprocessor,
-    rb: &DfRecordBatch,
+    rb: &RecordBatch,
     args: Vec<PyVector>,
     vm: &Arc<Interpreter>,
 ) -> Result<RecordBatch> {
@@ -389,7 +385,7 @@ pub(crate) fn exec_with_cached_vm(
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
         let col_len = rb.num_rows();
-        let mut cols: Vec<ArrayRef> = try_into_columns(&ret, vm, col_len)?;
+        let mut cols = try_into_columns(&ret, vm, col_len)?;
         ensure!(
             cols.len() == copr.deco_args.ret_names.len(),
             OtherSnafu {
@@ -405,11 +401,7 @@ pub(crate) fn exec_with_cached_vm(
         copr.check_and_cast_type(&mut cols)?;
         // 6. return a assembled DfRecordBatch
         let schema = copr.gen_schema(&cols)?;
-        let res_rb = DfRecordBatch::try_new(schema.clone(), cols).context(ArrowSnafu)?;
-        Ok(RecordBatch {
-            schema: Arc::new(Schema::try_from(schema).context(TypeCastSnafu)?),
-            df_recordbatch: res_rb,
-        })
+        RecordBatch::new(schema, cols).context(NewRecordBatchSnafu)
     })
 }
 
@@ -465,7 +457,7 @@ pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<Record
 #[allow(dead_code)]
 pub fn exec_copr_print(
     script: &str,
-    rb: &DfRecordBatch,
+    rb: &RecordBatch,
     ln_offset: usize,
     filename: &str,
 ) -> StdResult<RecordBatch, String> {
