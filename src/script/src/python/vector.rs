@@ -19,13 +19,16 @@ use std::sync::Arc;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
-use datatypes::arrow::array::{Array, ArrayRef, BooleanArray, PrimitiveArray};
+use datatypes::arrow::array::{Array, Float64Array, Int64Array, UInt64Array, ArrayRef, BooleanArray, PrimitiveArray};
+use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Value;
-use datatypes::value::OrderedFloat;
-use datatypes::vectors::{Helper, NullVector, VectorBuilder, VectorRef};
-use datatypes::{arrow, value};
+use datatypes::value::{self, OrderedFloat};
+use datatypes::vectors::{Helper, NullVector, MutableVector, VectorRef};
+use datatypes::arrow::compute;
+use datatypes::arrow::compute::kernels::comparison;
+use datatypes::arrow::compute::kernels::boolean;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr};
 use rustpython_vm::function::{Either, OptionalArg, PyComparisonValue};
 use rustpython_vm::protocol::{PyMappingMethods, PySequenceMethods};
@@ -34,6 +37,7 @@ use rustpython_vm::types::{AsMapping, AsSequence, Comparable, PyComparisonOp};
 use rustpython_vm::{
     pyclass, AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
+use arrow::compute::kernels::arithmetic;
 
 use crate::python::utils::{is_instance, PyVectorRef};
 
@@ -59,74 +63,52 @@ fn emit_cast_error(
         src_ty, dst_ty
     ))
 }
-fn arrow2_rsub_scalar(
+
+/// Performs `val - arr`.
+fn arrow_rsub(
     arr: &dyn Array,
-    val: &dyn Scalar,
-    _vm: &VirtualMachine,
-) -> PyResult<Box<dyn Array>> {
-    // b - a => a * (-1) + b
-    let neg = arithmetics::mul_scalar(arr, &PrimitiveScalar::new(DataType::Int64, Some(-1i64)));
-    Ok(arithmetics::add_scalar(neg.as_ref(), val))
+    val: &dyn Array,
+    vm: &VirtualMachine,
+) -> PyResult<ArrayRef> {
+    arithmetic::subtract_dyn(val, arr).map_err(|e| {
+        vm.new_type_error(format!("rsub error: {}", e))
+    })
 }
 
-fn arrow2_rtruediv_scalar(
+/// Performs `val / arr`
+fn arrow_rtruediv(
     arr: &dyn Array,
-    val: &dyn Scalar,
+    val: &dyn Array,
     vm: &VirtualMachine,
-) -> PyResult<Box<dyn Array>> {
-    // val / arr => one_arr / arr * val (this is simpler to write)
-    let one_arr: Box<dyn Array> = if is_float(arr.data_type()) {
-        Box::new(PrimitiveArray::from_values(vec![1f64; arr.len()]))
-    } else if is_integer(arr.data_type()) {
-        Box::new(PrimitiveArray::from_values(vec![1i64; arr.len()]))
-    } else {
-        return Err(vm.new_not_implemented_error(format!(
-            "truediv of {:?} Scalar with {:?} Array is not supported",
-            val.data_type(),
-            arr.data_type()
-        )));
-    };
-    let tmp = arithmetics::mul_scalar(one_arr.as_ref(), val);
-    Ok(arithmetics::div(tmp.as_ref(), arr))
+) -> PyResult<ArrayRef> {
+    arithmetic::divide_dyn(val, arr).map_err(|e| {
+        vm.new_type_error(format!("rtruediv error: {}", e))
+    })
 }
 
-fn arrow2_rfloordiv_scalar(
+/// Performs `val / arr`, but cast to i64.
+fn arrow_rfloordiv(
     arr: &dyn Array,
-    val: &dyn Scalar,
+    val: &dyn Array,
     vm: &VirtualMachine,
-) -> PyResult<Box<dyn Array>> {
-    // val // arr => one_arr // arr * val (this is simpler to write)
-    let one_arr: Box<dyn Array> = if is_float(arr.data_type()) {
-        Box::new(PrimitiveArray::from_values(vec![1f64; arr.len()]))
-    } else if is_integer(arr.data_type()) {
-        Box::new(PrimitiveArray::from_values(vec![1i64; arr.len()]))
-    } else {
-        return Err(vm.new_not_implemented_error(format!(
-            "truediv of {:?} Scalar with {:?} Array is not supported",
-            val.data_type(),
-            arr.data_type()
-        )));
-    };
-    let tmp = arithmetics::mul_scalar(one_arr.as_ref(), val);
-
-    Ok(arrow::compute::cast::cast(
-        arithmetics::div(tmp.as_ref(), arr).as_ref(),
-        &DataType::Int64,
-        cast::CastOptions {
-            wrapped: false,
-            partial: true,
-        },
-    )
-    .unwrap())
+) -> PyResult<ArrayRef> {
+    let array = arithmetic::divide_dyn(val, arr).map_err(|e| {
+        vm.new_type_error(format!("rtruediv divide error: {}", e))
+    })?;
+    compute::cast(array, &DataType::Int64).map_err(|e| {
+        vm.new_type_error(format!("rtruediv cast error: {}", e))
+    })
 }
 
 fn wrap_result<F>(
     f: F,
-) -> impl Fn(&dyn Array, &dyn Scalar, &VirtualMachine) -> PyResult<Box<dyn Array>>
+) -> impl Fn(&dyn Array, &dyn Array, &VirtualMachine) -> PyResult<ArrayRef>
 where
-    F: Fn(&dyn Array, &dyn Scalar) -> Box<dyn Array>,
+    F: Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef>,
 {
-    move |left, right, _vm| Ok(f(left, right))
+    move |left, right, vm| {
+        f(left, right).map_err(|e| vm.new_type_error(format!("arithmetic error {}", e)))
+    }
 }
 
 fn is_float(datatype: &DataType) -> bool {
@@ -154,17 +136,14 @@ fn is_unsigned(datatype: &DataType) -> bool {
     )
 }
 
-fn cast(array: ArrayRef, target_type: &DataType, vm: &VirtualMachine) -> PyResult<Box<dyn Array>> {
-    cast::cast(
+fn cast(array: ArrayRef, target_type: &DataType, vm: &VirtualMachine) -> PyResult<ArrayRef> {
+    compute::cast(
         array.as_ref(),
         target_type,
-        CastOptions {
-            wrapped: true,
-            partial: true,
-        },
     )
     .map_err(|e| vm.new_type_error(e.to_string()))
 }
+
 fn from_debug_error(err: impl std::fmt::Debug, vm: &VirtualMachine) -> PyBaseExceptionRef {
     vm.new_runtime_error(format!("Runtime Error: {err:#?}"))
 }
@@ -190,7 +169,7 @@ impl PyVector {
             }
 
             let datatype = get_concrete_type(&elements[0], vm)?;
-            let mut buf = VectorBuilder::with_capacity(datatype.clone(), elements.len());
+            let buf = datatype.create_mutable_vector(elements.len());
 
             for obj in elements.drain(..) {
                 let val = if let Some(v) =
@@ -203,11 +182,12 @@ impl PyVector {
                         obj, datatype
                     )));
                 };
-                buf.push(&val);
+                // Safety: `pyobj_try_to_typed_val()` has checked the data type.
+                buf.push_value_ref(val.as_value_ref()).unwrap();
             }
 
             Ok(PyVector {
-                vector: buf.finish(),
+                vector: buf.to_vector(),
             })
         } else {
             Ok(PyVector::default())
@@ -233,7 +213,7 @@ impl PyVector {
         vm: &VirtualMachine,
     ) -> PyResult<PyVector>
     where
-        F: Fn(&dyn Array, &dyn Scalar, &VirtualMachine) -> PyResult<Box<dyn Array>>,
+        F: Fn(&dyn Array, &dyn Array, &VirtualMachine) -> PyResult<ArrayRef>,
     {
         // the right operand only support PyInt or PyFloat,
         let (right, right_type) = {
@@ -268,36 +248,45 @@ impl PyVector {
             }
         });
         let left = cast(left, &target_type, vm)?;
-        let right: Box<dyn Scalar> = if is_float(&target_type) {
+        let left_len = left.len();
+
+        // Convert `right` to an array of `target_type`.
+        let right: Box<dyn Array> = if is_float(&target_type) {
             match right {
                 value::Value::Int64(v) => {
-                    Box::new(PrimitiveScalar::new(target_type, Some(v as f64)))
+                    Box::new(Float64Array::from_value(v as f64, left_len))
                 }
                 value::Value::UInt64(v) => {
-                    Box::new(PrimitiveScalar::new(target_type, Some(v as f64)))
+                    Box::new(Float64Array::from_value(v as f64, left_len))
                 }
                 value::Value::Float64(v) => {
-                    Box::new(PrimitiveScalar::new(target_type, Some(f64::from(v))))
+                    Box::new(Float64Array::from_value(f64::from(v), left_len))
                 }
                 _ => unreachable!(),
             }
         } else if is_signed(&target_type) {
             match right {
-                value::Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
+                value::Value::Int64(v) => {
+                    Box::new(Int64Array::from_value(v, left_len))
+                },
                 value::Value::UInt64(v) => {
-                    Box::new(PrimitiveScalar::new(target_type, Some(v as i64)))
+                    Box::new(Int64Array::from_value(v as i64, left_len))
                 }
                 value::Value::Float64(v) => {
-                    Box::new(PrimitiveScalar::new(DataType::Float64, Some(v.0 as i64)))
+                    Box::new(Int64Array::from_value(v.0 as i64, left_len))
                 }
                 _ => unreachable!(),
             }
         } else if is_unsigned(&target_type) {
             match right {
-                value::Value::Int64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
-                value::Value::UInt64(v) => Box::new(PrimitiveScalar::new(target_type, Some(v))),
+                value::Value::Int64(v) => {
+                    Box::new(UInt64Array::from_value(v as u64, left_len))
+                },
+                value::Value::UInt64(v) => {
+                    Box::new(UInt64Array::from_value(v, left_len))
+                },
                 value::Value::Float64(v) => {
-                    Box::new(PrimitiveScalar::new(target_type, Some(f64::from(v))))
+                    Box::new(UInt64Array::from_value(v as f64, left_len))
                 }
                 _ => unreachable!(),
             }
@@ -325,7 +314,7 @@ impl PyVector {
         vm: &VirtualMachine,
     ) -> PyResult<PyVector>
     where
-        F: Fn(&dyn Array, &dyn Array) -> Box<dyn Array>,
+        F: Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef>,
     {
         let right = other.downcast_ref::<PyVector>().ok_or_else(|| {
             vm.new_type_error(format!(
@@ -352,7 +341,9 @@ impl PyVector {
         let left = cast(left, &target_type, vm)?;
         let right = cast(right, &target_type, vm)?;
 
-        let result = op(left.as_ref(), right.as_ref());
+        let result = op(left.as_ref(), right.as_ref()).map_err(|e| {
+            vm.new_type_error(format!("Can't compute op, error: {}", e))
+        })?;
 
         Ok(Helper::try_into_vector(&*result)
             .map_err(|e| {
@@ -368,27 +359,27 @@ impl PyVector {
     #[pymethod(magic)]
     fn add(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, None, wrap_result(arithmetics::add_scalar), vm)
+            self.scalar_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
         } else {
-            self.arith_op(other, None, arithmetics::add, vm)
+            self.arith_op(other, None, arithmetic::add_dyn, vm)
         }
     }
 
     #[pymethod(magic)]
     fn sub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, None, wrap_result(arithmetics::sub_scalar), vm)
+            self.scalar_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
         } else {
-            self.arith_op(other, None, arithmetics::sub, vm)
+            self.arith_op(other, None, arithmetic::subtract_dyn, vm)
         }
     }
 
     #[pymethod(magic)]
     fn rsub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, None, arrow2_rsub_scalar, vm)
+            self.scalar_arith_op(other, None, arrow_rsub, vm)
         } else {
-            self.arith_op(other, None, |a, b| arithmetics::sub(b, a), vm)
+            self.arith_op(other, None, |a, b| arithmetic::subtract_dyn(b, a), vm)
         }
     }
 
@@ -396,9 +387,9 @@ impl PyVector {
     #[pymethod(magic)]
     fn mul(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, None, wrap_result(arithmetics::mul_scalar), vm)
+            self.scalar_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
         } else {
-            self.arith_op(other, None, arithmetics::mul, vm)
+            self.arith_op(other, None, arithmetic::multiply_dyn, vm)
         }
     }
 
@@ -408,23 +399,23 @@ impl PyVector {
             self.scalar_arith_op(
                 other,
                 Some(DataType::Float64),
-                wrap_result(arithmetics::div_scalar),
+                wrap_result(arithmetic::divide_dyn),
                 vm,
             )
         } else {
-            self.arith_op(other, Some(DataType::Float64), arithmetics::div, vm)
+            self.arith_op(other, Some(DataType::Float64), arithmetic::divide_dyn, vm)
         }
     }
 
     #[pymethod(magic)]
     fn rtruediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, Some(DataType::Float64), arrow2_rtruediv_scalar, vm)
+            self.scalar_arith_op(other, Some(DataType::Float64), arrow_rtruediv, vm)
         } else {
             self.arith_op(
                 other,
                 Some(DataType::Float64),
-                |a, b| arithmetics::div(b, a),
+                |a, b| arithmetic::divide_dyn(b, a),
                 vm,
             )
         }
@@ -436,11 +427,11 @@ impl PyVector {
             self.scalar_arith_op(
                 other,
                 Some(DataType::Int64),
-                wrap_result(arithmetics::div_scalar),
+                wrap_result(arithmetic::divide_dyn),
                 vm,
             )
         } else {
-            self.arith_op(other, Some(DataType::Int64), arithmetics::div, vm)
+            self.arith_op(other, Some(DataType::Int64), arithmetic::divide_dyn, vm)
         }
     }
 
@@ -448,12 +439,12 @@ impl PyVector {
     fn rfloordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if is_pyobj_scalar(&other, vm) {
             // FIXME: DataType convert problem, target_type should be inferred?
-            self.scalar_arith_op(other, Some(DataType::Int64), arrow2_rfloordiv_scalar, vm)
+            self.scalar_arith_op(other, Some(DataType::Int64), arrow_rfloordiv, vm)
         } else {
             self.arith_op(
                 other,
                 Some(DataType::Int64),
-                |a, b| arithmetics::div(b, a),
+                |a, b| arithmetic::divide_dyn(b, a),
                 vm,
             )
         }
@@ -529,7 +520,7 @@ impl PyVector {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
-        let res = compute::boolean::and(left, right).map_err(|err| from_debug_error(err, vm))?;
+        let res = boolean::and(left, right).map_err(|err| from_debug_error(err, vm))?;
         let res = Arc::new(res) as ArrayRef;
         let ret = Helper::try_into_vector(&*res).map_err(|err| from_debug_error(err, vm))?;
         Ok(ret.into())
@@ -547,7 +538,7 @@ impl PyVector {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
-        let res = compute::boolean::or(left, right).map_err(|err| from_debug_error(err, vm))?;
+        let res = boolean::or(left, right).map_err(|err| from_debug_error(err, vm))?;
         let res = Arc::new(res) as ArrayRef;
         let ret = Helper::try_into_vector(&*res).map_err(|err| from_debug_error(err, vm))?;
         Ok(ret.into())
@@ -561,7 +552,7 @@ impl PyVector {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
-        let res = compute::boolean::not(left);
+        let res = boolean::not(left);
         let res = Arc::new(res) as ArrayRef;
         let ret = Helper::try_into_vector(&*res).map_err(|err| from_debug_error(err, vm))?;
         Ok(ret.into())
@@ -576,11 +567,11 @@ impl PyVector {
     #[pymethod(name = "filter")]
     fn filter(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let left = self.to_arrow_array();
-        let right: ArrayRef = other.to_arrow_array();
+        let right = other.to_arrow_array();
         let filter = right.as_any().downcast_ref::<BooleanArray>();
         match filter {
             Some(filter) => {
-                let res = compute::filter::filter(left.as_ref(), filter);
+                let res = compute::filter(left.as_ref(), filter);
 
                 let res =
                     res.map_err(|err| vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
@@ -614,8 +605,7 @@ impl PyVector {
                 .ok_or_else(|| {
                     vm.new_type_error(format!("Can't cast {seq:#?} as a Boolean Array"))
                 })?;
-            // let left = self.to_arrow_array();
-            let res = compute::filter::filter(self.to_arrow_array().as_ref(), mask)
+            let res = compute::filter(self.to_arrow_array().as_ref(), mask)
                 .map_err(|err| vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
             let ret = Helper::try_into_vector(&*res).map_err(|e| {
                 vm.new_type_error(format!(
@@ -650,9 +640,9 @@ impl PyVector {
         let (mut range, step, slice_len) = slice.adjust_indices(self.len());
         let vector = self.as_vector_ref();
 
-        let mut buf = VectorBuilder::with_capacity(vector.data_type(), slice_len);
+        let mut buf = vector.data_type().create_mutable_vector(slice_len);
         if slice_len == 0 {
-            let v: PyVector = buf.finish().into();
+            let v: PyVector = buf.to_vector().into();
             Ok(v.into_pyobject(vm))
         } else if step == 1 {
             let v: PyVector = vector.slice(range.next().unwrap_or(0), slice_len).into();
@@ -660,15 +650,17 @@ impl PyVector {
         } else if step.is_negative() {
             // Negative step require special treatment
             for i in range.rev().step_by(step.unsigned_abs()) {
-                buf.push(&vector.get(i))
+                // Safety: This mutable vector is created from the vector's data type.
+                buf.push_value_ref(vector.get_ref(i)).unwrap();
             }
-            let v: PyVector = buf.finish().into();
+            let v: PyVector = buf.to_vector().into();
             Ok(v.into_pyobject(vm))
         } else {
             for i in range.step_by(step.unsigned_abs()) {
-                buf.push(&vector.get(i))
+                // Safety: This mutable vector is created from the vector's data type.
+                buf.push_value_ref(vector.get_ref(i))
             }
-            let v: PyVector = buf.finish().into();
+            let v: PyVector = buf.to_vector().into();
             Ok(v.into_pyobject(vm))
         }
     }
@@ -689,19 +681,18 @@ impl PyVector {
 /// get corresponding arrow op function according to given PyComaprsionOp
 ///
 /// TODO(discord9): impl scalar version function
-fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> Box<dyn Array> {
+fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef> {
     let op_bool_arr = match op {
-        PyComparisonOp::Eq => comparison::eq,
-        PyComparisonOp::Ne => comparison::neq,
-        PyComparisonOp::Gt => comparison::gt,
-        PyComparisonOp::Lt => comparison::lt,
-        PyComparisonOp::Ge => comparison::gt_eq,
-        PyComparisonOp::Le => comparison::lt_eq,
+        PyComparisonOp::Eq => comparison::eq_dyn,
+        PyComparisonOp::Ne => comparison::neq_dyn,
+        PyComparisonOp::Gt => comparison::gt_dyn,
+        PyComparisonOp::Lt => comparison::lt_dyn,
+        PyComparisonOp::Ge => comparison::gt_eq_dyn,
+        PyComparisonOp::Le => comparison::lt_eq_dyn,
     };
 
-    move |a: &dyn Array, b: &dyn Array| -> Box<dyn Array> {
-        let ret = op_bool_arr(a, b);
-        Box::new(ret) as _
+    move |a: &dyn Array, b: &dyn Array| -> ArrowResult<ArrayRef> {
+        op_bool_arr(a, b)
     }
 }
 
@@ -710,19 +701,20 @@ fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> Box<dy
 /// TODO(discord9): impl scalar version function
 fn get_arrow_scalar_op(
     op: PyComparisonOp,
-) -> impl Fn(&dyn Array, &dyn Scalar, &VirtualMachine) -> PyResult<Box<dyn Array>> {
+) -> impl Fn(&dyn Array, &dyn Scalar, &VirtualMachine) -> PyResult<ArrayRef> {
     let op_bool_arr = match op {
-        PyComparisonOp::Eq => comparison::eq_scalar,
-        PyComparisonOp::Ne => comparison::neq_scalar,
-        PyComparisonOp::Gt => comparison::gt_scalar,
-        PyComparisonOp::Lt => comparison::lt_scalar,
-        PyComparisonOp::Ge => comparison::gt_eq_scalar,
-        PyComparisonOp::Le => comparison::lt_eq_scalar,
+        PyComparisonOp::Eq => comparison::eq_dyn,
+        PyComparisonOp::Ne => comparison::neq_dyn,
+        PyComparisonOp::Gt => comparison::gt_dyn,
+        PyComparisonOp::Lt => comparison::lt_dyn,
+        PyComparisonOp::Ge => comparison::gt_eq_dyn,
+        PyComparisonOp::Le => comparison::lt_eq_dyn,
     };
 
-    move |a: &dyn Array, b: &dyn Scalar, _vm| -> PyResult<Box<dyn Array>> {
-        let ret = op_bool_arr(a, b);
-        Ok(Box::new(ret) as _)
+    move |a: &dyn Array, b: &dyn Scalar, vm| -> PyResult<ArrayRef> {
+        op_bool_arr(a, b).map_err(|e| {
+            vm.new_type_error(format!("scalar op error: {}", e))
+        })
     }
 }
 
