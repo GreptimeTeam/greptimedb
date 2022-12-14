@@ -19,16 +19,17 @@ use std::sync::Arc;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
-use datatypes::arrow::array::{Array, Float64Array, Int64Array, UInt64Array, ArrayRef, BooleanArray, PrimitiveArray};
-use datatypes::arrow::error::Result as ArrowResult;
+use datatypes::arrow::array::{
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, PrimitiveArray, UInt64Array,
+};
+use datatypes::arrow::compute;
+use datatypes::arrow::compute::kernels::{arithmetic, boolean, comparison};
 use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Value;
 use datatypes::value::{self, OrderedFloat};
-use datatypes::vectors::{Helper, NullVector, MutableVector, VectorRef};
-use datatypes::arrow::compute;
-use datatypes::arrow::compute::kernels::comparison;
-use datatypes::arrow::compute::kernels::boolean;
+use datatypes::vectors::{Helper, MutableVector, NullVector, VectorRef};
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr};
 use rustpython_vm::function::{Either, OptionalArg, PyComparisonValue};
 use rustpython_vm::protocol::{PyMappingMethods, PySequenceMethods};
@@ -37,7 +38,6 @@ use rustpython_vm::types::{AsMapping, AsSequence, Comparable, PyComparisonOp};
 use rustpython_vm::{
     pyclass, AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
 };
-use arrow::compute::kernels::arithmetic;
 
 use crate::python::utils::{is_instance, PyVectorRef};
 
@@ -65,44 +65,25 @@ fn emit_cast_error(
 }
 
 /// Performs `val - arr`.
-fn arrow_rsub(
-    arr: &dyn Array,
-    val: &dyn Array,
-    vm: &VirtualMachine,
-) -> PyResult<ArrayRef> {
-    arithmetic::subtract_dyn(val, arr).map_err(|e| {
-        vm.new_type_error(format!("rsub error: {}", e))
-    })
+fn arrow_rsub(arr: &dyn Array, val: &dyn Array, vm: &VirtualMachine) -> PyResult<ArrayRef> {
+    arithmetic::subtract_dyn(val, arr).map_err(|e| vm.new_type_error(format!("rsub error: {}", e)))
 }
 
 /// Performs `val / arr`
-fn arrow_rtruediv(
-    arr: &dyn Array,
-    val: &dyn Array,
-    vm: &VirtualMachine,
-) -> PyResult<ArrayRef> {
-    arithmetic::divide_dyn(val, arr).map_err(|e| {
-        vm.new_type_error(format!("rtruediv error: {}", e))
-    })
+fn arrow_rtruediv(arr: &dyn Array, val: &dyn Array, vm: &VirtualMachine) -> PyResult<ArrayRef> {
+    arithmetic::divide_dyn(val, arr)
+        .map_err(|e| vm.new_type_error(format!("rtruediv error: {}", e)))
 }
 
 /// Performs `val / arr`, but cast to i64.
-fn arrow_rfloordiv(
-    arr: &dyn Array,
-    val: &dyn Array,
-    vm: &VirtualMachine,
-) -> PyResult<ArrayRef> {
-    let array = arithmetic::divide_dyn(val, arr).map_err(|e| {
-        vm.new_type_error(format!("rtruediv divide error: {}", e))
-    })?;
-    compute::cast(array, &DataType::Int64).map_err(|e| {
-        vm.new_type_error(format!("rtruediv cast error: {}", e))
-    })
+fn arrow_rfloordiv(arr: &dyn Array, val: &dyn Array, vm: &VirtualMachine) -> PyResult<ArrayRef> {
+    let array = arithmetic::divide_dyn(val, arr)
+        .map_err(|e| vm.new_type_error(format!("rtruediv divide error: {}", e)))?;
+    compute::cast(array, &DataType::Int64)
+        .map_err(|e| vm.new_type_error(format!("rtruediv cast error: {}", e)))
 }
 
-fn wrap_result<F>(
-    f: F,
-) -> impl Fn(&dyn Array, &dyn Array, &VirtualMachine) -> PyResult<ArrayRef>
+fn wrap_result<F>(f: F) -> impl Fn(&dyn Array, &dyn Array, &VirtualMachine) -> PyResult<ArrayRef>
 where
     F: Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef>,
 {
@@ -137,11 +118,7 @@ fn is_unsigned(datatype: &DataType) -> bool {
 }
 
 fn cast(array: ArrayRef, target_type: &DataType, vm: &VirtualMachine) -> PyResult<ArrayRef> {
-    compute::cast(
-        array.as_ref(),
-        target_type,
-    )
-    .map_err(|e| vm.new_type_error(e.to_string()))
+    compute::cast(array.as_ref(), target_type).map_err(|e| vm.new_type_error(e.to_string()))
 }
 
 fn from_debug_error(err: impl std::fmt::Debug, vm: &VirtualMachine) -> PyBaseExceptionRef {
@@ -253,12 +230,8 @@ impl PyVector {
         // Convert `right` to an array of `target_type`.
         let right: Box<dyn Array> = if is_float(&target_type) {
             match right {
-                value::Value::Int64(v) => {
-                    Box::new(Float64Array::from_value(v as f64, left_len))
-                }
-                value::Value::UInt64(v) => {
-                    Box::new(Float64Array::from_value(v as f64, left_len))
-                }
+                value::Value::Int64(v) => Box::new(Float64Array::from_value(v as f64, left_len)),
+                value::Value::UInt64(v) => Box::new(Float64Array::from_value(v as f64, left_len)),
                 value::Value::Float64(v) => {
                     Box::new(Float64Array::from_value(f64::from(v), left_len))
                 }
@@ -266,28 +239,16 @@ impl PyVector {
             }
         } else if is_signed(&target_type) {
             match right {
-                value::Value::Int64(v) => {
-                    Box::new(Int64Array::from_value(v, left_len))
-                },
-                value::Value::UInt64(v) => {
-                    Box::new(Int64Array::from_value(v as i64, left_len))
-                }
-                value::Value::Float64(v) => {
-                    Box::new(Int64Array::from_value(v.0 as i64, left_len))
-                }
+                value::Value::Int64(v) => Box::new(Int64Array::from_value(v, left_len)),
+                value::Value::UInt64(v) => Box::new(Int64Array::from_value(v as i64, left_len)),
+                value::Value::Float64(v) => Box::new(Int64Array::from_value(v.0 as i64, left_len)),
                 _ => unreachable!(),
             }
         } else if is_unsigned(&target_type) {
             match right {
-                value::Value::Int64(v) => {
-                    Box::new(UInt64Array::from_value(v as u64, left_len))
-                },
-                value::Value::UInt64(v) => {
-                    Box::new(UInt64Array::from_value(v, left_len))
-                },
-                value::Value::Float64(v) => {
-                    Box::new(UInt64Array::from_value(v as f64, left_len))
-                }
+                value::Value::Int64(v) => Box::new(UInt64Array::from_value(v as u64, left_len)),
+                value::Value::UInt64(v) => Box::new(UInt64Array::from_value(v, left_len)),
+                value::Value::Float64(v) => Box::new(UInt64Array::from_value(v as f64, left_len)),
                 _ => unreachable!(),
             }
         } else {
@@ -341,9 +302,8 @@ impl PyVector {
         let left = cast(left, &target_type, vm)?;
         let right = cast(right, &target_type, vm)?;
 
-        let result = op(left.as_ref(), right.as_ref()).map_err(|e| {
-            vm.new_type_error(format!("Can't compute op, error: {}", e))
-        })?;
+        let result = op(left.as_ref(), right.as_ref())
+            .map_err(|e| vm.new_type_error(format!("Can't compute op, error: {}", e)))?;
 
         Ok(Helper::try_into_vector(&*result)
             .map_err(|e| {
@@ -691,9 +651,7 @@ fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> ArrowR
         PyComparisonOp::Le => comparison::lt_eq_dyn,
     };
 
-    move |a: &dyn Array, b: &dyn Array| -> ArrowResult<ArrayRef> {
-        op_bool_arr(a, b)
-    }
+    move |a: &dyn Array, b: &dyn Array| -> ArrowResult<ArrayRef> { op_bool_arr(a, b) }
 }
 
 /// get corresponding arrow scalar op function according to given PyComaprsionOp
@@ -701,7 +659,7 @@ fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> ArrowR
 /// TODO(discord9): impl scalar version function
 fn get_arrow_scalar_op(
     op: PyComparisonOp,
-) -> impl Fn(&dyn Array, &dyn Scalar, &VirtualMachine) -> PyResult<ArrayRef> {
+) -> impl Fn(&dyn Array, &dyn Array, &VirtualMachine) -> PyResult<ArrayRef> {
     let op_bool_arr = match op {
         PyComparisonOp::Eq => comparison::eq_dyn,
         PyComparisonOp::Ne => comparison::neq_dyn,
@@ -711,10 +669,8 @@ fn get_arrow_scalar_op(
         PyComparisonOp::Le => comparison::lt_eq_dyn,
     };
 
-    move |a: &dyn Array, b: &dyn Scalar, vm| -> PyResult<ArrayRef> {
-        op_bool_arr(a, b).map_err(|e| {
-            vm.new_type_error(format!("scalar op error: {}", e))
-        })
+    move |a: &dyn Array, b: &dyn Array, vm| -> PyResult<ArrayRef> {
+        op_bool_arr(a, b).map_err(|e| vm.new_type_error(format!("scalar op error: {}", e)))
     }
 }
 

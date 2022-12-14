@@ -22,10 +22,10 @@ use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::info;
-use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use datatypes::arrow;
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use datatypes::schema::Schema;
 use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector, VectorRef};
 use rustpython_compiler_core::CodeObject;
@@ -249,7 +249,8 @@ fn try_into_columns(
 /// select columns according to `fetch_names` from `rb`
 /// and cast them into a Vec of PyVector
 fn select_from_rb(rb: &RecordBatch, fetch_names: &[String]) -> Result<Vec<PyVector>> {
-    fetch_names.iter()
+    fetch_names
+        .iter()
         .map(|name| {
             let vector = rb.column_by_name(name).with_context(|| OtherSnafu {
                 reason: format!("Can't find field name {}", name),

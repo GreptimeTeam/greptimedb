@@ -18,11 +18,11 @@
 #[allow(clippy::print_stdout)]
 mod test;
 
+use arrow::compute::cast;
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::ColumnarValue as DFColValue;
 use datafusion_physical_expr::AggregateExpr;
 use datatypes::arrow::array::ArrayRef;
-use arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
