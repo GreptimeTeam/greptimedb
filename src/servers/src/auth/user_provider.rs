@@ -228,11 +228,11 @@ pub mod test {
 
     #[tokio::test]
     async fn test_file_provider() {
-        let dir = TempDir::new("").unwrap();
-        let file_path = dir.path().join("test_file_provider");
+        let dir = TempDir::new("test_file_provider").unwrap();
+        let file_path = format!("{}/test_file_provider", dir.path().to_str().unwrap());
         {
             // write a tmp file
-            let file = File::create(file_path.clone());
+            let file = File::create(&file_path);
             assert!(file.is_ok());
             let file = file.unwrap();
             let mut lw = LineWriter::new(file);
@@ -245,13 +245,9 @@ admin=654321",
             assert!(lw.flush().is_ok());
         }
 
-        let param = "file:".to_string() + file_path.as_os_str().to_str().unwrap();
-
+        let param = format!("file:{}", file_path);
         let provider = StaticUserProvider::try_from(param.as_str()).unwrap();
         test_auth(&provider, "root", "123456").await;
         test_auth(&provider, "admin", "654321").await;
-
-        // remove test file
-        std::fs::remove_file(&file_path).unwrap();
     }
 }
