@@ -30,13 +30,11 @@ use frontend::prometheus::PrometheusOptions;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
-use servers::{auth, Mode};
+use servers::Mode;
 use snafu::ResultExt;
 
-use crate::error::{
-    Error, IllegalAuthConfigSnafu, IllegalConfigSnafu, Result, StartDatanodeSnafu,
-    StartFrontendSnafu,
-};
+use crate::error::{Error, IllegalConfigSnafu, Result, StartDatanodeSnafu, StartFrontendSnafu};
+use crate::frontend::load_frontend_plugins;
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -154,7 +152,7 @@ impl StartCommand {
     async fn run(self) -> Result<()> {
         let enable_memory_catalog = self.enable_memory_catalog;
         let config_file = self.config_file.clone();
-        let plugins = load_plugins(&self)?;
+        let plugins = load_frontend_plugins(&self.user_provider)?;
         let fe_opts = FrontendOptions::try_from(self)?;
         let dn_opts: DatanodeOptions = {
             let mut opts: StandaloneOptions = if let Some(path) = config_file {
@@ -198,16 +196,6 @@ async fn build_frontend(
     frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
     frontend_instance.set_script_handler(datanode_instance);
     Ok(Frontend::new(fe_opts, frontend_instance, plugins))
-}
-
-fn load_plugins(cmd: &StartCommand) -> Result<AnyMap> {
-    let mut plugins = AnyMap::new();
-    if let Some(user_provider) = &cmd.user_provider {
-        let user_provider =
-            auth::user_provider_from_option(user_provider).context(IllegalAuthConfigSnafu)?;
-        plugins.insert(user_provider);
-    }
-    Ok(plugins)
 }
 
 impl TryFrom<StartCommand> for FrontendOptions {
@@ -355,7 +343,7 @@ mod tests {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
         };
 
-        let plugins = load_plugins(&command);
+        let plugins = load_frontend_plugins(&command.user_provider);
         assert!(plugins.is_ok());
         let plugins = plugins.unwrap();
         let provider = plugins.get::<UserProviderRef>();

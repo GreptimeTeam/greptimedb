@@ -24,6 +24,7 @@ use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use meta_client::MetaClientOpts;
+use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::{auth, Mode};
@@ -87,7 +88,7 @@ pub struct StartCommand {
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        let plugins = load_plugins(&self)?;
+        let plugins = load_frontend_plugins(&self.user_provider)?;
         let opts: FrontendOptions = self.try_into()?;
         let mut frontend = Frontend::new(
             opts.clone(),
@@ -100,12 +101,12 @@ impl StartCommand {
     }
 }
 
-fn load_plugins(cmd: &StartCommand) -> Result<AnyMap> {
+pub fn load_frontend_plugins(user_provider: &Option<String>) -> Result<AnyMap> {
     let mut plugins = AnyMap::new();
-    if let Some(user_provider) = &cmd.user_provider {
-        let user_provider =
-            auth::user_provider_from_option(user_provider).context(IllegalAuthConfigSnafu)?;
-        plugins.insert(user_provider);
+
+    if let Some(provider) = user_provider {
+        let provider = auth::user_provider_from_option(provider).context(IllegalAuthConfigSnafu)?;
+        plugins.insert::<UserProviderRef>(provider);
     }
     Ok(plugins)
 }
@@ -278,7 +279,7 @@ mod tests {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
         };
 
-        let plugins = load_plugins(&command);
+        let plugins = load_frontend_plugins(&command.user_provider);
         assert!(plugins.is_ok());
         let plugins = plugins.unwrap();
         let provider = plugins.get::<UserProviderRef>();
