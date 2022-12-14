@@ -36,12 +36,13 @@ use servers::Mode;
 use snafu::prelude::*;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
+use store_api::logstore::LogStore;
 use table::table::TableIdProviderRef;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
-    NewCatalogSnafu, Result,
+    NewCatalogSnafu, Result, StartLogStoreSnafu,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
@@ -61,6 +62,7 @@ pub struct Instance {
     pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
+    pub(crate) logstore: Arc<LocalFileLogStore>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -68,7 +70,7 @@ pub type InstanceRef = Arc<Instance>;
 impl Instance {
     pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
-        let log_store = create_local_file_log_store(opts).await?;
+        let logstore = Arc::new(create_local_file_log_store(&opts.wal_dir).await?);
 
         let meta_client = match opts.mode {
             Mode::Standalone => None,
@@ -88,7 +90,7 @@ impl Instance {
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
-                Arc::new(log_store),
+                logstore.clone(),
                 object_store.clone(),
             ),
             object_store,
@@ -158,6 +160,7 @@ impl Instance {
             script_executor,
             heartbeat_task,
             table_id_provider,
+            logstore,
         })
     }
 
@@ -166,6 +169,7 @@ impl Instance {
             .start()
             .await
             .context(NewCatalogSnafu)?;
+        self.logstore.start().await.context(StartLogStoreSnafu)?;
         if let Some(task) = &self.heartbeat_task {
             task.start().await?;
         }
@@ -272,16 +276,16 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Resul
 }
 
 pub(crate) async fn create_local_file_log_store(
-    opts: &DatanodeOptions,
+    path: impl AsRef<str>,
 ) -> Result<LocalFileLogStore> {
+    let path = path.as_ref();
     // create WAL directory
-    fs::create_dir_all(path::Path::new(&opts.wal_dir))
-        .context(error::CreateDirSnafu { dir: &opts.wal_dir })?;
+    fs::create_dir_all(path::Path::new(path)).context(error::CreateDirSnafu { dir: path })?;
 
-    info!("The WAL directory is: {}", &opts.wal_dir);
+    info!("The WAL directory is: {}", path);
 
     let log_config = LogConfig {
-        log_file_dir: opts.wal_dir.clone(),
+        log_file_dir: path.to_string(),
         ..Default::default()
     };
 

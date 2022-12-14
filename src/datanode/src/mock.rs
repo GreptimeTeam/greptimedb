@@ -38,10 +38,11 @@ impl Instance {
     // TODO(LFC): Delete it when callers no longer need it.
     pub async fn new_mock() -> Result<Self> {
         use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
-
         let mock_info = meta_srv::mocks::mock_with_memstore().await;
         let meta_client = Arc::new(mock_meta_client(mock_info, 0).await);
-        let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
+        let (dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
+
+        let logstore = Arc::new(create_local_file_log_store(dir.path().to_str().unwrap()).await?);
         let mock_engine = Arc::new(MockMitoEngine::new(
             TableEngineConfig::default(),
             MockEngine::default(),
@@ -80,6 +81,7 @@ impl Instance {
             script_executor,
             heartbeat_task,
             table_id_provider,
+            logstore,
         })
     }
 
@@ -90,13 +92,13 @@ impl Instance {
 
     pub async fn with_mock_meta_server(opts: &DatanodeOptions, meta_srv: MockInfo) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
-        let log_store = create_local_file_log_store(opts).await?;
+        let logstore = Arc::new(create_local_file_log_store(&opts.wal_dir).await?);
         let meta_client = Arc::new(mock_meta_client(meta_srv, opts.node_id.unwrap_or(42)).await);
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
-                Arc::new(log_store),
+                logstore.clone(),
                 object_store.clone(),
             ),
             object_store,
@@ -132,6 +134,7 @@ impl Instance {
             script_executor,
             table_id_provider: Some(Arc::new(LocalTableIdProvider::default())),
             heartbeat_task: Some(heartbeat_task),
+            logstore,
         })
     }
 }

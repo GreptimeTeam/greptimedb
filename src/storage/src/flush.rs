@@ -223,7 +223,8 @@ impl<S: LogStore> FlushJob<S> {
                 edit,
                 self.max_memtable_id,
             )
-            .await
+            .await?;
+        self.wal.obsolete(self.flush_sequence).await
     }
 
     /// Generates random SST file name in format: `^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$`
@@ -237,9 +238,7 @@ impl<S: LogStore> Job for FlushJob<S> {
     // TODO(yingwen): [flush] Support in-job parallelism (Flush memtables concurrently)
     async fn run(&mut self, ctx: &Context) -> Result<()> {
         let file_metas = self.write_memtables_to_layer(ctx).await?;
-
         self.write_manifest_and_apply(&file_metas).await?;
-
         Ok(())
     }
 }

@@ -25,6 +25,7 @@ pub async fn create_tmp_local_file_log_store(dir: &str) -> (LocalFileLogStore, T
         append_buffer_size: 128,
         max_log_file_size: 128,
         log_file_dir: dir.path().to_str().unwrap().to_string(),
+        ..Default::default()
     };
 
     (LocalFileLogStore::open(&cfg).await.unwrap(), dir)

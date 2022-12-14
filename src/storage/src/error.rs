@@ -204,6 +204,17 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display(
+        "Failed to mark WAL as stable, region id: {}, source: {}",
+        region_id,
+        source
+    ))]
+    MarkWalStable {
+        region_id: u64,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("WAL data corrupted, region_id: {}, message: {}", region_id, message))]
     WalDataCorrupted {
         region_id: RegionId,
@@ -409,6 +420,7 @@ impl ErrorExt for Error {
             PushBatch { source, .. } => source.status_code(),
             AddDefault { source, .. } => source.status_code(),
             ConvertChunk { source, .. } => source.status_code(),
+            MarkWalStable { source, .. } => source.status_code(),
         }
     }
 
