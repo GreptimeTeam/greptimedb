@@ -91,7 +91,7 @@ pub enum Error {
     #[snafu(display("Failed while waiting for write to finish, source: {}", source))]
     WaitWrite { source: tokio::task::JoinError },
 
-    #[snafu(display("Logstore status invalid, msg: {}", msg))]
+    #[snafu(display("Invalid logstore status, msg: {}", msg))]
     InvalidState { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to wait for gc task to stop, source: {}", source))]

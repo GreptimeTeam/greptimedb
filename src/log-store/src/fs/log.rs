@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_stream::stream;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use futures::{pin_mut, StreamExt};
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{Encode, Entry, Id};
@@ -211,7 +211,7 @@ async fn find_lowest_id(obsolete_ids: Arc<RwLock<HashMap<LocalNamespace, u64>>>)
         for (ns, id) in obsolete_ids.iter() {
             if *id <= *lowest_obsolete.get_or_insert(*id) {
                 lowest_obsolete = Some(*id);
-                info!("Current lowest obsolete id: {}, namespace: {:?}", *id, ns);
+                debug!("Current lowest obsolete id: {}, namespace: {:?}", *id, ns);
             }
         }
     }
