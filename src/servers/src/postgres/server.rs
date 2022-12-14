@@ -35,7 +35,7 @@ pub struct PostgresServer {
     base_server: BaseTcpServer,
     auth_handler: Arc<PgAuthStartupHandler>,
     query_handler: Arc<PostgresServerHandler>,
-    tls: Arc<TlsOption>,
+    tls: TlsOption,
 }
 
 impl PostgresServer {
@@ -43,7 +43,7 @@ impl PostgresServer {
     pub fn new(
         query_handler: SqlQueryHandlerRef,
         check_pwd: bool,
-        tls: Arc<TlsOption>,
+        tls: TlsOption,
         io_runtime: Arc<Runtime>,
     ) -> PostgresServer {
         let postgres_handler = Arc::new(PostgresServerHandler::new(query_handler));
