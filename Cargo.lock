@@ -6151,6 +6151,7 @@ dependencies = [
  "snap",
  "strum 0.24.1",
  "table",
+ "tempdir",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",

@@ -22,7 +22,7 @@ use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use snafu::{Backtrace, ErrorCompat, OptionExt, Snafu};
 
-use crate::auth::user_provider::MemUserProvider;
+use crate::auth::user_provider::StaticUserProvider;
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
@@ -82,10 +82,10 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef, Error>
         value: opt.to_string(),
         msg: "UserProviderOption must be in format `<option>:<value>`",
     })?;
-    match name {
-        "mem_user_provider" => {
+    match name.to_lowercase().as_str() {
+        user_provider::STATIC_USER_PROVIDER => {
             let provider =
-                MemUserProvider::try_from(content).map(|p| Arc::new(p) as UserProviderRef)?;
+                StaticUserProvider::try_from(content).map(|p| Arc::new(p) as UserProviderRef)?;
             Ok(provider)
         }
         _ => InvalidConfigSnafu {
@@ -109,8 +109,8 @@ pub enum Error {
     #[snafu(display("Encounter IO error, source: {}", source))]
     IOErr { source: std::io::Error },
 
-    #[snafu(display("User not found"))]
-    UserNotFound {},
+    #[snafu(display("User not found, username: {}", username))]
+    UserNotFound { username: String },
 
     #[snafu(display("Unsupported password type: {}", password_type))]
     UnsupportedPasswordType {
@@ -118,8 +118,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Username and password does not match"))]
-    UserPasswordMismatch {},
+    #[snafu(display("Username and password does not match, username: {}", username))]
+    UserPasswordMismatch { username: String },
 }
 
 impl ErrorExt for Error {
@@ -169,10 +169,16 @@ pub mod test {
                                     username: "greptime".to_string(),
                                 });
                             } else {
-                                return super::UserPasswordMismatchSnafu {}.fail();
+                                return super::UserPasswordMismatchSnafu {
+                                    username: username.to_string(),
+                                }
+                                .fail();
                             }
                         } else {
-                            return super::UserNotFoundSnafu {}.fail();
+                            return super::UserNotFoundSnafu {
+                                username: username.to_string(),
+                            }
+                            .fail();
                         }
                     }
                     _ => super::UnsupportedPasswordTypeSnafu {

@@ -22,32 +22,32 @@ use async_trait::async_trait;
 use digest;
 use digest::Digest;
 use sha1::Sha1;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::auth::{
-    Error, IOErrSnafu, Identity, InvalidConfigSnafu, Password, UserInfo, UserNotFoundSnafu,
-    UserPasswordMismatchSnafu, UserProvider,
+    Error, HashedPassword, IOErrSnafu, Identity, InvalidConfigSnafu, Password, Salt,
+    UnsupportedPasswordTypeSnafu, UserInfo, UserNotFoundSnafu, UserPasswordMismatchSnafu,
+    UserProvider,
 };
 
-impl TryFrom<&str> for MemUserProvider {
+pub const STATIC_USER_PROVIDER: &str = "static_user_provider";
+
+impl TryFrom<&str> for StaticUserProvider {
     type Error = Error;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         let (mode, content) = value.split_once(':').context(InvalidConfigSnafu {
             value: value.to_string(),
-            msg: "MemUserProviderOption must be in format `<option>:<value>`",
+            msg: "StaticUserProviderOption must be in format `<option>:<value>`",
         })?;
-        return match mode {
+        return match mode.to_lowercase().as_str() {
             "file" => {
                 // check valid path
                 let path = Path::new(content);
-                if !path.exists() || !path.is_file() {
-                    return InvalidConfigSnafu {
-                        value: content.to_string(),
-                        msg: "MemUserProviderOption file path must be a valid file",
-                    }
-                    .fail();
-                }
+                ensure!(path.exists() && path.is_file(), InvalidConfigSnafu {
+                    value: content.to_string(),
+                    msg: "StaticUserProviderOption file must be a valid file path",
+                });
 
                 let file = File::open(path).context(IOErrSnafu)?;
                 let credential = io::BufReader::new(file)
@@ -61,44 +61,42 @@ impl TryFrom<&str> for MemUserProvider {
                         }
                     })
                     .collect::<HashMap<String, Vec<u8>>>();
-                if credential.is_empty() {
-                    return InvalidConfigSnafu {
-                        value: content.to_string(),
-                        msg: "MemUserProviderOption file must contain at least one valid credential",
-                    }
-                    .fail();
-                }
 
-                Ok(MemUserProvider { users: credential, })
+                ensure!(!credential.is_empty(), InvalidConfigSnafu {
+                    value: content.to_string(),
+                    msg: "StaticUserProviderOption file must contains at least one valid credential",
+                });
+
+                Ok(StaticUserProvider { users: credential, })
             }
-            "inline" => content
+            "cmd" => content
                 .split(',')
                 .map(|kv| {
                     let (k, v) = kv.split_once('=').context(InvalidConfigSnafu {
                         value: kv.to_string(),
-                        msg: "MemUserProviderOption inline values must be in format `user=pwd[,user=pwd]`",
+                        msg: "StaticUserProviderOption cmd values must be in format `user=pwd[,user=pwd]`",
                     })?;
                     Ok((k.to_string(), v.as_bytes().to_vec()))
                 })
                 .collect::<Result<HashMap<String, Vec<u8>>, Error>>()
-                .map(|users| MemUserProvider { users }),
+                .map(|users| StaticUserProvider { users }),
             _ => InvalidConfigSnafu {
                 value: mode.to_string(),
-                msg: "MemUserProviderOption must be in format `file:<path>` or `inline:<values>`",
+                msg: "StaticUserProviderOption must be in format `file:<path>` or `cmd:<values>`",
             }
             .fail(),
         };
     }
 }
 
-pub struct MemUserProvider {
+pub struct StaticUserProvider {
     users: HashMap<String, Vec<u8>>,
 }
 
 #[async_trait]
-impl UserProvider for MemUserProvider {
+impl UserProvider for StaticUserProvider {
     fn name(&self) -> &str {
-        "mem_user_provider"
+        STATIC_USER_PROVIDER
     }
 
     async fn auth(
@@ -108,42 +106,55 @@ impl UserProvider for MemUserProvider {
     ) -> Result<UserInfo, Error> {
         match input_id {
             Identity::UserId(username, _) => {
-                if let Some(save_pwd) = self.users.get(username) {
-                    match input_pwd {
-                        Password::PlainText(pwd) => {
-                            return if save_pwd == pwd.as_bytes() {
-                                Ok(UserInfo {
-                                    username: username.to_string(),
-                                })
-                            } else {
-                                UserNotFoundSnafu {}.fail()
+                let save_pwd = self.users.get(username).context(UserNotFoundSnafu {
+                    username: username.to_string(),
+                })?;
+
+                match input_pwd {
+                    Password::PlainText(pwd) => {
+                        return if save_pwd == pwd.as_bytes() {
+                            Ok(UserInfo {
+                                username: username.to_string(),
+                            })
+                        } else {
+                            UserPasswordMismatchSnafu {
+                                username: username.to_string(),
                             }
+                            .fail()
                         }
-                        Password::MysqlNativePassword(auth_data, salt) => {
-                            // ref: https://github.com/mysql/mysql-server/blob/a246bad76b9271cb4333634e954040a970222e0a/sql/auth/password.cc#L62
-                            let hash_stage_2 = double_sha1(save_pwd);
-                            let tmp = sha1_two(salt, &hash_stage_2);
-                            // xor auth_data and tmp
-                            let mut xor_result = [0u8; 20];
-                            for i in 0..20 {
-                                xor_result[i] = auth_data[i] ^ tmp[i];
-                            }
-                            let candidate_stage_2 = sha1_one(&xor_result);
-                            return if candidate_stage_2 == hash_stage_2 {
-                                Ok(UserInfo {
-                                    username: username.to_string(),
-                                })
-                            } else {
-                                UserPasswordMismatchSnafu {}.fail()
-                            };
-                        }
-                        _ => unimplemented!(),
                     }
-                } else {
-                    UserNotFoundSnafu {}.fail()
+                    Password::MysqlNativePassword(auth_data, salt) => {
+                        auth_mysql(auth_data, salt, username.to_string(), save_pwd)
+                    }
+                    Password::PgMD5(_, _) => UnsupportedPasswordTypeSnafu {
+                        password_type: "pg_md5",
+                    }
+                    .fail(),
                 }
             }
         }
+    }
+}
+
+fn auth_mysql(
+    auth_data: HashedPassword,
+    salt: Salt,
+    username: String,
+    save_pwd: &[u8],
+) -> Result<UserInfo, Error> {
+    // ref: https://github.com/mysql/mysql-server/blob/a246bad76b9271cb4333634e954040a970222e0a/sql/auth/password.cc#L62
+    let hash_stage_2 = double_sha1(save_pwd);
+    let tmp = sha1_two(salt, &hash_stage_2);
+    // xor auth_data and tmp
+    let mut xor_result = [0u8; 20];
+    for i in 0..20 {
+        xor_result[i] = auth_data[i] ^ tmp[i];
+    }
+    let candidate_stage_2 = sha1_one(&xor_result);
+    if candidate_stage_2 == hash_stage_2 {
+        Ok(UserInfo { username })
+    } else {
+        UserPasswordMismatchSnafu { username }.fail()
     }
 }
 
@@ -169,7 +180,9 @@ pub mod test {
     use std::fs::File;
     use std::io::{LineWriter, Write};
 
-    use crate::auth::user_provider::{double_sha1, sha1_one, sha1_two, MemUserProvider};
+    use tempdir::TempDir;
+
+    use crate::auth::user_provider::{double_sha1, sha1_one, sha1_two, StaticUserProvider};
     use crate::auth::{Identity, Password, UserProvider};
 
     #[test]
@@ -208,16 +221,18 @@ pub mod test {
 
     #[tokio::test]
     async fn test_inline_provider() {
-        let provider = MemUserProvider::try_from("inline:root=123456,admin=654321").unwrap();
+        let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
         test_auth(&provider, "root", "123456").await;
         test_auth(&provider, "admin", "654321").await;
     }
 
     #[tokio::test]
     async fn test_file_provider() {
+        let dir = TempDir::new("").unwrap();
+        let file_path = dir.path().join("test_file_provider");
         {
             // write a tmp file
-            let file = File::create("/tmp/test_file_provider");
+            let file = File::create(file_path.clone());
             assert!(file.is_ok());
             let file = file.unwrap();
             let mut lw = LineWriter::new(file);
@@ -230,11 +245,13 @@ admin=654321",
             assert!(lw.flush().is_ok());
         }
 
-        let provider = MemUserProvider::try_from("file:/tmp/test_file_provider").unwrap();
+        let param = "file:".to_string() + file_path.as_os_str().to_str().unwrap();
+
+        let provider = StaticUserProvider::try_from(param.as_str()).unwrap();
         test_auth(&provider, "root", "123456").await;
         test_auth(&provider, "admin", "654321").await;
 
         // remove test file
-        std::fs::remove_file("/tmp/test_file_provider").unwrap();
+        std::fs::remove_file(&file_path).unwrap();
     }
 }

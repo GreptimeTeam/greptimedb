@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use axum::{http, Router};
 use axum_test_helper::TestClient;
 use common_query::Output;
-use servers::auth::user_provider::MemUserProvider;
+use servers::auth::user_provider::StaticUserProvider;
 use servers::error::Result;
 use servers::http::{HttpOptions, HttpServer};
 use servers::influxdb::InfluxdbRequest;
@@ -54,7 +54,7 @@ impl SqlQueryHandler for DummyInstance {
 fn make_test_app(tx: mpsc::Sender<(String, String)>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
     let mut server = HttpServer::new(instance.clone(), HttpOptions::default());
-    let up = MemUserProvider::try_from("inline:greptime=greptime").unwrap();
+    let up = StaticUserProvider::try_from("cmd:greptime=greptime").unwrap();
     server.set_user_provider(Arc::new(up));
 
     server.set_influxdb_handler(instance);

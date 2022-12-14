@@ -23,7 +23,7 @@ use mysql_async::prelude::*;
 use mysql_async::SslOpts;
 use rand::rngs::StdRng;
 use rand::Rng;
-use servers::auth::user_provider::MemUserProvider;
+use servers::auth::user_provider::StaticUserProvider;
 use servers::error::Result;
 use servers::mysql::server::MysqlServer;
 use servers::server::Server;
@@ -43,7 +43,7 @@ fn create_mysql_server(table: MemTable, tls: Arc<TlsOption>) -> Result<Box<dyn S
             .unwrap(),
     );
 
-    let provider = MemUserProvider::try_from("inline:greptime=greptime").unwrap();
+    let provider = StaticUserProvider::try_from("cmd:greptime=greptime").unwrap();
 
     Ok(MysqlServer::create_server(
         query_handler,

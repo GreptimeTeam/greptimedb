@@ -300,6 +300,8 @@ impl TryFrom<StartCommand> for FrontendOptions {
 mod tests {
     use std::time::Duration;
 
+    use servers::auth::{Identity, Password};
+
     use super::*;
 
     #[test]
@@ -342,5 +344,37 @@ mod tests {
         );
         assert_eq!(2, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
         assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
+    }
+
+    #[tokio::test]
+    async fn test_try_from_start_command_to_anymap() {
+        let command = StartCommand {
+            http_addr: None,
+            rpc_addr: None,
+            mysql_addr: None,
+            postgres_addr: None,
+            opentsdb_addr: None,
+            config_file: None,
+            influxdb_enable: false,
+            enable_memory_catalog: false,
+            tls_mode: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+        };
+
+        let plugins = AnyMap::try_from(&command);
+        assert!(plugins.is_ok());
+        let plugins = plugins.unwrap();
+        let fe_plugin = plugins.get::<FrontendPlugin>();
+        assert!(fe_plugin.is_some());
+        let fe_plugin = fe_plugin.unwrap();
+        assert!(fe_plugin.user_provider.is_some());
+
+        let provider = fe_plugin.user_provider.clone().unwrap();
+        let result = provider
+            .auth(Identity::UserId("test", None), Password::PlainText("test"))
+            .await;
+        assert!(result.is_ok());
     }
 }

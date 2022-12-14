@@ -22,7 +22,7 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rustls::client::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Certificate, Error, ServerName};
-use servers::auth::user_provider::MemUserProvider;
+use servers::auth::user_provider::StaticUserProvider;
 use servers::auth::UserProviderRef;
 use servers::error::Result;
 use servers::postgres::PostgresServer;
@@ -48,7 +48,7 @@ fn create_postgres_server(
     );
     let user_provider: Option<UserProviderRef> = if check_pwd {
         Some(Arc::new(
-            MemUserProvider::try_from("inline:test_user=test_pwd").unwrap(),
+            StaticUserProvider::try_from("cmd:test_user=test_pwd").unwrap(),
         ))
     } else {
         None
