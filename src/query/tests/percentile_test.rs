@@ -123,9 +123,9 @@ fn create_correctness_engine() -> Arc<dyn QueryEngine> {
     let column_schema = ColumnSchema::new("corr_number", ConcreteDataType::int32_datatype(), true);
     column_schemas.push(column_schema);
 
-    let numbers = vec![3_i32, 6_i32, 8_i32, 10_i32];
+    let numbers = [3_i32, 6_i32, 8_i32, 10_i32];
 
-    let column: VectorRef = Arc::new(Int32Vector::from_vec(numbers.to_vec()));
+    let column: VectorRef = Arc::new(Int32Vector::from_slice(&numbers));
     columns.push(column);
 
     let schema = Arc::new(Schema::new(column_schemas));

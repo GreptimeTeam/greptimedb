@@ -76,10 +76,11 @@ impl QueryEngineState {
     }
 
     /// Register a udf function
-    /// TODO(dennis): manage UDFs by ourself.
+    // TODO(dennis): manage UDFs by ourself.
     pub fn register_udf(&self, udf: ScalarUdf) {
         // `SessionContext` has a `register_udf()` method, which requires `&mut self`, this is
         // a workaround.
+        // TODO(yingwen): Use `SessionContext::register_udf()` once it taks `&self`.
         self.df_context
             .state
             .write()

@@ -148,8 +148,8 @@ impl<'a> TypeConverter<'a> {
                     compute::cast(&value_arr, target_type).map_err(DataFusionError::ArrowError)?;
 
                 ScalarValue::try_from_array(
-                    &arr, // index: Converts a value in `array` at `index` into a ScalarValue
-                    0,
+                    &arr,
+                    0, // index: Converts a value in `array` at `index` into a ScalarValue
                 )
             }
         }
