@@ -1346,7 +1346,7 @@ mod tests {
                 ConcreteDataType::timestamp_second_datatype(),
             ))
             .to_string(),
-            "TimestampSecondType[]"
+            "TimestampSecond[]"
         );
         assert_eq!(
             Value::List(ListValue::new(
@@ -1354,7 +1354,7 @@ mod tests {
                 ConcreteDataType::timestamp_millisecond_datatype(),
             ))
             .to_string(),
-            "TimestampMillisecondType[]"
+            "TimestampMillisecond[]"
         );
         assert_eq!(
             Value::List(ListValue::new(
@@ -1362,7 +1362,7 @@ mod tests {
                 ConcreteDataType::timestamp_microsecond_datatype(),
             ))
             .to_string(),
-            "TimestampMicrosecondType[]"
+            "TimestampMicrosecond[]"
         );
         assert_eq!(
             Value::List(ListValue::new(
@@ -1370,7 +1370,7 @@ mod tests {
                 ConcreteDataType::timestamp_nanosecond_datatype(),
             ))
             .to_string(),
-            "TimestampNanosecondType[]"
+            "TimestampNanosecond[]"
         );
     }
 
