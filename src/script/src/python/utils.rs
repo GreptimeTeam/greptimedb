@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::{ArrayRef, BooleanArray, NullArray, PrimitiveArray, Utf8Array};
+use datafusion::arrow::array::{ArrayRef, BooleanArray, NullArray, PrimitiveArray, StringArray};
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue as DFColValue;
 use datatypes::arrow::datatypes::DataType;
@@ -89,7 +89,7 @@ pub fn py_vec_obj_to_array(
             .try_into_value::<String>(vm)
             .map_err(|e| format_py_error(e, vm))?;
 
-        let ret = Utf8Array::<i32>::from_iter(std::iter::repeat(Some(val)).take(col_len));
+        let ret = StringArray::from_iter(std::iter::repeat(Some(val)).take(col_len));
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyList>(obj, vm) {
         let columnar_value =

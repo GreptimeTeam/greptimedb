@@ -22,10 +22,9 @@ use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::info;
-use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use datatypes::arrow;
 use datatypes::arrow::array::{Array, ArrayRef};
-use datatypes::arrow::compute::cast::CastOptions;
 use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use datatypes::schema::Schema;
 use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector, VectorRef};
@@ -249,27 +248,15 @@ fn try_into_columns(
 
 /// select columns according to `fetch_names` from `rb`
 /// and cast them into a Vec of PyVector
-fn select_from_rb(rb: &DfRecordBatch, fetch_names: &[String]) -> Result<Vec<PyVector>> {
-    let field_map: HashMap<&String, usize> = rb
-        .schema()
-        .fields
-        .iter()
-        .enumerate()
-        .map(|(idx, field)| (&field.name, idx))
-        .collect();
-    let fetch_idx: Vec<usize> = fetch_names
-        .iter()
-        .map(|field| {
-            field_map.get(field).copied().context(OtherSnafu {
-                reason: format!("Can't found field name {field}"),
-            })
+fn select_from_rb(rb: &RecordBatch, fetch_names: &[String]) -> Result<Vec<PyVector>> {
+    fetch_names.iter()
+        .map(|name| {
+            let vector = rb.column_by_name(name).with_context(|| OtherSnafu {
+                reason: format!("Can't find field name {}", name),
+            })?;
+            PyVector::from(vector.clone())
         })
-        .collect::<Result<Vec<usize>>>()?;
-    let fetch_args: Vec<Arc<dyn Array>> = fetch_idx
-        .into_iter()
-        .map(|idx| rb.column(idx).clone())
-        .collect();
-    try_into_py_vector(fetch_args)
+        .collect()
 }
 
 /// match between arguments' real type and annotation types
@@ -459,7 +446,7 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
 }
 
 /// using a parsed `Coprocessor` struct as input to execute python code
-pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &DfRecordBatch) -> Result<RecordBatch> {
+pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
     check_args_anno_real_type(&args, copr, rb)?;

@@ -59,7 +59,7 @@ impl Stream for CoprStream {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(recordbatch))) => {
-                let batch = exec_parsed(&self.copr, &recordbatch.df_recordbatch)
+                let batch = exec_parsed(&self.copr, &recordbatch)
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
 
