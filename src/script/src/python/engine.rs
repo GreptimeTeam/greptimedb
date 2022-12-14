@@ -177,6 +177,7 @@ mod tests {
 
         let script_engine = PyEngine::new(query_engine.clone());
 
+        // To avoid divide by zero, the script divides `add(a, b)` by `g.sqrt(c + 1)` instead of `g.sqrt(c)`
         let script = r#"
 import greptime as g
 def add(a, b):
@@ -184,7 +185,7 @@ def add(a, b):
 
 @copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
 def test(a, b, c):
-    return add(a, b) / g.sqrt(c)
+    return add(a, b) / g.sqrt(c + 1)
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())
@@ -207,8 +208,8 @@ def test(a, b, c):
                     .as_any()
                     .downcast_ref::<Float64Vector>()
                     .unwrap();
-                assert!(rows.get_data(0).unwrap().is_nan());
-                assert_eq!((99f64 + 99f64) / 99f64.sqrt(), rows.get_data(99).unwrap())
+                assert_eq!(0f64, rows.get_data(0).unwrap());
+                assert_eq!((99f64 + 99f64) / 100f64.sqrt(), rows.get_data(99).unwrap())
             }
             _ => unreachable!(),
         }

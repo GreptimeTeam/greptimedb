@@ -380,11 +380,6 @@ pub(crate) mod greptime_builtin {
     }
 
     #[pyfunction]
-    fn median(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        eval_aggr_func("median", &[v], vm)
-    }
-
-    #[pyfunction]
     fn diff(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         eval_aggr_func("diff", &[v], vm)
     }
@@ -557,6 +552,17 @@ pub(crate) mod greptime_builtin {
     fn approx_distinct(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_aggr_fn!(
             ApproxDistinct,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn median(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            Median,
             vm,
             &[values.to_arrow_array()],
             values.to_arrow_array().data_type(),
