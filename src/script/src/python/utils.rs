@@ -17,6 +17,7 @@ use std::sync::Arc;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue as DFColValue;
 use datatypes::arrow::datatypes::DataType;
+use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{
     BooleanVector, Float64Vector, Helper, Int64Vector, NullVector, StringVector, VectorRef,
 };
@@ -91,7 +92,7 @@ pub fn py_vec_obj_to_array(
             .try_into_value::<String>(vm)
             .map_err(|e| format_py_error(e, vm))?;
 
-        let ret = StringVector::from_iter(std::iter::repeat(val.as_str()).take(col_len));
+        let ret = StringVector::from_iterator(std::iter::repeat(val.as_str()).take(col_len));
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyList>(obj, vm) {
         let columnar_value =
@@ -103,7 +104,7 @@ pub fn py_vec_obj_to_array(
                     let array = ScalarValue::iter_to_array(scalars.into_iter())
                         .context(error::DataFusionSnafu)?;
 
-                    Helper::try_into_vector(&*array).context(error::TypeCastSnafu)
+                    Helper::try_into_vector(array).context(error::TypeCastSnafu)
                 }
                 None => Ok(Arc::new(NullVector::new(0))),
             },

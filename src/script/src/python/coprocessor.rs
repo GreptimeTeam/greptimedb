@@ -24,9 +24,9 @@ use common_recordbatch::RecordBatch;
 use common_telemetry::info;
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::compute;
-use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
-use datatypes::data_type::ConcreteDataType;
+use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector, VectorRef};
 use rustpython_compiler_core::CodeObject;
@@ -56,7 +56,7 @@ thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::n
 pub struct AnnotationInfo {
     /// if None, use types inferred by PyVector
     // TODO(yingwen): We should use our data type. i.e. ConcreteDataType.
-    pub datatype: Option<DataType>,
+    pub datatype: Option<ArrowDataType>,
     pub is_nullable: bool,
 }
 
@@ -129,12 +129,12 @@ impl Coprocessor {
                 });
                 let column_type = match ty {
                     Some(arrow_type) => {
-                        ConcreteDataType::try_from(arrow_type).context(TypeCastSnafu)?
+                        ConcreteDataType::try_from(&arrow_type).context(TypeCastSnafu)?
                     }
                     // if type is like `_` or `_ | None`
                     None => real_ty.clone(),
                 };
-                ColumnSchema::new(name, column_type, is_nullable)
+                Ok(ColumnSchema::new(name, column_type, is_nullable))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -166,10 +166,10 @@ impl Coprocessor {
             {
                 let real_ty = col.data_type();
                 let anno_ty = datatype;
-                if real_ty != anno_ty {
+                if real_ty.as_arrow_type() != *anno_ty {
                     let array = col.to_arrow_array();
-                    let array = compute::cast(&*array, anno_ty).context(ArrowSnafu)?;
-                    *col = Helper::try_into_vector(&*array).context(TypeCastSnafu)?;
+                    let array = compute::cast(&array, anno_ty).context(ArrowSnafu)?;
+                    *col = Helper::try_into_vector(array).context(TypeCastSnafu)?;
                 }
             }
         }
@@ -250,7 +250,7 @@ fn select_from_rb(rb: &RecordBatch, fetch_names: &[String]) -> Result<Vec<PyVect
             let vector = rb.column_by_name(name).with_context(|| OtherSnafu {
                 reason: format!("Can't find field name {}", name),
             })?;
-            PyVector::from(vector.clone())
+            Ok(PyVector::from(vector.clone()))
         })
         .collect()
 }

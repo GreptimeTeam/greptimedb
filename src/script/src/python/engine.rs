@@ -149,8 +149,8 @@ mod tests {
     use catalog::{CatalogList, CatalogProvider, SchemaProvider};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_recordbatch::util;
-    use datafusion_common::field_util::{FieldExt, SchemaExt};
-    use datatypes::arrow::array::{Float64Array, Int64Array};
+    use datatypes::prelude::ScalarVector;
+    use datatypes::vectors::{Float64Vector, Int64Vector};
     use query::QueryEngineFactory;
     use table::table::numbers::NumbersTable;
 
@@ -197,15 +197,18 @@ def test(a, b, c):
 
                 assert_eq!(1, numbers.len());
                 let number = &numbers[0];
-                assert_eq!(number.df_recordbatch.num_columns(), 1);
-                assert_eq!("r", number.schema.arrow_schema().field(0).name());
+                assert_eq!(number.num_columns(), 1);
+                assert_eq!("r", number.schema.column_schemas()[0].name);
 
-                let columns = number.df_recordbatch.columns();
-                assert_eq!(1, columns.len());
-                assert_eq!(100, columns[0].len());
-                let rows = columns[0].as_any().downcast_ref::<Float64Array>().unwrap();
-                assert!(rows.value(0).is_nan());
-                assert_eq!((99f64 + 99f64) / 99f64.sqrt(), rows.value(99))
+                assert_eq!(1, number.num_columns());
+                assert_eq!(100, number.column(0).len());
+                let rows = number
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Float64Vector>()
+                    .unwrap();
+                assert!(rows.get_data(0).unwrap().is_nan());
+                assert_eq!((99f64 + 99f64) / 99f64.sqrt(), rows.get_data(99).unwrap())
             }
             _ => unreachable!(),
         }
@@ -229,15 +232,18 @@ def test(a):
 
                 assert_eq!(1, numbers.len());
                 let number = &numbers[0];
-                assert_eq!(number.df_recordbatch.num_columns(), 1);
-                assert_eq!("r", number.schema.arrow_schema().field(0).name());
+                assert_eq!(number.num_columns(), 1);
+                assert_eq!("r", number.schema.column_schemas()[0].name);
 
-                let columns = number.df_recordbatch.columns();
-                assert_eq!(1, columns.len());
-                assert_eq!(50, columns[0].len());
-                let rows = columns[0].as_any().downcast_ref::<Int64Array>().unwrap();
-                assert_eq!(0, rows.value(0));
-                assert_eq!(98, rows.value(49))
+                assert_eq!(1, number.num_columns());
+                assert_eq!(50, number.column(0).len());
+                let rows = number
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Vector>()
+                    .unwrap();
+                assert_eq!(0, rows.get_data(0).unwrap());
+                assert_eq!(98, rows.get_data(49).unwrap())
             }
             _ => unreachable!(),
         }

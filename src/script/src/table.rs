@@ -25,7 +25,7 @@ use common_time::timestamp::Timestamp;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
-use datatypes::vectors::{StringVector, TimestampMillisecondVector, VectorRef};
+use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
 use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -103,21 +103,16 @@ impl ScriptsTable {
         // Timestamp in key part is intentionally left to 0
         columns_values.insert(
             "timestamp".to_string(),
-            Arc::new(TimestampMillisecondVector::from_slice(&[
-                Timestamp::new_millisecond(0),
-            ])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
         );
+        let now = util::current_time_millis();
         columns_values.insert(
             "gmt_created".to_string(),
-            Arc::new(TimestampMillisecondVector::from_slice(&[
-                Timestamp::new_millisecond(util::current_time_millis()),
-            ])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice(&[now])) as _,
         );
         columns_values.insert(
             "gmt_modified".to_string(),
-            Arc::new(TimestampMillisecondVector::from_slice(&[
-                Timestamp::new_millisecond(util::current_time_millis()),
-            ])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice(&[now])) as _,
         );
 
         let table = self
@@ -183,10 +178,10 @@ impl ScriptsTable {
                     "can't downcast {:?} array into utf8 string vector",
                     script_column.data_type()
                 ),
-            });
+            })?;
 
         assert_eq!(script_column.len(), 1);
-        Ok(script_column.value(0).to_string())
+        Ok(script_column.get_data(0).unwrap().to_string())
     }
 
     #[inline]

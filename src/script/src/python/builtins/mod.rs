@@ -23,7 +23,7 @@ use datafusion_expr::ColumnarValue as DFColValue;
 use datafusion_physical_expr::AggregateExpr;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::compute;
-use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
 use rustpython_vm::{pymodule, AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine};
@@ -36,7 +36,7 @@ fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseException
     vm.new_type_error(format!("Can't cast operand of type `{name}` into `{ty}`."))
 }
 
-fn collect_diff_types_string(values: &[ScalarValue], ty: &DataType) -> String {
+fn collect_diff_types_string(values: &[ScalarValue], ty: &ArrowDataType) -> String {
     values
         .iter()
         .enumerate()
@@ -53,6 +53,10 @@ fn collect_diff_types_string(values: &[ScalarValue], ty: &DataType) -> String {
             acc
         })
         .unwrap_or_else(|| "Nothing".to_string())
+}
+
+fn new_item_field(data_type: ArrowDataType) -> Field {
+    Field::new("item", data_type, false)
 }
 
 /// try to turn a Python Object into a PyVector or a scalar that can be use for calculate
@@ -108,7 +112,7 @@ pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResul
             // TODO(dennis): empty list, we set type as null.
             return Ok(DFColValue::Scalar(ScalarValue::List(
                 None,
-                Box::new(DataType::Null),
+                Box::new(new_item_field(ArrowDataType::Null)),
             )));
         }
 
@@ -120,8 +124,8 @@ pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResul
             )));
         }
         Ok(DFColValue::Scalar(ScalarValue::List(
-            Some(Box::new(ret)),
-            Box::new(ty),
+            Some(ret),
+            Box::new(new_item_field(ty)),
         )))
     } else {
         Err(vm.new_type_error(format!(
@@ -183,11 +187,11 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
 fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
     match col {
         DFColValue::Array(arr) => {
-            let res = compute::cast(arr.as_ref(), &DataType::Float64).map_err(|err| {
+            let res = compute::cast(&arr, &ArrowDataType::Float64).map_err(|err| {
                 vm.new_type_error(format!(
                     "Arrow Type Cast Fail(from {:#?} to {:#?}): {err:#?}",
                     arr.data_type(),
-                    DataType::Float64
+                    ArrowDataType::Float64
                 ))
             })?;
             Ok(DFColValue::Array(res.into()))
@@ -201,7 +205,7 @@ fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
                     return Err(vm.new_type_error(format!(
                         "Can't cast type {:#?} to {:#?}",
                         val.get_datatype(),
-                        DataType::Float64
+                        ArrowDataType::Float64
                     )))
                 }
             };
@@ -278,7 +282,7 @@ pub(crate) mod greptime_builtin {
     use common_function::scalars::function::FunctionContext;
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
-    use datafusion::arrow::datatypes::DataType;
+    use datafusion::arrow::datatypes::DataType as ArrowDataType;
     use datafusion::arrow::error::ArrowError;
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
@@ -543,7 +547,7 @@ pub(crate) mod greptime_builtin {
     fn random(len: usize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         // This is in a proc macro so using full path to avoid strange things
         // more info at: https://doc.rust-lang.org/reference/procedural-macros.html#procedural-macro-hygiene
-        let arg = NullArray::new(arrow::datatypes::DataType::Null, len);
+        let arg = NullArray::new(len);
         let args = &[DFColValue::Array(std::sync::Arc::new(arg) as _)];
         let res = math_expressions::random(args).map_err(|err| from_df_err(err, vm))?;
         let ret = try_into_py_obj(res, vm)?;
@@ -798,12 +802,16 @@ pub(crate) mod greptime_builtin {
         Ok(res.into())
     }
 
-    fn gen_none_array(data_type: DataType, len: usize, vm: &VirtualMachine) -> PyResult<ArrayRef> {
+    fn gen_none_array(
+        data_type: ArrowDataType,
+        len: usize,
+        vm: &VirtualMachine,
+    ) -> PyResult<ArrayRef> {
         macro_rules! match_none_array {
             ($VAR:ident, $LEN: ident, [$($TY:ident),*]) => {
                 paste!{
                     match $VAR{
-                        $(DataType::$TY => Arc::new(arrow::array::[<$TY Array>]::from(vec![None;$LEN])), )*
+                        $(ArrowDataType::$TY => Arc::new(arrow::array::[<$TY Array>]::from(vec![None;$LEN])), )*
                         _ => return Err(vm.new_type_error(format!("gen_none_array() does not support {:?}", data_type)))
                     }
                 }
@@ -822,7 +830,7 @@ pub(crate) mod greptime_builtin {
         let cur = cur.to_arrow_array();
         if cur.len() == 0 {
             let ret = cur.slice(0, 0);
-            let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+            let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
                 vm.new_type_error(format!(
                     "Can't cast result into vector, result: {:?}, err: {:?}",
                     ret, e
@@ -835,7 +843,7 @@ pub(crate) mod greptime_builtin {
         let ret = compute::concat(&[&*fill, &*cur]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
-        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+        let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
                 "Can't cast result into vector, result: {:?}, err: {:?}",
                 ret, e
@@ -849,7 +857,7 @@ pub(crate) mod greptime_builtin {
         let cur = cur.to_arrow_array();
         if cur.len() == 0 {
             let ret = cur.slice(0, 0);
-            let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+            let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
                 vm.new_type_error(format!(
                     "Can't cast result into vector, result: {:?}, err: {:?}",
                     ret, e
@@ -862,7 +870,7 @@ pub(crate) mod greptime_builtin {
         let ret = compute::concat(&[&*cur, &*fill]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
-        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+        let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
                 "Can't cast result into vector, result: {:?}, err: {:?}",
                 ret, e
@@ -870,6 +878,9 @@ pub(crate) mod greptime_builtin {
         })?;
         Ok(ret.into())
     }
+
+    // TODO(yingwen): arrow doesn't support returning a trait object in min/max like arrow2, so
+    // interval is not supported now.
 
     // fn try_scalar_to_value(scalar: &dyn Scalar, vm: &VirtualMachine) -> PyResult<i64> {
     //     let ty_error = |s: String| vm.new_type_error(s);
@@ -1023,7 +1034,7 @@ pub(crate) mod greptime_builtin {
             0 => arr.slice(0, 0),
             _ => arr.slice(0, 1),
         };
-        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+        let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
                 "Can't cast result into vector, result: {:?}, err: {:?}",
                 ret, e
@@ -1040,7 +1051,7 @@ pub(crate) mod greptime_builtin {
             0 => arr.slice(0, 0),
             _ => arr.slice(arr.len() - 1, 1),
         };
-        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+        let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
                 "Can't cast result into vector, result: {:?}, err: {:?}",
                 ret, e
