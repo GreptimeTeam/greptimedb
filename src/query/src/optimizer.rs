@@ -44,12 +44,10 @@ impl OptimizerRule for TypeConversionRule {
         };
 
         match plan {
-            LogicalPlan::Filter(Filter { predicate, input }) => {
-                Ok(LogicalPlan::Filter(Filter::try_new(
-                    predicate.clone().rewrite(&mut converter)?,
-                    Arc::new(self.optimize(input, optimizer_config)?),
-                )?))
-            }
+            LogicalPlan::Filter(filter) => Ok(LogicalPlan::Filter(Filter::try_new(
+                filter.predicate().clone().rewrite(&mut converter)?,
+                Arc::new(self.optimize(filter.input(), optimizer_config)?),
+            )?)),
             LogicalPlan::TableScan(TableScan {
                 table_name,
                 source,
@@ -150,8 +148,8 @@ impl<'a> TypeConverter<'a> {
                     compute::cast(&value_arr, target_type).map_err(DataFusionError::ArrowError)?;
 
                 ScalarValue::try_from_array(
-                    &Arc::from(arr), // index: Converts a value in `array` at `index` into a ScalarValue
-                    0,
+                    &arr,
+                    0, // index: Converts a value in `array` at `index` into a ScalarValue
                 )
             }
         }

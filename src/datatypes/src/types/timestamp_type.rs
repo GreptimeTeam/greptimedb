@@ -70,7 +70,7 @@ macro_rules! impl_data_type_for_timestamp {
 
             impl DataType for [<Timestamp $unit Type>] {
                 fn name(&self) -> &str {
-                    stringify!([<Timestamp $unit Type>])
+                    stringify!([<Timestamp $unit>])
                 }
 
                 fn logical_type_id(&self) -> LogicalTypeId {

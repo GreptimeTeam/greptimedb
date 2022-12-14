@@ -26,12 +26,10 @@ use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
-use datafusion::arrow_print;
-use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::{PrimitiveElement, PrimitiveType};
-use datatypes::vectors::PrimitiveVector;
+use datatypes::types::{LogicalPrimitiveType, WrapperType};
+use datatypes::vectors::Helper;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use query::error::Result;
@@ -40,28 +38,30 @@ use session::context::QueryContext;
 use table::test_util::MemTable;
 
 #[derive(Debug, Default)]
-struct MySumAccumulator<T, SumT>
-where
-    T: Primitive + AsPrimitive<SumT>,
-    SumT: Primitive + std::ops::AddAssign,
-{
+struct MySumAccumulator<T, SumT> {
     sum: SumT,
     _phantom: PhantomData<T>,
 }
 
 impl<T, SumT> MySumAccumulator<T, SumT>
 where
-    T: Primitive + AsPrimitive<SumT>,
-    SumT: Primitive + std::ops::AddAssign,
+    T: WrapperType,
+    SumT: WrapperType,
+    T::Native: AsPrimitive<SumT::Native>,
+    SumT::Native: std::ops::AddAssign,
 {
     #[inline(always)]
     fn add(&mut self, v: T) {
-        self.sum += v.as_();
+        let mut sum_native = self.sum.into_native();
+        sum_native += v.into_native().as_();
+        self.sum = SumT::from_native(sum_native);
     }
 
     #[inline(always)]
     fn merge(&mut self, s: SumT) {
-        self.sum += s;
+        let mut sum_native = self.sum.into_native();
+        sum_native += s.into_native();
+        self.sum = SumT::from_native(sum_native);
     }
 }
 
@@ -76,7 +76,7 @@ impl AggregateFunctionCreator for MySumAccumulatorCreator {
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(MySumAccumulator::<$S, <$S as Primitive>::LargestType>::default()))
+                    Ok(Box::new(MySumAccumulator::<<$S as LogicalPrimitiveType>::Wrapper, <<$S as LogicalPrimitiveType>::LargestType as LogicalPrimitiveType>::Wrapper>::default()))
                 },
                 {
                     let err_msg = format!(
@@ -95,7 +95,7 @@ impl AggregateFunctionCreator for MySumAccumulatorCreator {
         with_match_primitive_type_id!(
             input_type.logical_type_id(),
             |$S| {
-                Ok(PrimitiveType::<<$S as Primitive>::LargestType>::default().logical_type_id().data_type())
+                Ok(<<$S as LogicalPrimitiveType>::LargestType>::build_data_type())
             },
             {
                 unreachable!()
@@ -110,10 +110,10 @@ impl AggregateFunctionCreator for MySumAccumulatorCreator {
 
 impl<T, SumT> Accumulator for MySumAccumulator<T, SumT>
 where
-    T: Primitive + AsPrimitive<SumT>,
-    for<'a> T: Scalar<RefType<'a> = T>,
-    SumT: Primitive + std::ops::AddAssign,
-    for<'a> SumT: Scalar<RefType<'a> = SumT>,
+    T: WrapperType,
+    SumT: WrapperType,
+    T::Native: AsPrimitive<SumT::Native>,
+    SumT::Native: std::ops::AddAssign,
 {
     fn state(&self) -> QueryResult<Vec<Value>> {
         Ok(vec![self.sum.into()])
@@ -124,7 +124,7 @@ where
             return Ok(());
         };
         let column = &values[0];
-        let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(column) };
+        let column: &<T as Scalar>::VectorType = unsafe { Helper::static_cast(column) };
         for v in column.iter_data().flatten() {
             self.add(v)
         }
@@ -136,7 +136,7 @@ where
             return Ok(());
         };
         let states = &states[0];
-        let states: &<SumT as Scalar>::VectorType = unsafe { VectorHelper::static_cast(states) };
+        let states: &<SumT as Scalar>::VectorType = unsafe { Helper::static_cast(states) };
         for s in states.iter_data().flatten() {
             self.merge(s)
         }
@@ -154,65 +154,57 @@ async fn test_my_sum() -> Result<()> {
 
     test_my_sum_with(
         (1..=10).collect::<Vec<u32>>(),
-        vec![
-            "+--------+",
-            "| my_sum |",
-            "+--------+",
-            "| 55     |",
-            "+--------+",
-        ],
+        r#"+--------+
+| my_sum |
++--------+
+| 55     |
++--------+"#,
     )
     .await?;
     test_my_sum_with(
         (-10..=11).collect::<Vec<i32>>(),
-        vec![
-            "+--------+",
-            "| my_sum |",
-            "+--------+",
-            "| 11     |",
-            "+--------+",
-        ],
+        r#"+--------+
+| my_sum |
++--------+
+| 11     |
++--------+"#,
     )
     .await?;
     test_my_sum_with(
         vec![-1.0f32, 1.0, 2.0, 3.0, 4.0],
-        vec![
-            "+--------+",
-            "| my_sum |",
-            "+--------+",
-            "| 9      |",
-            "+--------+",
-        ],
+        r#"+--------+
+| my_sum |
++--------+
+| 9      |
++--------+"#,
     )
     .await?;
     test_my_sum_with(
         vec![u32::MAX, u32::MAX],
-        vec![
-            "+------------+",
-            "| my_sum     |",
-            "+------------+",
-            "| 8589934590 |",
-            "+------------+",
-        ],
+        r#"+------------+
+| my_sum     |
++------------+
+| 8589934590 |
++------------+"#,
     )
     .await?;
     Ok(())
 }
 
-async fn test_my_sum_with<T>(numbers: Vec<T>, expected: Vec<&str>) -> Result<()>
+async fn test_my_sum_with<T>(numbers: Vec<T>, expected: &str) -> Result<()>
 where
-    T: PrimitiveElement,
+    T: WrapperType,
 {
     let table_name = format!("{}_numbers", std::any::type_name::<T>());
     let column_name = format!("{}_number", std::any::type_name::<T>());
 
     let column_schemas = vec![ColumnSchema::new(
         column_name.clone(),
-        T::build_data_type(),
+        T::LogicalType::build_data_type(),
         true,
     )];
     let schema = Arc::new(Schema::new(column_schemas.clone()));
-    let column: VectorRef = Arc::new(PrimitiveVector::<T>::from_vec(numbers));
+    let column: VectorRef = Arc::new(T::VectorType::from_vec(numbers));
     let recordbatch = RecordBatch::new(schema, vec![column]).unwrap();
     let testing_table = MemTable::new(&table_name, recordbatch);
 
@@ -236,14 +228,9 @@ where
         Output::Stream(batch) => batch,
         _ => unreachable!(),
     };
-    let recordbatch = util::collect(recordbatch_stream).await.unwrap();
-    let df_recordbatch = recordbatch
-        .into_iter()
-        .map(|r| r.df_recordbatch)
-        .collect::<Vec<DfRecordBatch>>();
+    let batches = util::collect_batches(recordbatch_stream).await.unwrap();
 
-    let pretty_print = arrow_print::write(&df_recordbatch);
-    let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
+    let pretty_print = batches.pretty_print().unwrap();
     assert_eq!(expected, pretty_print);
     Ok(())
 }

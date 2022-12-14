@@ -505,11 +505,7 @@ mod tests {
         assert_matches!(
             &stmts[0],
             Statement::ShowTables(ShowTables {
-                kind: ShowKind::Where(sqlparser::ast::Expr::BinaryOp {
-                    left: _,
-                    right: _,
-                    op: sqlparser::ast::BinaryOperator::Like,
-                }),
+                kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
                 database: None,
             })
         );
@@ -522,11 +518,7 @@ mod tests {
         assert_matches!(
             &stmts[0],
             Statement::ShowTables(ShowTables {
-                kind: ShowKind::Where(sqlparser::ast::Expr::BinaryOp {
-                    left: _,
-                    right: _,
-                    op: sqlparser::ast::BinaryOperator::Like,
-                }),
+                kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
                 database: Some(_),
             })
         );
@@ -543,11 +535,12 @@ mod tests {
             distinct: false,
             top: None,
             projection: vec![sqlparser::ast::SelectItem::Wildcard],
+            into: None,
             from: vec![sqlparser::ast::TableWithJoins {
                 relation: sqlparser::ast::TableFactor::Table {
                     name: sqlparser::ast::ObjectName(vec![sqlparser::ast::Ident::new("foo")]),
                     alias: None,
-                    args: vec![],
+                    args: None,
                     with_hints: vec![],
                 },
                 joins: vec![],
@@ -559,11 +552,12 @@ mod tests {
             distribute_by: vec![],
             sort_by: vec![],
             having: None,
+            qualify: None,
         };
 
         let sp_statement = SpStatement::Query(Box::new(SpQuery {
             with: None,
-            body: sqlparser::ast::SetExpr::Select(Box::new(select)),
+            body: Box::new(sqlparser::ast::SetExpr::Select(Box::new(select))),
             order_by: vec![],
             limit: None,
             offset: None,
@@ -576,6 +570,7 @@ mod tests {
             analyze: false,
             verbose: false,
             statement: Box::new(sp_statement),
+            format: None,
         })
         .unwrap();
 

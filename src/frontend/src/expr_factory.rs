@@ -19,9 +19,9 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::{Column, ColumnDataType, CreateExpr};
 use datatypes::schema::ColumnSchema;
 use snafu::{ensure, ResultExt};
+use sql::ast::{ColumnDef, TableConstraint};
 use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, table_idents_to_full_name};
-use sqlparser::ast::{ColumnDef, TableConstraint};
 
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,

@@ -318,7 +318,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             }
             .fail(),
         },
-        SqlDataType::Timestamp => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
+        SqlDataType::Timestamp(_) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -336,7 +336,7 @@ mod tests {
     use datatypes::value::OrderedFloat;
 
     use super::*;
-    use crate::ast::{DataType, Ident};
+    use crate::ast::{Ident, TimezoneInfo};
     use crate::statements::ColumnOption;
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
@@ -376,7 +376,7 @@ mod tests {
             ConcreteDataType::datetime_datatype(),
         );
         check_type(
-            SqlDataType::Timestamp,
+            SqlDataType::Timestamp(TimezoneInfo::None),
             ConcreteDataType::timestamp_millisecond_datatype(),
         );
     }
@@ -573,7 +573,7 @@ mod tests {
         // test basic
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: DataType::Double,
+            data_type: SqlDataType::Double,
             collation: None,
             options: vec![],
         };
@@ -588,7 +588,7 @@ mod tests {
         // test not null
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: DataType::Double,
+            data_type: SqlDataType::Double,
             collation: None,
             options: vec![ColumnOptionDef {
                 name: None,

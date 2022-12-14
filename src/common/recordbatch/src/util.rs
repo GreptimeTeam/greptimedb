@@ -15,11 +15,18 @@
 use futures::TryStreamExt;
 
 use crate::error::Result;
-use crate::{RecordBatch, SendableRecordBatchStream};
+use crate::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 
 /// Collect all the items from the stream into a vector of [`RecordBatch`].
 pub async fn collect(stream: SendableRecordBatchStream) -> Result<Vec<RecordBatch>> {
     stream.try_collect::<Vec<_>>().await
+}
+
+/// Collect all the items from the stream into [RecordBatches].
+pub async fn collect_batches(stream: SendableRecordBatchStream) -> Result<RecordBatches> {
+    let schema = stream.schema();
+    let batches = stream.try_collect::<Vec<_>>().await?;
+    RecordBatches::try_new(schema, batches)
 }
 
 #[cfg(test)]
@@ -90,7 +97,14 @@ mod tests {
         };
         let batches = collect(Box::pin(stream)).await.unwrap();
         assert_eq!(1, batches.len());
-
         assert_eq!(batch, batches[0]);
+
+        let stream = MockRecordBatchStream {
+            schema: schema.clone(),
+            batch: Some(batch.clone()),
+        };
+        let batches = collect_batches(Box::pin(stream)).await.unwrap();
+        let expect_batches = RecordBatches::try_new(schema.clone(), vec![batch]).unwrap();
+        assert_eq!(expect_batches, batches);
     }
 }

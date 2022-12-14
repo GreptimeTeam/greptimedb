@@ -35,10 +35,10 @@ use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::ast::Value as SqlValue;
 use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
-use sqlparser::ast::Value as SqlValue;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 
 use crate::catalog::FrontendCatalogManager;
@@ -454,9 +454,9 @@ fn find_partition_columns(
 
 #[cfg(test)]
 mod test {
+    use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
-    use sqlparser::dialect::GenericDialect;
 
     use super::*;
     use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};

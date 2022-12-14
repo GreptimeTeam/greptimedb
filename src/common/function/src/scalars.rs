@@ -23,6 +23,5 @@ pub(crate) mod test;
 mod timestamp;
 pub mod udf;
 
-pub use aggregate::MedianAccumulatorCreator;
 pub use function::{Function, FunctionRef};
 pub use function_registry::{FunctionRegistry, FUNCTION_REGISTRY};

@@ -530,9 +530,9 @@ mod test {
     use meta_srv::mocks::MockInfo;
     use meta_srv::service::store::kv::KvStoreRef;
     use meta_srv::service::store::memory::MemStore;
+    use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
-    use sqlparser::dialect::GenericDialect;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::TableRef;
     use tempdir::TempDir;
