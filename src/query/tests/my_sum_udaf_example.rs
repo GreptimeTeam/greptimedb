@@ -154,52 +154,44 @@ async fn test_my_sum() -> Result<()> {
 
     test_my_sum_with(
         (1..=10).collect::<Vec<u32>>(),
-        vec![
-            "+--------+",
-            "| my_sum |",
-            "+--------+",
-            "| 55     |",
-            "+--------+",
-        ],
+        r#"+--------+
+| my_sum |
++--------+
+| 55     |
++--------+"#,
     )
     .await?;
     test_my_sum_with(
         (-10..=11).collect::<Vec<i32>>(),
-        vec![
-            "+--------+",
-            "| my_sum |",
-            "+--------+",
-            "| 11     |",
-            "+--------+",
-        ],
+        r#"+--------+
+| my_sum |
++--------+
+| 11     |
++--------+"#,
     )
     .await?;
     test_my_sum_with(
         vec![-1.0f32, 1.0, 2.0, 3.0, 4.0],
-        vec![
-            "+--------+",
-            "| my_sum |",
-            "+--------+",
-            "| 9      |",
-            "+--------+",
-        ],
+        r#"+--------+
+| my_sum |
++--------+
+| 9      |
++--------+"#,
     )
     .await?;
     test_my_sum_with(
         vec![u32::MAX, u32::MAX],
-        vec![
-            "+------------+",
-            "| my_sum     |",
-            "+------------+",
-            "| 8589934590 |",
-            "+------------+",
-        ],
+        r#"+------------+
+| my_sum     |
++------------+
+| 8589934590 |
++------------+"#,
     )
     .await?;
     Ok(())
 }
 
-async fn test_my_sum_with<T>(numbers: Vec<T>, expected: Vec<&str>) -> Result<()>
+async fn test_my_sum_with<T>(numbers: Vec<T>, expected: &str) -> Result<()>
 where
     T: WrapperType,
 {
@@ -239,8 +231,7 @@ where
     let batches = util::collect_batches(recordbatch_stream).await.unwrap();
 
     let pretty_print = batches.pretty_print().unwrap();
-    // TODO(yingwen): Check pretty print output.
-    assert_eq!(expected, vec![pretty_print]);
+    assert_eq!(expected, pretty_print);
     Ok(())
 }
 

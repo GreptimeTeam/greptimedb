@@ -383,7 +383,7 @@ mod test {
         ];
         let expected_columns = vec![
             Arc::new(StringVector::from(vec!["t1", "t2"])) as _,
-            Arc::new(StringVector::from(vec!["UInt32", "Timestamp"])) as _,
+            Arc::new(StringVector::from(vec!["UInt32", "TimestampMillisecond"])) as _,
             Arc::new(StringVector::from(vec![NULLABLE_YES, NULLABLE_NO])) as _,
             Arc::new(StringVector::from(vec!["", "current_timestamp()"])) as _,
             Arc::new(StringVector::from(vec![

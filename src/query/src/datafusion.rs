@@ -282,10 +282,10 @@ mod tests {
 
         assert_eq!(
             format!("{:?}", plan),
-            r#"DfPlan(Limit: 20
-  Projection: #SUM(numbers.number)
-    Aggregate: groupBy=[[]], aggr=[[SUM(#numbers.number)]]
-      TableScan: numbers projection=None)"#
+            r#"DfPlan(Limit: skip=0, fetch=20
+  Projection: SUM(numbers.number)
+    Aggregate: groupBy=[[]], aggr=[[SUM(numbers.number)]]
+      TableScan: numbers)"#
         );
     }
 
