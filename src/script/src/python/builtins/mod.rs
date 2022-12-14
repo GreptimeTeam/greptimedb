@@ -194,7 +194,7 @@ fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
                     ArrowDataType::Float64
                 ))
             })?;
-            Ok(DFColValue::Array(res.into()))
+            Ok(DFColValue::Array(res))
         }
         DFColValue::Scalar(val) => {
             let val_in_f64 = match val {

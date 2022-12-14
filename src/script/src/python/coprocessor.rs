@@ -131,7 +131,7 @@ impl Coprocessor {
                         ConcreteDataType::try_from(&arrow_type).context(TypeCastSnafu)?
                     }
                     // if type is like `_` or `_ | None`
-                    None => real_ty.clone(),
+                    None => real_ty,
                 };
                 Ok(ColumnSchema::new(name, column_type, is_nullable))
             })
