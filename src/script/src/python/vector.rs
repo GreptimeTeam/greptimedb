@@ -20,7 +20,7 @@ use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, PrimitiveArray, UInt64Array,
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, UInt64Array,
 };
 use datatypes::arrow::compute;
 use datatypes::arrow::compute::kernels::{arithmetic, boolean, comparison};
@@ -29,7 +29,7 @@ use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::Value;
 use datatypes::value::{self, OrderedFloat};
-use datatypes::vectors::{Helper, MutableVector, NullVector, VectorRef};
+use datatypes::vectors::{Helper, NullVector, VectorRef};
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr};
 use rustpython_vm::function::{Either, OptionalArg, PyComparisonValue};
 use rustpython_vm::protocol::{PyMappingMethods, PySequenceMethods};
@@ -97,10 +97,6 @@ fn is_float(datatype: &ArrowDataType) -> bool {
         datatype,
         ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64
     )
-}
-
-fn is_integer(datatype: &ArrowDataType) -> bool {
-    is_signed(datatype) || is_unsigned(datatype)
 }
 
 fn is_signed(datatype: &ArrowDataType) -> bool {

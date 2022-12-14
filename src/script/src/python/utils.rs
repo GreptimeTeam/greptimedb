@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue as DFColValue;
-use datatypes::arrow::datatypes::DataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{
     BooleanVector, Float64Vector, Helper, Int64Vector, NullVector, StringVector, VectorRef,

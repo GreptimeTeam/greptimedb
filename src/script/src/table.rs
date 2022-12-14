@@ -21,7 +21,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, SCRIPTS_
 use common_query::Output;
 use common_recordbatch::util as record_util;
 use common_telemetry::logging;
-use common_time::timestamp::Timestamp;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};

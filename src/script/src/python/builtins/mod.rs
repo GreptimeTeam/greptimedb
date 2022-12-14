@@ -283,24 +283,22 @@ pub(crate) mod greptime_builtin {
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
     use datafusion::arrow::datatypes::DataType as ArrowDataType;
-    use datafusion::arrow::error::ArrowError;
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
     use datatypes::arrow::array::{ArrayRef, NullArray};
-    use datatypes::arrow::compute::kernels::comparison;
     use datatypes::arrow::{self, compute};
     use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector, VectorRef};
     use paste::paste;
-    use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
-    use rustpython_vm::function::{FuncArgs, KwArgs, OptionalArg};
-    use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
+    use rustpython_vm::builtins::{PyFloat, PyInt, PyStr};
+    use rustpython_vm::function::OptionalArg;
+    use rustpython_vm::{AsObject, PyObjectRef, PyResult, VirtualMachine};
 
     use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
-    use crate::python::utils::{is_instance, py_vec_obj_to_array, PyVectorRef};
+    use crate::python::utils::{is_instance, PyVectorRef};
     use crate::python::vector::val_to_pyobj;
     use crate::python::PyVector;
 

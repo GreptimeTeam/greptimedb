@@ -16,19 +16,18 @@ pub mod compile;
 pub mod parse;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::info;
-use datatypes::arrow::array::{Array, ArrayRef};
+use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
-use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
-use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::vectors::{BooleanVector, Helper, StringVector, Vector, VectorRef};
+use datatypes::vectors::{Helper, VectorRef};
 use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
 use rustpython_vm::class::PyClassImpl;
@@ -176,47 +175,6 @@ impl Coprocessor {
         Ok(())
     }
 }
-
-// /// cast a `dyn Array` of type unsigned/int/float into a `dyn Vector`
-// fn try_into_vector<T: datatypes::types::Primitive>(arg: Arc<dyn Array>) -> Result<Arc<dyn Vector>> {
-//     // wrap try_into_vector in here to convert `datatypes::error::Error` to `python::error::Error`
-//     Helper::try_into_vector(arg).context(TypeCastSnafu)
-// }
-
-// /// convert a `Vec<ArrayRef>` into a `Vec<PyVector>` only when they are of supported types
-// /// PyVector now only support unsigned&int8/16/32/64, float32/64 and bool when doing meanful arithmetics operation
-// fn try_into_py_vector(fetch_args: Vec<ArrayRef>) -> Result<Vec<PyVector>> {
-//     let mut args: Vec<PyVector> = Vec::with_capacity(fetch_args.len());
-//     for (idx, arg) in fetch_args.into_iter().enumerate() {
-//         let v: VectorRef = match arg.data_type() {
-//             DataType::Float32 => try_into_vector::<f32>(arg)?,
-//             DataType::Float64 => try_into_vector::<f64>(arg)?,
-//             DataType::UInt8 => try_into_vector::<u8>(arg)?,
-//             DataType::UInt16 => try_into_vector::<u16>(arg)?,
-//             DataType::UInt32 => try_into_vector::<u32>(arg)?,
-//             DataType::UInt64 => try_into_vector::<u64>(arg)?,
-//             DataType::Int8 => try_into_vector::<i8>(arg)?,
-//             DataType::Int16 => try_into_vector::<i16>(arg)?,
-//             DataType::Int32 => try_into_vector::<i32>(arg)?,
-//             DataType::Int64 => try_into_vector::<i64>(arg)?,
-//             DataType::Utf8 => {
-//                 Arc::new(StringVector::try_from_arrow_array(arg).context(TypeCastSnafu)?) as _
-//             }
-//             DataType::Boolean => {
-//                 Arc::new(BooleanVector::try_from_arrow_array(arg).context(TypeCastSnafu)?) as _
-//             }
-//             _ => {
-//                 return ret_other_error_with(format!(
-//                     "Unsupported data type at column {idx}: {:?} for coprocessor",
-//                     arg.data_type()
-//                 ))
-//                 .fail()
-//             }
-//         };
-//         args.push(PyVector::from(v));
-//     }
-//     Ok(args)
-// }
 
 /// convert a tuple of `PyVector` or one `PyVector`(wrapped in a Python Object Ref[`PyObjectRef`])
 /// to a `Vec<ArrayRef>`
