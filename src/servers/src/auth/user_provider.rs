@@ -40,7 +40,7 @@ impl TryFrom<&str> for StaticUserProvider {
             value: value.to_string(),
             msg: "StaticUserProviderOption must be in format `<option>:<value>`",
         })?;
-        return match mode.to_lowercase().as_str() {
+        return match mode {
             "file" => {
                 // check valid path
                 let path = Path::new(content);

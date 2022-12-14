@@ -82,7 +82,7 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef, Error>
         value: opt.to_string(),
         msg: "UserProviderOption must be in format `<option>:<value>`",
     })?;
-    match name.to_lowercase().as_str() {
+    match name {
         user_provider::STATIC_USER_PROVIDER => {
             let provider =
                 StaticUserProvider::try_from(content).map(|p| Arc::new(p) as UserProviderRef)?;
