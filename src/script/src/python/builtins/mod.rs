@@ -279,6 +279,7 @@ pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
+    use arrow::compute::kernels::{aggregate, boolean, comparison};
     use common_function::scalars::function::FunctionContext;
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
@@ -286,19 +287,20 @@ pub(crate) mod greptime_builtin {
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
-    use datatypes::arrow::array::{ArrayRef, NullArray};
+    use datatypes::arrow::array::{ArrayRef, Int64Array, NullArray};
+    use datatypes::arrow::error::ArrowError;
     use datatypes::arrow::{self, compute};
     use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector, VectorRef};
     use paste::paste;
-    use rustpython_vm::builtins::{PyFloat, PyInt, PyStr};
-    use rustpython_vm::function::OptionalArg;
-    use rustpython_vm::{AsObject, PyObjectRef, PyResult, VirtualMachine};
+    use rustpython_vm::builtins::{PyFloat, PyFunction, PyInt, PyStr};
+    use rustpython_vm::function::{FuncArgs, KwArgs, OptionalArg};
+    use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
 
     use crate::python::builtins::{
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
-    use crate::python::utils::{is_instance, PyVectorRef};
+    use crate::python::utils::{is_instance, py_vec_obj_to_array, PyVectorRef};
     use crate::python::vector::val_to_pyobj;
     use crate::python::PyVector;
 
@@ -883,152 +885,130 @@ pub(crate) mod greptime_builtin {
         Ok(ret.into())
     }
 
-    // TODO(yingwen): arrow doesn't support returning a trait object in min/max like arrow2, so
-    // interval is not supported now.
+    /// generate interval time point
+    fn gen_inteveral(
+        oldest: i64,
+        newest: i64,
+        duration: i64,
+        vm: &VirtualMachine,
+    ) -> PyResult<Vec<i64>> {
+        if oldest > newest {
+            return Err(vm.new_value_error(format!("{oldest} is greater than {newest}")));
+        }
+        if duration > 0 {
+            let ret = (oldest..=newest)
+                .step_by(duration as usize)
+                .collect::<Vec<_>>();
+            Ok(ret)
+        } else {
+            Err(vm.new_value_error(format!("duration: {duration} is not positive number.")))
+        }
+    }
 
-    // fn try_scalar_to_value(scalar: &dyn Scalar, vm: &VirtualMachine) -> PyResult<i64> {
-    //     let ty_error = |s: String| vm.new_type_error(s);
-    //     scalar
-    //         .as_any()
-    //         .downcast_ref::<PrimitiveScalar<i64>>()
-    //         .ok_or_else(|| {
-    //             ty_error(format!(
-    //                 "expect scalar to be i64, found{:?}",
-    //                 scalar.data_type()
-    //             ))
-    //         })?
-    //         .value()
-    //         .ok_or_else(|| ty_error("All element is Null in a time series array".to_string()))
-    // }
+    /// `func`: exec on sliding window slice of given `arr`, expect it to always return a PyVector of one element
+    /// `ts`: a vector of time stamp, expect to be Monotonous increase
+    /// `arr`: actual data vector
+    /// `duration`: the size of sliding window, also is the default step of sliding window's per step
+    #[pyfunction]
+    fn interval(
+        ts: PyVectorRef,
+        arr: PyVectorRef,
+        duration: i64,
+        func: PyRef<PyFunction>,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyVector> {
+        // TODO(discord9): change to use PyDict to mimic a table?
+        // then: table: PyDict, , lambda t:
+        // ts: PyStr, duration: i64
+        // TODO: try to return a PyVector if possible, using concat array in arrow's compute module
+        // 1. slice them according to duration
+        let arrow_error = |err: ArrowError| vm.new_runtime_error(format!("Arrow Error: {err:#?}"));
+        let datatype_error =
+            |err: datatypes::Error| vm.new_runtime_error(format!("DataType Errors!: {err:#?}"));
+        let ts_array_ref: ArrayRef = ts.to_arrow_array();
+        let ts = ts_array_ref
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                vm.new_type_error(format!("ts must be int64, found: {:?}", ts_array_ref))
+            })?;
+        let slices = {
+            let oldest = aggregate::min(ts)
+                .ok_or_else(|| vm.new_runtime_error("ts must has min value".to_string()))?;
+            let newest = aggregate::max(ts)
+                .ok_or_else(|| vm.new_runtime_error("ts must has max value".to_string()))?;
+            gen_inteveral(oldest, newest, duration, vm)?
+        };
 
-    // /// generate interval time point
-    // fn gen_inteveral(
-    //     oldest: &dyn Scalar,
-    //     newest: &dyn Scalar,
-    //     duration: i64,
-    //     vm: &VirtualMachine,
-    // ) -> PyResult<Vec<PrimitiveScalar<i64>>> {
-    //     use datatypes::arrow::datatypes::DataType;
-    //     match (oldest.data_type(), newest.data_type()) {
-    //         (DataType::Int64, DataType::Int64) => (),
-    //         _ => {
-    //             return Err(vm.new_type_error(format!(
-    //                 "Expect int64, found {:?} and {:?}",
-    //                 oldest.data_type(),
-    //                 newest.data_type()
-    //             )));
-    //         }
-    //     }
+        let windows = {
+            slices
+                .iter()
+                .zip({
+                    let mut it = slices.iter();
+                    it.next();
+                    it
+                })
+                .map(|(first, second)| {
+                    let left = comparison::gt_eq_scalar(ts, *first).map_err(arrow_error)?;
+                    let right = comparison::lt_eq_scalar(ts, *second).map_err(arrow_error)?;
+                    boolean::and(&left, &right).map_err(arrow_error)
+                })
+                .map(|mask| match mask {
+                    Ok(mask) => {
+                        let arrow_arr = arr.to_arrow_array();
+                        compute::filter(&arrow_arr, &mask).map_err(arrow_error)
+                    }
+                    Err(e) => Err(e),
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
 
-    //     let oldest = try_scalar_to_value(oldest, vm)?;
-    //     let newest = try_scalar_to_value(newest, vm)?;
-    //     if oldest > newest {
-    //         return Err(vm.new_value_error(format!("{oldest} is greater than {newest}")));
-    //     }
-    //     let ret = if duration > 0 {
-    //         (oldest..=newest)
-    //             .step_by(duration as usize)
-    //             .map(|v| PrimitiveScalar::new(DataType::Int64, Some(v)))
-    //             .collect::<Vec<_>>()
-    //     } else {
-    //         return Err(vm.new_value_error(format!("duration: {duration} is not positive number.")));
-    //     };
+        let apply_interval_function = |v: PyResult<PyVector>| match v {
+            Ok(v) => {
+                let args = FuncArgs::new(vec![v.into_pyobject(vm)], KwArgs::default());
+                let ret = func.invoke(args, vm);
+                match ret{
+                        Ok(obj) => match py_vec_obj_to_array(&obj, vm, 1){
+                            Ok(v) => if v.len()==1{
+                                Ok(v)
+                            }else{
+                                Err(vm.new_runtime_error(format!("Expect return's length to be at most one, found to be length of {}.", v.len())))
+                            },
+                            Err(err) => Err(vm
+                                .new_runtime_error(
+                                    format!("expect `interval()`'s `func` return a PyVector(`vector`) or int/float/bool, found return to be {:?}, error msg: {err}", obj)
+                                )
+                            )
+                        }
+                        Err(e) => Err(e),
+                    }
+            }
+            Err(e) => Err(e),
+        };
 
-    //     Ok(ret)
-    // }
+        // 2. apply function on each slice
+        let fn_results = windows
+            .into_iter()
+            .map(|window| {
+                Helper::try_into_vector(window)
+                    .map(PyVector::from)
+                    .map_err(datatype_error)
+            })
+            .map(apply_interval_function)
+            .collect::<Result<Vec<_>, _>>()?;
 
-    // /// `func`: exec on sliding window slice of given `arr`, expect it to always return a PyVector of one element
-    // /// `ts`: a vector of time stamp, expect to be Monotonous increase
-    // /// `arr`: actual data vector
-    // /// `duration`: the size of sliding window, also is the default step of sliding window's per step
-    // #[pyfunction]
-    // fn interval(
-    //     ts: PyVectorRef,
-    //     arr: PyVectorRef,
-    //     duration: i64,
-    //     func: PyRef<PyFunction>,
-    //     vm: &VirtualMachine,
-    // ) -> PyResult<PyVector> {
-    //     // TODO(discord9): change to use PyDict to mimic a table?
-    //     // then: table: PyDict, , lambda t:
-    //     // ts: PyStr, duration: i64
-    //     // TODO: try to return a PyVector if possible, using concat array in arrow's compute module
-    //     // 1. slice them according to duration
-    //     let arrow_error = |err: ArrowError| vm.new_runtime_error(format!("Arrow Error: {err:#?}"));
-    //     let datatype_error =
-    //         |err: datatypes::Error| vm.new_runtime_error(format!("DataType Errors!: {err:#?}"));
-    //     let ts: ArrayRef = ts.to_arrow_array();
-    //     let arr: ArrayRef = arr.to_arrow_array();
-    //     let slices = {
-    //         let oldest = compute::aggregate::min(&*ts).map_err(arrow_error)?;
-    //         let newest = compute::aggregate::max(&*ts).map_err(arrow_error)?;
-    //         gen_inteveral(&*oldest, &*newest, duration, vm)?
-    //     };
+        // 3. get returned vector and concat them
+        let result_arrays: Vec<_> = fn_results
+            .iter()
+            .map(|vector| vector.to_arrow_array())
+            .collect();
+        let result_dyn_arrays: Vec<_> = result_arrays.iter().map(|v| v.as_ref()).collect();
+        let concat_array = compute::concat(&result_dyn_arrays).map_err(arrow_error)?;
+        let vector = Helper::try_into_vector(concat_array).map_err(datatype_error)?;
 
-    //     let windows = {
-    //         slices
-    //             .iter()
-    //             .zip({
-    //                 let mut it = slices.iter();
-    //                 it.next();
-    //                 it
-    //             })
-    //             .map(|(first, second)| {
-    //                 compute::boolean::and(&gt_eq_scalar(&*ts, first), &lt_eq_scalar(&*ts, second))
-    //                     .map_err(arrow_error)
-    //             })
-    //             .map(|mask| match mask {
-    //                 Ok(mask) => compute::filter::filter(&*arr, &mask).map_err(arrow_error),
-    //                 Err(e) => Err(e),
-    //             })
-    //             .collect::<Result<Vec<_>, _>>()?
-    //     };
-
-    //     let apply_interval_function = |v: PyResult<PyVector>| match v {
-    //         Ok(v) => {
-    //             let args = FuncArgs::new(vec![v.into_pyobject(vm)], KwArgs::default());
-    //             let ret = func.invoke(args, vm);
-    //             match ret{
-    //                     Ok(obj) => match py_vec_obj_to_array(&obj, vm, 1){
-    //                         Ok(v) => if v.len()==1{
-    //                             Ok(v)
-    //                         }else{
-    //                             Err(vm.new_runtime_error(format!("Expect return's length to be at most one, found to be length of {}.", v.len())))
-    //                         },
-    //                         Err(err) => Err(vm
-    //                             .new_runtime_error(
-    //                                 format!("expect `interval()`'s `func` return a PyVector(`vector`) or int/float/bool, found return to be {:?}, error msg: {err}", obj)
-    //                             )
-    //                         )
-    //                     }
-    //                     Err(e) => Err(e),
-    //                 }
-    //         }
-    //         Err(e) => Err(e),
-    //     };
-
-    //     // 2. apply function on each slice
-    //     let fn_results = windows
-    //         .into_iter()
-    //         .map(|window| {
-    //             Helper::try_into_vector(window)
-    //                 .map(PyVector::from)
-    //                 .map_err(datatype_error)
-    //         })
-    //         .map(apply_interval_function)
-    //         .collect::<Result<Vec<_>, _>>()?;
-
-    //     // 3. get returen vector and concat them
-    //     let ret = fn_results
-    //         .into_iter()
-    //         .try_reduce(|acc, x| {
-    //             compute::concatenate::concatenate(&[acc.as_ref(), x.as_ref()]).map(Arc::from)
-    //         })
-    //         .map_err(arrow_error)?
-    //         .unwrap_or_else(|| Arc::from(arr.slice(0, 0)));
-    //     // 4. return result vector
-    //     Ok(Helper::try_into_vector(ret).map_err(datatype_error)?.into())
-    // }
+        // 4. return result vector
+        Ok(PyVector::from(vector))
+    }
 
     /// return first element in a `PyVector` in sliced new `PyVector`, if vector's length is zero, return a zero sized slice instead
     #[pyfunction]
