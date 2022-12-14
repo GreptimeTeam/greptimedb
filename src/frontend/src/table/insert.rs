@@ -150,7 +150,6 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::types::StringType;
-    use datatypes::vectors::VectorBuilder;
     use table::requests::InsertRequest;
 
     use super::to_insert_expr;
@@ -173,11 +172,11 @@ mod tests {
         builder.push(&"host3".into());
         columns_values.insert("host".to_string(), builder.finish());
 
-        let mut builder = VectorBuilder::new(ConcreteDataType::int16_datatype());
+        let mut builder = ConcreteDataType::int16_datatype().create_mutable_vector(3);
         builder.push(&1_i16.into());
         builder.push(&2_i16.into());
         builder.push(&3_i16.into());
-        columns_values.insert("id".to_string(), builder.finish());
+        columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),

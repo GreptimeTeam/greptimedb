@@ -29,12 +29,13 @@ use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use common_telemetry::debug;
-use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::logical_plan::Expr as DfExpr;
+use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::{
     Partitioning, SendableRecordBatchStream as DfSendableRecordBatchStream,
 };
 use datafusion_common::DataFusionError;
+use datafusion_expr::expr::Expr as DfExpr;
+use datafusion_expr::BinaryExpr;
 use datatypes::prelude::Value;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::{Peer, TableName};
@@ -198,7 +199,7 @@ impl DistTable {
     ) -> Result<HashSet<RegionNumber>> {
         let expr = filter.df_expr();
         match expr {
-            DfExpr::BinaryExpr { left, op, right } if is_compare_op(op) => {
+            DfExpr::BinaryExpr(BinaryExpr { left, op, right }) if is_compare_op(op) => {
                 let column_op_value = match (left.as_ref(), right.as_ref()) {
                     (DfExpr::Column(c), DfExpr::Literal(v)) => Some((&c.name, *op, v)),
                     (DfExpr::Literal(v), DfExpr::Column(c)) => {
@@ -217,7 +218,7 @@ impl DistTable {
                         .collect::<HashSet<RegionNumber>>());
                 }
             }
-            DfExpr::BinaryExpr { left, op, right }
+            DfExpr::BinaryExpr(BinaryExpr { left, op, right })
                 if matches!(op, Operator::And | Operator::Or) =>
             {
                 let left_regions =
@@ -449,7 +450,7 @@ impl PhysicalPlan for DistTableScan {
     fn execute(
         &self,
         partition: usize,
-        _runtime: Arc<RuntimeEnv>,
+        _context: Arc<TaskContext>,
     ) -> QueryResult<SendableRecordBatchStream> {
         let exec = self.partition_execs[partition].clone();
         let stream = Box::pin(async move {
@@ -516,6 +517,7 @@ mod test {
     use catalog::remote::MetaKvBackend;
     use common_recordbatch::util;
     use datafusion::arrow_print;
+    use datafusion::execution::context::TaskContext;
     use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::lit;
@@ -743,7 +745,6 @@ mod test {
     async fn test_dist_table_scan() {
         common_telemetry::init_default_ut_logging();
         let table = Arc::new(new_dist_table().await);
-
         // should scan all regions
         // select * from numbers
         let projection = None;
@@ -798,10 +799,16 @@ mod test {
             .await
             .unwrap();
 
+        let task_ctx = Arc::new(TaskContext::new(
+            "0".to_string(),
+            "0".to_string(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            Arc::new(RuntimeEnv::default()),
+        ));
         for partition in 0..table_scan.output_partitioning().partition_count() {
-            let result = table_scan
-                .execute(partition, Arc::new(RuntimeEnv::default()))
-                .unwrap();
+            let result = table_scan.execute(partition, task_ctx.clone()).unwrap();
             let recordbatches = util::collect(result).await.unwrap();
 
             let df_recordbatch = recordbatches
