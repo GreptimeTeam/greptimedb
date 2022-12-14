@@ -40,14 +40,14 @@ const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;
 pub struct MysqlServer {
     base_server: BaseTcpServer,
     query_handler: SqlQueryHandlerRef,
-    tls: Arc<TlsOption>,
+    tls: TlsOption,
 }
 
 impl MysqlServer {
     pub fn create_server(
         query_handler: SqlQueryHandlerRef,
         io_runtime: Arc<Runtime>,
-        tls: Arc<TlsOption>,
+        tls: TlsOption,
     ) -> Box<dyn Server> {
         Box::new(MysqlServer {
             base_server: BaseTcpServer::create_server("MySQL", io_runtime),

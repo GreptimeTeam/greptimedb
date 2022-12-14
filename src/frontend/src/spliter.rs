@@ -14,8 +14,10 @@
 
 use std::collections::HashMap;
 
+use datatypes::data_type::DataType;
+use datatypes::prelude::MutableVector;
 use datatypes::value::Value;
-use datatypes::vectors::{VectorBuilder, VectorRef};
+use datatypes::vectors::VectorRef;
 use snafu::{ensure, OptionExt};
 use store_api::storage::RegionNumber;
 use table::requests::InsertRequest;
@@ -125,8 +127,15 @@ fn partition_insert_request(
     insert: &InsertRequest,
     region_map: HashMap<RegionNumber, Vec<usize>>,
 ) -> DistInsertRequest {
-    let mut dist_insert: HashMap<RegionNumber, HashMap<&str, VectorBuilder>> =
+    let mut dist_insert: HashMap<RegionNumber, HashMap<&str, Box<dyn MutableVector>>> =
         HashMap::with_capacity(region_map.len());
+
+    let row_num = insert
+        .columns_values
+        .values()
+        .next()
+        .map(|v| v.len())
+        .unwrap_or(0);
 
     let column_count = insert.columns_values.len();
     for (column_name, vector) in &insert.columns_values {
@@ -136,10 +145,13 @@ fn partition_insert_request(
                 .or_insert_with(|| HashMap::with_capacity(column_count));
             let builder = region_insert
                 .entry(column_name)
-                .or_insert_with(|| VectorBuilder::new(vector.data_type()));
-            val_idxs
-                .iter()
-                .for_each(|idx| builder.push(&vector.get(*idx)));
+                .or_insert_with(|| vector.data_type().create_mutable_vector(row_num));
+            val_idxs.iter().for_each(|idx| {
+                // Safety: MutableVector is built according to column data type.
+                builder
+                    .push_value_ref(vector.get(*idx).as_value_ref())
+                    .unwrap();
+            });
         }
     }
 
@@ -151,7 +163,7 @@ fn partition_insert_request(
         .map(|(region_id, vector_map)| {
             let columns_values = vector_map
                 .into_iter()
-                .map(|(column_name, mut builder)| (column_name.to_string(), builder.finish()))
+                .map(|(column_name, mut builder)| (column_name.to_string(), builder.to_vector()))
                 .collect();
             (
                 region_id,

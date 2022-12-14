@@ -81,6 +81,7 @@ impl QueryEngineState {
         // `SessionContext` has a `register_udf()` method, which requires `&mut self`, this is
         // a workaround.
         // TODO(yingwen): Use `SessionContext::register_udf()` once it taks `&self`.
+        // It's implemented in https://github.com/apache/arrow-datafusion/pull/4612
         self.df_context
             .state
             .write()
