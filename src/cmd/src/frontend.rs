@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use anymap::AnyMap;
 use clap::Parser;
-use frontend::frontend::{Frontend, FrontendOptions, FrontendPlugin};
+use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
 use frontend::instance::Instance;
@@ -87,7 +87,7 @@ pub struct StartCommand {
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        let plugins: AnyMap = AnyMap::try_from(&self)?;
+        let plugins = load_plugins(&self)?;
         let opts: FrontendOptions = self.try_into()?;
         let mut frontend = Frontend::new(
             opts.clone(),
@@ -98,6 +98,16 @@ impl StartCommand {
         );
         frontend.start().await.context(error::StartFrontendSnafu)
     }
+}
+
+fn load_plugins(cmd: &StartCommand) -> Result<AnyMap> {
+    let mut plugins = AnyMap::new();
+    if let Some(user_provider) = &cmd.user_provider {
+        let user_provider =
+            auth::user_provider_from_option(user_provider).context(IllegalAuthConfigSnafu)?;
+        plugins.insert(user_provider);
+    }
+    Ok(plugins)
 }
 
 impl TryFrom<StartCommand> for FrontendOptions {
@@ -161,29 +171,11 @@ impl TryFrom<StartCommand> for FrontendOptions {
     }
 }
 
-impl TryFrom<&StartCommand> for AnyMap {
-    type Error = error::Error;
-
-    fn try_from(cmd: &StartCommand) -> Result<Self> {
-        let mut plugins = AnyMap::new();
-        let mut fe_plugin = FrontendPlugin::default();
-
-        if let Some(provider_config) = &cmd.user_provider {
-            let user_provider =
-                auth::user_provider_from_option(provider_config).context(IllegalAuthConfigSnafu)?;
-            fe_plugin.user_provider = Some(user_provider);
-        }
-
-        plugins.insert(fe_plugin);
-        Ok(plugins)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use servers::auth::{Identity, Password};
+    use servers::auth::{Identity, Password, UserProviderRef};
 
     use super::*;
 
@@ -286,15 +278,13 @@ mod tests {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
         };
 
-        let plugins = AnyMap::try_from(&command);
+        let plugins = load_plugins(&command);
         assert!(plugins.is_ok());
         let plugins = plugins.unwrap();
-        let fe_plugin = plugins.get::<FrontendPlugin>();
-        assert!(fe_plugin.is_some());
-        let fe_plugin = fe_plugin.unwrap();
-        assert!(fe_plugin.user_provider.is_some());
+        let provider = plugins.get::<UserProviderRef>();
+        assert!(provider.is_some());
 
-        let provider = fe_plugin.user_provider.clone().unwrap();
+        let provider = provider.unwrap();
         let result = provider
             .auth(Identity::UserId("test", None), Password::PlainText("test"))
             .await;

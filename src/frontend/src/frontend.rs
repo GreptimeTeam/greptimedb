@@ -61,11 +61,6 @@ impl Default for FrontendOptions {
     }
 }
 
-#[derive(Default)]
-pub struct FrontendPlugin {
-    pub user_provider: Option<UserProviderRef>,
-}
-
 pub struct Frontend<T>
 where
     T: FrontendInstance,
@@ -95,10 +90,7 @@ impl<T: FrontendInstance> Frontend<T> {
 
         let instance = Arc::new(instance);
 
-        let provider = self
-            .plugins
-            .get::<FrontendPlugin>()
-            .and_then(|f| f.user_provider.clone());
+        let provider = self.plugins.get::<UserProviderRef>().cloned();
 
         Services::start(&self.opts, instance, provider).await
     }
