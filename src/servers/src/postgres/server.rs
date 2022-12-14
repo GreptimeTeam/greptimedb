@@ -43,14 +43,12 @@ impl PostgresServer {
     /// Creates a new Postgres server with provided query_handler and async runtime
     pub fn new(
         query_handler: SqlQueryHandlerRef,
-        check_pwd: bool,
         tls: Arc<TlsOption>,
         io_runtime: Arc<Runtime>,
         user_provider: Option<UserProviderRef>,
     ) -> PostgresServer {
         let postgres_handler = Arc::new(PostgresServerHandler::new(query_handler));
         let startup_handler = Arc::new(PgAuthStartupHandler::new(
-            check_pwd,
             user_provider,
             tls.should_force_tls(),
         ));

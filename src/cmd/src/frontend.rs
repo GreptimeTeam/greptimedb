@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use anymap::AnyMap;
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
@@ -23,12 +24,13 @@ use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use meta_client::MetaClientOpts;
+use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
-use servers::Mode;
+use servers::{auth, Mode};
 use snafu::ResultExt;
 
-use crate::error::{self, Result};
+use crate::error::{self, IllegalAuthConfigSnafu, Result};
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -80,19 +82,33 @@ pub struct StartCommand {
     tls_cert_path: Option<String>,
     #[clap(long)]
     tls_key_path: Option<String>,
+    #[clap(long)]
+    user_provider: Option<String>,
 }
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
+        let plugins = load_frontend_plugins(&self.user_provider)?;
         let opts: FrontendOptions = self.try_into()?;
         let mut frontend = Frontend::new(
             opts.clone(),
             Instance::try_new_distributed(&opts)
                 .await
                 .context(error::StartFrontendSnafu)?,
+            plugins,
         );
         frontend.start().await.context(error::StartFrontendSnafu)
     }
+}
+
+pub fn load_frontend_plugins(user_provider: &Option<String>) -> Result<AnyMap> {
+    let mut plugins = AnyMap::new();
+
+    if let Some(provider) = user_provider {
+        let provider = auth::user_provider_from_option(provider).context(IllegalAuthConfigSnafu)?;
+        plugins.insert::<UserProviderRef>(provider);
+    }
+    Ok(plugins)
 }
 
 impl TryFrom<StartCommand> for FrontendOptions {
@@ -160,6 +176,8 @@ impl TryFrom<StartCommand> for FrontendOptions {
 mod tests {
     use std::time::Duration;
 
+    use servers::auth::{Identity, Password, UserProviderRef};
+
     use super::*;
 
     #[test]
@@ -176,6 +194,7 @@ mod tests {
             tls_mode: None,
             tls_cert_path: None,
             tls_key_path: None,
+            user_provider: None,
         };
 
         let opts: FrontendOptions = command.try_into().unwrap();
@@ -228,6 +247,7 @@ mod tests {
             tls_mode: None,
             tls_cert_path: None,
             tls_key_path: None,
+            user_provider: None,
         };
 
         let fe_opts = FrontendOptions::try_from(command).unwrap();
@@ -240,5 +260,35 @@ mod tests {
             Duration::from_secs(30),
             fe_opts.http_options.as_ref().unwrap().timeout
         );
+    }
+
+    #[tokio::test]
+    async fn test_try_from_start_command_to_anymap() {
+        let command = StartCommand {
+            http_addr: None,
+            grpc_addr: None,
+            mysql_addr: None,
+            postgres_addr: None,
+            opentsdb_addr: None,
+            influxdb_enable: None,
+            config_file: None,
+            metasrv_addr: None,
+            tls_mode: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+        };
+
+        let plugins = load_frontend_plugins(&command.user_provider);
+        assert!(plugins.is_ok());
+        let plugins = plugins.unwrap();
+        let provider = plugins.get::<UserProviderRef>();
+        assert!(provider.is_some());
+
+        let provider = provider.unwrap();
+        let result = provider
+            .auth(Identity::UserId("test", None), Password::PlainText("test"))
+            .await;
+        assert!(result.is_ok());
     }
 }

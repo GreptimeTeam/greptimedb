@@ -5,6 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
+anymap = "1.0.0-beta.2"
 api = { path = "../api" }
 async-stream = "0.3"
 async-trait = "0.1"

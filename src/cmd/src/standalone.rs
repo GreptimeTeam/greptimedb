@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use anymap::AnyMap;
 use clap::Parser;
 use common_telemetry::info;
 use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
@@ -33,6 +34,7 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{Error, IllegalConfigSnafu, Result, StartDatanodeSnafu, StartFrontendSnafu};
+use crate::frontend::load_frontend_plugins;
 use crate::toml_loader;
 
 #[derive(Parser)]
@@ -142,12 +144,15 @@ struct StartCommand {
     tls_cert_path: Option<String>,
     #[clap(long)]
     tls_key_path: Option<String>,
+    #[clap(long)]
+    user_provider: Option<String>,
 }
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
         let enable_memory_catalog = self.enable_memory_catalog;
         let config_file = self.config_file.clone();
+        let plugins = load_frontend_plugins(&self.user_provider)?;
         let fe_opts = FrontendOptions::try_from(self)?;
         let dn_opts: DatanodeOptions = {
             let mut opts: StandaloneOptions = if let Some(path) = config_file {
@@ -167,7 +172,7 @@ impl StartCommand {
         let mut datanode = Datanode::new(dn_opts.clone())
             .await
             .context(StartDatanodeSnafu)?;
-        let mut frontend = build_frontend(fe_opts, datanode.get_instance()).await?;
+        let mut frontend = build_frontend(fe_opts, plugins, datanode.get_instance()).await?;
 
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
         datanode
@@ -184,12 +189,13 @@ impl StartCommand {
 /// Build frontend instance in standalone mode
 async fn build_frontend(
     fe_opts: FrontendOptions,
+    plugins: AnyMap,
     datanode_instance: InstanceRef,
 ) -> Result<Frontend<FeInstance>> {
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
     frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
     frontend_instance.set_script_handler(datanode_instance);
-    Ok(Frontend::new(fe_opts, frontend_instance))
+    Ok(Frontend::new(fe_opts, frontend_instance, plugins))
 }
 
 impl TryFrom<StartCommand> for FrontendOptions {
@@ -274,6 +280,8 @@ impl TryFrom<StartCommand> for FrontendOptions {
 mod tests {
     use std::time::Duration;
 
+    use servers::auth::{Identity, Password, UserProviderRef};
+
     use super::*;
 
     #[test]
@@ -293,6 +301,7 @@ mod tests {
             tls_mode: None,
             tls_cert_path: None,
             tls_key_path: None,
+            user_provider: None,
         };
 
         let fe_opts = FrontendOptions::try_from(cmd).unwrap();
@@ -315,5 +324,34 @@ mod tests {
         );
         assert_eq!(2, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
         assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
+    }
+
+    #[tokio::test]
+    async fn test_try_from_start_command_to_anymap() {
+        let command = StartCommand {
+            http_addr: None,
+            rpc_addr: None,
+            mysql_addr: None,
+            postgres_addr: None,
+            opentsdb_addr: None,
+            config_file: None,
+            influxdb_enable: false,
+            enable_memory_catalog: false,
+            tls_mode: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+        };
+
+        let plugins = load_frontend_plugins(&command.user_provider);
+        assert!(plugins.is_ok());
+        let plugins = plugins.unwrap();
+        let provider = plugins.get::<UserProviderRef>();
+        assert!(provider.is_some());
+        let provider = provider.unwrap();
+        let result = provider
+            .auth(Identity::UserId("test", None), Password::PlainText("test"))
+            .await;
+        assert!(result.is_ok());
     }
 }

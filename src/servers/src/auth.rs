@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod user_provider;
+
 pub const DEFAULT_USERNAME: &str = "greptime";
 
 use std::sync::Arc;
 
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
-use snafu::{Backtrace, ErrorCompat, Snafu};
+use snafu::{Backtrace, ErrorCompat, OptionExt, Snafu};
+
+use crate::auth::user_provider::StaticUserProvider;
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
@@ -73,11 +77,40 @@ impl UserInfo {
     }
 }
 
+pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef, Error> {
+    let (name, content) = opt.split_once(':').context(InvalidConfigSnafu {
+        value: opt.to_string(),
+        msg: "UserProviderOption must be in format `<option>:<value>`",
+    })?;
+    match name {
+        user_provider::STATIC_USER_PROVIDER => {
+            let provider =
+                StaticUserProvider::try_from(content).map(|p| Arc::new(p) as UserProviderRef)?;
+            Ok(provider)
+        }
+        _ => InvalidConfigSnafu {
+            value: name.to_string(),
+            msg: "Invalid UserProviderOption",
+        }
+        .fail(),
+    }
+}
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("User not found"))]
-    UserNotFound { backtrace: Backtrace },
+    #[snafu(display("Invalid config value: {}, {}", value, msg))]
+    InvalidConfig {
+        value: String,
+        msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Encounter IO error, source: {}", source))]
+    IOErr { source: std::io::Error },
+
+    #[snafu(display("User not found, username: {}", username))]
+    UserNotFound { username: String },
 
     #[snafu(display("Unsupported password type: {}", password_type))]
     UnsupportedPasswordType {
@@ -85,20 +118,23 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Username and password does not match"))]
-    UserPasswordMismatch { backtrace: Backtrace },
+    #[snafu(display("Username and password does not match, username: {}", username))]
+    UserPasswordMismatch { username: String },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
+            Error::InvalidConfig { .. } => StatusCode::InvalidArguments,
+            Error::IOErr { .. } => StatusCode::Internal,
+
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
             Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,
             Error::UserPasswordMismatch { .. } => StatusCode::UserPasswordMismatch,
         }
     }
 
-    fn backtrace_opt(&self) -> Option<&common_error::snafu::Backtrace> {
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
         ErrorCompat::backtrace(self)
     }
 
@@ -133,10 +169,16 @@ pub mod test {
                                     username: "greptime".to_string(),
                                 });
                             } else {
-                                return super::UserPasswordMismatchSnafu {}.fail();
+                                return super::UserPasswordMismatchSnafu {
+                                    username: username.to_string(),
+                                }
+                                .fail();
                             }
                         } else {
-                            return super::UserNotFoundSnafu {}.fail();
+                            return super::UserNotFoundSnafu {
+                                username: username.to_string(),
+                            }
+                            .fail();
                         }
                     }
                     _ => super::UnsupportedPasswordTypeSnafu {

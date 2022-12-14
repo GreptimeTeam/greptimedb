@@ -107,16 +107,14 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 pub struct PgAuthStartupHandler {
     verifier: PgPwdVerifier,
     param_provider: GreptimeDBStartupParameters,
-    with_pwd: bool,
     force_tls: bool,
 }
 
 impl PgAuthStartupHandler {
-    pub fn new(with_pwd: bool, user_provider: Option<UserProviderRef>, force_tls: bool) -> Self {
+    pub fn new(user_provider: Option<UserProviderRef>, force_tls: bool) -> Self {
         PgAuthStartupHandler {
             verifier: PgPwdVerifier { user_provider },
             param_provider: GreptimeDBStartupParameters::new(),
-            with_pwd,
             force_tls,
         }
     }
@@ -151,7 +149,7 @@ impl StartupHandler for PgAuthStartupHandler {
                     return Ok(());
                 }
                 auth::save_startup_parameters_to_metadata(client, startup);
-                if self.with_pwd {
+                if self.verifier.user_provider.is_some() {
                     client.set_state(PgWireConnectionState::AuthenticationInProgress);
                     client
                         .send(PgWireBackendMessage::Authentication(

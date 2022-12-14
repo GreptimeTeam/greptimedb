@@ -128,6 +128,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98161a4e3e2184da77bb14f02184cdd111e83bbbcc9979dfee3c44b9a85f5602"
 
 [[package]]
+name = "anymap"
+version = "1.0.0-beta.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f1f8f5a6f3d50d89e3797d7593a50f96bb2aaa20ca0cc7be1fb673232c91d72"
+
+[[package]]
 name = "api"
 version = "0.1.0"
 dependencies = [
@@ -1276,6 +1282,7 @@ dependencies = [
 name = "cmd"
 version = "0.1.0"
 dependencies = [
+ "anymap",
  "build-data",
  "clap 3.2.22",
  "common-error",
@@ -2475,6 +2482,7 @@ dependencies = [
 name = "frontend"
 version = "0.1.0"
 dependencies = [
+ "anymap",
  "api",
  "async-stream",
  "async-trait",
@@ -6114,6 +6122,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datatypes",
+ "digest",
  "futures",
  "hex",
  "http-body",
@@ -6138,10 +6147,12 @@ dependencies = [
  "serde",
  "serde_json",
  "session",
+ "sha1",
  "snafu",
  "snap",
  "strum 0.24.1",
  "table",
+ "tempdir",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
