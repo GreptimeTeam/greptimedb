@@ -23,10 +23,9 @@ use common_recordbatch::util as record_util;
 use common_telemetry::logging;
 use common_time::timestamp::Timestamp;
 use common_time::util;
-use datatypes::arrow::array::Utf8Array;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
-use datatypes::vectors::{StringVector, TimestampVector, VectorRef};
+use datatypes::vectors::{StringVector, TimestampMillisecondVector, VectorRef};
 use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -104,21 +103,21 @@ impl ScriptsTable {
         // Timestamp in key part is intentionally left to 0
         columns_values.insert(
             "timestamp".to_string(),
-            Arc::new(TimestampVector::from_slice(&[Timestamp::new_millisecond(
-                0,
-            )])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice(&[
+                Timestamp::new_millisecond(0),
+            ])) as _,
         );
         columns_values.insert(
             "gmt_created".to_string(),
-            Arc::new(TimestampVector::from_slice(&[Timestamp::new_millisecond(
-                util::current_time_millis(),
-            )])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice(&[
+                Timestamp::new_millisecond(util::current_time_millis()),
+            ])) as _,
         );
         columns_values.insert(
             "gmt_modified".to_string(),
-            Arc::new(TimestampVector::from_slice(&[Timestamp::new_millisecond(
-                util::current_time_millis(),
-            )])) as _,
+            Arc::new(TimestampMillisecondVector::from_slice(&[
+                Timestamp::new_millisecond(util::current_time_millis()),
+            ])) as _,
         );
 
         let table = self
@@ -173,20 +172,18 @@ impl ScriptsTable {
         ensure!(!records.is_empty(), ScriptNotFoundSnafu { name });
 
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].df_recordbatch.num_columns(), 1);
+        assert_eq!(records[0].num_columns(), 1);
 
-        let record = &records[0].df_recordbatch;
-
-        let script_column = record
-            .column(0)
+        let script_column = records[0].column(0);
+        let script_column = script_column
             .as_any()
-            .downcast_ref::<Utf8Array<i32>>()
-            .context(CastTypeSnafu {
+            .downcast_ref::<Arc<StringVector>>()
+            .with_context(|| CastTypeSnafu {
                 msg: format!(
-                    "can't downcast {:?} array into utf8 array",
-                    record.column(0).data_type()
+                    "can't downcast {:?} array into utf8 string vector",
+                    script_column.data_type()
                 ),
-            })?;
+            });
 
         assert_eq!(script_column.len(), 1);
         Ok(script_column.value(0).to_string())
