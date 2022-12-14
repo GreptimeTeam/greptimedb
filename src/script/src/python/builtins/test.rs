@@ -19,8 +19,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use datatypes::arrow::array::{Float64Array, Int64Array, PrimitiveArray};
-use datatypes::arrow::compute::cast::CastOptions;
-use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::datatypes::{DataType, Field};
 use datatypes::vectors::VectorRef;
 use ron::from_str as from_ron_string;
 use rustpython_vm::builtins::{PyFloat, PyInt, PyList};
@@ -72,7 +71,7 @@ fn convert_scalar_to_py_obj_and_back() {
                 ScalarValue::Int64(Some(1)),
                 ScalarValue::Int64(Some(2)),
             ])),
-            Box::new(DataType::Int64),
+            Box::new(Field::new("item", DataType::Int64, false)),
         ));
         let to = try_into_py_obj(col, vm).unwrap();
         let back = try_into_columnar_value(to, vm).unwrap();
@@ -251,13 +250,6 @@ impl PyValue {
                 let ret = vec_f64
                     .into_iter()
                     .map(|v| v.map(|inner| inner.to_owned()))
-                    /* .enumerate()
-                    .map(|(idx, v)| {
-                        v.ok_or(format!(
-                            "No null element expected, found one in {idx} position"
-                        ))
-                        .map(|v| v.to_owned())
-                    })*/
                     .collect::<Vec<_>>();
                 if ret.iter().all(|x| x.is_some()) {
                     Ok(Self::FloatVec(

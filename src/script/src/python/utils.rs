@@ -14,10 +14,12 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::array::{ArrayRef, BooleanArray, NullArray, PrimitiveArray, StringArray};
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue as DFColValue;
 use datatypes::arrow::datatypes::DataType;
+use datatypes::vectors::{
+    BooleanVector, Float64Vector, Helper, Int64Vector, NullVector, StringVector, VectorRef,
+};
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
 use rustpython_vm::{PyObjectRef, PyPayload, PyRef, VirtualMachine};
 use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
@@ -54,26 +56,26 @@ pub fn py_vec_obj_to_array(
     obj: &PyObjectRef,
     vm: &VirtualMachine,
     col_len: usize,
-) -> Result<ArrayRef, error::Error> {
+) -> Result<VectorRef, error::Error> {
     // It's ugly, but we can't find a better way right now.
     if is_instance::<PyVector>(obj, vm) {
         let pyv = obj.payload::<PyVector>().with_context(|| {
             ret_other_error_with(format!("can't cast obj {:?} to PyVector", obj))
         })?;
-        Ok(pyv.to_arrow_array())
+        Ok(pyv.as_vector_ref())
     } else if is_instance::<PyInt>(obj, vm) {
         let val = obj
             .to_owned()
             .try_into_value::<i64>(vm)
             .map_err(|e| format_py_error(e, vm))?;
-        let ret = PrimitiveArray::from_vec(vec![val; col_len]);
+        let ret = Int64Vector::from_iterator(std::iter::repeat(val).take(col_len));
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyFloat>(obj, vm) {
         let val = obj
             .to_owned()
             .try_into_value::<f64>(vm)
             .map_err(|e| format_py_error(e, vm))?;
-        let ret = PrimitiveArray::from_vec(vec![val; col_len]);
+        let ret = Float64Vector::from_iterator(std::iter::repeat(val).take(col_len));
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyBool>(obj, vm) {
         let val = obj
@@ -81,7 +83,7 @@ pub fn py_vec_obj_to_array(
             .try_into_value::<bool>(vm)
             .map_err(|e| format_py_error(e, vm))?;
 
-        let ret = BooleanArray::from_iter(std::iter::repeat(Some(val)).take(col_len));
+        let ret = BooleanVector::from_iterator(std::iter::repeat(val).take(col_len));
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyStr>(obj, vm) {
         let val = obj
@@ -89,7 +91,7 @@ pub fn py_vec_obj_to_array(
             .try_into_value::<String>(vm)
             .map_err(|e| format_py_error(e, vm))?;
 
-        let ret = StringArray::from_iter(std::iter::repeat(Some(val)).take(col_len));
+        let ret = StringVector::from_iter(std::iter::repeat(val.as_str()).take(col_len));
         Ok(Arc::new(ret) as _)
     } else if is_instance::<PyList>(obj, vm) {
         let columnar_value =
@@ -101,9 +103,9 @@ pub fn py_vec_obj_to_array(
                     let array = ScalarValue::iter_to_array(scalars.into_iter())
                         .context(error::DataFusionSnafu)?;
 
-                    Ok(array)
+                    Helper::try_into_vector(&*array).context(error::TypeCastSnafu)
                 }
-                None => Ok(Arc::new(NullArray::new(DataType::Null, 0))),
+                None => Ok(Arc::new(NullVector::new(0))),
             },
             _ => unreachable!(),
         }
