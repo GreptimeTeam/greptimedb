@@ -110,8 +110,7 @@ impl DfContextProviderAdapter {
 impl ContextProvider for DfContextProviderAdapter {
     fn get_table_provider(&self, name: TableReference) -> DfResult<Arc<dyn TableSource>> {
         let schema = self.query_ctx.current_schema();
-        self.state
-            .get_table_provider(schema.as_ref().map(|v| v.as_str()), name)
+        self.state.get_table_provider(schema.as_deref(), name)
     }
 
     fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {

@@ -124,7 +124,7 @@ impl QueryEngineState {
             TableReference::Bare { table } if schema.is_some() => {
                 state.get_table_provider(TableReference::Partial {
                     // unwrap safety: checked in this match's arm
-                    schema: &schema.unwrap(),
+                    schema: schema.unwrap(),
                     table,
                 })
             }
