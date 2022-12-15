@@ -193,6 +193,20 @@ pub async fn test_sql_api(store_type: StorageType) {
         .unwrap()
     );
 
+    // test multi-statement with error
+    let res = client
+        .get("/v1/sql?sql=select cpu, ts from demo limit 1;select cpu, ts from demo2 where ts > 0;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    // body json:
+    // r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"Timestamp"}]},"rows":[[66.6,0]]}}]}"#
+    assert!(!body.success());
+    assert!(body.execution_time_ms().is_some());
+    assert!(body.error().unwrap().contains("not found"));
+
     guard.remove_all().await;
 }
 
