@@ -113,7 +113,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
             ..Default::default()
         }),
         semantic_type: SemanticType::Timestamp as i32,
-        datatype: ColumnDataType::Timestamp as i32,
+        datatype: ColumnDataType::TimestampMillisecond as i32,
         ..Default::default()
     };
 

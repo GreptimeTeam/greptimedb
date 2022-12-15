@@ -359,7 +359,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         verify_column(
             &columns[3],
             "ts",
-            ColumnDataType::Timestamp,
+            ColumnDataType::TimestampMillisecond,
             SemanticType::Timestamp,
             Vec::new(),
             Values {
@@ -398,7 +398,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         verify_column(
             &columns[2],
             "ts",
-            ColumnDataType::Timestamp,
+            ColumnDataType::TimestampMillisecond,
             SemanticType::Timestamp,
             Vec::new(),
             Values {

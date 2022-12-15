@@ -310,90 +310,55 @@ mod test {
         let output = check(query, Arc::new(QueryContext::new()));
         assert!(output.is_none());
 
-        fn test(query: &str, expected: Vec<&str>) {
+        fn test(query: &str, expected: String) {
             let output = check(query, Arc::new(QueryContext::new()));
             match output.unwrap() {
                 Output::RecordBatches(r) => {
-                    assert_eq!(r.pretty_print().lines().collect::<Vec<_>>(), expected)
+                    assert_eq!(r.pretty_print().unwrap(), expected)
                 }
                 _ => unreachable!(),
             }
         }
 
         let query = "select version()";
-        let expected = vec![
-            "+-----------+",
-            "| version() |",
-            "+-----------+",
-            "| 8.0.26    |",
-            "+-----------+",
-        ];
+        let expected = "
+            +-----------+
+            | version() |
+            +-----------+
+            | 8.0.26    |
+            +-----------+
+        ]"
+        .to_string();
         test(query, expected);
 
         let query = "SELECT @@version_comment LIMIT 1";
-        let expected = vec![
-            "+-------------------+",
-            "| @@version_comment |",
-            "+-------------------+",
-            "| Greptime          |",
-            "+-------------------+",
-        ];
+        let expected = "".to_string();
         test(query, expected);
 
         // variables
         let query = "select @@tx_isolation, @@session.tx_isolation";
-        let expected = vec![
-            "+-----------------+------------------------+",
-            "| @@tx_isolation  | @@session.tx_isolation |",
-            "+-----------------+------------------------+",
-            "| REPEATABLE-READ | REPEATABLE-READ        |",
-            "+-----------------+------------------------+",
-        ];
+        let expected = "".to_string();
         test(query, expected);
 
         // complex variables
         let query = "/* mysql-connector-java-8.0.17 (Revision: 16a712ddb3f826a1933ab42b0039f7fb9eebc6ec) */SELECT  @@session.auto_increment_increment AS auto_increment_increment, @@character_set_client AS character_set_client, @@character_set_connection AS character_set_connection, @@character_set_results AS character_set_results, @@character_set_server AS character_set_server, @@collation_server AS collation_server, @@collation_connection AS collation_connection, @@init_connect AS init_connect, @@interactive_timeout AS interactive_timeout, @@license AS license, @@lower_case_table_names AS lower_case_table_names, @@max_allowed_packet AS max_allowed_packet, @@net_write_timeout AS net_write_timeout, @@performance_schema AS performance_schema, @@sql_mode AS sql_mode, @@system_time_zone AS system_time_zone, @@time_zone AS time_zone, @@transaction_isolation AS transaction_isolation, @@wait_timeout AS wait_timeout;";
-        let expected = vec![
-            "+--------------------------+----------------------+--------------------------+-----------------------+----------------------+------------------+----------------------+--------------+---------------------+---------+------------------------+--------------------+-------------------+--------------------+----------+------------------+-----------+-----------------------+---------------+",
-            "| auto_increment_increment | character_set_client | character_set_connection | character_set_results | character_set_server | collation_server | collation_connection | init_connect | interactive_timeout | license | lower_case_table_names | max_allowed_packet | net_write_timeout | performance_schema | sql_mode | system_time_zone | time_zone | transaction_isolation | wait_timeout; |",
-            "+--------------------------+----------------------+--------------------------+-----------------------+----------------------+------------------+----------------------+--------------+---------------------+---------+------------------------+--------------------+-------------------+--------------------+----------+------------------+-----------+-----------------------+---------------+",
-            "| 0                        | 0                    | 0                        | 0                     | 0                    | 0                | 0                    | 0            | 31536000            | 0       | 0                      | 134217728          | 31536000          | 0                  | 0        | UTC              | UTC       | REPEATABLE-READ       | 31536000      |",
-            "+--------------------------+----------------------+--------------------------+-----------------------+----------------------+------------------+----------------------+--------------+---------------------+---------+------------------------+--------------------+-------------------+--------------------+----------+------------------+-----------+-----------------------+---------------+",
-        ];
+        let expected = "".to_string();
         test(query, expected);
 
         let query = "show variables";
-        let expected = vec![
-            "+---------------+-------+",
-            "| Variable_name | Value |",
-            "+---------------+-------+",
-            "|               |       |",
-            "+---------------+-------+",
-        ];
+        let expected = "".to_string();
         test(query, expected);
 
         let query = "show variables like 'lower_case_table_names'";
-        let expected = vec![
-            "+------------------------+-------+",
-            "| Variable_name          | Value |",
-            "+------------------------+-------+",
-            "| lower_case_table_names | 0     |",
-            "+------------------------+-------+",
-        ];
+        let expected = "".to_string();
         test(query, expected);
 
         let query = "show collation";
-        let expected = vec!["++", "++"]; // empty
+        let expected = "".to_string();
         test(query, expected);
 
         let query = "SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP())";
-        let expected = vec![
-            "+----------------------------------+",
-            "| TIMEDIFF(NOW(), UTC_TIMESTAMP()) |",
-            "+----------------------------------+",
-            "| 00:00:00                         |",
-            "+----------------------------------+",
-        ];
+        let expected = "".to_string();
         test(query, expected);
     }
 }

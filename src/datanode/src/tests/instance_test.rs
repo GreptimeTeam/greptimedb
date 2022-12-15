@@ -17,9 +17,8 @@ use std::sync::Arc;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::Output;
 use common_recordbatch::util;
-use datafusion::arrow_print;
-use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-use datatypes::arrow::array::{Int64Array, UInt64Array, Utf8Array};
+use datatypes::arrow::array::{Int64Array, UInt64Array};
+use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow_array::StringArray;
 use datatypes::prelude::ConcreteDataType;
 use session::context::QueryContext;
@@ -66,11 +65,14 @@ async fn test_create_database_and_insert_query() {
     match query_output {
         Output::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
-            let columns = batches[0].df_recordbatch.columns();
-            assert_eq!(1, columns.len());
+            assert_eq!(1, batches[0].num_columns());
             assert_eq!(
-                &Int64Array::from_slice(&[1655276557000, 1655276558000]),
-                columns[0].as_any().downcast_ref::<Int64Array>().unwrap()
+                &Int64Array::from(vec![1655276557000, 1655276558000]),
+                batches[0]
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
             );
         }
         _ => unreachable!(),
@@ -155,18 +157,23 @@ async fn assert_query_result(instance: &Instance, sql: &str, ts: i64, host: &str
     match query_output {
         Output::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
-            let columns = batches[0].df_recordbatch.columns();
-            assert_eq!(2, columns.len());
+            // let columns = batches[0].df_recordbatch.columns();
+            assert_eq!(2, batches[0].num_columns());
             assert_eq!(
-                &Utf8Array::<i32>::from_slice(&[host]),
-                columns[0]
+                &StringArray::from(vec![host]),
+                batches[0]
+                    .column(0)
                     .as_any()
-                    .downcast_ref::<Utf8Array<i32>>()
+                    .downcast_ref::<StringArray>()
                     .unwrap()
             );
             assert_eq!(
-                &Int64Array::from_slice(&[ts]),
-                columns[1].as_any().downcast_ref::<Int64Array>().unwrap()
+                &Int64Array::from(vec![ts]),
+                batches[0]
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
             );
         }
         _ => unreachable!(),
@@ -235,11 +242,14 @@ async fn test_execute_insert_query_with_i64_timestamp() {
     match query_output {
         Output::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
-            let columns = batches[0].df_recordbatch.columns();
-            assert_eq!(1, columns.len());
+            assert_eq!(1, batches[0].num_columns());
             assert_eq!(
-                &Int64Array::from_slice(&[1655276557000, 1655276558000]),
-                columns[0].as_any().downcast_ref::<Int64Array>().unwrap()
+                &Int64Array::from(vec![1655276557000, 1655276558000]),
+                batches[0]
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
             );
         }
         _ => unreachable!(),
@@ -249,11 +259,14 @@ async fn test_execute_insert_query_with_i64_timestamp() {
     match query_output {
         Output::Stream(s) => {
             let batches = util::collect(s).await.unwrap();
-            let columns = batches[0].df_recordbatch.columns();
-            assert_eq!(1, columns.len());
+            assert_eq!(1, batches[0].num_columns());
             assert_eq!(
-                &Int64Array::from_slice(&[1655276557000, 1655276558000]),
-                columns[0].as_any().downcast_ref::<Int64Array>().unwrap()
+                &Int64Array::from(vec![1655276557000, 1655276558000]),
+                batches[0]
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
             );
         }
         _ => unreachable!(),
