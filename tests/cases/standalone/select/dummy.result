@@ -32,5 +32,5 @@ Error: 3000(PlanQuery), Schema error: No field named 'A'. Valid fields are .
 
 select * where "a" = "A";
 
-Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are .
 
+Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are .
