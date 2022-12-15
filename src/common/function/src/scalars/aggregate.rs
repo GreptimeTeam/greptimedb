@@ -16,7 +16,6 @@ mod argmax;
 mod argmin;
 mod diff;
 mod mean;
-mod median;
 mod percentile;
 mod polyval;
 mod scipy_stats_norm_cdf;
@@ -29,7 +28,6 @@ pub use argmin::ArgminAccumulatorCreator;
 use common_query::logical_plan::AggregateFunctionCreatorRef;
 pub use diff::DiffAccumulatorCreator;
 pub use mean::MeanAccumulatorCreator;
-pub use median::MedianAccumulatorCreator;
 pub use percentile::PercentileAccumulatorCreator;
 pub use polyval::PolyvalAccumulatorCreator;
 pub use scipy_stats_norm_cdf::ScipyStatsNormCdfAccumulatorCreator;
@@ -88,7 +86,6 @@ impl AggregateFunctions {
             };
         }
 
-        register_aggr_func!("median", 1, MedianAccumulatorCreator);
         register_aggr_func!("diff", 1, DiffAccumulatorCreator);
         register_aggr_func!("mean", 1, MeanAccumulatorCreator);
         register_aggr_func!("polyval", 2, PolyvalAccumulatorCreator);

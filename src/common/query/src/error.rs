@@ -23,16 +23,9 @@ use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
 use statrs::StatsError;
 
-common_error::define_opaque_error!(Error);
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum InnerError {
-    #[snafu(display("Fail to cast array to {:?}, source: {}", typ, source))]
-    TypeCast {
-        source: ArrowError,
-        typ: arrow::datatypes::DataType,
-    },
+pub enum Error {
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
@@ -83,8 +76,8 @@ pub enum InnerError {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Invalid inputs: {}", err_msg))]
-    InvalidInputs {
+    #[snafu(display("Invalid input type: {}", err_msg))]
+    InvalidInputType {
         #[snafu(backtrace)]
         source: DataTypeError,
         err_msg: String,
@@ -133,37 +126,74 @@ pub enum InnerError {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Failed to cast array to {:?}, source: {}", typ, source))]
+    TypeCast {
+        source: ArrowError,
+        typ: arrow::datatypes::DataType,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to perform compute operation on arrow arrays, source: {}",
+        source
+    ))]
+    ArrowCompute {
+        source: ArrowError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Query engine fail to cast value: {}", source))]
+    ToScalarValue {
+        #[snafu(backtrace)]
+        source: DataTypeError,
+    },
+
+    #[snafu(display("Failed to get scalar vector, {}", source))]
+    GetScalarVector {
+        #[snafu(backtrace)]
+        source: DataTypeError,
+    },
+
+    #[snafu(display("Invalid function args: {}", err_msg))]
+    InvalidFuncArgs {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl ErrorExt for InnerError {
+impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            InnerError::ExecuteFunction { .. }
-            | InnerError::GenerateFunction { .. }
-            | InnerError::CreateAccumulator { .. }
-            | InnerError::DowncastVector { .. }
-            | InnerError::InvalidInputState { .. }
-            | InnerError::InvalidInputCol { .. }
-            | InnerError::BadAccumulatorImpl { .. } => StatusCode::EngineExecuteQuery,
+            Error::ExecuteFunction { .. }
+            | Error::GenerateFunction { .. }
+            | Error::CreateAccumulator { .. }
+            | Error::DowncastVector { .. }
+            | Error::InvalidInputState { .. }
+            | Error::InvalidInputCol { .. }
+            | Error::BadAccumulatorImpl { .. }
+            | Error::ToScalarValue { .. }
+            | Error::GetScalarVector { .. }
+            | Error::ArrowCompute { .. } => StatusCode::EngineExecuteQuery,
 
-            InnerError::InvalidInputs { source, .. }
-            | InnerError::IntoVector { source, .. }
-            | InnerError::FromScalarValue { source }
-            | InnerError::ConvertArrowSchema { source }
-            | InnerError::FromArrowArray { source } => source.status_code(),
+            Error::InvalidInputType { source, .. }
+            | Error::IntoVector { source, .. }
+            | Error::FromScalarValue { source }
+            | Error::ConvertArrowSchema { source }
+            | Error::FromArrowArray { source } => source.status_code(),
 
-            InnerError::ExecuteRepeatedly { .. }
-            | InnerError::GeneralDataFusion { .. }
-            | InnerError::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
+            Error::ExecuteRepeatedly { .. }
+            | Error::GeneralDataFusion { .. }
+            | Error::DataFusionExecutionPlan { .. } => StatusCode::Unexpected,
 
-            InnerError::UnsupportedInputDataType { .. } | InnerError::TypeCast { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::UnsupportedInputDataType { .. }
+            | Error::TypeCast { .. }
+            | Error::InvalidFuncArgs { .. } => StatusCode::InvalidArguments,
 
-            InnerError::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
-            InnerError::ExecutePhysicalPlan { source } => source.status_code(),
+            Error::ConvertDfRecordBatchStream { source, .. } => source.status_code(),
+            Error::ExecutePhysicalPlan { source } => source.status_code(),
         }
     }
 
@@ -176,12 +206,6 @@ impl ErrorExt for InnerError {
     }
 }
 
-impl From<InnerError> for Error {
-    fn from(e: InnerError) -> Error {
-        Error::new(e)
-    }
-}
-
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
@@ -190,7 +214,7 @@ impl From<Error> for DataFusionError {
 
 impl From<BoxedError> for Error {
     fn from(source: BoxedError) -> Self {
-        InnerError::ExecutePhysicalPlan { source }.into()
+        Error::ExecutePhysicalPlan { source }
     }
 }
 
@@ -206,60 +230,51 @@ mod tests {
     }
 
     fn assert_error(err: &Error, code: StatusCode) {
-        let inner_err = err.as_any().downcast_ref::<InnerError>().unwrap();
+        let inner_err = err.as_any().downcast_ref::<Error>().unwrap();
         assert_eq!(code, inner_err.status_code());
         assert!(inner_err.backtrace_opt().is_some());
     }
 
     #[test]
     fn test_datafusion_as_source() {
-        let err: Error = throw_df_error()
+        let err = throw_df_error()
             .context(ExecuteFunctionSnafu)
             .err()
-            .unwrap()
-            .into();
+            .unwrap();
         assert_error(&err, StatusCode::EngineExecuteQuery);
 
         let err: Error = throw_df_error()
             .context(GeneralDataFusionSnafu)
             .err()
-            .unwrap()
-            .into();
+            .unwrap();
         assert_error(&err, StatusCode::Unexpected);
 
-        let err: Error = throw_df_error()
+        let err = throw_df_error()
             .context(DataFusionExecutionPlanSnafu)
             .err()
-            .unwrap()
-            .into();
+            .unwrap();
         assert_error(&err, StatusCode::Unexpected);
     }
 
     #[test]
     fn test_execute_repeatedly_error() {
-        let error: Error = None::<i32>
-            .context(ExecuteRepeatedlySnafu)
-            .err()
-            .unwrap()
-            .into();
-        assert_eq!(error.inner.status_code(), StatusCode::Unexpected);
+        let error = None::<i32>.context(ExecuteRepeatedlySnafu).err().unwrap();
+        assert_eq!(error.status_code(), StatusCode::Unexpected);
         assert!(error.backtrace_opt().is_some());
     }
 
     #[test]
     fn test_convert_df_recordbatch_stream_error() {
         let result: std::result::Result<i32, common_recordbatch::error::Error> =
-            Err(common_recordbatch::error::InnerError::PollStream {
-                source: ArrowError::Overflow,
+            Err(common_recordbatch::error::Error::PollStream {
+                source: ArrowError::DivideByZero,
                 backtrace: Backtrace::generate(),
-            }
-            .into());
-        let error: Error = result
+            });
+        let error = result
             .context(ConvertDfRecordBatchStreamSnafu)
             .err()
-            .unwrap()
-            .into();
-        assert_eq!(error.inner.status_code(), StatusCode::Internal);
+            .unwrap();
+        assert_eq!(error.status_code(), StatusCode::Internal);
         assert!(error.backtrace_opt().is_some());
     }
 
@@ -272,13 +287,12 @@ mod tests {
 
     #[test]
     fn test_into_vector_error() {
-        let err: Error = raise_datatype_error()
+        let err = raise_datatype_error()
             .context(IntoVectorSnafu {
                 data_type: ArrowDatatype::Int32,
             })
             .err()
-            .unwrap()
-            .into();
+            .unwrap();
         assert!(err.backtrace_opt().is_some());
         let datatype_err = raise_datatype_error().err().unwrap();
         assert_eq!(datatype_err.status_code(), err.status_code());

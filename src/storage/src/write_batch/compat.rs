@@ -99,7 +99,7 @@ mod tests {
 
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
-    use datatypes::vectors::{Int32Vector, TimestampVector};
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
     use store_api::storage::{PutOperation, WriteRequest};
 
     use super::*;
@@ -110,8 +110,12 @@ mod tests {
     ) -> SchemaBuilder {
         let mut column_schemas = vec![
             ColumnSchema::new("k0", ConcreteDataType::int32_datatype(), false),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
-                .with_time_index(true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
         ];
 
         if let Some(v0_constraint) = v0_constraint {
@@ -134,7 +138,7 @@ mod tests {
     fn new_put_data() -> PutData {
         let mut put_data = PutData::new();
         let k0 = Arc::new(Int32Vector::from_slice(&[1, 2, 3]));
-        let ts = Arc::new(TimestampVector::from_values([11, 12, 13]));
+        let ts = Arc::new(TimestampMillisecondVector::from_values([11, 12, 13]));
 
         put_data.add_key_column("k0", k0).unwrap();
         put_data.add_key_column("ts", ts).unwrap();

@@ -41,7 +41,7 @@ async fn run() {
         column_defs: vec![
             ColumnDef {
                 name: "timestamp".to_string(),
-                datatype: ColumnDataType::Timestamp as i32,
+                datatype: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: false,
                 default_constraint: None,
             },

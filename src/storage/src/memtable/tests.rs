@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_time::timestamp::Timestamp;
-use datatypes::arrow;
-use datatypes::arrow::array::{Int64Array, PrimitiveArray, UInt64Array, UInt8Array};
 use datatypes::prelude::*;
+use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;
-use datatypes::vectors::{TimestampVectorBuilder, UInt64VectorBuilder};
+use datatypes::vectors::{
+    TimestampMillisecondVector, TimestampMillisecondVectorBuilder, UInt64Vector,
+    UInt64VectorBuilder, UInt8Vector,
+};
 
 use super::*;
 use crate::metadata::RegionMetadata;
@@ -43,13 +44,13 @@ fn kvs_for_test_with_index(
     sequence: SequenceNumber,
     op_type: OpType,
     start_index_in_batch: usize,
-    keys: &[(Timestamp, u64)],
+    keys: &[(TimestampMillisecond, u64)],
     values: &[(Option<u64>, Option<u64>)],
 ) -> KeyValues {
     assert_eq!(keys.len(), values.len());
 
     let mut key_builders = (
-        TimestampVectorBuilder::with_capacity(keys.len()),
+        TimestampMillisecondVectorBuilder::with_capacity(keys.len()),
         UInt64VectorBuilder::with_capacity(keys.len()),
     );
     for key in keys {
@@ -91,7 +92,7 @@ fn kvs_for_test_with_index(
 fn kvs_for_test(
     sequence: SequenceNumber,
     op_type: OpType,
-    keys: &[(Timestamp, u64)],
+    keys: &[(TimestampMillisecond, u64)],
     values: &[(Option<u64>, Option<u64>)],
 ) -> KeyValues {
     kvs_for_test_with_index(sequence, op_type, 0, keys, values)
@@ -104,7 +105,8 @@ pub fn write_kvs(
     keys: &[(i64, u64)],
     values: &[(Option<u64>, Option<u64>)],
 ) {
-    let keys: Vec<(Timestamp, u64)> = keys.iter().map(|(l, r)| ((*l).into(), *r)).collect();
+    let keys: Vec<(TimestampMillisecond, u64)> =
+        keys.iter().map(|(l, r)| ((*l).into(), *r)).collect();
 
     let kvs = kvs_for_test(sequence, op_type, &keys, values);
 
@@ -126,7 +128,8 @@ fn check_iter_content(
     op_types: &[OpType],
     values: &[(Option<u64>, Option<u64>)],
 ) {
-    let keys: Vec<(Timestamp, u64)> = keys.iter().map(|(l, r)| ((*l).into(), *r)).collect();
+    let keys: Vec<(TimestampMillisecond, u64)> =
+        keys.iter().map(|(l, r)| ((*l).into(), *r)).collect();
 
     let mut index = 0;
     for batch in iter {
@@ -239,7 +242,7 @@ fn write_iter_memtable_case(ctx: &TestContext) {
     );
 
     // 9 key value pairs (6 + 3).
-    assert_eq!(288, ctx.memtable.bytes_allocated());
+    assert_eq!(704, ctx.memtable.bytes_allocated());
 
     let batch_sizes = [1, 4, 8, consts::READ_BATCH_SIZE];
     for batch_size in batch_sizes {
@@ -576,22 +579,16 @@ fn test_memtable_projection() {
         assert!(iter.next().is_none());
 
         assert_eq!(5, batch.num_columns());
-        let k0 = Int64Array::from_slice(&[1000, 1001, 1002]);
-        let k0 = PrimitiveArray::new(
-            arrow::datatypes::DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-            k0.values().clone(),
-            k0.validity().cloned(),
-        );
+        let k0 = Arc::new(TimestampMillisecondVector::from_slice(&[1000, 1001, 1002])) as VectorRef;
+        let k1 = Arc::new(UInt64Vector::from_slice(&[0, 1, 2])) as VectorRef;
+        let v0 = Arc::new(UInt64Vector::from_slice(&[10, 11, 12])) as VectorRef;
+        let sequences = Arc::new(UInt64Vector::from_slice(&[9, 9, 9])) as VectorRef;
+        let op_types = Arc::new(UInt8Vector::from_slice(&[0, 0, 0])) as VectorRef;
 
-        let k1 = UInt64Array::from_slice(&[0, 1, 2]);
-        let v0 = UInt64Array::from_slice(&[10, 11, 12]);
-        let sequences = UInt64Array::from_slice(&[9, 9, 9]);
-        let op_types = UInt8Array::from_slice(&[0, 0, 0]);
-
-        assert_eq!(k0, &*batch.column(0).to_arrow_array());
-        assert_eq!(k1, &*batch.column(1).to_arrow_array());
-        assert_eq!(v0, &*batch.column(2).to_arrow_array());
-        assert_eq!(sequences, &*batch.column(3).to_arrow_array());
-        assert_eq!(op_types, &*batch.column(4).to_arrow_array());
+        assert_eq!(k0, *batch.column(0));
+        assert_eq!(k1, *batch.column(1));
+        assert_eq!(v0, *batch.column(2));
+        assert_eq!(sequences, *batch.column(3));
+        assert_eq!(op_types, *batch.column(4));
     });
 }

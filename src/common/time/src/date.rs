@@ -55,8 +55,11 @@ impl From<i32> for Date {
 impl Display for Date {
     /// [Date] is formatted according to ISO-8601 standard.
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let abs_date = NaiveDate::from_num_days_from_ce(UNIX_EPOCH_FROM_CE + self.0);
-        f.write_str(&abs_date.format("%F").to_string())
+        if let Some(abs_date) = NaiveDate::from_num_days_from_ce_opt(UNIX_EPOCH_FROM_CE + self.0) {
+            write!(f, "{}", abs_date.format("%F"))
+        } else {
+            write!(f, "Date({})", self.0)
+        }
     }
 }
 
@@ -95,7 +98,7 @@ mod tests {
             Date::from_str("1969-01-01").unwrap().to_string()
         );
 
-        let now = Utc::now().date().format("%F").to_string();
+        let now = Utc::now().date_naive().format("%F").to_string();
         assert_eq!(now, Date::from_str(&now).unwrap().to_string());
     }
 

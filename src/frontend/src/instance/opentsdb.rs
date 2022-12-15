@@ -63,7 +63,7 @@ mod tests {
 
     use common_query::Output;
     use common_recordbatch::RecordBatches;
-    use datafusion::arrow_print;
+    use itertools::Itertools;
     use servers::query_handler::SqlQueryHandler;
     use session::context::QueryContext;
 
@@ -134,22 +134,18 @@ mod tests {
         match output {
             Output::Stream(stream) => {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-                let recordbatches = recordbatches
-                    .take()
-                    .into_iter()
-                    .map(|r| r.df_recordbatch)
-                    .collect::<Vec<_>>();
-                let pretty_print = arrow_print::write(&recordbatches);
-                let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
+                let pretty_print = recordbatches.pretty_print().unwrap();
                 let expected = vec![
                     "+---------------------+----------------+-------+-------+-------+",
                     "| greptime_timestamp  | greptime_value | tagk1 | tagk2 | tagk3 |",
                     "+---------------------+----------------+-------+-------+-------+",
-                    "| 1970-01-01 00:00:01 | 1              | tagv1 | tagv2 |       |",
-                    "| 1970-01-01 00:00:02 | 2              |       | tagv2 | tagv3 |",
-                    "| 1970-01-01 00:00:03 | 3              |       |       |       |",
+                    "| 1970-01-01T00:00:01 | 1              | tagv1 | tagv2 |       |",
+                    "| 1970-01-01T00:00:02 | 2              |       | tagv2 | tagv3 |",
+                    "| 1970-01-01T00:00:03 | 3              |       |       |       |",
                     "+---------------------+----------------+-------+-------+-------+",
-                ];
+                ]
+                .into_iter()
+                .join("\n");
                 assert_eq!(pretty_print, expected);
             }
             _ => unreachable!(),

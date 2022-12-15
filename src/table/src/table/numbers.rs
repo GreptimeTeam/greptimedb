@@ -19,7 +19,8 @@ use std::sync::Arc;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream};
-use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+use datafusion::arrow::record_batch::RecordBatch as DfRecordBatch;
+use datafusion_common::from_slice::FromSlice;
 use datatypes::arrow::array::UInt32Array;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
@@ -139,9 +140,9 @@ impl Stream for NumbersStream {
         )
         .unwrap();
 
-        Poll::Ready(Some(Ok(RecordBatch {
-            schema: self.schema.clone(),
-            df_recordbatch: batch,
-        })))
+        Poll::Ready(Some(RecordBatch::try_from_df_record_batch(
+            self.schema.clone(),
+            batch,
+        )))
     }
 }

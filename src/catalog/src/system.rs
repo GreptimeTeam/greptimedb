@@ -21,14 +21,13 @@ use common_catalog::consts::{
     SYSTEM_CATALOG_TABLE_ID, SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_query::logical_plan::Expr;
-use common_query::physical_plan::{PhysicalPlanRef, RuntimeEnv};
+use common_query::physical_plan::{PhysicalPlanRef, SessionContext};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
-use common_time::timestamp::Timestamp;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
-use datatypes::vectors::{BinaryVector, TimestampVector, UInt8Vector};
+use datatypes::vectors::{BinaryVector, TimestampMillisecondVector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
@@ -127,13 +126,14 @@ impl SystemCatalogTable {
     /// Create a stream of all entries inside system catalog table
     pub async fn records(&self) -> Result<SendableRecordBatchStream> {
         let full_projection = None;
+        let ctx = SessionContext::new();
         let scan = self
             .table
             .scan(&full_projection, &[], None)
             .await
             .context(error::SystemCatalogTableScanSnafu)?;
         let stream = scan
-            .execute(0, Arc::new(RuntimeEnv::default()))
+            .execute(0, ctx.task_ctx())
             .context(error::SystemCatalogTableScanExecSnafu)?;
         Ok(stream)
     }
@@ -161,7 +161,7 @@ fn build_system_catalog_schema() -> Schema {
         ),
         ColumnSchema::new(
             "timestamp".to_string(),
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         )
         .with_time_index(true),
@@ -172,12 +172,12 @@ fn build_system_catalog_schema() -> Schema {
         ),
         ColumnSchema::new(
             "gmt_created".to_string(),
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         ),
         ColumnSchema::new(
             "gmt_modified".to_string(),
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         ),
     ];
@@ -222,7 +222,7 @@ pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> 
     // Timestamp in key part is intentionally left to 0
     columns_values.insert(
         "timestamp".to_string(),
-        Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(0)])) as _,
+        Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
     );
 
     columns_values.insert(
@@ -230,18 +230,15 @@ pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> 
         Arc::new(BinaryVector::from_slice(&[value])) as _,
     );
 
+    let now = util::current_time_millis();
     columns_values.insert(
         "gmt_created".to_string(),
-        Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
-            util::current_time_millis(),
-        )])) as _,
+        Arc::new(TimestampMillisecondVector::from_slice(&[now])) as _,
     );
 
     columns_values.insert(
         "gmt_modified".to_string(),
-        Arc::new(TimestampVector::from_slice(&[Timestamp::from_millis(
-            util::current_time_millis(),
-        )])) as _,
+        Arc::new(TimestampMillisecondVector::from_slice(&[now])) as _,
     );
 
     InsertRequest {

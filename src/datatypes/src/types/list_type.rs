@@ -15,15 +15,17 @@
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use serde::{Deserialize, Serialize};
 
-use crate::prelude::*;
-use crate::value::ListValue;
+use crate::data_type::{ConcreteDataType, DataType};
+use crate::type_id::LogicalTypeId;
+use crate::value::{ListValue, Value};
 use crate::vectors::{ListVectorBuilder, MutableVector};
 
 /// Used to represent the List datatype.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListType {
-    /// The type of List's inner data.
-    inner: Box<ConcreteDataType>,
+    /// The type of List's item.
+    // Use Box to avoid recursive dependency, as enum ConcreteDataType depends on ListType.
+    item_type: Box<ConcreteDataType>,
 }
 
 impl Default for ListType {
@@ -33,10 +35,17 @@ impl Default for ListType {
 }
 
 impl ListType {
-    pub fn new(datatype: ConcreteDataType) -> Self {
+    /// Create a new `ListType` whose item's data type is `item_type`.
+    pub fn new(item_type: ConcreteDataType) -> Self {
         ListType {
-            inner: Box::new(datatype),
+            item_type: Box::new(item_type),
         }
+    }
+
+    /// Returns the item data type.
+    #[inline]
+    pub fn item_type(&self) -> &ConcreteDataType {
+        &self.item_type
     }
 }
 
@@ -50,19 +59,23 @@ impl DataType for ListType {
     }
 
     fn default_value(&self) -> Value {
-        Value::List(ListValue::new(None, *self.inner.clone()))
+        Value::List(ListValue::new(None, *self.item_type.clone()))
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        let field = Box::new(Field::new("item", self.inner.as_arrow_type(), true));
+        let field = Box::new(Field::new("item", self.item_type.as_arrow_type(), true));
         ArrowDataType::List(field)
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(ListVectorBuilder::with_type_capacity(
-            *self.inner.clone(),
+            *self.item_type.clone(),
             capacity,
         ))
+    }
+
+    fn is_timestamp_compatible(&self) -> bool {
+        false
     }
 }
 
@@ -84,5 +97,6 @@ mod tests {
             ArrowDataType::List(Box::new(Field::new("item", ArrowDataType::Boolean, true))),
             t.as_arrow_type()
         );
+        assert_eq!(ConcreteDataType::boolean_datatype(), *t.item_type());
     }
 }

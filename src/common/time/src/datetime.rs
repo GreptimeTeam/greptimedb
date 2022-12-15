@@ -31,8 +31,11 @@ pub struct DateTime(i64);
 
 impl Display for DateTime {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let abs_time = NaiveDateTime::from_timestamp(self.0, 0);
-        write!(f, "{}", abs_time.format(DATETIME_FORMAT))
+        if let Some(abs_time) = NaiveDateTime::from_timestamp_opt(self.0, 0) {
+            write!(f, "{}", abs_time.format(DATETIME_FORMAT))
+        } else {
+            write!(f, "DateTime({})", self.0)
+        }
     }
 }
 

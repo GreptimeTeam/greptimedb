@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::DataType as ArrowDataType;
+use arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use common_time::timestamp::TimeUnit;
 use paste::paste;
 use serde::{Deserialize, Serialize};
@@ -23,13 +23,14 @@ use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
     BinaryType, BooleanType, DateTimeType, DateType, Float32Type, Float64Type, Int16Type,
-    Int32Type, Int64Type, Int8Type, ListType, NullType, StringType, TimestampType, UInt16Type,
-    UInt32Type, UInt64Type, UInt8Type,
+    Int32Type, Int64Type, Int8Type, ListType, NullType, StringType, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[enum_dispatch::enum_dispatch(DataType)]
 pub enum ConcreteDataType {
     Null(NullType),
@@ -47,17 +48,21 @@ pub enum ConcreteDataType {
     Float32(Float32Type),
     Float64(Float64Type),
 
-    // String types
+    // String types:
     Binary(BinaryType),
     String(StringType),
 
+    // Date types:
     Date(DateType),
     DateTime(DateTimeType),
     Timestamp(TimestampType),
 
+    // Compound types:
     List(ListType),
 }
 
+// TODO(yingwen): Refactor these `is_xxx()` methods, such as adding a `properties()` method
+// returning all these properties to the `DataType` trait
 impl ConcreteDataType {
     pub fn is_float(&self) -> bool {
         matches!(
@@ -70,7 +75,7 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Boolean(_))
     }
 
-    pub fn stringifiable(&self) -> bool {
+    pub fn is_stringifiable(&self) -> bool {
         matches!(
             self,
             ConcreteDataType::String(_)
@@ -103,13 +108,6 @@ impl ConcreteDataType {
         )
     }
 
-    pub fn is_timestamp(&self) -> bool {
-        matches!(
-            self,
-            ConcreteDataType::Timestamp(_) | ConcreteDataType::Int64(_)
-        )
-    }
-
     pub fn numerics() -> Vec<ConcreteDataType> {
         vec![
             ConcreteDataType::int8_datatype(),
@@ -136,6 +134,14 @@ impl ConcreteDataType {
     pub fn is_null(&self) -> bool {
         matches!(self, ConcreteDataType::Null(NullType))
     }
+
+    /// Try to cast the type as a [`ListType`].
+    pub fn as_list(&self) -> Option<&ListType> {
+        match self {
+            ConcreteDataType::List(t) => Some(t),
+            _ => None,
+        }
+    }
 }
 
 impl TryFrom<&ArrowDataType> for ConcreteDataType {
@@ -161,7 +167,7 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Binary | ArrowDataType::LargeBinary => Self::binary_datatype(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Self::string_datatype(),
             ArrowDataType::List(field) => Self::List(ListType::new(
-                ConcreteDataType::from_arrow_type(&field.data_type),
+                ConcreteDataType::from_arrow_type(field.data_type()),
             )),
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
@@ -191,37 +197,51 @@ macro_rules! impl_new_concrete_type_functions {
 
 impl_new_concrete_type_functions!(
     Null, Boolean, UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64, Float32, Float64,
-    Binary, String, Date, DateTime
+    Binary, Date, DateTime, String
 );
 
 impl ConcreteDataType {
-    pub fn list_datatype(inner_type: ConcreteDataType) -> ConcreteDataType {
-        ConcreteDataType::List(ListType::new(inner_type))
+    pub fn timestamp_second_datatype() -> Self {
+        ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType::default()))
+    }
+
+    pub fn timestamp_millisecond_datatype() -> Self {
+        ConcreteDataType::Timestamp(TimestampType::Millisecond(
+            TimestampMillisecondType::default(),
+        ))
+    }
+
+    pub fn timestamp_microsecond_datatype() -> Self {
+        ConcreteDataType::Timestamp(TimestampType::Microsecond(
+            TimestampMicrosecondType::default(),
+        ))
+    }
+
+    pub fn timestamp_nanosecond_datatype() -> Self {
+        ConcreteDataType::Timestamp(TimestampType::Nanosecond(TimestampNanosecondType::default()))
     }
 
     pub fn timestamp_datatype(unit: TimeUnit) -> Self {
-        ConcreteDataType::Timestamp(TimestampType::new(unit))
-    }
-
-    pub fn timestamp_millis_datatype() -> Self {
-        ConcreteDataType::Timestamp(TimestampType::new(TimeUnit::Millisecond))
+        match unit {
+            TimeUnit::Second => Self::timestamp_second_datatype(),
+            TimeUnit::Millisecond => Self::timestamp_millisecond_datatype(),
+            TimeUnit::Microsecond => Self::timestamp_microsecond_datatype(),
+            TimeUnit::Nanosecond => Self::timestamp_nanosecond_datatype(),
+        }
     }
 
     /// Converts from arrow timestamp unit to
-    // TODO(hl): maybe impl From<ArrowTimestamp> for our timestamp ?
-    pub fn from_arrow_time_unit(t: &arrow::datatypes::TimeUnit) -> Self {
+    pub fn from_arrow_time_unit(t: &ArrowTimeUnit) -> Self {
         match t {
-            arrow::datatypes::TimeUnit::Second => Self::timestamp_datatype(TimeUnit::Second),
-            arrow::datatypes::TimeUnit::Millisecond => {
-                Self::timestamp_datatype(TimeUnit::Millisecond)
-            }
-            arrow::datatypes::TimeUnit::Microsecond => {
-                Self::timestamp_datatype(TimeUnit::Microsecond)
-            }
-            arrow::datatypes::TimeUnit::Nanosecond => {
-                Self::timestamp_datatype(TimeUnit::Nanosecond)
-            }
+            ArrowTimeUnit::Second => Self::timestamp_second_datatype(),
+            ArrowTimeUnit::Millisecond => Self::timestamp_millisecond_datatype(),
+            ArrowTimeUnit::Microsecond => Self::timestamp_microsecond_datatype(),
+            ArrowTimeUnit::Nanosecond => Self::timestamp_nanosecond_datatype(),
         }
+    }
+
+    pub fn list_datatype(item_type: ConcreteDataType) -> ConcreteDataType {
+        ConcreteDataType::List(ListType::new(item_type))
     }
 }
 
@@ -237,11 +257,15 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
     /// Returns the default value of this type.
     fn default_value(&self) -> Value;
 
-    /// Convert this type as [arrow2::datatypes::DataType].
+    /// Convert this type as [arrow::datatypes::DataType].
     fn as_arrow_type(&self) -> ArrowDataType;
 
-    /// Create a mutable vector with given `capacity` of this type.
+    /// Creates a mutable vector with given `capacity` of this type.
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector>;
+
+    /// Returns true if the data type is compatible with timestamp type so we can
+    /// use it as a timestamp.
+    fn is_timestamp_compatible(&self) -> bool;
 }
 
 pub type DataTypeRef = Arc<dyn DataType>;
@@ -324,10 +348,6 @@ mod tests {
             ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
             ConcreteDataType::String(_)
         ));
-        assert!(matches!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8),
-            ConcreteDataType::String(_)
-        ));
         assert_eq!(
             ConcreteDataType::from_arrow_type(&ArrowDataType::List(Box::new(Field::new(
                 "item",
@@ -345,36 +365,140 @@ mod tests {
     #[test]
     fn test_from_arrow_timestamp() {
         assert_eq!(
-            ConcreteDataType::timestamp_millis_datatype(),
-            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Millisecond)
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            ConcreteDataType::from_arrow_time_unit(&ArrowTimeUnit::Millisecond)
         );
         assert_eq!(
-            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond),
-            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Microsecond)
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            ConcreteDataType::from_arrow_time_unit(&ArrowTimeUnit::Microsecond)
         );
         assert_eq!(
-            ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond),
-            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Nanosecond)
+            ConcreteDataType::timestamp_nanosecond_datatype(),
+            ConcreteDataType::from_arrow_time_unit(&ArrowTimeUnit::Nanosecond)
         );
         assert_eq!(
-            ConcreteDataType::timestamp_datatype(TimeUnit::Second),
-            ConcreteDataType::from_arrow_time_unit(&arrow::datatypes::TimeUnit::Second)
+            ConcreteDataType::timestamp_second_datatype(),
+            ConcreteDataType::from_arrow_time_unit(&ArrowTimeUnit::Second)
         );
     }
 
     #[test]
-    fn test_is_timestamp() {
-        assert!(ConcreteDataType::timestamp_millis_datatype().is_timestamp());
-        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Second).is_timestamp());
-        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond).is_timestamp());
-        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond).is_timestamp());
-        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond).is_timestamp());
-        assert!(ConcreteDataType::int64_datatype().is_timestamp());
+    fn test_is_timestamp_compatible() {
+        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Second).is_timestamp_compatible());
+        assert!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond).is_timestamp_compatible()
+        );
+        assert!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond).is_timestamp_compatible()
+        );
+        assert!(
+            ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond).is_timestamp_compatible()
+        );
+        assert!(ConcreteDataType::timestamp_second_datatype().is_timestamp_compatible());
+        assert!(ConcreteDataType::timestamp_millisecond_datatype().is_timestamp_compatible());
+        assert!(ConcreteDataType::timestamp_microsecond_datatype().is_timestamp_compatible());
+        assert!(ConcreteDataType::timestamp_nanosecond_datatype().is_timestamp_compatible());
+        assert!(ConcreteDataType::int64_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::null_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::binary_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::boolean_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::date_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::datetime_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::string_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::int32_datatype().is_timestamp_compatible());
+        assert!(!ConcreteDataType::uint64_datatype().is_timestamp_compatible());
     }
 
     #[test]
     fn test_is_null() {
         assert!(ConcreteDataType::null_datatype().is_null());
         assert!(!ConcreteDataType::int32_datatype().is_null());
+    }
+
+    #[test]
+    fn test_is_float() {
+        assert!(!ConcreteDataType::int32_datatype().is_float());
+        assert!(ConcreteDataType::float32_datatype().is_float());
+        assert!(ConcreteDataType::float64_datatype().is_float());
+    }
+
+    #[test]
+    fn test_is_boolean() {
+        assert!(!ConcreteDataType::int32_datatype().is_boolean());
+        assert!(!ConcreteDataType::float32_datatype().is_boolean());
+        assert!(ConcreteDataType::boolean_datatype().is_boolean());
+    }
+
+    #[test]
+    fn test_is_stringifiable() {
+        assert!(!ConcreteDataType::int32_datatype().is_stringifiable());
+        assert!(!ConcreteDataType::float32_datatype().is_stringifiable());
+        assert!(ConcreteDataType::string_datatype().is_stringifiable());
+        assert!(ConcreteDataType::date_datatype().is_stringifiable());
+        assert!(ConcreteDataType::datetime_datatype().is_stringifiable());
+        assert!(ConcreteDataType::timestamp_second_datatype().is_stringifiable());
+        assert!(ConcreteDataType::timestamp_millisecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::timestamp_microsecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::timestamp_nanosecond_datatype().is_stringifiable());
+    }
+
+    #[test]
+    fn test_is_signed() {
+        assert!(ConcreteDataType::int8_datatype().is_signed());
+        assert!(ConcreteDataType::int16_datatype().is_signed());
+        assert!(ConcreteDataType::int32_datatype().is_signed());
+        assert!(ConcreteDataType::int64_datatype().is_signed());
+        assert!(ConcreteDataType::date_datatype().is_signed());
+        assert!(ConcreteDataType::datetime_datatype().is_signed());
+        assert!(ConcreteDataType::timestamp_second_datatype().is_signed());
+        assert!(ConcreteDataType::timestamp_millisecond_datatype().is_signed());
+        assert!(ConcreteDataType::timestamp_microsecond_datatype().is_signed());
+        assert!(ConcreteDataType::timestamp_nanosecond_datatype().is_signed());
+
+        assert!(!ConcreteDataType::uint8_datatype().is_signed());
+        assert!(!ConcreteDataType::uint16_datatype().is_signed());
+        assert!(!ConcreteDataType::uint32_datatype().is_signed());
+        assert!(!ConcreteDataType::uint64_datatype().is_signed());
+
+        assert!(!ConcreteDataType::float32_datatype().is_signed());
+        assert!(!ConcreteDataType::float64_datatype().is_signed());
+    }
+
+    #[test]
+    fn test_is_unsigned() {
+        assert!(!ConcreteDataType::int8_datatype().is_unsigned());
+        assert!(!ConcreteDataType::int16_datatype().is_unsigned());
+        assert!(!ConcreteDataType::int32_datatype().is_unsigned());
+        assert!(!ConcreteDataType::int64_datatype().is_unsigned());
+        assert!(!ConcreteDataType::date_datatype().is_unsigned());
+        assert!(!ConcreteDataType::datetime_datatype().is_unsigned());
+        assert!(!ConcreteDataType::timestamp_second_datatype().is_unsigned());
+        assert!(!ConcreteDataType::timestamp_millisecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::timestamp_microsecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::timestamp_nanosecond_datatype().is_unsigned());
+
+        assert!(ConcreteDataType::uint8_datatype().is_unsigned());
+        assert!(ConcreteDataType::uint16_datatype().is_unsigned());
+        assert!(ConcreteDataType::uint32_datatype().is_unsigned());
+        assert!(ConcreteDataType::uint64_datatype().is_unsigned());
+
+        assert!(!ConcreteDataType::float32_datatype().is_unsigned());
+        assert!(!ConcreteDataType::float64_datatype().is_unsigned());
+    }
+
+    #[test]
+    fn test_numerics() {
+        let nums = ConcreteDataType::numerics();
+        assert_eq!(10, nums.len());
+    }
+
+    #[test]
+    fn test_as_list() {
+        let list_type = ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype());
+        assert_eq!(
+            ListType::new(ConcreteDataType::int32_datatype()),
+            *list_type.as_list().unwrap()
+        );
+        assert!(ConcreteDataType::int32_datatype().as_list().is_none());
     }
 }

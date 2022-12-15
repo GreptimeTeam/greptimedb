@@ -29,12 +29,13 @@ use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use common_telemetry::debug;
-use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::logical_plan::Expr as DfExpr;
+use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::{
     Partitioning, SendableRecordBatchStream as DfSendableRecordBatchStream,
 };
 use datafusion_common::DataFusionError;
+use datafusion_expr::expr::Expr as DfExpr;
+use datafusion_expr::BinaryExpr;
 use datatypes::prelude::Value;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::{Peer, TableName};
@@ -198,7 +199,7 @@ impl DistTable {
     ) -> Result<HashSet<RegionNumber>> {
         let expr = filter.df_expr();
         match expr {
-            DfExpr::BinaryExpr { left, op, right } if is_compare_op(op) => {
+            DfExpr::BinaryExpr(BinaryExpr { left, op, right }) if is_compare_op(op) => {
                 let column_op_value = match (left.as_ref(), right.as_ref()) {
                     (DfExpr::Column(c), DfExpr::Literal(v)) => Some((&c.name, *op, v)),
                     (DfExpr::Literal(v), DfExpr::Column(c)) => {
@@ -217,7 +218,7 @@ impl DistTable {
                         .collect::<HashSet<RegionNumber>>());
                 }
             }
-            DfExpr::BinaryExpr { left, op, right }
+            DfExpr::BinaryExpr(BinaryExpr { left, op, right })
                 if matches!(op, Operator::And | Operator::Or) =>
             {
                 let left_regions =
@@ -449,7 +450,7 @@ impl PhysicalPlan for DistTableScan {
     fn execute(
         &self,
         partition: usize,
-        _runtime: Arc<RuntimeEnv>,
+        _context: Arc<TaskContext>,
     ) -> QueryResult<SendableRecordBatchStream> {
         let exec = self.partition_execs[partition].clone();
         let stream = Box::pin(async move {
@@ -515,18 +516,20 @@ mod test {
     use datafusion::physical_plan::expressions::{col as physical_col, PhysicalSortExpr};
     use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::prelude::SessionContext;
+    use datafusion::sql::sqlparser;
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::lit;
     use datanode::instance::Instance;
-    use datatypes::arrow::compute::sort::SortOptions;
+    use datatypes::arrow::compute::SortOptions;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
+    use itertools::Itertools;
     use meta_client::client::MetaClient;
     use meta_client::rpc::router::RegionRoute;
     use meta_client::rpc::{Region, Table, TableRoute};
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
-    use sqlparser::dialect::GenericDialect;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::TableRef;
 
@@ -733,7 +736,6 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dist_table_scan() {
         let table = Arc::new(new_dist_table().await);
-
         // should scan all regions
         // select a, row_id from numbers
         let projection = Some(vec![1, 2]);
@@ -859,6 +861,7 @@ mod test {
         expected_partitions: usize,
         expected_output: Vec<&str>,
     ) {
+        let expected_output = expected_output.into_iter().join("\n");
         let table_scan = table
             .scan(&projection, filters.as_slice(), None)
             .await
@@ -877,21 +880,17 @@ mod test {
                 options: SortOptions::default(),
             }],
             Arc::new(merge),
+            None,
         )
         .unwrap();
         assert_eq!(sort.output_partitioning().partition_count(), 1);
 
-        let stream = sort
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .await
-            .unwrap();
+        let session_ctx = SessionContext::new();
+        let stream = sort.execute(0, session_ctx.task_ctx()).unwrap();
         let stream = Box::pin(RecordBatchStreamAdapter::try_new(stream).unwrap());
 
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        assert_eq!(
-            recordbatches.pretty_print().lines().collect::<Vec<_>>(),
-            expected_output
-        );
+        assert_eq!(recordbatches.pretty_print().unwrap(), expected_output);
     }
 
     async fn new_dist_table() -> DistTable {
@@ -923,14 +922,16 @@ mod test {
                 PARTITION r3 VALUES LESS THAN (MAXVALUE),
             )
             ENGINE=mito";
-        let create_table = match ParserContext::create_with_dialect(sql, &GenericDialect {})
-            .unwrap()
-            .pop()
-            .unwrap()
-        {
-            Statement::CreateTable(c) => c,
-            _ => unreachable!(),
-        };
+
+        let create_table =
+            match ParserContext::create_with_dialect(sql, &sqlparser::dialect::GenericDialect {})
+                .unwrap()
+                .pop()
+                .unwrap()
+            {
+                Statement::CreateTable(c) => c,
+                _ => unreachable!(),
+            };
 
         let mut expr = DefaultCreateExprFactory
             .create_expr_by_stmt(&create_table)

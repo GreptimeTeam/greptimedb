@@ -26,7 +26,7 @@ use datatypes::arrow::error::ArrowError;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::{ScalarVector, Value};
 use datatypes::schema::{ColumnSchema, SchemaRef};
-use datatypes::vectors::{Int64Vector, TimestampVector, VectorRef};
+use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use prost::{DecodeError, EncodeError};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{consts, PutOperation, WriteRequest};
@@ -115,9 +115,6 @@ pub enum Error {
         backtrace: Backtrace,
         source: datatypes::error::Error,
     },
-
-    #[snafu(display("Failed to decode, in stream waiting state"))]
-    StreamWaiting { backtrace: Backtrace },
 
     #[snafu(display("Failed to decode, corrupted data {}", message))]
     DataCorrupted {
@@ -230,11 +227,13 @@ impl WriteRequest for WriteBatch {
                     } else {
                         match column.data_type() {
                             ConcreteDataType::Timestamp(_) => {
-                                let ts_vector =
-                                    column.as_any().downcast_ref::<TimestampVector>().unwrap();
+                                let ts_vector = column
+                                    .as_any()
+                                    .downcast_ref::<TimestampMillisecondVector>()
+                                    .unwrap();
                                 for ts in ts_vector.iter_data().flatten() {
-                                    let aligned = align_timestamp(ts.value(), durations_millis)
-                                        .context(TimestampOverflowSnafu { ts: ts.value() })?;
+                                    let aligned = align_timestamp(ts.into(), durations_millis)
+                                        .context(TimestampOverflowSnafu { ts: i64::from(ts) })?;
                                     aligned_timestamps.insert(aligned);
                                 }
                             }
@@ -505,9 +504,9 @@ pub mod codec {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    use datatypes::arrow::chunk::Chunk as ArrowChunk;
-    use datatypes::arrow::io::ipc::read::{self, StreamReader, StreamState};
-    use datatypes::arrow::io::ipc::write::{StreamWriter, WriteOptions};
+    use datatypes::arrow::ipc::reader::StreamReader;
+    use datatypes::arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+    use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::schema::{Schema, SchemaRef};
     use datatypes::vectors::Helper;
     use prost::Message;
@@ -520,8 +519,8 @@ pub mod codec {
     use crate::write_batch::{
         DataCorruptedSnafu, DecodeArrowSnafu, DecodeProtobufSnafu, DecodeVectorSnafu,
         EncodeArrowSnafu, EncodeProtobufSnafu, Error as WriteBatchError, FromProtobufSnafu,
-        MissingColumnSnafu, Mutation, ParseSchemaSnafu, PutData, Result, StreamWaitingSnafu,
-        ToProtobufSnafu, WriteBatch,
+        MissingColumnSnafu, Mutation, ParseSchemaSnafu, PutData, Result, ToProtobufSnafu,
+        WriteBatch,
     };
 
     // TODO(jiachun): We can make a comparison with protobuf, including performance, storage cost,
@@ -543,12 +542,12 @@ pub mod codec {
             let item_schema = item.schema();
             let arrow_schema = item_schema.arrow_schema();
 
-            let opts = WriteOptions { compression: None };
-            let mut writer = StreamWriter::new(dst, opts);
-            writer.start(arrow_schema, None).context(EncodeArrowSnafu)?;
+            let opts = IpcWriteOptions::default();
+            let mut writer = StreamWriter::try_new_with_options(dst, arrow_schema, opts)
+                .context(EncodeArrowSnafu)?;
 
             for mutation in item.iter() {
-                let chunk = match mutation {
+                let rb = match mutation {
                     Mutation::Put(put) => {
                         let arrays = item_schema
                             .column_schemas()
@@ -563,15 +562,13 @@ pub mod codec {
                             })
                             .collect::<Result<Vec<_>>>()?;
 
-                        ArrowChunk::try_new(arrays).context(EncodeArrowSnafu)?
+                        RecordBatch::try_new(arrow_schema.clone(), arrays)
+                            .context(EncodeArrowSnafu)?
                     }
                 };
-
-                writer.write(&chunk, None).context(EncodeArrowSnafu)?;
+                writer.write(&rb).context(EncodeArrowSnafu)?;
             }
-
             writer.finish().context(EncodeArrowSnafu)?;
-
             Ok(())
         }
     }
@@ -591,20 +588,14 @@ pub mod codec {
         type Error = WriteBatchError;
 
         fn decode(&self, src: &[u8]) -> Result<WriteBatch> {
-            let mut reader = Cursor::new(src);
-            let metadata = read::read_stream_metadata(&mut reader).context(DecodeArrowSnafu)?;
-            let mut reader = StreamReader::new(reader, metadata);
-            let arrow_schema = reader.metadata().schema.clone();
-
+            let reader = Cursor::new(src);
+            let mut reader = StreamReader::try_new(reader, None).context(DecodeArrowSnafu)?;
+            let arrow_schema = reader.schema();
             let mut chunks = Vec::with_capacity(self.mutation_types.len());
-            for stream_state in reader.by_ref() {
-                let stream_state = stream_state.context(DecodeArrowSnafu)?;
-                let chunk = match stream_state {
-                    StreamState::Some(chunk) => chunk,
-                    StreamState::Waiting => return StreamWaitingSnafu {}.fail(),
-                };
 
-                chunks.push(chunk);
+            for maybe_record_batch in reader.by_ref() {
+                let record_batch = maybe_record_batch.context(DecodeArrowSnafu)?;
+                chunks.push(record_batch);
             }
 
             // check if exactly finished
@@ -629,12 +620,15 @@ pub mod codec {
             let schema = Arc::new(Schema::try_from(arrow_schema).context(ParseSchemaSnafu)?);
             let mut write_batch = WriteBatch::new(schema.clone());
 
-            for (mutation_type, chunk) in self.mutation_types.iter().zip(chunks.into_iter()) {
+            for (mutation_type, record_batch) in self.mutation_types.iter().zip(chunks.into_iter())
+            {
                 match MutationType::from_i32(*mutation_type) {
                     Some(MutationType::Put) => {
                         let mut put_data = PutData::with_num_columns(schema.num_columns());
-                        for (column_schema, array) in
-                            schema.column_schemas().iter().zip(chunk.arrays().iter())
+                        for (column_schema, array) in schema
+                            .column_schemas()
+                            .iter()
+                            .zip(record_batch.columns().iter())
                         {
                             let vector =
                                 Helper::try_into_vector(array).context(DecodeVectorSnafu)?;
@@ -654,7 +648,6 @@ pub mod codec {
                     }
                 }
             }
-
             Ok(write_batch)
         }
     }
@@ -787,7 +780,8 @@ mod tests {
 
     use datatypes::type_id::LogicalTypeId;
     use datatypes::vectors::{
-        BooleanVector, ConstantVector, Int32Vector, Int64Vector, UInt64Vector,
+        BooleanVector, ConstantVector, Int32Vector, Int64Vector, TimestampMillisecondVector,
+        UInt64Vector,
     };
 
     use super::*;
@@ -835,7 +829,7 @@ mod tests {
             &[
                 ("k1", LogicalTypeId::UInt64, false),
                 (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                ("ts", LogicalTypeId::Timestamp, false),
+                ("ts", LogicalTypeId::TimestampMillisecond, false),
                 ("v1", LogicalTypeId::Boolean, true),
             ],
             Some(2),
@@ -846,7 +840,7 @@ mod tests {
     fn test_write_batch_put() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true]));
-        let tsv = Arc::new(TimestampVector::from_vec(vec![0, 0, 0]));
+        let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 0]));
 
         let mut put_data = PutData::new();
         put_data.add_key_column("k1", intv.clone()).unwrap();
@@ -872,8 +866,8 @@ mod tests {
 
     #[test]
     fn test_write_batch_too_large() {
-        let boolv = Arc::new(BooleanVector::from_iter(
-            iter::repeat(Some(true)).take(MAX_BATCH_SIZE + 1),
+        let boolv = Arc::new(BooleanVector::from_iterator(
+            iter::repeat(true).take(MAX_BATCH_SIZE + 1),
         ));
 
         let mut put_data = PutData::new();
@@ -922,7 +916,7 @@ mod tests {
 
     #[test]
     fn test_put_type_has_null() {
-        let intv = Arc::new(UInt64Vector::from_iter(&[Some(1), None, Some(3)]));
+        let intv = Arc::new(UInt64Vector::from(vec![Some(1), None, Some(3)]));
         let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
 
         let mut put_data = PutData::new();
@@ -950,7 +944,7 @@ mod tests {
     #[test]
     fn test_put_unknown_column() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-        let tsv = Arc::new(TimestampVector::from_vec(vec![0, 0, 0]));
+        let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 0]));
         let boolv = Arc::new(BooleanVector::from(vec![true, false, true]));
 
         let mut put_data = PutData::new();
@@ -990,7 +984,9 @@ mod tests {
     #[test]
     pub fn test_write_batch_time_range() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3, 4, 5, 6]));
-        let tsv = Arc::new(TimestampVector::from_vec(vec![-21, -20, -1, 0, 1, 20]));
+        let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![
+            -21, -20, -1, 0, 1, 20,
+        ]));
         let boolv = Arc::new(BooleanVector::from(vec![
             true, false, true, false, false, false,
         ]));
@@ -1018,7 +1014,7 @@ mod tests {
     pub fn test_write_batch_time_range_const_vector() {
         let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3, 4, 5, 6]));
         let tsv = Arc::new(ConstantVector::new(
-            Arc::new(TimestampVector::from_vec(vec![20])),
+            Arc::new(TimestampMillisecondVector::from_vec(vec![20])),
             6,
         ));
         let boolv = Arc::new(BooleanVector::from(vec![
@@ -1049,7 +1045,7 @@ mod tests {
         for i in 0..10 {
             let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
             let boolv = Arc::new(BooleanVector::from(vec![Some(true), Some(false), None]));
-            let tsv = Arc::new(TimestampVector::from_vec(vec![i, i, i]));
+            let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![i, i, i]));
 
             let mut put_data = PutData::new();
             put_data.add_key_column("k1", intv.clone()).unwrap();
@@ -1103,7 +1099,7 @@ mod tests {
         let mut batch = new_test_batch();
         for _ in 0..10 {
             let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-            let tsv = Arc::new(TimestampVector::from_vec(vec![0, 0, 0]));
+            let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 0]));
 
             let mut put_data = PutData::new();
             put_data.add_key_column("k1", intv.clone()).unwrap();

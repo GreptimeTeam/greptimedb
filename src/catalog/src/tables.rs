@@ -26,9 +26,9 @@ use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream};
-use datatypes::prelude::{ConcreteDataType, VectorBuilder};
+use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::value::Value;
+use datatypes::value::ValueRef;
 use datatypes::vectors::VectorRef;
 use futures::Stream;
 use snafu::ResultExt;
@@ -149,26 +149,33 @@ fn tables_to_record_batch(
     engine: &str,
 ) -> Vec<VectorRef> {
     let mut catalog_vec =
-        VectorBuilder::with_capacity(ConcreteDataType::string_datatype(), table_names.len());
+        ConcreteDataType::string_datatype().create_mutable_vector(table_names.len());
     let mut schema_vec =
-        VectorBuilder::with_capacity(ConcreteDataType::string_datatype(), table_names.len());
+        ConcreteDataType::string_datatype().create_mutable_vector(table_names.len());
     let mut table_name_vec =
-        VectorBuilder::with_capacity(ConcreteDataType::string_datatype(), table_names.len());
+        ConcreteDataType::string_datatype().create_mutable_vector(table_names.len());
     let mut engine_vec =
-        VectorBuilder::with_capacity(ConcreteDataType::string_datatype(), table_names.len());
+        ConcreteDataType::string_datatype().create_mutable_vector(table_names.len());
 
     for table_name in table_names {
-        catalog_vec.push(&Value::String(catalog_name.into()));
-        schema_vec.push(&Value::String(schema_name.into()));
-        table_name_vec.push(&Value::String(table_name.into()));
-        engine_vec.push(&Value::String(engine.into()));
+        // Safety: All these vectors are string type.
+        catalog_vec
+            .push_value_ref(ValueRef::String(catalog_name))
+            .unwrap();
+        schema_vec
+            .push_value_ref(ValueRef::String(schema_name))
+            .unwrap();
+        table_name_vec
+            .push_value_ref(ValueRef::String(&table_name))
+            .unwrap();
+        engine_vec.push_value_ref(ValueRef::String(engine)).unwrap();
     }
 
     vec![
-        catalog_vec.finish(),
-        schema_vec.finish(),
-        table_name_vec.finish(),
-        engine_vec.finish(),
+        catalog_vec.to_vector(),
+        schema_vec.to_vector(),
+        table_name_vec.to_vector(),
+        engine_vec.to_vector(),
     ]
 }
 
@@ -340,9 +347,7 @@ fn build_schema_for_tables() -> Schema {
 #[cfg(test)]
 mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_query::physical_plan::RuntimeEnv;
-    use datatypes::arrow::array::Utf8Array;
-    use datatypes::arrow::datatypes::DataType;
+    use common_query::physical_plan::SessionContext;
     use futures_util::StreamExt;
     use table::table::numbers::NumbersTable;
 
@@ -366,56 +371,47 @@ mod tests {
 
         let tables = Tables::new(catalog_list, "test_engine".to_string());
         let tables_stream = tables.scan(&None, &[], None).await.unwrap();
-        let mut tables_stream = tables_stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .unwrap();
+        let session_ctx = SessionContext::new();
+        let mut tables_stream = tables_stream.execute(0, session_ctx.task_ctx()).unwrap();
 
         if let Some(t) = tables_stream.next().await {
-            let batch = t.unwrap().df_recordbatch;
+            let batch = t.unwrap();
             assert_eq!(1, batch.num_rows());
             assert_eq!(4, batch.num_columns());
-            assert_eq!(&DataType::Utf8, batch.column(0).data_type());
-            assert_eq!(&DataType::Utf8, batch.column(1).data_type());
-            assert_eq!(&DataType::Utf8, batch.column(2).data_type());
-            assert_eq!(&DataType::Utf8, batch.column(3).data_type());
+            assert_eq!(
+                ConcreteDataType::string_datatype(),
+                batch.column(0).data_type()
+            );
+            assert_eq!(
+                ConcreteDataType::string_datatype(),
+                batch.column(1).data_type()
+            );
+            assert_eq!(
+                ConcreteDataType::string_datatype(),
+                batch.column(2).data_type()
+            );
+            assert_eq!(
+                ConcreteDataType::string_datatype(),
+                batch.column(3).data_type()
+            );
             assert_eq!(
                 "greptime",
-                batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Utf8Array<i32>>()
-                    .unwrap()
-                    .value(0)
+                batch.column(0).get_ref(0).as_string().unwrap().unwrap()
             );
 
             assert_eq!(
                 "public",
-                batch
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<Utf8Array<i32>>()
-                    .unwrap()
-                    .value(0)
+                batch.column(1).get_ref(0).as_string().unwrap().unwrap()
             );
 
             assert_eq!(
                 "test_table",
-                batch
-                    .column(2)
-                    .as_any()
-                    .downcast_ref::<Utf8Array<i32>>()
-                    .unwrap()
-                    .value(0)
+                batch.column(2).get_ref(0).as_string().unwrap().unwrap()
             );
 
             assert_eq!(
                 "test_engine",
-                batch
-                    .column(3)
-                    .as_any()
-                    .downcast_ref::<Utf8Array<i32>>()
-                    .unwrap()
-                    .value(0)
+                batch.column(3).get_ref(0).as_string().unwrap().unwrap()
             );
         } else {
             panic!("Record batch should not be empty!")

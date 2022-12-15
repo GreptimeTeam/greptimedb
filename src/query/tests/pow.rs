@@ -32,7 +32,7 @@ pub fn pow(args: &[VectorRef]) -> Result<VectorRef> {
 
     assert_eq!(exponent.len(), base.len());
 
-    let v = base
+    let iter = base
         .iter_data()
         .zip(exponent.iter_data())
         .map(|(base, exponent)| {
@@ -42,8 +42,8 @@ pub fn pow(args: &[VectorRef]) -> Result<VectorRef> {
                 (Some(base), Some(exponent)) => Some(base.pow(exponent)),
                 _ => None,
             }
-        })
-        .collect::<UInt32Vector>();
+        });
+    let v = UInt32Vector::from_owned_iterator(iter);
 
     Ok(Arc::new(v) as _)
 }

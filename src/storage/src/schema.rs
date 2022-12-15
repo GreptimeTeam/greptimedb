@@ -25,7 +25,9 @@ pub use crate::schema::store::{StoreSchema, StoreSchemaRef};
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::vectors::{Int64Vector, UInt64Vector, UInt8Vector, VectorRef};
+    use datatypes::vectors::{
+        Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector, VectorRef,
+    };
 
     use crate::read::Batch;
 
@@ -37,7 +39,8 @@ mod tests {
 
     pub(crate) fn new_batch_with_num_values(num_value_columns: usize) -> Batch {
         let k0 = Int64Vector::from_slice(&[1, 2, 3]);
-        let timestamp = Int64Vector::from_slice(&[4, 5, 6]);
+        let timestamp = TimestampMillisecondVector::from_vec(vec![4, 5, 6]);
+
         let mut columns: Vec<VectorRef> = vec![Arc::new(k0), Arc::new(timestamp)];
 
         for i in 0..num_value_columns {

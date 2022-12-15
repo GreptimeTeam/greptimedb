@@ -14,7 +14,9 @@
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
-use datatypes::prelude::{ConcreteDataType, VectorBuilder};
+use datatypes::data_type::DataType;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::vectors::MutableVector;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
 use sql::statements::insert::Insert;
@@ -70,7 +72,7 @@ impl SqlHandler {
         };
         let rows_num = values.len();
 
-        let mut columns_builders: Vec<(&String, &ConcreteDataType, VectorBuilder)> =
+        let mut columns_builders: Vec<(&String, &ConcreteDataType, Box<dyn MutableVector>)> =
             Vec::with_capacity(columns_num);
 
         if columns.is_empty() {
@@ -79,7 +81,7 @@ impl SqlHandler {
                 columns_builders.push((
                     &column_schema.name,
                     data_type,
-                    VectorBuilder::with_capacity(data_type.clone(), rows_num),
+                    data_type.create_mutable_vector(rows_num),
                 ));
             }
         } else {
@@ -95,7 +97,7 @@ impl SqlHandler {
                 columns_builders.push((
                     column_name,
                     data_type,
-                    VectorBuilder::with_capacity(data_type.clone(), rows_num),
+                    data_type.create_mutable_vector(rows_num),
                 ));
             }
         }
@@ -123,7 +125,7 @@ impl SqlHandler {
             table_name: table_ref.table.to_string(),
             columns_values: columns_builders
                 .into_iter()
-                .map(|(c, _, mut b)| (c.to_owned(), b.finish()))
+                .map(|(c, _, mut b)| (c.to_owned(), b.to_vector()))
                 .collect(),
         }))
     }
@@ -133,11 +135,11 @@ fn add_row_to_vector(
     column_name: &str,
     data_type: &ConcreteDataType,
     sql_val: &SqlValue,
-    builder: &mut VectorBuilder,
+    builder: &mut Box<dyn MutableVector>,
 ) -> Result<()> {
     let value = statements::sql_value_to_value(column_name, data_type, sql_val)
         .context(ParseSqlValueSnafu)?;
-    builder.push(&value);
+    builder.push_value_ref(value.as_value_ref()).unwrap();
 
     Ok(())
 }

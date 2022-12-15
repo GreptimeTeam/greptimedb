@@ -16,9 +16,10 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, BooleanArray, MutableArray, MutableBooleanArray};
-use arrow::bitmap::utils::{BitmapIter, ZipValidity};
-use snafu::{OptionExt, ResultExt};
+use arrow::array::{
+    Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef, BooleanArray, BooleanBuilder,
+};
+use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::Result;
@@ -41,12 +42,26 @@ impl BooleanVector {
     pub(crate) fn as_boolean_array(&self) -> &BooleanArray {
         &self.array
     }
+
+    fn to_array_data(&self) -> ArrayData {
+        self.array.data().clone()
+    }
+
+    fn from_array_data(data: ArrayData) -> BooleanVector {
+        BooleanVector {
+            array: BooleanArray::from(data),
+        }
+    }
+
+    pub(crate) fn false_count(&self) -> usize {
+        self.array.false_count()
+    }
 }
 
 impl From<Vec<bool>> for BooleanVector {
     fn from(data: Vec<bool>) -> Self {
         BooleanVector {
-            array: BooleanArray::from_slice(&data),
+            array: BooleanArray::from(data),
         }
     }
 }
@@ -91,11 +106,13 @@ impl Vector for BooleanVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        Arc::new(self.array.clone())
+        let data = self.to_array_data();
+        Arc::new(BooleanArray::from(data))
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        Box::new(self.array.clone())
+        let data = self.to_array_data();
+        Box::new(BooleanArray::from(data))
     }
 
     fn validity(&self) -> Validity {
@@ -103,7 +120,11 @@ impl Vector for BooleanVector {
     }
 
     fn memory_size(&self) -> usize {
-        self.array.values().as_slice().0.len()
+        self.array.get_buffer_memory_size()
+    }
+
+    fn null_count(&self) -> usize {
+        self.array.null_count()
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -111,7 +132,8 @@ impl Vector for BooleanVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        Arc::new(Self::from(self.array.slice(offset, length)))
+        let data = self.array.data().slice(offset, length);
+        Arc::new(Self::from_array_data(data))
     }
 
     fn get(&self, index: usize) -> Value {
@@ -126,7 +148,7 @@ impl Vector for BooleanVector {
 impl ScalarVector for BooleanVector {
     type OwnedItem = bool;
     type RefItem<'a> = bool;
-    type Iter<'a> = ZipValidity<'a, bool, BitmapIter<'a>>;
+    type Iter<'a> = ArrayIter<&'a BooleanArray>;
     type Builder = BooleanVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
@@ -143,7 +165,7 @@ impl ScalarVector for BooleanVector {
 }
 
 pub struct BooleanVectorBuilder {
-    mutable_array: MutableBooleanArray,
+    mutable_array: BooleanBuilder,
 }
 
 impl MutableVector for BooleanVectorBuilder {
@@ -168,12 +190,15 @@ impl MutableVector for BooleanVectorBuilder {
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        self.mutable_array.push(value.as_boolean()?);
+        match value.as_boolean()? {
+            Some(v) => self.mutable_array.append_value(v),
+            None => self.mutable_array.append_null(),
+        }
         Ok(())
     }
 
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
-        vectors::impl_extend_for_builder!(self.mutable_array, vector, BooleanVector, offset, length)
+        vectors::impl_extend_for_builder!(self, vector, BooleanVector, offset, length)
     }
 }
 
@@ -182,17 +207,20 @@ impl ScalarVectorBuilder for BooleanVectorBuilder {
 
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            mutable_array: MutableBooleanArray::with_capacity(capacity),
+            mutable_array: BooleanBuilder::with_capacity(capacity),
         }
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        self.mutable_array.push(value);
+        match value {
+            Some(v) => self.mutable_array.append_value(v),
+            None => self.mutable_array.append_null(),
+        }
     }
 
     fn finish(&mut self) -> Self::VectorType {
         BooleanVector {
-            array: std::mem::take(&mut self.mutable_array).into(),
+            array: self.mutable_array.finish(),
         }
     }
 }
@@ -225,9 +253,9 @@ mod tests {
         assert_eq!(9, v.len());
         assert_eq!("BooleanVector", v.vector_type_name());
         assert!(!v.is_const());
-        assert_eq!(Validity::AllValid, v.validity());
+        assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
-        assert_eq!(2, v.memory_size());
+        assert_eq!(64, v.memory_size());
 
         for (i, b) in bools.iter().enumerate() {
             assert!(!v.is_null(i));
@@ -316,13 +344,12 @@ mod tests {
         let vector = BooleanVector::from(vec![Some(true), None, Some(false)]);
         assert_eq!(1, vector.null_count());
         let validity = vector.validity();
-        let slots = validity.slots().unwrap();
-        assert_eq!(1, slots.null_count());
-        assert!(!slots.get_bit(1));
+        assert_eq!(1, validity.null_count());
+        assert!(!validity.is_set(1));
 
         let vector = BooleanVector::from(vec![true, false, false]);
         assert_eq!(0, vector.null_count());
-        assert_eq!(Validity::AllValid, vector.validity());
+        assert!(vector.validity().is_all_valid());
     }
 
     #[test]

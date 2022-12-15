@@ -32,7 +32,10 @@ message Column {
 
     repeated int32 date_values = 14;
     repeated int64 datetime_values = 15;
-    repeated int64 ts_millis_values = 16;
+    repeated int64 ts_second_values = 16;
+    repeated int64 ts_millisecond_values = 17;
+    repeated int64 ts_microsecond_values = 18;
+    repeated int64 ts_nanosecond_values = 19;
   }
   // The array of non-null values in this column.
   //
@@ -75,5 +78,8 @@ enum ColumnDataType {
   STRING = 12;
   DATE = 13;
   DATETIME = 14;
-  TIMESTAMP = 15;
+  TIMESTAMP_SECOND = 15;
+  TIMESTAMP_MILLISECOND = 16;
+  TIMESTAMP_MICROSECOND = 17;
+  TIMESTAMP_NANOSECOND = 18;
 }

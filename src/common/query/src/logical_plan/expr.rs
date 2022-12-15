@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion::logical_plan::Expr as DfExpr;
+pub use datafusion_expr::expr::Expr as DfExpr;
 
 /// Central struct of query API.
 /// Represent logical expressions such as `A + 1`, or `CAST(c1 AS int)`.
-#[derive(Clone, PartialEq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Expr {
     df_expr: DfExpr,
 }

@@ -109,11 +109,11 @@ fn expect_data() -> (Column, Column, Column, Column) {
     let expected_ts_col = Column {
         column_name: "ts".to_string(),
         values: Some(column::Values {
-            ts_millis_values: vec![100, 101, 102, 103],
+            ts_millisecond_values: vec![100, 101, 102, 103],
             ..Default::default()
         }),
         semantic_type: SemanticType::Timestamp as i32,
-        datatype: ColumnDataType::Timestamp as i32,
+        datatype: ColumnDataType::TimestampMillisecond as i32,
         ..Default::default()
     };
 
@@ -244,7 +244,7 @@ fn testing_create_expr() -> CreateExpr {
         },
         ColumnDef {
             name: "ts".to_string(),
-            datatype: 15, // timestamp
+            datatype: ColumnDataType::TimestampMillisecond as i32, // timestamp
             is_nullable: true,
             default_constraint: None,
         },

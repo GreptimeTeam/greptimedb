@@ -22,7 +22,7 @@ use snafu::{ensure, ResultExt};
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::value::Value;
-use crate::vectors::{Int64Vector, TimestampVector, VectorRef};
+use crate::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 
 const CURRENT_TIMESTAMP: &str = "current_timestamp()";
 
@@ -81,7 +81,7 @@ impl ColumnDefaultConstraint {
                     error::UnsupportedDefaultExprSnafu { expr }
                 );
                 ensure!(
-                    data_type.is_timestamp(),
+                    data_type.is_timestamp_compatible(),
                     error::DefaultValueTypeSnafu {
                         reason: "return value of the function must has timestamp type",
                     }
@@ -162,8 +162,10 @@ fn create_current_timestamp_vector(
     data_type: &ConcreteDataType,
     num_rows: usize,
 ) -> Result<VectorRef> {
+    // FIXME(yingwen): We should implements cast in VectorOp so we could cast the millisecond vector
+    // to other data type and avoid this match.
     match data_type {
-        ConcreteDataType::Timestamp(_) => Ok(Arc::new(TimestampVector::from_values(
+        ConcreteDataType::Timestamp(_) => Ok(Arc::new(TimestampMillisecondVector::from_values(
             std::iter::repeat(util::current_time_millis()).take(num_rows),
         ))),
         ConcreteDataType::Int64(_) => Ok(Arc::new(Int64Vector::from_values(
@@ -217,7 +219,7 @@ mod tests {
     fn test_validate_function_constraint() {
         let constraint = ColumnDefaultConstraint::Function(CURRENT_TIMESTAMP.to_string());
         constraint
-            .validate(&ConcreteDataType::timestamp_millis_datatype(), false)
+            .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
             .unwrap();
         constraint
             .validate(&ConcreteDataType::boolean_datatype(), false)
@@ -225,7 +227,7 @@ mod tests {
 
         let constraint = ColumnDefaultConstraint::Function("hello()".to_string());
         constraint
-            .validate(&ConcreteDataType::timestamp_millis_datatype(), false)
+            .validate(&ConcreteDataType::timestamp_millisecond_datatype(), false)
             .unwrap_err();
     }
 
@@ -262,7 +264,7 @@ mod tests {
     fn test_create_default_vector_by_func() {
         let constraint = ColumnDefaultConstraint::Function(CURRENT_TIMESTAMP.to_string());
         // Timestamp type.
-        let data_type = ConcreteDataType::timestamp_millis_datatype();
+        let data_type = ConcreteDataType::timestamp_millisecond_datatype();
         let v = constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap();
@@ -286,7 +288,7 @@ mod tests {
         );
 
         let constraint = ColumnDefaultConstraint::Function("no".to_string());
-        let data_type = ConcreteDataType::timestamp_millis_datatype();
+        let data_type = ConcreteDataType::timestamp_millisecond_datatype();
         constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap_err();

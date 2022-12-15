@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use chrono_tz::Tz;
-
-use crate::error::Error;
+use common_query::error::Error;
 
 pub struct EvalContext {
     _tz: Tz,

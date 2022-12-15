@@ -104,7 +104,7 @@ fn to_df_accumulator_func(
     accumulator: AccumulatorFunctionImpl,
     creator: AggregateFunctionCreatorRef,
 ) -> DfAccumulatorFunctionImplementation {
-    Arc::new(move || {
+    Arc::new(move |_| {
         let accumulator = accumulator()?;
         let creator = creator.clone();
         Ok(Box::new(DfAccumulatorAdaptor::new(accumulator, creator)))

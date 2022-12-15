@@ -20,10 +20,10 @@ mod flush;
 mod projection;
 
 use common_telemetry::logging;
-use common_time::timestamp::Timestamp;
-use datatypes::prelude::ScalarVector;
+use datatypes::prelude::{ScalarVector, WrapperType};
+use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;
-use datatypes::vectors::{Int64Vector, TimestampVector};
+use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
 use log_store::fs::log::LocalFileLogStore;
 use log_store::fs::noop::NoopLogStore;
 use object_store::backend::fs;
@@ -70,7 +70,7 @@ impl<S: LogStore> TesterBase<S> {
     ///
     /// Format of data: (timestamp, v0), timestamp is key, v0 is value.
     pub async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
-        let data: Vec<(Timestamp, Option<i64>)> =
+        let data: Vec<(TimestampMillisecond, Option<i64>)> =
             data.iter().map(|(l, r)| ((*l).into(), *r)).collect();
         // Build a batch without version.
         let mut batch = new_write_batch_for_test(false);
@@ -82,7 +82,7 @@ impl<S: LogStore> TesterBase<S> {
 
     /// Put without version specified directly to inner writer.
     pub async fn put_inner(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
-        let data: Vec<(Timestamp, Option<i64>)> =
+        let data: Vec<(TimestampMillisecond, Option<i64>)> =
             data.iter().map(|(l, r)| ((*l).into(), *r)).collect();
         let mut batch = new_write_batch_for_test(false);
         let put_data = new_put_data(&data);
@@ -131,7 +131,11 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     if enable_version_column {
         write_batch_util::new_write_batch(
             &[
-                (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
+                (
+                    test_util::TIMESTAMP_NAME,
+                    LogicalTypeId::TimestampMillisecond,
+                    false,
+                ),
                 (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
                 ("v0", LogicalTypeId::Int64, true),
             ],
@@ -140,7 +144,11 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     } else {
         write_batch_util::new_write_batch(
             &[
-                (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
+                (
+                    test_util::TIMESTAMP_NAME,
+                    LogicalTypeId::TimestampMillisecond,
+                    false,
+                ),
                 ("v0", LogicalTypeId::Int64, true),
             ],
             Some(0),
@@ -148,11 +156,12 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     }
 }
 
-fn new_put_data(data: &[(Timestamp, Option<i64>)]) -> PutData {
+fn new_put_data(data: &[(TimestampMillisecond, Option<i64>)]) -> PutData {
     let mut put_data = PutData::with_num_columns(2);
 
-    let timestamps = TimestampVector::from_vec(data.iter().map(|v| v.0).collect());
-    let values = Int64Vector::from_iter(data.iter().map(|kv| kv.1));
+    let timestamps =
+        TimestampMillisecondVector::from_vec(data.iter().map(|v| v.0.into()).collect());
+    let values = Int64Vector::from_owned_iterator(data.iter().map(|kv| kv.1));
 
     put_data
         .add_key_column(test_util::TIMESTAMP_NAME, Arc::new(timestamps))
@@ -167,14 +176,14 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
 
     let timestamps = chunk.columns[0]
         .as_any()
-        .downcast_ref::<TimestampVector>()
+        .downcast_ref::<TimestampMillisecondVector>()
         .unwrap();
     let values = chunk.columns[1]
         .as_any()
         .downcast_ref::<Int64Vector>()
         .unwrap();
     for (ts, value) in timestamps.iter_data().zip(values.iter_data()) {
-        dst.push((ts.unwrap().value(), value));
+        dst.push((ts.unwrap().into_native(), value));
     }
 }
 
@@ -207,7 +216,11 @@ async fn test_new_region() {
     let expect_schema = schema_util::new_schema_ref(
         &[
             ("k1", LogicalTypeId::Int32, false),
-            (test_util::TIMESTAMP_NAME, LogicalTypeId::Timestamp, false),
+            (
+                test_util::TIMESTAMP_NAME,
+                LogicalTypeId::TimestampMillisecond,
+                false,
+            ),
             (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
             ("v0", LogicalTypeId::Float32, true),
         ],

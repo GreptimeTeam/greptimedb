@@ -17,6 +17,7 @@ use std::any::Any;
 use common_error::prelude::*;
 use common_query::logical_plan::Expr;
 use datafusion_common::ScalarValue;
+use datatypes::prelude::Value;
 use store_api::storage::RegionId;
 
 #[derive(Debug, Snafu)]
@@ -437,6 +438,17 @@ pub enum Error {
         source: substrait::error::Error,
     },
 
+    #[snafu(display(
+        "Failed to build a vector from values, value: {}, source: {}",
+        value,
+        source
+    ))]
+    BuildVector {
+        value: Value,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Failed to invoke GRPC server, source: {}", source))]
     InvokeGrpcServer {
         #[snafu(backtrace)]
@@ -533,6 +545,7 @@ impl ErrorExt for Error {
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
+            Error::BuildVector { source, .. } => source.status_code(),
         }
     }
 

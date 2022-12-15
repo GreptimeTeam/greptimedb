@@ -45,11 +45,11 @@ impl LinesWriter {
     pub fn write_ts(&mut self, column_name: &str, value: (i64, Precision)) -> Result<()> {
         let (idx, column) = self.mut_column(
             column_name,
-            ColumnDataType::Timestamp,
+            ColumnDataType::TimestampMillisecond,
             SemanticType::Timestamp,
         );
         ensure!(
-            column.datatype == ColumnDataType::Timestamp as i32,
+            column.datatype == ColumnDataType::TimestampMillisecond as i32,
             TypeMismatchSnafu {
                 column_name,
                 expected: "timestamp",
@@ -58,7 +58,9 @@ impl LinesWriter {
         );
         // It is safe to use unwrap here, because values has been initialized in mut_column()
         let values = column.values.as_mut().unwrap();
-        values.ts_millis_values.push(to_ms_ts(value.1, value.0));
+        values
+            .ts_millisecond_values
+            .push(to_ms_ts(value.1, value.0));
         self.null_masks[idx].push(false);
         Ok(())
     }
@@ -224,23 +226,23 @@ impl LinesWriter {
 
 pub fn to_ms_ts(p: Precision, ts: i64) -> i64 {
     match p {
-        Precision::NANOSECOND => ts / 1_000_000,
-        Precision::MICROSECOND => ts / 1000,
-        Precision::MILLISECOND => ts,
-        Precision::SECOND => ts * 1000,
-        Precision::MINUTE => ts * 1000 * 60,
-        Precision::HOUR => ts * 1000 * 60 * 60,
+        Precision::Nanosecond => ts / 1_000_000,
+        Precision::Microsecond => ts / 1000,
+        Precision::Millisecond => ts,
+        Precision::Second => ts * 1000,
+        Precision::Minute => ts * 1000 * 60,
+        Precision::Hour => ts * 1000 * 60 * 60,
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Precision {
-    NANOSECOND,
-    MICROSECOND,
-    MILLISECOND,
-    SECOND,
-    MINUTE,
-    HOUR,
+    Nanosecond,
+    Microsecond,
+    Millisecond,
+    Second,
+    Minute,
+    Hour,
 }
 
 #[cfg(test)]
@@ -261,13 +263,13 @@ mod tests {
         writer.write_f64("memory", 0.4).unwrap();
         writer.write_string("name", "name1").unwrap();
         writer
-            .write_ts("ts", (101011000, Precision::MILLISECOND))
+            .write_ts("ts", (101011000, Precision::Millisecond))
             .unwrap();
         writer.commit();
 
         writer.write_tag("host", "host2").unwrap();
         writer
-            .write_ts("ts", (102011001, Precision::MILLISECOND))
+            .write_ts("ts", (102011001, Precision::Millisecond))
             .unwrap();
         writer.write_bool("enable_reboot", true).unwrap();
         writer.write_u64("year_of_service", 2).unwrap();
@@ -278,7 +280,7 @@ mod tests {
         writer.write_f64("cpu", 0.4).unwrap();
         writer.write_u64("cpu_core_num", 16).unwrap();
         writer
-            .write_ts("ts", (103011002, Precision::MILLISECOND))
+            .write_ts("ts", (103011002, Precision::Millisecond))
             .unwrap();
         writer.commit();
 
@@ -321,11 +323,11 @@ mod tests {
 
         let column = &columns[4];
         assert_eq!("ts", column.column_name);
-        assert_eq!(ColumnDataType::Timestamp as i32, column.datatype);
+        assert_eq!(ColumnDataType::TimestampMillisecond as i32, column.datatype);
         assert_eq!(SemanticType::Timestamp as i32, column.semantic_type);
         assert_eq!(
             vec![101011000, 102011001, 103011002],
-            column.values.as_ref().unwrap().ts_millis_values
+            column.values.as_ref().unwrap().ts_millisecond_values
         );
         verify_null_mask(&column.null_mask, vec![false, false, false]);
 
@@ -367,16 +369,16 @@ mod tests {
 
     #[test]
     fn test_to_ms() {
-        assert_eq!(100, to_ms_ts(Precision::NANOSECOND, 100110000));
-        assert_eq!(100110, to_ms_ts(Precision::MICROSECOND, 100110000));
-        assert_eq!(100110000, to_ms_ts(Precision::MILLISECOND, 100110000));
+        assert_eq!(100, to_ms_ts(Precision::Nanosecond, 100110000));
+        assert_eq!(100110, to_ms_ts(Precision::Microsecond, 100110000));
+        assert_eq!(100110000, to_ms_ts(Precision::Millisecond, 100110000));
         assert_eq!(
             100110000 * 1000 * 60,
-            to_ms_ts(Precision::MINUTE, 100110000)
+            to_ms_ts(Precision::Minute, 100110000)
         );
         assert_eq!(
             100110000 * 1000 * 60 * 60,
-            to_ms_ts(Precision::HOUR, 100110000)
+            to_ms_ts(Precision::Hour, 100110000)
         );
     }
 }

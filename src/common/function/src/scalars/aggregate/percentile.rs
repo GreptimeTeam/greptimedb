@@ -26,7 +26,7 @@ use common_query::prelude::*;
 use datatypes::prelude::*;
 use datatypes::types::OrdPrimitive;
 use datatypes::value::{ListValue, OrderedFloat};
-use datatypes::vectors::{ConstantVector, Float64Vector, ListVector};
+use datatypes::vectors::{ConstantVector, Float64Vector, Helper, ListVector};
 use datatypes::with_match_primitive_type_id;
 use num::NumCast;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -44,15 +44,15 @@ use snafu::{ensure, OptionExt, ResultExt};
 // This optional method parameter specifies the method to use when the desired quantile lies between two data points i < j.
 // If g is the fractional part of the index surrounded by i and alpha and beta are correction constants modifying i and j.
 //              i+g = (q-alpha)/(n-alpha-beta+1)
-// Below, ‘q’ is the quantile value, ‘n’ is the sample size and alpha and beta are constants. The following formula gives an interpolation “i + g” of where the quantile would be in the sorted sample.
-// With ‘i’ being the floor and ‘g’ the fractional part of the result.
+// Below, 'q' is the quantile value, 'n' is the sample size and alpha and beta are constants. The following formula gives an interpolation "i + g" of where the quantile would be in the sorted sample.
+// With 'i' being the floor and 'g' the fractional part of the result.
 // the default method is linear where
 // alpha = 1
 // beta = 1
 #[derive(Debug, Default)]
 pub struct Percentile<T>
 where
-    T: Primitive,
+    T: WrapperType,
 {
     greater: BinaryHeap<Reverse<OrdPrimitive<T>>>,
     not_greater: BinaryHeap<OrdPrimitive<T>>,
@@ -62,7 +62,7 @@ where
 
 impl<T> Percentile<T>
 where
-    T: Primitive,
+    T: WrapperType,
 {
     fn push(&mut self, value: T) {
         let value = OrdPrimitive::<T>(value);
@@ -93,8 +93,7 @@ where
 
 impl<T> Accumulator for Percentile<T>
 where
-    T: Primitive,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    T: WrapperType,
 {
     fn state(&self) -> Result<Vec<Value>> {
         let nums = self
@@ -107,7 +106,7 @@ where
         Ok(vec![
             Value::List(ListValue::new(
                 Some(Box::new(nums)),
-                T::default().into().data_type(),
+                T::LogicalType::build_data_type(),
             )),
             self.p.into(),
         ])
@@ -129,14 +128,14 @@ where
         let mut len = 1;
         let column: &<T as Scalar>::VectorType = if column.is_const() {
             len = column.len();
-            let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
-            unsafe { VectorHelper::static_cast(column.inner()) }
+            let column: &ConstantVector = unsafe { Helper::static_cast(column) };
+            unsafe { Helper::static_cast(column.inner()) }
         } else {
-            unsafe { VectorHelper::static_cast(column) }
+            unsafe { Helper::static_cast(column) }
         };
 
         let x = &values[1];
-        let x = VectorHelper::check_get_scalar::<f64>(x).context(error::InvalidInputsSnafu {
+        let x = Helper::check_get_scalar::<f64>(x).context(error::InvalidInputTypeSnafu {
             err_msg: "expecting \"POLYVAL\" function's second argument to be float64",
         })?;
         // `get(0)` is safe because we have checked `values[1].len() == values[0].len() != 0`
@@ -209,10 +208,11 @@ where
                 ),
             })?;
         for value in values.values_iter() {
-            let value = value.context(FromScalarValueSnafu)?;
-            let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(&value) };
-            for v in column.iter_data().flatten() {
-                self.push(v);
+            if let Some(value) = value.context(FromScalarValueSnafu)? {
+                let column: &<T as Scalar>::VectorType = unsafe { Helper::static_cast(&value) };
+                for v in column.iter_data().flatten() {
+                    self.push(v);
+                }
             }
         }
         Ok(())
@@ -259,7 +259,7 @@ impl AggregateFunctionCreator for PercentileAccumulatorCreator {
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Percentile::<$S>::default()))
+                    Ok(Box::new(Percentile::<<$S as LogicalPrimitiveType>::Wrapper>::default()))
                 },
                 {
                     let err_msg = format!(
@@ -292,7 +292,7 @@ impl AggregateFunctionCreator for PercentileAccumulatorCreator {
 
 #[cfg(test)]
 mod test {
-    use datatypes::vectors::PrimitiveVector;
+    use datatypes::vectors::{Float64Vector, Int32Vector};
 
     use super::*;
     #[test]
@@ -307,8 +307,8 @@ mod test {
         // test update one not-null value
         let mut percentile = Percentile::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![Some(100.0_f64)])),
+            Arc::new(Int32Vector::from(vec![Some(42)])),
+            Arc::new(Float64Vector::from(vec![Some(100.0_f64)])),
         ];
         assert!(percentile.update_batch(&v).is_ok());
         assert_eq!(Value::from(42.0_f64), percentile.evaluate().unwrap());
@@ -316,8 +316,8 @@ mod test {
         // test update one null value
         let mut percentile = Percentile::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![Option::<i32>::None])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![Some(100.0_f64)])),
+            Arc::new(Int32Vector::from(vec![Option::<i32>::None])),
+            Arc::new(Float64Vector::from(vec![Some(100.0_f64)])),
         ];
         assert!(percentile.update_batch(&v).is_ok());
         assert_eq!(Value::Null, percentile.evaluate().unwrap());
@@ -325,12 +325,8 @@ mod test {
         // test update no null-value batch
         let mut percentile = Percentile::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(-1i32),
-                Some(1),
-                Some(2),
-            ])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(-1i32), Some(1), Some(2)])),
+            Arc::new(Float64Vector::from(vec![
                 Some(100.0_f64),
                 Some(100.0_f64),
                 Some(100.0_f64),
@@ -342,13 +338,8 @@ mod test {
         // test update null-value batch
         let mut percentile = Percentile::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(-2i32),
-                None,
-                Some(3),
-                Some(4),
-            ])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(-2i32), None, Some(3), Some(4)])),
+            Arc::new(Float64Vector::from(vec![
                 Some(100.0_f64),
                 Some(100.0_f64),
                 Some(100.0_f64),
@@ -362,13 +353,10 @@ mod test {
         let mut percentile = Percentile::<i32>::default();
         let v: Vec<VectorRef> = vec![
             Arc::new(ConstantVector::new(
-                Arc::new(PrimitiveVector::<i32>::from_vec(vec![4])),
+                Arc::new(Int32Vector::from_vec(vec![4])),
                 2,
             )),
-            Arc::new(PrimitiveVector::<f64>::from(vec![
-                Some(100.0_f64),
-                Some(100.0_f64),
-            ])),
+            Arc::new(Float64Vector::from(vec![Some(100.0_f64), Some(100.0_f64)])),
         ];
         assert!(percentile.update_batch(&v).is_ok());
         assert_eq!(Value::from(4_f64), percentile.evaluate().unwrap());
@@ -376,12 +364,8 @@ mod test {
         // test left border
         let mut percentile = Percentile::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(-1i32),
-                Some(1),
-                Some(2),
-            ])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(-1i32), Some(1), Some(2)])),
+            Arc::new(Float64Vector::from(vec![
                 Some(0.0_f64),
                 Some(0.0_f64),
                 Some(0.0_f64),
@@ -393,12 +377,8 @@ mod test {
         // test medium
         let mut percentile = Percentile::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(-1i32),
-                Some(1),
-                Some(2),
-            ])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(-1i32), Some(1), Some(2)])),
+            Arc::new(Float64Vector::from(vec![
                 Some(50.0_f64),
                 Some(50.0_f64),
                 Some(50.0_f64),
@@ -410,12 +390,8 @@ mod test {
         // test right border
         let mut percentile = Percentile::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(-1i32),
-                Some(1),
-                Some(2),
-            ])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(-1i32), Some(1), Some(2)])),
+            Arc::new(Float64Vector::from(vec![
                 Some(100.0_f64),
                 Some(100.0_f64),
                 Some(100.0_f64),
@@ -431,12 +407,8 @@ mod test {
         // >> 6.400000000000
         let mut percentile = Percentile::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(10i32),
-                Some(7),
-                Some(4),
-            ])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(10i32), Some(7), Some(4)])),
+            Arc::new(Float64Vector::from(vec![
                 Some(40.0_f64),
                 Some(40.0_f64),
                 Some(40.0_f64),
@@ -451,12 +423,8 @@ mod test {
         // >> 9.7000000000000011
         let mut percentile = Percentile::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(10i32),
-                Some(7),
-                Some(4),
-            ])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(10i32), Some(7), Some(4)])),
+            Arc::new(Float64Vector::from(vec![
                 Some(95.0_f64),
                 Some(95.0_f64),
                 Some(95.0_f64),

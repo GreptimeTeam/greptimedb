@@ -20,23 +20,20 @@ use common_query::error::{BadAccumulatorImplSnafu, CreateAccumulatorSnafu, Resul
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::prelude::*;
-use datatypes::vectors::ConstantVector;
+use datatypes::vectors::{ConstantVector, Helper};
 use datatypes::with_match_primitive_type_id;
 use snafu::ensure;
 
 // // https://numpy.org/doc/stable/reference/generated/numpy.argmin.html
 #[derive(Debug, Default)]
-pub struct Argmin<T>
-where
-    T: Primitive + PartialOrd,
-{
+pub struct Argmin<T> {
     min: Option<T>,
     n: u32,
 }
 
 impl<T> Argmin<T>
 where
-    T: Primitive + PartialOrd,
+    T: Copy + PartialOrd,
 {
     fn update(&mut self, value: T, index: u32) {
         match self.min {
@@ -56,8 +53,7 @@ where
 
 impl<T> Accumulator for Argmin<T>
 where
-    T: Primitive + PartialOrd,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    T: WrapperType + PartialOrd,
 {
     fn state(&self) -> Result<Vec<Value>> {
         match self.min {
@@ -75,10 +71,10 @@ where
 
         let column = &values[0];
         let column: &<T as Scalar>::VectorType = if column.is_const() {
-            let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
-            unsafe { VectorHelper::static_cast(column.inner()) }
+            let column: &ConstantVector = unsafe { Helper::static_cast(column) };
+            unsafe { Helper::static_cast(column.inner()) }
         } else {
-            unsafe { VectorHelper::static_cast(column) }
+            unsafe { Helper::static_cast(column) }
         };
         for (i, v) in column.iter_data().enumerate() {
             if let Some(value) = v {
@@ -102,8 +98,8 @@ where
 
         let min = &states[0];
         let index = &states[1];
-        let min: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(min) };
-        let index: &<u32 as Scalar>::VectorType = unsafe { VectorHelper::static_cast(index) };
+        let min: &<T as Scalar>::VectorType = unsafe { Helper::static_cast(min) };
+        let index: &<u32 as Scalar>::VectorType = unsafe { Helper::static_cast(index) };
         index
             .iter_data()
             .flatten()
@@ -131,7 +127,7 @@ impl AggregateFunctionCreator for ArgminAccumulatorCreator {
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(Argmin::<$S>::default()))
+                    Ok(Box::new(Argmin::<<$S as LogicalPrimitiveType>::Wrapper>::default()))
                 },
                 {
                     let err_msg = format!(
@@ -163,7 +159,7 @@ impl AggregateFunctionCreator for ArgminAccumulatorCreator {
 
 #[cfg(test)]
 mod test {
-    use datatypes::vectors::PrimitiveVector;
+    use datatypes::vectors::Int32Vector;
 
     use super::*;
     #[test]
@@ -175,21 +171,19 @@ mod test {
 
         // test update one not-null value
         let mut argmin = Argmin::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![Some(42)]))];
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Some(42)]))];
         assert!(argmin.update_batch(&v).is_ok());
         assert_eq!(Value::from(0_u32), argmin.evaluate().unwrap());
 
         // test update one null value
         let mut argmin = Argmin::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
-            Option::<i32>::None,
-        ]))];
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![Option::<i32>::None]))];
         assert!(argmin.update_batch(&v).is_ok());
         assert_eq!(Value::Null, argmin.evaluate().unwrap());
 
         // test update no null-value batch
         let mut argmin = Argmin::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![
             Some(-1i32),
             Some(1),
             Some(3),
@@ -199,7 +193,7 @@ mod test {
 
         // test update null-value batch
         let mut argmin = Argmin::<i32>::default();
-        let v: Vec<VectorRef> = vec![Arc::new(PrimitiveVector::<i32>::from(vec![
+        let v: Vec<VectorRef> = vec![Arc::new(Int32Vector::from(vec![
             Some(-2i32),
             None,
             Some(4),
@@ -210,7 +204,7 @@ mod test {
         // test update with constant vector
         let mut argmin = Argmin::<i32>::default();
         let v: Vec<VectorRef> = vec![Arc::new(ConstantVector::new(
-            Arc::new(PrimitiveVector::<i32>::from_vec(vec![4])),
+            Arc::new(Int32Vector::from_vec(vec![4])),
             10,
         ))];
         assert!(argmin.update_batch(&v).is_ok());

@@ -225,7 +225,7 @@ pub async fn setup_test_app(store_type: StorageType, name: &str) -> (Router, Tes
     create_test_table(
         instance.catalog_manager(),
         instance.sql_handler(),
-        ConcreteDataType::timestamp_millis_datatype(),
+        ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
     .unwrap();
@@ -244,7 +244,7 @@ pub async fn setup_test_app_with_frontend(
     create_test_table(
         frontend.catalog_manager(),
         instance.sql_handler(),
-        ConcreteDataType::timestamp_millis_datatype(),
+        ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
     .unwrap();

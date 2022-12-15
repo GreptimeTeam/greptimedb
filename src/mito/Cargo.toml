@@ -19,10 +19,8 @@ common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
-    "simd",
-] }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+datafusion = "14.0.0"
+datafusion-common = "14.0.0"
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 log-store = { path = "../log-store" }

@@ -8,6 +8,7 @@ license = "Apache-2.0"
 default = ["python"]
 python = [
     "dep:datafusion",
+    "dep:datafusion-common",
     "dep:datafusion-expr",
     "dep:datafusion-physical-expr",
     "dep:rustpython-vm",
@@ -32,10 +33,10 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 console = "0.15"
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true }
-datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", optional = true }
+datafusion = { version = "14.0.0", optional = true }
+datafusion-common = { version = "14.0.0", optional = true }
+datafusion-expr = { version = "14.0.0", optional = true }
+datafusion-physical-expr = { version = "14.0.0", optional = true }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"

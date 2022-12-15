@@ -27,7 +27,7 @@ pub type RegionId = u64;
 pub type RegionNumber = u32;
 
 /// A [ColumnDescriptor] contains information to create a column.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder)]
 #[builder(pattern = "owned", build_fn(validate = "Self::validate"))]
 pub struct ColumnDescriptor {
     pub id: ColumnId,
@@ -107,7 +107,7 @@ impl ColumnDescriptorBuilder {
 }
 
 /// A [RowKeyDescriptor] contains information about row key.
-#[derive(Debug, Clone, PartialEq, Builder)]
+#[derive(Debug, Clone, PartialEq, Eq, Builder)]
 #[builder(pattern = "owned")]
 pub struct RowKeyDescriptor {
     #[builder(default, setter(each(name = "push_column")))]
@@ -122,7 +122,7 @@ pub struct RowKeyDescriptor {
 }
 
 /// A [ColumnFamilyDescriptor] contains information to create a column family.
-#[derive(Debug, Clone, PartialEq, Builder)]
+#[derive(Debug, Clone, PartialEq, Eq, Builder)]
 #[builder(pattern = "owned")]
 pub struct ColumnFamilyDescriptor {
     #[builder(default = "consts::DEFAULT_CF_ID")]
@@ -135,7 +135,7 @@ pub struct ColumnFamilyDescriptor {
 }
 
 /// A [RegionDescriptor] contains information to create a region.
-#[derive(Debug, Clone, PartialEq, Builder)]
+#[derive(Debug, Clone, PartialEq, Eq, Builder)]
 #[builder(pattern = "owned")]
 pub struct RegionDescriptor {
     pub id: RegionId,
