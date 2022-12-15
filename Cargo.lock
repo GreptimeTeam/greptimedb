@@ -6150,6 +6150,7 @@ dependencies = [
  "sha1",
  "snafu",
  "snap",
+ "sql",
  "strum 0.24.1",
  "table",
  "tempdir",

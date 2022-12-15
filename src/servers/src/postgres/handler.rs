@@ -26,7 +26,7 @@ use pgwire::api::portal::Portal;
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{text_query_response, FieldInfo, Response, Tag, TextDataRowEncoder};
 use pgwire::api::{ClientInfo, Type};
-use pgwire::error::{PgWireError, PgWireResult};
+use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use session::context::QueryContext;
 
 use crate::error::{self, Error, Result};
@@ -61,30 +61,31 @@ impl SimpleQueryHandler for PostgresServerHandler {
         C: ClientInfo + Unpin + Send + Sync,
     {
         let query_ctx = query_context_from_client_info(client);
-        let outputs = self
-            .query_handler
-            .do_query(query, query_ctx)
-            .await
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let outputs = self.query_handler.do_query(query, query_ctx).await;
 
         let mut results = Vec::with_capacity(outputs.len());
 
         for output in outputs {
             let resp = match output {
-                Output::AffectedRows(rows) => {
+                Ok(Output::AffectedRows(rows)) => {
                     Response::Execution(Tag::new_for_execution("OK", Some(rows)))
                 }
-                Output::Stream(record_stream) => {
+                Ok(Output::Stream(record_stream)) => {
                     let schema = record_stream.schema();
                     recordbatches_to_query_response(record_stream, schema)?
                 }
-                Output::RecordBatches(recordbatches) => {
+                Ok(Output::RecordBatches(recordbatches)) => {
                     let schema = recordbatches.schema();
                     recordbatches_to_query_response(
                         stream::iter(recordbatches.take().into_iter().map(Ok)),
                         schema,
                     )?
                 }
+                Err(e) => Response::Error(Box::new(ErrorInfo::new(
+                    "ERROR".to_string(),
+                    "XX000".to_string(),
+                    e.to_string(),
+                ))),
             };
             results.push(resp);
         }

@@ -47,6 +47,7 @@ session = { path = "../session" }
 sha1 = "0.10"
 snafu = { version = "0.7", features = ["backtraces"] }
 snap = "1"
+sql = { path = "../sql" }
 strum = { version = "0.24", features = ["derive"] }
 table = { path = "../table" }
 tokio = { version = "1.20", features = ["full"] }

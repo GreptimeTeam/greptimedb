@@ -78,6 +78,12 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to execute sql statement, source: {}", source))]
+    ExecuteStatement {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to execute insert: {}, source: {}", msg, source))]
     ExecuteInsert {
         msg: String,
@@ -257,6 +263,7 @@ impl ErrorExt for Error {
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
+            | ExecuteStatement { source, .. }
             | ExecuteInsert { source, .. }
             | ExecuteAlter { source, .. }
             | PutOpentsdbDataPoint { source, .. } => source.status_code(),

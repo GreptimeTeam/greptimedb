@@ -468,10 +468,10 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 impl Instance {
     async fn do_query_statement(
         &self,
-        query: &str,
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        let query = &format!("{:?}", &stmt);
         match stmt {
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
@@ -480,12 +480,7 @@ impl Instance {
             | Statement::DescribeTable(_)
             | Statement::Explain(_)
             | Statement::Query(_) => {
-                // TODO(sunng87): refactor this
-                return self
-                    .sql_handler
-                    .do_query(query, query_ctx)
-                    .await
-                    .map(|mut v| v.remove(0));
+                return self.sql_handler.do_statement_query(stmt, query_ctx).await;
             }
             Statement::Insert(insert) => match self.mode {
                 Mode::Standalone => {
@@ -560,49 +555,42 @@ impl Instance {
     }
 }
 
-// TODO(sunng87): temporary workaround to extract sql statements from string
-fn parse_statement_strings(sql: &str) -> std::result::Result<Vec<String>, ParserError> {
-    Parser::parse_sql(&GenericDialect, sql)
-        .map(|stmts| stmts.iter().map(|s| s.to_string()).collect())
-}
-
 #[async_trait]
 impl SqlQueryHandler for Instance {
     async fn do_query(
         &self,
         query: &str,
         query_ctx: QueryContextRef,
-    ) -> server_error::Result<Vec<Output>> {
-        let stmts = parse_stmt(query)
+    ) -> Vec<server_error::Result<Output>> {
+        match parse_stmt(query)
             .map_err(BoxedError::new)
-            .context(server_error::ExecuteQuerySnafu { query })?;
-
-        // TODO(sunng87): this is temporary solution to get sql query string for
-        // each statement.
-        //
-        // Currently we use sql query string for some sql calls between
-        // frontend and datanode in standalone mode, so here we have to extract
-        // it. This is to be REMOVED when frontend-datanode calls refactored to
-        // use statement for standalone and logic plans for distributed
-        //
-        // There is a chance that this parser returns error for our customized
-        // sql. We will ignore the error temporarily.
-        let stmt_strings = parse_statement_strings(query);
-        let mut results = Vec::with_capacity(stmts.len());
-
-        for (idx, stmt) in stmts.into_iter().enumerate() {
-            let query_string = if let Ok(ref stmt_strings) = stmt_strings {
-                &stmt_strings[idx]
-            } else {
-                query
-            };
-            let output = self
-                .do_query_statement(query_string, stmt, query_ctx.clone())
-                .await?;
-            results.push(output);
+            .context(server_error::ExecuteQuerySnafu { query })
+        {
+            Ok(stmts) => {
+                let mut results = Vec::with_capacity(stmts.len());
+                for stmt in stmts {
+                    match self.do_query_statement(stmt, query_ctx.clone()).await {
+                        Ok(output) => results.push(Ok(output)),
+                        Err(e) => {
+                            results.push(Err(e));
+                            break;
+                        }
+                    }
+                }
+                results
+            }
+            Err(e) => {
+                vec![Err(e)]
+            }
         }
+    }
 
-        Ok(results)
+    async fn do_statement_query(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.do_query_statement(stmt, query_ctx).await
     }
 }
 
@@ -708,8 +696,9 @@ mod tests {
                         ) engine=mito with(regions=1);"#;
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
+            .remove(0)
             .unwrap();
-        match output[0] {
+        match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
             _ => unreachable!(),
         }
@@ -721,8 +710,9 @@ mod tests {
                                 "#;
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
+            .remove(0)
             .unwrap();
-        match output[0] {
+        match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 3),
             _ => unreachable!(),
         }
@@ -730,8 +720,8 @@ mod tests {
         let sql = "select * from demo";
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
-            .unwrap()
-            .remove(0);
+            .remove(0)
+            .unwrap();
         match output {
             Output::Stream(stream) => {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
@@ -754,8 +744,8 @@ mod tests {
         let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
-            .unwrap()
-            .remove(0);
+            .remove(0)
+            .unwrap();
         match output {
             Output::Stream(stream) => {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();

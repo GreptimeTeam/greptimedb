@@ -232,55 +232,52 @@ impl JsonResponse {
     }
 
     /// Create a json response from query result
-    async fn from_output(output: Result<Vec<Output>>) -> Self {
-        match output {
-            Ok(outputs) => {
-                let mut results = Vec::with_capacity(outputs.len());
-
-                for out in outputs {
-                    match out {
-                        Output::AffectedRows(rows) => {
-                            results.push(JsonOutput::AffectedRows(rows));
-                        }
-                        Output::Stream(stream) => {
-                            // TODO(sunng87): streaming response
-                            match util::collect(stream).await {
-                                Ok(rows) => match HttpRecordsOutput::try_from(rows) {
-                                    Ok(rows) => {
-                                        results.push(JsonOutput::Records(rows));
-                                    }
-                                    Err(err) => {
-                                        return Self::with_error(err, StatusCode::Internal);
-                                    }
-                                },
-
-                                Err(e) => {
-                                    return Self::with_error(
-                                        format!("Recordbatch error: {}", e),
-                                        e.status_code(),
-                                    );
-                                }
+    async fn from_output(outputs: Vec<Result<Output>>) -> Self {
+        // TOOD(sunng87): this api response structure cannot represent error
+        // well. It hides sucessful execution results from error response
+        let mut results = Vec::with_capacity(outputs.len());
+        for out in outputs {
+            match out {
+                Ok(Output::AffectedRows(rows)) => {
+                    results.push(JsonOutput::AffectedRows(rows));
+                }
+                Ok(Output::Stream(stream)) => {
+                    // TODO(sunng87): streaming response
+                    match util::collect(stream).await {
+                        Ok(rows) => match HttpRecordsOutput::try_from(rows) {
+                            Ok(rows) => {
+                                results.push(JsonOutput::Records(rows));
                             }
-                        }
-                        Output::RecordBatches(rbs) => {
-                            match HttpRecordsOutput::try_from(rbs.take()) {
-                                Ok(rows) => {
-                                    results.push(JsonOutput::Records(rows));
-                                }
-                                Err(err) => {
-                                    return Self::with_error(err, StatusCode::Internal);
-                                }
+                            Err(err) => {
+                                return Self::with_error(err, StatusCode::Internal);
                             }
+                        },
+
+                        Err(e) => {
+                            return Self::with_error(
+                                format!("Recordbatch error: {}", e),
+                                e.status_code(),
+                            );
                         }
                     }
                 }
-
-                Self::with_output(Some(results))
-            }
-            Err(e) => {
-                Self::with_error(format!("Query engine output error: {}", e), e.status_code())
+                Ok(Output::RecordBatches(rbs)) => match HttpRecordsOutput::try_from(rbs.take()) {
+                    Ok(rows) => {
+                        results.push(JsonOutput::Records(rows));
+                    }
+                    Err(err) => {
+                        return Self::with_error(err, StatusCode::Internal);
+                    }
+                },
+                Err(e) => {
+                    return Self::with_error(
+                        format!("Query engine output error: {}", e),
+                        e.status_code(),
+                    );
+                }
             }
         }
+        Self::with_output(Some(results))
     }
 
     pub fn code(&self) -> u32 {
@@ -546,7 +543,15 @@ mod test {
 
     #[async_trait]
     impl SqlQueryHandler for DummyInstance {
-        async fn do_query(&self, _: &str, _: QueryContextRef) -> Result<Vec<Output>> {
+        async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_statement_query(
+            &self,
+            _stmt: sql::statements::statement::Statement,
+            _query_ctx: QueryContextRef,
+        ) -> Result<Output> {
             unimplemented!()
         }
     }
@@ -610,7 +615,7 @@ mod test {
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch]).unwrap();
 
         let json_resp =
-            JsonResponse::from_output(Ok(vec![Output::RecordBatches(recordbatches)])).await;
+            JsonResponse::from_output(vec![Ok(Output::RecordBatches(recordbatches))]).await;
 
         let json_output = &json_resp.output.unwrap()[0];
         if let JsonOutput::Records(r) = json_output {

@@ -46,7 +46,15 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, _: &str, _: QueryContextRef) -> Result<Vec<Output>> {
+    async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+        unimplemented!()
+    }
+
+    async fn do_statement_query(
+        &self,
+        _stmt: sql::statements::statement::Statement,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         unimplemented!()
     }
 }

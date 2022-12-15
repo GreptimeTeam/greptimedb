@@ -386,10 +386,8 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to execute statement: {}", source))]
+    #[snafu(display("Failed to execute source: {}", source))]
     ExecuteStatement {
-        // TODO(sunng87): statement is moved and I could not find a way to
-        // included any form of it in this error
         #[snafu(backtrace)]
         source: query::error::Error,
     },

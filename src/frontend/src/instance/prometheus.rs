@@ -27,9 +27,9 @@ use servers::prometheus::{self, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use servers::Mode;
 use session::context::QueryContext;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::instance::Instance;
+use crate::instance::{parse_stmt, Instance};
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
 
@@ -94,17 +94,26 @@ impl Instance {
             );
 
             let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
-            let output = self
-                .sql_handler
-                .do_query(&sql, query_ctx)
-                .await
-                .map(|mut v| v.remove(0));
+
+            let mut stmts = parse_stmt(&sql)
+                .map_err(BoxedError::new)
+                .context(error::ExecuteQuerySnafu { query: &sql })?;
+
+            ensure!(
+                stmts.len() == 1,
+                error::InvalidQuerySnafu {
+                    reason: "The sql has multiple statements".to_string()
+                }
+            );
+            let stmt = stmts.remove(0);
+
+            let output = self.sql_handler.do_statement_query(stmt, query_ctx).await;
 
             let object_result = to_object_result(output)
                 .await
                 .try_into()
                 .map_err(BoxedError::new)
-                .context(error::ExecuteQuerySnafu { query: sql })?;
+                .context(error::ExecuteQuerySnafu { query: &sql })?;
 
             results.push((table_name, object_result));
         }

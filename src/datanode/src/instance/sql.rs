@@ -33,12 +33,11 @@ use crate::metric;
 use crate::sql::SqlRequest;
 
 impl Instance {
-    pub async fn execute_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
-        let stmt = self
-            .query_engine
-            .sql_to_statement(sql)
-            .context(ExecuteSqlSnafu)?;
-
+    pub async fn execute_stmt(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {
                 let logical_plan = self
@@ -153,6 +152,14 @@ impl Instance {
             }
         }
     }
+
+    pub async fn execute_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
+        let stmt = self
+            .query_engine
+            .sql_to_statement(sql)
+            .context(ExecuteSqlSnafu)?;
+        self.execute_stmt(stmt, query_ctx).await
+    }
 }
 
 // TODO(LFC): Refactor consideration: move this function to some helper mod,
@@ -193,17 +200,33 @@ impl SqlQueryHandler for Instance {
         &self,
         query: &str,
         query_ctx: QueryContextRef,
-    ) -> servers::error::Result<Vec<Output>> {
+    ) -> Vec<servers::error::Result<Output>> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
         // we assume sql string has only 1 statement in datanode
-        self.execute_sql(query, query_ctx)
+        let result = self
+            .execute_sql(query, query_ctx)
             .await
-            .map(|output| vec![output])
             .map_err(|e| {
                 error!(e; "Instance failed to execute sql");
                 BoxedError::new(e)
             })
-            .context(servers::error::ExecuteQuerySnafu { query })
+            .context(servers::error::ExecuteQuerySnafu { query });
+        vec![result]
+    }
+
+    async fn do_statement_query(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> servers::error::Result<Output> {
+        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
+        self.execute_stmt(stmt, query_ctx)
+            .await
+            .map_err(|e| {
+                error!(e; "Instance failed to execute sql");
+                BoxedError::new(e)
+            })
+            .context(servers::error::ExecuteStatementSnafu)
     }
 }
 
