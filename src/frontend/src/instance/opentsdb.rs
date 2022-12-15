@@ -70,9 +70,9 @@ mod tests {
     use super::*;
     use crate::tests;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_exec() {
-        let instance = tests::create_frontend_instance().await;
+        let (instance, _guard) = tests::create_frontend_instance("test_exec").await;
         instance
             .exec(
                 &DataPoint::try_create(
@@ -88,9 +88,10 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_insert_opentsdb_metric() {
-        let instance = tests::create_frontend_instance().await;
+        let (instance, _guard) =
+            tests::create_frontend_instance("test_insert_opentsdb_metric").await;
 
         let data_point1 = DataPoint::new(
             "my_metric_1".to_string(),
@@ -124,7 +125,10 @@ mod tests {
         assert!(result.is_ok());
 
         let output = instance
-            .do_query("select * from my_metric_1", Arc::new(QueryContext::new()))
+            .do_query(
+                "select * from my_metric_1 order by greptime_timestamp",
+                Arc::new(QueryContext::new()),
+            )
             .await
             .unwrap();
         match output {

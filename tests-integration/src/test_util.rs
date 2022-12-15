@@ -214,7 +214,6 @@ pub async fn create_test_table(
 
 async fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
-    frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
     frontend_instance.set_script_handler(datanode_instance);
     frontend_instance
 }
@@ -243,7 +242,7 @@ pub async fn setup_test_app_with_frontend(
     let mut frontend = build_frontend_instance(instance.clone()).await;
     instance.start().await.unwrap();
     create_test_table(
-        frontend.catalog_manager().as_ref().unwrap(),
+        frontend.catalog_manager(),
         instance.sql_handler(),
         ConcreteDataType::timestamp_millis_datatype(),
     )
@@ -276,9 +275,7 @@ pub async fn setup_grpc_server(
 
     let fe_grpc_addr = format!("127.0.0.1:{}", get_port());
 
-    let mut fe_instance = frontend::instance::Instance::new_standalone(instance.clone());
-    fe_instance.set_catalog_manager(instance.catalog_manager().clone());
-
+    let fe_instance = frontend::instance::Instance::new_standalone(instance.clone());
     let fe_instance_ref = Arc::new(fe_instance);
     let fe_grpc_server = Arc::new(GrpcServer::new(
         fe_instance_ref.clone(),

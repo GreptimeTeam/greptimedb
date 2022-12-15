@@ -56,13 +56,13 @@ use sql::parser::ParserContext;
 use sql::statements::create::Partitions;
 use sql::statements::insert::Insert;
 use sql::statements::statement::Statement;
+use table::TableRef;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, AlterTableOnInsertionSnafu, CatalogNotFoundSnafu, CatalogSnafu, CreateDatabaseSnafu,
-    CreateTableSnafu, FindNewColumnsOnInsertionSnafu, InsertSnafu, MissingMetasrvOptsSnafu, Result,
-    SchemaNotFoundSnafu,
+    self, AlterTableOnInsertionSnafu, CatalogSnafu, CreateDatabaseSnafu, CreateTableSnafu,
+    FindNewColumnsOnInsertionSnafu, InsertSnafu, MissingMetasrvOptsSnafu, Result,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
@@ -90,8 +90,7 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 
 #[derive(Clone)]
 pub struct Instance {
-    /// catalog manager is None in standalone mode, datanode will keep their own
-    catalog_manager: Option<CatalogManagerRef>,
+    catalog_manager: CatalogManagerRef,
     /// Script handler is None in distributed mode, only works on standalone mode.
     script_handler: Option<ScriptHandlerRef>,
     create_expr_factory: CreateExprFactoryRef,
@@ -128,7 +127,7 @@ impl Instance {
         let dist_instance_ref = Arc::new(dist_instance.clone());
 
         Ok(Instance {
-            catalog_manager: Some(catalog_manager),
+            catalog_manager,
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             mode: Mode::Distributed,
@@ -171,7 +170,7 @@ impl Instance {
 
     pub fn new_standalone(dn_instance: DnInstanceRef) -> Self {
         Instance {
-            catalog_manager: None,
+            catalog_manager: dn_instance.catalog_manager().clone(),
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             mode: Mode::Standalone,
@@ -182,16 +181,8 @@ impl Instance {
         }
     }
 
-    pub fn catalog_manager(&self) -> &Option<CatalogManagerRef> {
+    pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
-    }
-
-    pub fn set_catalog_manager(&mut self, catalog_manager: CatalogManagerRef) {
-        debug_assert!(
-            self.catalog_manager.is_none(),
-            "Catalog manager can be set only once!"
-        );
-        self.catalog_manager = Some(catalog_manager);
     }
 
     pub fn set_script_handler(&mut self, handler: ScriptHandlerRef) {
@@ -293,21 +284,7 @@ impl Instance {
         table_name: &str,
         columns: &[Column],
     ) -> Result<()> {
-        match self
-            .catalog_manager
-            .as_ref()
-            .expect("catalog manager cannot be None")
-            .catalog(catalog_name)
-            .context(CatalogSnafu)?
-            .context(CatalogNotFoundSnafu { catalog_name })?
-            .schema(schema_name)
-            .context(CatalogSnafu)?
-            .context(SchemaNotFoundSnafu {
-                schema_info: schema_name,
-            })?
-            .table(table_name)
-            .context(CatalogSnafu)?
-        {
+        match self.find_table(catalog_name, schema_name, table_name)? {
             None => {
                 info!(
                     "Table {}.{}.{} does not exist, try create table",
@@ -403,8 +380,6 @@ impl Instance {
 
     fn get_catalog(&self, catalog_name: &str) -> Result<CatalogProviderRef> {
         self.catalog_manager
-            .as_ref()
-            .context(error::CatalogManagerSnafu)?
             .catalog(catalog_name)
             .context(error::CatalogSnafu)?
             .context(error::CatalogNotFoundSnafu { catalog_name })
@@ -417,6 +392,12 @@ impl Instance {
             .context(error::SchemaNotFoundSnafu {
                 schema_info: schema_name,
             })
+    }
+
+    fn find_table(&self, catalog: &str, schema: &str, table: &str) -> Result<Option<TableRef>> {
+        self.catalog_manager
+            .table(catalog, schema, table)
+            .context(CatalogSnafu)
     }
 
     async fn sql_dist_insert(&self, insert: Box<Insert>) -> Result<usize> {
@@ -458,23 +439,17 @@ impl Instance {
     }
 
     fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
-        let catalog_manager = &self.catalog_manager;
-        if let Some(catalog_manager) = catalog_manager {
-            ensure!(
-                catalog_manager
-                    .schema(DEFAULT_CATALOG_NAME, &db)
-                    .context(error::CatalogSnafu)?
-                    .is_some(),
-                error::SchemaNotFoundSnafu { schema_info: &db }
-            );
+        ensure!(
+            self.catalog_manager
+                .schema(DEFAULT_CATALOG_NAME, &db)
+                .context(error::CatalogSnafu)?
+                .is_some(),
+            error::SchemaNotFoundSnafu { schema_info: &db }
+        );
 
-            query_ctx.set_current_schema(&db);
+        query_ctx.set_current_schema(&db);
 
-            Ok(Output::RecordBatches(RecordBatches::empty()))
-        } else {
-            // TODO(LFC): Handle "use" stmt here.
-            unimplemented!()
-        }
+        Ok(Output::RecordBatches(RecordBatches::empty()))
     }
 }
 
@@ -679,11 +654,11 @@ mod tests {
     use super::*;
     use crate::tests;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_execute_sql() {
         let query_ctx = Arc::new(QueryContext::new());
 
-        let instance = tests::create_frontend_instance().await;
+        let (instance, _guard) = tests::create_frontend_instance("test_execute_sql").await;
 
         let sql = r#"CREATE TABLE demo(
                             host STRING,
@@ -761,9 +736,9 @@ mod tests {
         };
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_execute_grpc() {
-        let instance = tests::create_frontend_instance().await;
+        let (instance, _guard) = tests::create_frontend_instance("test_execute_grpc").await;
 
         // testing data:
         let expected_host_col = Column {

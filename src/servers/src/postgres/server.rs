@@ -19,6 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
+use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use pgwire::tokio::process_socket;
 use tokio;
@@ -79,6 +80,11 @@ impl PostgresServer {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
+                        match io_stream.peer_addr() {
+                            Ok(addr) => debug!("PostgreSQL client coming from {}", addr),
+                            Err(e) => warn!("Failed to get PostgreSQL client addr, err: {}", e),
+                        }
+
                         io_runtime.spawn(process_socket(
                             io_stream,
                             tls_acceptor.clone(),
@@ -102,6 +108,7 @@ impl Server for PostgresServer {
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let (stream, addr) = self.base_server.bind(listening).await?;
 
+        debug!("Starting PostgreSQL with TLS option: {:?}", self.tls);
         let tls_acceptor = self
             .tls
             .setup()?

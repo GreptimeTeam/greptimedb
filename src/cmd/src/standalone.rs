@@ -193,7 +193,6 @@ async fn build_frontend(
     datanode_instance: InstanceRef,
 ) -> Result<Frontend<FeInstance>> {
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
-    frontend_instance.set_catalog_manager(datanode_instance.catalog_manager().clone());
     frontend_instance.set_script_handler(datanode_instance);
     Ok(Frontend::new(fe_opts, frontend_instance, plugins))
 }

@@ -24,7 +24,7 @@ use query::QueryEngineFactory;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::metadata::TableId;
-use table::table::{TableIdProvider, TableIdProviderRef};
+use table::table::TableIdProvider;
 
 use crate::datanode::DatanodeOptions;
 use crate::error::Result;
@@ -34,57 +34,6 @@ use crate::script::ScriptExecutor;
 use crate::sql::SqlHandler;
 
 impl Instance {
-    // This method is used in other crate's testing codes, so move it out of "cfg(test)".
-    // TODO(LFC): Delete it when callers no longer need it.
-    pub async fn new_mock() -> Result<Self> {
-        use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
-        let mock_info = meta_srv::mocks::mock_with_memstore().await;
-        let meta_client = Arc::new(mock_meta_client(mock_info, 0).await);
-        let (dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
-
-        let logstore = Arc::new(create_local_file_log_store(dir.path().to_str().unwrap()).await?);
-        let mock_engine = Arc::new(MockMitoEngine::new(
-            TableEngineConfig::default(),
-            MockEngine::default(),
-            object_store,
-        ));
-
-        let catalog_manager = Arc::new(
-            catalog::local::manager::LocalCatalogManager::try_new(mock_engine.clone())
-                .await
-                .unwrap(),
-        );
-
-        let factory = QueryEngineFactory::new(catalog_manager.clone());
-        let query_engine = factory.query_engine();
-
-        let sql_handler = SqlHandler::new(
-            mock_engine.clone(),
-            catalog_manager.clone(),
-            query_engine.clone(),
-        );
-        let script_executor = ScriptExecutor::new(catalog_manager.clone(), query_engine.clone())
-            .await
-            .unwrap();
-
-        let heartbeat_task = Some(HeartbeatTask::new(
-            0,
-            "127.0.0.1:3302".to_string(),
-            meta_client,
-        ));
-
-        let table_id_provider = Some(catalog_manager.clone() as TableIdProviderRef);
-        Ok(Self {
-            query_engine,
-            sql_handler,
-            catalog_manager,
-            script_executor,
-            heartbeat_task,
-            table_id_provider,
-            logstore,
-        })
-    }
-
     pub async fn with_mock_meta_client(opts: &DatanodeOptions) -> Result<Self> {
         let mock_info = meta_srv::mocks::mock_with_memstore().await;
         Self::with_mock_meta_server(opts, mock_info).await

@@ -182,10 +182,11 @@ mod tests {
     use super::*;
     use crate::tests;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_prometheus_remote_write_and_read() {
         common_telemetry::init_default_ut_logging();
-        let instance = tests::create_frontend_instance().await;
+        let (instance, _guard) =
+            tests::create_frontend_instance("test_prometheus_remote_write_and_read").await;
 
         let write_request = WriteRequest {
             timeseries: prometheus::mock_timeseries(),
