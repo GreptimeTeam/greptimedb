@@ -609,7 +609,7 @@ mod tests {
     pub fn test_column_def_to_schema() {
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: DataType::Double,
+            data_type: SqlDataType::Double,
             collation: None,
             options: vec![],
         };
@@ -636,7 +636,7 @@ mod tests {
 
         let column_def = ColumnDef {
             name: "col2".into(),
-            data_type: DataType::String,
+            data_type: SqlDataType::String,
             collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
