@@ -242,10 +242,11 @@ fn parse_column_default_constraint(
 // a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
 pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Result<ColumnSchema> {
-    let is_nullable = column_def
+    let is_nullable = !column_def
         .options
         .iter()
-        .any(|o| matches!(o.option, ColumnOption::Null));
+        .any(|o| matches!(o.option, ColumnOption::NotNull))
+        && !is_time_index;
 
     let name = column_def.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&column_def.data_type)?;
@@ -602,5 +603,52 @@ mod tests {
 
         let grpc_column_def = sql_column_def_to_grpc_column_def(column_def).unwrap();
         assert!(!grpc_column_def.is_nullable);
+    }
+
+    #[test]
+    pub fn test_column_def_to_schema() {
+        let column_def = ColumnDef {
+            name: "col".into(),
+            data_type: DataType::Double,
+            collation: None,
+            options: vec![],
+        };
+
+        let column_schema = column_def_to_schema(&column_def, false).unwrap();
+
+        assert_eq!("col", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            column_schema.data_type
+        );
+        assert!(column_schema.is_nullable());
+        assert!(!column_schema.is_time_index());
+
+        let column_schema = column_def_to_schema(&column_def, true).unwrap();
+
+        assert_eq!("col", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            column_schema.data_type
+        );
+        assert!(!column_schema.is_nullable());
+        assert!(column_schema.is_time_index());
+
+        let column_def = ColumnDef {
+            name: "col2".into(),
+            data_type: DataType::String,
+            collation: None,
+            options: vec![ColumnOptionDef {
+                name: None,
+                option: ColumnOption::NotNull,
+            }],
+        };
+
+        let column_schema = column_def_to_schema(&column_def, false).unwrap();
+
+        assert_eq!("col2", column_schema.name);
+        assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
+        assert!(!column_schema.is_nullable());
+        assert!(!column_schema.is_time_index());
     }
 }

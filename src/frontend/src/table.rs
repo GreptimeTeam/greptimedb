@@ -354,7 +354,7 @@ impl DistTable {
         Ok(partition_rule)
     }
 
-    /// Define a `alter_by_expr` instead of impl [`Table::alter`] to avoid redundant conversion between  
+    /// Define a `alter_by_expr` instead of impl [`Table::alter`] to avoid redundant conversion between
     /// [`table::requests::AlterTableRequest`] and [`AlterExpr`].
     pub(crate) async fn alter_by_expr(&self, expr: AlterExpr) -> Result<()> {
         let table_routes = self.table_routes.get_route(&self.table_name).await?;
@@ -735,6 +735,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dist_table_scan() {
+        common_telemetry::init_default_ut_logging();
         let table = Arc::new(new_dist_table().await);
         // should scan all regions
         // select a, row_id from numbers
@@ -896,8 +897,8 @@ mod test {
     async fn new_dist_table() -> DistTable {
         let column_schemas = vec![
             ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false),
-            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), false),
-            ColumnSchema::new("row_id", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("row_id", ConcreteDataType::int32_datatype(), true),
         ];
         let schema = Arc::new(Schema::new(column_schemas.clone()));
 
