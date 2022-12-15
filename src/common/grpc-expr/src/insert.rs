@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::{SemanticType, Values};
-use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateExpr};
+use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateTableExpr};
 use common_base::BitVec;
 use common_time::timestamp::Timestamp;
 use common_time::{Date, DateTime};
@@ -45,7 +45,7 @@ fn build_column_def(column_name: &str, datatype: i32, nullable: bool) -> ColumnD
         name: column_name.to_string(),
         datatype,
         is_nullable: nullable,
-        default_constraint: None,
+        default_constraint: vec![],
     }
 }
 
@@ -214,7 +214,7 @@ pub fn build_create_expr_from_insertion(
     table_id: Option<TableId>,
     table_name: &str,
     columns: &[Column],
-) -> Result<CreateExpr> {
+) -> Result<CreateTableExpr> {
     let mut new_columns: HashSet<String> = HashSet::default();
     let mut column_defs = Vec::default();
     let mut primary_key_indices = Vec::default();
@@ -263,7 +263,7 @@ pub fn build_create_expr_from_insertion(
         .map(|idx| columns[*idx].column_name.clone())
         .collect::<Vec<_>>();
 
-    let expr = CreateExpr {
+    let expr = CreateTableExpr {
         catalog_name: Some(catalog_name.to_string()),
         schema_name: Some(schema_name.to_string()),
         table_name: table_name.to_string(),

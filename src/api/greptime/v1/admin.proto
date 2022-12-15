@@ -17,7 +17,7 @@ message AdminResponse {
 message AdminExpr {
   ExprHeader header = 1;
   oneof expr {
-    CreateExpr create = 2;
+    CreateTableExpr create_table = 2;
     AlterExpr alter = 3;
     CreateDatabaseExpr create_database = 4;
     DropTableExpr drop_table = 5;
@@ -31,8 +31,7 @@ message AdminResult {
   }
 }
 
-// TODO(hl): rename to CreateTableExpr
-message CreateExpr {
+message CreateTableExpr {
   optional string catalog_name = 1;
   optional string schema_name = 2;
   string table_name = 3;

@@ -15,7 +15,7 @@ use api::v1::alter_expr::Kind;
 use api::v1::column::SemanticType;
 use api::v1::{
     admin_result, column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-    CreateExpr, InsertExpr, MutateResult,
+    CreateTableExpr, InsertExpr, MutateResult,
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
@@ -151,7 +151,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         name: "test_column".to_string(),
         datatype: ColumnDataType::Int64.into(),
         is_nullable: true,
-        default_constraint: None,
+        default_constraint: vec![],
     };
     let kind = Kind::AddColumns(AddColumns {
         add_columns: vec![AddColumn {
@@ -222,34 +222,34 @@ async fn insert_and_assert(db: &Database) {
     }
 }
 
-fn testing_create_expr() -> CreateExpr {
+fn testing_create_expr() -> CreateTableExpr {
     let column_defs = vec![
         ColumnDef {
             name: "host".to_string(),
             datatype: ColumnDataType::String as i32,
             is_nullable: false,
-            default_constraint: None,
+            default_constraint: vec![],
         },
         ColumnDef {
             name: "cpu".to_string(),
             datatype: ColumnDataType::Float64 as i32,
             is_nullable: true,
-            default_constraint: None,
+            default_constraint: vec![],
         },
         ColumnDef {
             name: "memory".to_string(),
             datatype: ColumnDataType::Float64 as i32,
             is_nullable: true,
-            default_constraint: None,
+            default_constraint: vec![],
         },
         ColumnDef {
             name: "ts".to_string(),
             datatype: ColumnDataType::TimestampMillisecond as i32, // timestamp
             is_nullable: true,
-            default_constraint: None,
+            default_constraint: vec![],
         },
     ];
-    CreateExpr {
+    CreateTableExpr {
         catalog_name: None,
         schema_name: None,
         table_name: "demo".to_string(),

@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::alter_expr::Kind;
-use api::v1::{AlterExpr, CreateExpr, DropColumns};
+use api::v1::{AlterExpr, CreateTableExpr, DropColumns};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -81,7 +81,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
     }
 }
 
-pub fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
+pub fn create_table_schema(expr: &CreateTableExpr) -> Result<SchemaRef> {
     let column_schemas = expr
         .column_defs
         .iter()
@@ -119,7 +119,10 @@ pub fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
     ))
 }
 
-pub fn create_expr_to_request(table_id: TableId, expr: CreateExpr) -> Result<CreateTableRequest> {
+pub fn create_expr_to_request(
+    table_id: TableId,
+    expr: CreateTableExpr,
+) -> Result<CreateTableRequest> {
     let schema = create_table_schema(&expr)?;
     let primary_key_indices = expr
         .primary_keys
@@ -181,7 +184,7 @@ mod tests {
                         name: "mem_usage".to_string(),
                         datatype: ColumnDataType::Float64 as i32,
                         is_nullable: false,
-                        default_constraint: None,
+                        default_constraint: vec![],
                     }),
                     is_key: false,
                 }],

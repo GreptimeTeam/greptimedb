@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{ColumnDataType, ColumnDef, CreateExpr};
+use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr};
 use client::admin::Admin;
 use client::{Client, Database};
 use prost_09::Message;
@@ -33,7 +33,7 @@ fn main() {
 async fn run() {
     let client = Client::with_urls(vec!["127.0.0.1:3001"]);
 
-    let create_table_expr = CreateExpr {
+    let create_table_expr = CreateTableExpr {
         catalog_name: Some("greptime".to_string()),
         schema_name: Some("public".to_string()),
         table_name: "test_logical_dist_exec".to_string(),
@@ -43,19 +43,19 @@ async fn run() {
                 name: "timestamp".to_string(),
                 datatype: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "key".to_string(),
                 datatype: ColumnDataType::Uint64 as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "value".to_string(),
                 datatype: ColumnDataType::Uint64 as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
         ],
         time_index: "timestamp".to_string(),

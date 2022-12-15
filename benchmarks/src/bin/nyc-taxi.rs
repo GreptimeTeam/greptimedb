@@ -28,7 +28,7 @@ use arrow::record_batch::RecordBatch;
 use clap::Parser;
 use client::admin::Admin;
 use client::api::v1::column::Values;
-use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateExpr, InsertExpr};
+use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertExpr};
 use client::{Client, Database, Select};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -219,8 +219,8 @@ fn build_values(column: &ArrayRef) -> Values {
     }
 }
 
-fn create_table_expr() -> CreateExpr {
-    CreateExpr {
+fn create_table_expr() -> CreateTableExpr {
+    CreateTableExpr {
         catalog_name: Some(CATALOG_NAME.to_string()),
         schema_name: Some(SCHEMA_NAME.to_string()),
         table_name: TABLE_NAME.to_string(),
@@ -230,115 +230,115 @@ fn create_table_expr() -> CreateExpr {
                 name: "VendorID".to_string(),
                 datatype: ColumnDataType::Int64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "tpep_pickup_datetime".to_string(),
                 datatype: ColumnDataType::Int64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "tpep_dropoff_datetime".to_string(),
                 datatype: ColumnDataType::Int64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "passenger_count".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "trip_distance".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "RatecodeID".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "store_and_fwd_flag".to_string(),
                 datatype: ColumnDataType::String as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "PULocationID".to_string(),
                 datatype: ColumnDataType::Int64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "DOLocationID".to_string(),
                 datatype: ColumnDataType::Int64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "payment_type".to_string(),
                 datatype: ColumnDataType::Int64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "fare_amount".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "extra".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "mta_tax".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "tip_amount".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "tolls_amount".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "improvement_surcharge".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "total_amount".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "congestion_surcharge".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "airport_fee".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
         ],
         time_index: "tpep_pickup_datetime".to_string(),

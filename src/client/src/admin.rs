@@ -34,13 +34,13 @@ impl Admin {
         }
     }
 
-    pub async fn create(&self, expr: CreateExpr) -> Result<AdminResult> {
+    pub async fn create(&self, expr: CreateTableExpr) -> Result<AdminResult> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
         };
         let expr = AdminExpr {
             header: Some(header),
-            expr: Some(admin_expr::Expr::Create(expr)),
+            expr: Some(admin_expr::Expr::CreateTable(expr)),
         };
         self.do_request(expr).await
     }

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{Column, ColumnDataType, CreateExpr};
+use api::v1::{Column, ColumnDataType, CreateTableExpr};
 use datatypes::schema::ColumnSchema;
 use snafu::{ensure, ResultExt};
 use sql::ast::{ColumnDef, TableConstraint};
@@ -32,7 +32,7 @@ pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
 
 #[async_trait::async_trait]
 pub trait CreateExprFactory {
-    async fn create_expr_by_stmt(&self, stmt: &CreateTable) -> Result<CreateExpr>;
+    async fn create_expr_by_stmt(&self, stmt: &CreateTable) -> Result<CreateTableExpr>;
 
     async fn create_expr_by_columns(
         &self,
@@ -40,7 +40,7 @@ pub trait CreateExprFactory {
         schema_name: &str,
         table_name: &str,
         columns: &[Column],
-    ) -> crate::error::Result<CreateExpr>;
+    ) -> crate::error::Result<CreateTableExpr>;
 }
 
 #[derive(Debug)]
@@ -48,7 +48,7 @@ pub struct DefaultCreateExprFactory;
 
 #[async_trait::async_trait]
 impl CreateExprFactory for DefaultCreateExprFactory {
-    async fn create_expr_by_stmt(&self, stmt: &CreateTable) -> Result<CreateExpr> {
+    async fn create_expr_by_stmt(&self, stmt: &CreateTable) -> Result<CreateTableExpr> {
         create_to_expr(None, vec![0], stmt)
     }
 
@@ -58,7 +58,7 @@ impl CreateExprFactory for DefaultCreateExprFactory {
         schema_name: &str,
         table_name: &str,
         columns: &[Column],
-    ) -> Result<CreateExpr> {
+    ) -> Result<CreateTableExpr> {
         let table_id = None;
         let create_expr = common_grpc_expr::build_create_expr_from_insertion(
             catalog_name,
@@ -78,12 +78,12 @@ fn create_to_expr(
     table_id: Option<u32>,
     region_ids: Vec<u32>,
     create: &CreateTable,
-) -> Result<CreateExpr> {
+) -> Result<CreateTableExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(&create.name).context(ParseSqlSnafu)?;
 
     let time_index = find_time_index(&create.constraints)?;
-    let expr = CreateExpr {
+    let expr = CreateTableExpr {
         catalog_name: Some(catalog_name),
         schema_name: Some(schema_name),
         table_name,
@@ -171,12 +171,14 @@ fn columns_to_expr(
                 datatype: datatype as i32,
                 is_nullable: schema.is_nullable(),
                 default_constraint: match schema.default_constraint() {
-                    None => None,
-                    Some(v) => Some(v.clone().try_into().context(
-                        ConvertColumnDefaultConstraintSnafu {
-                            column_name: &schema.name,
-                        },
-                    )?),
+                    None => vec![],
+                    Some(v) => {
+                        v.clone()
+                            .try_into()
+                            .context(ConvertColumnDefaultConstraintSnafu {
+                                column_name: &schema.name,
+                            })?
+                    }
                 },
             })
         })

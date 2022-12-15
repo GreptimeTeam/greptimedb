@@ -18,7 +18,7 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::result::AdminResultBuilder;
 use api::v1::{
-    admin_expr, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr, CreateExpr, ObjectExpr,
+    admin_expr, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr, CreateTableExpr, ObjectExpr,
     ObjectResult,
 };
 use async_trait::async_trait;
@@ -86,7 +86,7 @@ impl DistInstance {
 
     pub(crate) async fn create_table(
         &self,
-        create_table: &mut CreateExpr,
+        create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
     ) -> Result<Output> {
         let response = self.create_table_in_meta(create_table, partitions).await?;
@@ -223,7 +223,7 @@ impl DistInstance {
 
     async fn create_table_in_meta(
         &self,
-        create_table: &CreateExpr,
+        create_table: &CreateTableExpr,
         partitions: Option<Partitions>,
     ) -> Result<RouteResponse> {
         let table_name = TableName::new(
@@ -252,7 +252,7 @@ impl DistInstance {
     // TODO(LFC): Maybe move this to FrontendCatalogManager's "register_table" method?
     async fn put_table_global_meta(
         &self,
-        create_table: &CreateExpr,
+        create_table: &CreateTableExpr,
         table_route: &TableRoute,
     ) -> Result<()> {
         let table_name = &table_route.table.table_name;
@@ -340,7 +340,7 @@ impl GrpcAdminHandler for DistInstance {
 }
 
 fn create_table_global_value(
-    create_table: &CreateExpr,
+    create_table: &CreateTableExpr,
     table_route: &TableRoute,
 ) -> Result<TableGlobalValue> {
     let table_name = &table_route.table.table_name;
@@ -440,7 +440,7 @@ fn create_table_global_value(
 }
 
 fn parse_partitions(
-    create_table: &CreateExpr,
+    create_table: &CreateTableExpr,
     partitions: Option<Partitions>,
 ) -> Result<Vec<MetaPartition>> {
     // If partitions are not defined by user, use the timestamp column (which has to be existed) as
@@ -455,7 +455,7 @@ fn parse_partitions(
 }
 
 fn find_partition_entries(
-    create_table: &CreateExpr,
+    create_table: &CreateTableExpr,
     partitions: &Option<Partitions>,
     partition_columns: &[String],
 ) -> Result<Vec<Vec<PartitionBound>>> {
@@ -505,7 +505,7 @@ fn find_partition_entries(
 }
 
 fn find_partition_columns(
-    create_table: &CreateExpr,
+    create_table: &CreateTableExpr,
     partitions: &Option<Partitions>,
 ) -> Result<Vec<String>> {
     let columns = if let Some(partitions) = partitions {

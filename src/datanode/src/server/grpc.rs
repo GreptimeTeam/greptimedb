@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::result::AdminResultBuilder;
-use api::v1::{AdminResult, AlterExpr, CreateExpr, DropTableExpr};
+use api::v1::{AdminResult, AlterExpr, CreateTableExpr, DropTableExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
@@ -31,7 +31,7 @@ use crate::sql::SqlRequest;
 
 impl Instance {
     /// Handle gRPC create table requests.
-    pub(crate) async fn handle_create(&self, expr: CreateExpr) -> AdminResult {
+    pub(crate) async fn handle_create(&self, expr: CreateTableExpr) -> AdminResult {
         // Respect CreateExpr's table id and region ids if present, or allocate table id
         // from local table id provider and set region id to 0.
         let table_id = if let Some(table_id) = expr.table_id {
@@ -214,7 +214,7 @@ mod tests {
             name: "a".to_string(),
             datatype: 1024,
             is_nullable: true,
-            default_constraint: None,
+            default_constraint: vec![],
         };
         let result = column_def.try_as_column_schema();
         assert!(matches!(
@@ -226,7 +226,7 @@ mod tests {
             name: "a".to_string(),
             datatype: ColumnDataType::String as i32,
             is_nullable: true,
-            default_constraint: None,
+            default_constraint: vec![],
         };
         let column_schema = column_def.try_as_column_schema().unwrap();
         assert_eq!(column_schema.name, "a");
@@ -238,7 +238,7 @@ mod tests {
             name: "a".to_string(),
             datatype: ColumnDataType::String as i32,
             is_nullable: true,
-            default_constraint: Some(default_constraint.clone().try_into().unwrap()),
+            default_constraint: default_constraint.clone().try_into().unwrap(),
         };
         let column_schema = column_def.try_as_column_schema().unwrap();
         assert_eq!(column_schema.name, "a");
@@ -250,34 +250,34 @@ mod tests {
         );
     }
 
-    fn testing_create_expr() -> CreateExpr {
+    fn testing_create_expr() -> CreateTableExpr {
         let column_defs = vec![
             ColumnDef {
                 name: "host".to_string(),
                 datatype: ColumnDataType::String as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "ts".to_string(),
                 datatype: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "cpu".to_string(),
                 datatype: ColumnDataType::Float32 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "memory".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
         ];
-        CreateExpr {
+        CreateTableExpr {
             catalog_name: None,
             schema_name: None,
             table_name: "my-metrics".to_string(),
