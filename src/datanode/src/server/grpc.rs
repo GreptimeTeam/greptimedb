@@ -260,7 +260,7 @@ mod tests {
             },
             ColumnDef {
                 name: "ts".to_string(),
-                datatype: ColumnDataType::TimestampMicrosecond as i32,
+                datatype: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: false,
                 default_constraint: None,
             },
@@ -299,7 +299,8 @@ mod tests {
                 "ts",
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
-            ),
+            )
+            .with_time_index(true),
             ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ];

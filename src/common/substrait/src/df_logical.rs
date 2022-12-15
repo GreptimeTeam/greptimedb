@@ -425,6 +425,10 @@ impl DFLogicalSubstraitConvertor {
         let provider = table_scan
             .source
             .as_any()
+            .downcast_ref::<DefaultTableSource>()
+            .context(UnknownPlanSnafu)?
+            .table_provider
+            .as_any()
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownPlanSnafu)?;
         let table_info = provider.table().table_info();
