@@ -19,7 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
-use common_telemetry::{debug, info, warn};
+use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use pgwire::tokio::process_socket;
 use tokio;
@@ -81,10 +81,8 @@ impl PostgresServer {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
                         match io_stream.peer_addr() {
-                            Ok(addr) => info!("PostgreSQL connection coming from {}", addr),
-                            Err(e) => {
-                                warn!("PostgreSQL connection coming from unknown, err: {}", e)
-                            }
+                            Ok(addr) => debug!("PostgreSQL client coming from {}", addr),
+                            Err(e) => warn!("Failed to get PostgreSQL client addr, err: {}", e),
                         }
 
                         io_runtime.spawn(process_socket(
