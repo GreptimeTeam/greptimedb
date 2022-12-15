@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use anymap::AnyMap;
 use clap::Parser;
 use common_telemetry::info;
@@ -262,12 +260,12 @@ impl TryFrom<StartCommand> for FrontendOptions {
         let tls_option = TlsOption::new(cmd.tls_mode, cmd.tls_cert_path, cmd.tls_key_path);
 
         if let Some(mut mysql_options) = opts.mysql_options {
-            mysql_options.tls = Arc::new(tls_option.clone());
+            mysql_options.tls = tls_option.clone();
             opts.mysql_options = Some(mysql_options);
         }
 
         if let Some(mut postgres_options) = opts.postgres_options {
-            postgres_options.tls = Arc::new(tls_option);
+            postgres_options.tls = tls_option;
             opts.postgres_options = Some(postgres_options);
         }
 

@@ -63,7 +63,6 @@ mod tests {
 
     use common_query::Output;
     use common_recordbatch::RecordBatches;
-    use datafusion::arrow_print;
     use servers::query_handler::SqlQueryHandler;
     use session::context::QueryContext;
 

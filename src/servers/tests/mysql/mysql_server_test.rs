@@ -202,7 +202,7 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     Ok(())
 }
 
-async fn do_test_query_all_datatypes(server_tls: Arc<TlsOption>, client_tls: bool) -> Result<()> {
+async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let TestingData {
         column_schemas,
