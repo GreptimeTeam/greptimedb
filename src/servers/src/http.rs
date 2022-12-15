@@ -233,8 +233,8 @@ impl JsonResponse {
 
     /// Create a json response from query result
     async fn from_output(outputs: Vec<Result<Output>>) -> Self {
-        // TOOD(sunng87): this api response structure cannot represent error
-        // well. It hides sucessful execution results from error response
+        // TODO(sunng87): this api response structure cannot represent error
+        // well. It hides successful execution results from error response
         let mut results = Vec::with_capacity(outputs.len());
         for out in outputs {
             match out {
