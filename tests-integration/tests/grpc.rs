@@ -244,7 +244,7 @@ fn testing_create_expr() -> CreateExpr {
         },
         ColumnDef {
             name: "ts".to_string(),
-            datatype: 15, // timestamp
+            datatype: ColumnDataType::TimestampMillisecond as i32, // timestamp
             is_nullable: true,
             default_constraint: None,
         },
