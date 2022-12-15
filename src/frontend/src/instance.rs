@@ -466,7 +466,7 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 }
 
 impl Instance {
-    async fn do_query_statement(
+    async fn query_statement(
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
@@ -569,7 +569,7 @@ impl SqlQueryHandler for Instance {
             Ok(stmts) => {
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
-                    match self.do_query_statement(stmt, query_ctx.clone()).await {
+                    match self.query_statement(stmt, query_ctx.clone()).await {
                         Ok(output) => results.push(Ok(output)),
                         Err(e) => {
                             results.push(Err(e));
@@ -590,7 +590,7 @@ impl SqlQueryHandler for Instance {
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        self.do_query_statement(stmt, query_ctx).await
+        self.query_statement(stmt, query_ctx).await
     }
 }
 
