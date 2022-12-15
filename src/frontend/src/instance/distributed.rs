@@ -659,11 +659,10 @@ ENGINE=mito",
             match output {
                 Output::RecordBatches(r) => {
                     let expected = r#"+--------------+
-                           | Tables       |
-                           +--------------+
-                           | dist_numbers |
-                           +--------------+
-                    "#;
+| Tables       |
++--------------+
+| dist_numbers |
++--------------+"#;
                     assert_eq!(r.pretty_print().unwrap(), expected);
                 }
                 _ => unreachable!(),

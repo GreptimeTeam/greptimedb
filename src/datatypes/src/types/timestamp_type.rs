@@ -125,6 +125,9 @@ macro_rules! impl_data_type_for_timestamp {
                 fn cast_value_ref(value: ValueRef) -> crate::Result<Option<Self::Wrapper>> {
                     match value {
                         ValueRef::Null => Ok(None),
+                        ValueRef::Int64(v) =>{
+                            Ok(Some([<Timestamp $unit>]::from(v)))
+                        }
                         ValueRef::Timestamp(t) => match t.unit() {
                             TimeUnit::$unit => Ok(Some([<Timestamp $unit>](t))),
                             other => error::CastTypeSnafu {
