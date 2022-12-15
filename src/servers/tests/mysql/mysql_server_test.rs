@@ -23,6 +23,7 @@ use mysql_async::prelude::*;
 use mysql_async::SslOpts;
 use rand::rngs::StdRng;
 use rand::Rng;
+use servers::auth::user_provider::StaticUserProvider;
 use servers::error::Result;
 use servers::mysql::server::MysqlServer;
 use servers::server::Server;
@@ -41,7 +42,15 @@ fn create_mysql_server(table: MemTable, tls: Arc<TlsOption>) -> Result<Box<dyn S
             .build()
             .unwrap(),
     );
-    Ok(MysqlServer::create_server(query_handler, io_runtime, tls))
+
+    let provider = StaticUserProvider::try_from("cmd:greptime=greptime").unwrap();
+
+    Ok(MysqlServer::create_server(
+        query_handler,
+        io_runtime,
+        tls,
+        Some(Arc::new(provider)),
+    ))
 }
 
 #[tokio::test]
@@ -79,10 +88,10 @@ async fn test_shutdown_mysql_server() -> Result<()> {
     let server_port = server_addr.port();
 
     let mut join_handles = vec![];
-    for index in 0..2 {
+    for _ in 0..2 {
         join_handles.push(tokio::spawn(async move {
             for _ in 0..1000 {
-                match create_connection(server_port, index == 1, false).await {
+                match create_connection(server_port, false).await {
                     Ok(mut connection) => {
                         let result: u32 = connection
                             .query_first("SELECT uint32s FROM numbers LIMIT 1")
@@ -119,7 +128,7 @@ async fn test_query_all_datatypes() -> Result<()> {
     let server_tls = Arc::new(TlsOption::default());
     let client_tls = false;
 
-    do_test_query_all_datatypes(server_tls, client_tls, false).await?;
+    do_test_query_all_datatypes(server_tls, client_tls).await?;
     Ok(())
 }
 
@@ -132,7 +141,7 @@ async fn test_server_prefer_secure_client_plain() -> Result<()> {
     });
 
     let client_tls = false;
-    do_test_query_all_datatypes(server_tls, client_tls, false).await?;
+    do_test_query_all_datatypes(server_tls, client_tls).await?;
     Ok(())
 }
 
@@ -145,7 +154,7 @@ async fn test_server_prefer_secure_client_secure() -> Result<()> {
     });
 
     let client_tls = true;
-    do_test_query_all_datatypes(server_tls, client_tls, false).await?;
+    do_test_query_all_datatypes(server_tls, client_tls).await?;
     Ok(())
 }
 
@@ -158,7 +167,7 @@ async fn test_server_require_secure_client_secure() -> Result<()> {
     });
 
     let client_tls = true;
-    do_test_query_all_datatypes(server_tls, client_tls, false).await?;
+    do_test_query_all_datatypes(server_tls, client_tls).await?;
     Ok(())
 }
 
@@ -188,16 +197,12 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = mysql_server.start(listening).await.unwrap();
 
-    let r = create_connection(server_addr.port(), client_tls, false).await;
+    let r = create_connection(server_addr.port(), client_tls).await;
     assert!(r.is_err());
     Ok(())
 }
 
-async fn do_test_query_all_datatypes(
-    server_tls: Arc<TlsOption>,
-    with_pwd: bool,
-    client_tls: bool,
-) -> Result<()> {
+async fn do_test_query_all_datatypes(server_tls: Arc<TlsOption>, client_tls: bool) -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let TestingData {
         column_schemas,
@@ -214,7 +219,7 @@ async fn do_test_query_all_datatypes(
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = mysql_server.start(listening).await.unwrap();
 
-    let mut connection = create_connection(server_addr.port(), client_tls, with_pwd)
+    let mut connection = create_connection(server_addr.port(), client_tls)
         .await
         .unwrap();
 
@@ -252,13 +257,11 @@ async fn test_query_concurrently() -> Result<()> {
     let threads = 4;
     let expect_executed_queries_per_worker = 1000;
     let mut join_handles = vec![];
-    for index in 0..threads {
+    for _ in 0..threads {
         join_handles.push(tokio::spawn(async move {
             let mut rand: StdRng = rand::SeedableRng::from_entropy();
 
-            let mut connection = create_connection(server_port, index % 2 == 0, false)
-                .await
-                .unwrap();
+            let mut connection = create_connection(server_port, false).await.unwrap();
             for _ in 0..expect_executed_queries_per_worker {
                 let expected: u32 = rand.gen_range(0..100);
                 let result: u32 = connection
@@ -273,9 +276,7 @@ async fn test_query_concurrently() -> Result<()> {
 
                 let should_recreate_conn = expected == 1;
                 if should_recreate_conn {
-                    connection = create_connection(server_port, index % 2 == 0, false)
-                        .await
-                        .unwrap();
+                    connection = create_connection(server_port, false).await.unwrap();
                 }
             }
             expect_executed_queries_per_worker
@@ -289,26 +290,20 @@ async fn test_query_concurrently() -> Result<()> {
     Ok(())
 }
 
-async fn create_connection(
-    port: u16,
-    with_pwd: bool,
-    ssl: bool,
-) -> mysql_async::Result<mysql_async::Conn> {
+async fn create_connection(port: u16, ssl: bool) -> mysql_async::Result<mysql_async::Conn> {
     let mut opts = mysql_async::OptsBuilder::default()
         .ip_or_hostname("127.0.0.1")
         .tcp_port(port)
         .prefer_socket(false)
-        .wait_timeout(Some(1000));
+        .wait_timeout(Some(1000))
+        .user(Some("greptime".to_string()))
+        .pass(Some("greptime".to_string()));
 
     if ssl {
         let ssl_opts = SslOpts::default()
             .with_danger_skip_domain_validation(true)
             .with_danger_accept_invalid_certs(true);
         opts = opts.ssl_opts(ssl_opts)
-    }
-
-    if with_pwd {
-        opts = opts.pass(Some("default_pwd".to_string()));
     }
 
     mysql_async::Conn::new(opts).await

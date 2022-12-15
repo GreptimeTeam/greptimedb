@@ -16,4 +16,7 @@ mod auth_handler;
 mod handler;
 mod server;
 
+pub(crate) const METADATA_USER: &str = "user";
+pub(crate) const METADATA_DATABASE: &str = "database";
+
 pub use server::PostgresServer;

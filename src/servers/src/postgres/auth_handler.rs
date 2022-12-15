@@ -23,11 +23,56 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
+use snafu::ResultExt;
 
-struct PgPwdVerifier;
+use crate::auth::{Identity, Password, UserProviderRef};
+use crate::error;
+use crate::error::Result;
+
+struct PgPwdVerifier {
+    user_provider: Option<UserProviderRef>,
+}
+
+#[allow(dead_code)]
+struct LoginInfo {
+    user: Option<String>,
+    database: Option<String>,
+    host: String,
+}
+
+impl LoginInfo {
+    pub fn from_client_info<C>(client: &C) -> LoginInfo
+    where
+        C: ClientInfo,
+    {
+        LoginInfo {
+            user: client.metadata().get(super::METADATA_USER).map(Into::into),
+            database: client
+                .metadata()
+                .get(super::METADATA_DATABASE)
+                .map(Into::into),
+            host: client.socket_addr().ip().to_string(),
+        }
+    }
+}
 
 impl PgPwdVerifier {
-    async fn verify_pwd(&self, _pwd: &str, _meta: HashMap<String, String>) -> PgWireResult<bool> {
+    async fn verify_pwd(&self, password: &str, login: LoginInfo) -> Result<bool> {
+        if let Some(user_provider) = &self.user_provider {
+            let user_name = match login.user {
+                Some(name) => name,
+                None => return Ok(false),
+            };
+
+            // TODO(fys): pass user_info to context
+            let _user_info = user_provider
+                .auth(
+                    Identity::UserId(&user_name, None),
+                    Password::PlainText(password),
+                )
+                .await
+                .context(error::AuthSnafu)?;
+        }
         Ok(true)
     }
 }
@@ -62,16 +107,14 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 pub struct PgAuthStartupHandler {
     verifier: PgPwdVerifier,
     param_provider: GreptimeDBStartupParameters,
-    with_pwd: bool,
     force_tls: bool,
 }
 
 impl PgAuthStartupHandler {
-    pub fn new(with_pwd: bool, force_tls: bool) -> Self {
+    pub fn new(user_provider: Option<UserProviderRef>, force_tls: bool) -> Self {
         PgAuthStartupHandler {
-            verifier: PgPwdVerifier,
+            verifier: PgPwdVerifier { user_provider },
             param_provider: GreptimeDBStartupParameters::new(),
-            with_pwd,
             force_tls,
         }
     }
@@ -106,7 +149,7 @@ impl StartupHandler for PgAuthStartupHandler {
                     return Ok(());
                 }
                 auth::save_startup_parameters_to_metadata(client, startup);
-                if self.with_pwd {
+                if self.verifier.user_provider.is_some() {
                     client.set_state(PgWireConnectionState::AuthenticationInProgress);
                     client
                         .send(PgWireBackendMessage::Authentication(
@@ -118,8 +161,8 @@ impl StartupHandler for PgAuthStartupHandler {
                 }
             }
             PgWireFrontendMessage::Password(ref pwd) => {
-                let meta = client.metadata().clone();
-                if let Ok(true) = self.verifier.verify_pwd(pwd.password(), meta).await {
+                let login_info = LoginInfo::from_client_info(client);
+                if let Ok(true) = self.verifier.verify_pwd(pwd.password(), login_info).await {
                     auth::finish_authentication(client, &self.param_provider).await
                 } else {
                     let error_info = ErrorInfo::new(

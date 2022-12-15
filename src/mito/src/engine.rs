@@ -58,8 +58,8 @@ fn region_id(table_id: TableId, n: u32) -> RegionId {
 }
 
 #[inline]
-fn table_dir(schema_name: &str, table_name: &str, table_id: TableId) -> String {
-    format!("{}/{}_{}/", schema_name, table_name, table_id)
+fn table_dir(schema_name: &str, table_id: TableId) -> String {
+    format!("{}/{}/", schema_name, table_id)
 }
 
 /// [TableEngine] implementation.
@@ -341,7 +341,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             }
         }
 
-        let table_dir = table_dir(schema_name, table_name, table_id);
+        let table_dir = table_dir(schema_name, table_id);
         let opts = CreateOptions {
             parent_dir: table_dir.clone(),
         };
@@ -422,7 +422,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
             let table_id = request.table_id;
             let engine_ctx = StorageEngineContext::default();
-            let table_dir = table_dir(schema_name, table_name, table_id);
+            let table_dir = table_dir(schema_name, table_id);
             let opts = OpenOptions {
                 parent_dir: table_dir.to_string(),
             };
@@ -665,14 +665,8 @@ mod tests {
 
     #[test]
     fn test_table_dir() {
-        assert_eq!(
-            "public/test_table_1024/",
-            table_dir("public", "test_table", 1024)
-        );
-        assert_eq!(
-            "prometheus/demo_1024/",
-            table_dir("prometheus", "demo", 1024)
-        );
+        assert_eq!("public/1024/", table_dir("public", 1024));
+        assert_eq!("prometheus/1024/", table_dir("prometheus", 1024));
     }
 
     #[test]

@@ -245,18 +245,6 @@ pub enum Error {
         source: client::Error,
     },
 
-    #[snafu(display("Failed to alter table, source: {}", source))]
-    AlterTable {
-        #[snafu(backtrace)]
-        source: client::Error,
-    },
-
-    #[snafu(display("Failed to drop table, source: {}", source))]
-    DropTable {
-        #[snafu(backtrace)]
-        source: client::Error,
-    },
-
     #[snafu(display("Failed to insert values to table, source: {}", source))]
     Insert {
         #[snafu(backtrace)]
@@ -399,9 +387,6 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Unsupported expr type: {}", name))]
-    UnsupportedExpr { name: String, backtrace: Backtrace },
-
     #[snafu(display("Failed to do vector computation, source: {}", source))]
     VectorComputation {
         #[snafu(backtrace)]
@@ -463,6 +448,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Failed to invoke GRPC server, source: {}", source))]
+    InvokeGrpcServer {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -482,7 +473,9 @@ impl ErrorExt for Error {
 
             Error::RuntimeResource { source, .. } => source.status_code(),
 
-            Error::StartServer { source, .. } => source.status_code(),
+            Error::StartServer { source, .. } | Error::InvokeGrpcServer { source } => {
+                source.status_code()
+            }
 
             Error::ParseSql { source } => source.status_code(),
 
@@ -512,7 +505,6 @@ impl ErrorExt for Error {
             | Error::FindLeaderPeer { .. }
             | Error::FindRegionPartition { .. }
             | Error::IllegalTableRoutesData { .. }
-            | Error::UnsupportedExpr { .. }
             | Error::BuildDfLogicalPlan { .. } => StatusCode::Internal,
 
             Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
@@ -534,8 +526,6 @@ impl ErrorExt for Error {
             Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
             Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
             Error::CreateTable { source, .. }
-            | Error::AlterTable { source, .. }
-            | Error::DropTable { source }
             | Error::Select { source, .. }
             | Error::CreateDatabase { source, .. }
             | Error::CreateTableOnInsertion { source, .. }

@@ -205,6 +205,13 @@ mod tests {
             ) -> Result<api::v1::meta::DeleteRangeResponse> {
                 unreachable!()
             }
+
+            async fn move_value(
+                &self,
+                _: api::v1::meta::MoveValueRequest,
+            ) -> Result<api::v1::meta::MoveValueResponse> {
+                unreachable!()
+            }
         }
 
         let kv_store = Arc::new(Noop {});

@@ -10,6 +10,7 @@ api = { path = "../api" }
 async-trait = "0.1"
 axum = "0.6"
 axum-macros = "0.3"
+base64 = "0.13"
 bytes = "1.2"
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
@@ -21,8 +22,10 @@ common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
+digest = "0.10"
 futures = "0.3"
 hex = { version = "0.4" }
+http-body = "0.4"
 humantime-serde = "1.1"
 hyper = { version = "0.14", features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
@@ -31,7 +34,7 @@ num_cpus = "1.13"
 once_cell = "1.16"
 openmetrics-parser = "0.4"
 opensrv-mysql = "0.3"
-pgwire = "0.5"
+pgwire = "0.6.1"
 prost = "0.11"
 rand = "0.8"
 regex = "1.6"
@@ -41,8 +44,10 @@ schemars = "0.8"
 serde = "1.0"
 serde_json = "1.0"
 session = { path = "../session" }
+sha1 = "0.10"
 snafu = { version = "0.7", features = ["backtraces"] }
 snap = "1"
+strum = { version = "0.24", features = ["derive"] }
 table = { path = "../table" }
 tokio = { version = "1.20", features = ["full"] }
 tokio-rustls = "0.23"
@@ -64,6 +69,7 @@ rand = "0.8"
 script = { path = "../script", features = ["python"] }
 serde_json = "1.0"
 table = { path = "../table" }
+tempdir = "0.3"
 tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.9"
 tokio-test = "0.4"

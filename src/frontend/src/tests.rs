@@ -12,34 +12,70 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use catalog::remote::MetaKvBackend;
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
 use common_runtime::Builder as RuntimeBuilder;
+use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
 use datanode::instance::Instance as DatanodeInstance;
+use meta_client::client::MetaClientBuilder;
+use meta_client::rpc::Peer;
+use meta_srv::metasrv::MetaSrvOptions;
+use meta_srv::mocks::MockInfo;
+use meta_srv::service::store::kv::KvStoreRef;
+use meta_srv::service::store::memory::MemStore;
 use servers::grpc::GrpcServer;
+use servers::Mode;
+use tempdir::TempDir;
 use tonic::transport::Server;
 use tower::service_fn;
 
+use crate::catalog::FrontendCatalogManager;
+use crate::datanode::DatanodeClients;
+use crate::instance::distributed::DistInstance;
 use crate::instance::Instance;
+use crate::table::route::TableRoutes;
 
-async fn create_datanode_instance() -> Arc<DatanodeInstance> {
-    // TODO(LFC) Use real Mito engine when we can alter its region schema,
-    //   and delete the `new_mock` method.
-    let instance = Arc::new(DatanodeInstance::new_mock().await.unwrap());
-    instance.start().await.unwrap();
-    instance
+/// Guard against the `TempDir`s that used in unit tests.
+/// (The `TempDir` will be deleted once it goes out of scope.)
+pub struct TestGuard {
+    _wal_tmp_dir: TempDir,
+    _data_tmp_dir: TempDir,
 }
 
-pub(crate) async fn create_frontend_instance() -> Arc<Instance> {
-    let datanode_instance: Arc<DatanodeInstance> = create_datanode_instance().await;
-    let dn_catalog_manager = datanode_instance.catalog_manager().clone();
-    let (_, client) = create_datanode_client(datanode_instance).await;
-    Arc::new(Instance::with_client_and_catalog_manager(
-        client,
-        dn_catalog_manager,
-    ))
+pub(crate) async fn create_frontend_instance(test_name: &str) -> (Arc<Instance>, TestGuard) {
+    let (opts, guard) = create_tmp_dir_and_datanode_opts(test_name);
+    let datanode_instance = DatanodeInstance::with_mock_meta_client(&opts)
+        .await
+        .unwrap();
+    datanode_instance.start().await.unwrap();
+
+    let frontend_instance = Instance::new_standalone(Arc::new(datanode_instance));
+    (Arc::new(frontend_instance), guard)
+}
+
+fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
+    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{}", name)).unwrap();
+    let data_tmp_dir = TempDir::new(&format!("gt_data_{}", name)).unwrap();
+    let opts = DatanodeOptions {
+        wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+        storage: ObjectStoreConfig::File {
+            data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+        },
+        mode: Mode::Standalone,
+        ..Default::default()
+    };
+    (
+        opts,
+        TestGuard {
+            _wal_tmp_dir: wal_tmp_dir,
+            _data_tmp_dir: data_tmp_dir,
+        },
+    )
 }
 
 pub(crate) async fn create_datanode_client(
@@ -95,4 +131,92 @@ pub(crate) async fn create_datanode_client(
         addr.to_string(),
         Client::with_manager_and_urls(channel_manager, vec![addr]),
     )
+}
+
+async fn create_dist_datanode_instance(
+    datanode_id: u64,
+    meta_srv: MockInfo,
+) -> Arc<DatanodeInstance> {
+    let current = common_time::util::current_time_millis();
+    let wal_tmp_dir = TempDir::new_in("/tmp", &format!("dist_datanode-wal-{}", current)).unwrap();
+    let data_tmp_dir = TempDir::new_in("/tmp", &format!("dist_datanode-data-{}", current)).unwrap();
+    let opts = DatanodeOptions {
+        node_id: Some(datanode_id),
+        wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+        storage: ObjectStoreConfig::File {
+            data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
+        },
+        ..Default::default()
+    };
+
+    let instance = Arc::new(
+        DatanodeInstance::with_mock_meta_server(&opts, meta_srv)
+            .await
+            .unwrap(),
+    );
+    instance.start().await.unwrap();
+    instance
+}
+
+async fn wait_datanodes_alive(kv_store: KvStoreRef) {
+    let wait = 10;
+    for _ in 0..wait {
+        let datanodes = meta_srv::lease::alive_datanodes(1000, &kv_store, |_, _| true)
+            .await
+            .unwrap();
+        if datanodes.len() >= 4 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await
+    }
+    panic!()
+}
+
+pub(crate) async fn create_dist_instance() -> (DistInstance, HashMap<u64, Arc<DatanodeInstance>>) {
+    let kv_store: KvStoreRef = Arc::new(MemStore::default()) as _;
+    let meta_srv = meta_srv::mocks::mock(MetaSrvOptions::default(), kv_store.clone(), None).await;
+
+    let datanode_clients = Arc::new(DatanodeClients::new());
+
+    let mut datanode_instances = HashMap::new();
+    for datanode_id in 1..=4 {
+        let dn_instance = create_dist_datanode_instance(datanode_id, meta_srv.clone()).await;
+        datanode_instances.insert(datanode_id, dn_instance.clone());
+
+        let (addr, client) = create_datanode_client(dn_instance).await;
+        datanode_clients
+            .insert_client(Peer::new(datanode_id, addr), client)
+            .await;
+    }
+
+    let MockInfo {
+        server_addr,
+        channel_manager,
+    } = meta_srv.clone();
+    let mut meta_client = MetaClientBuilder::new(1000, 0)
+        .enable_router()
+        .enable_store()
+        .channel_manager(channel_manager)
+        .build();
+    meta_client.start(&[&server_addr]).await.unwrap();
+    let meta_client = Arc::new(meta_client);
+
+    let meta_backend = Arc::new(MetaKvBackend {
+        client: meta_client.clone(),
+    });
+    let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
+    let catalog_manager = Arc::new(FrontendCatalogManager::new(
+        meta_backend,
+        table_routes.clone(),
+        datanode_clients.clone(),
+    ));
+
+    wait_datanodes_alive(kv_store).await;
+
+    let dist_instance = DistInstance::new(
+        meta_client.clone(),
+        catalog_manager,
+        datanode_clients.clone(),
+    );
+    (dist_instance, datanode_instances)
 }

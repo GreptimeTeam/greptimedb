@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::print_stdout, clippy::print_stderr)]
-// for debug purpose, also this is already a
-// test module so allow print_stdout shouldn't be a problem?
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
+use common_telemetry::{error, info};
 use console::style;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::{ConcreteDataType, DataType};
@@ -91,6 +89,8 @@ fn create_sample_recordbatch() -> RecordBatch {
 /// and exec/parse (depending on the type of predicate) then decide if result is as expected
 #[test]
 fn run_ron_testcases() {
+    common_telemetry::init_default_ut_logging();
+
     let loc = Path::new("src/python/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
@@ -98,9 +98,9 @@ fn run_ron_testcases() {
     file.read_to_string(&mut buf)
         .expect("Fail to read to string");
     let testcases: Vec<TestCase> = from_ron_string(&buf).expect("Fail to convert to testcases");
-    println!("Read {} testcases from {}", testcases.len(), loc);
+    info!("Read {} testcases from {}", testcases.len(), loc);
     for testcase in testcases {
-        print!(".ron test {}", testcase.name);
+        info!(".ron test {}", testcase.name);
         match testcase.predicate {
             Predicate::ParseIsOk { result } => {
                 let copr = parse_and_compile_copr(&testcase.code);
@@ -110,19 +110,19 @@ fn run_ron_testcases() {
             }
             Predicate::ParseIsErr { reason } => {
                 let copr = parse_and_compile_copr(&testcase.code);
-                if copr.is_ok() {
-                    panic!("Expect to be err, found{copr:#?}");
-                }
+                assert!(copr.is_err(), "Expect to be err, actual {copr:#?}");
+
                 let res = &copr.unwrap_err();
-                println!(
+                error!(
                     "{}",
                     pretty_print_error_in_src(&testcase.code, res, 0, "<embedded>")
                 );
                 let (res, _) = get_error_reason_loc(res);
-                if !res.contains(&reason) {
-                    eprintln!("{}", testcase.code);
-                    panic!("Parse Error, expect \"{reason}\" in \"{res}\", but not found.");
-                }
+                assert!(
+                    res.contains(&reason),
+                    "{} Parse Error, expect \"{reason}\" in \"{res}\", actual not found.",
+                    testcase.code,
+                );
             }
             Predicate::ExecIsOk { fields, columns } => {
                 let rb = create_sample_recordbatch();
@@ -130,58 +130,47 @@ fn run_ron_testcases() {
                 fields
                     .iter()
                     .zip(res.schema.column_schemas())
-                    .map(|(anno, real)| {
-                        if !(anno.datatype.as_ref().unwrap() == &real.data_type.as_arrow_type()
-                            && anno.is_nullable == real.is_nullable())
-                        {
-                            eprintln!("fields expect to be {anno:#?}, found to be {real:#?}.");
-                            panic!()
-                        }
-                    })
-                    .count();
-                columns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, anno)| {
-                        let real = res.column(i);
-                        if !(anno.ty == real.data_type().as_arrow_type() && anno.len == real.len())
-                        {
-                            panic!(
-                                "Unmatch type or length!Expect [{:#?}; {}], found [{:#?}; {}]",
-                                anno.ty,
-                                anno.len,
-                                real.data_type(),
-                                real.len()
-                            );
-                        }
-                    })
-                    .count();
+                    .for_each(|(anno, real)| {
+                        assert!(
+                            anno.datatype.as_ref().unwrap() == &real.data_type.as_arrow_type()
+                                && anno.is_nullable == real.is_nullable(),
+                            "Fields expected to be {anno:#?}, actual {real:#?}"
+                        );
+                    });
+                columns.iter().zip(res.columns()).for_each(|(anno, real)| {
+                    assert!(
+                        anno.ty == real.data_type().as_arrow_type() && anno.len == real.len(),
+                        "Type or length not match! Expect [{:#?}; {}], actual [{:#?}; {}]",
+                        anno.ty,
+                        anno.len,
+                        real.data_type(),
+                        real.len()
+                    );
+                });
             }
             Predicate::ExecIsErr {
                 reason: part_reason,
             } => {
                 let rb = create_sample_recordbatch();
                 let res = coprocessor::exec_coprocessor(&testcase.code, &rb);
+                assert!(res.is_err(), "{:#?}\nExpect Err(...), actual Ok(...)", res);
                 if let Err(res) = res {
-                    println!(
+                    error!(
                         "{}",
                         pretty_print_error_in_src(&testcase.code, &res, 1120, "<embedded>")
                     );
                     let (reason, _) = get_error_reason_loc(&res);
-                    if !reason.contains(&part_reason) {
-                        panic!(
-                            "{}\nExecute error, expect \"{reason}\" in \"{res}\", but not found.",
-                            testcase.code,
-                            reason = style(reason).green(),
-                            res = style(res).red()
-                        );
-                    }
-                } else {
-                    panic!("{:#?}\nExpect Err(...), found Ok(...)", res);
+                    assert!(
+                        reason.contains(&part_reason),
+                        "{}\nExecute error, expect \"{reason}\" in \"{res}\", actual not found.",
+                        testcase.code,
+                        reason = style(reason).green(),
+                        res = style(res).red()
+                    )
                 }
             }
         }
-        println!(" ... {}", style("ok✅").green());
+        info!(" ... {}", style("ok✅").green());
     }
 }
 
@@ -279,7 +268,7 @@ def calc_rvs(open_time, close):
             0,
             "copr.py",
         );
-        println!("{res}");
+        info!("{res}");
     } else if let Ok(res) = ret {
         dbg!(&res);
     } else {
@@ -329,7 +318,7 @@ def a(cpu, mem):
             0,
             "copr.py",
         );
-        println!("{res}");
+        info!("{res}");
     } else if let Ok(res) = ret {
         dbg!(&res);
     } else {

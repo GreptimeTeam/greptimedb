@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 #[derive(Debug, Clone)]
 pub struct LogConfig {
     pub append_buffer_size: usize,
     pub max_log_file_size: usize,
     pub log_file_dir: String,
+    pub gc_interval: Duration,
 }
 
 impl Default for LogConfig {
@@ -27,6 +30,7 @@ impl Default for LogConfig {
             append_buffer_size: 128,
             max_log_file_size: 1024 * 1024 * 1024,
             log_file_dir: "/tmp/greptimedb".to_string(),
+            gc_interval: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -44,5 +48,6 @@ mod tests {
         info!("LogConfig::default(): {:?}", default);
         assert_eq!(1024 * 1024 * 1024, default.max_log_file_size);
         assert_eq!(128, default.append_buffer_size);
+        assert_eq!(Duration::from_secs(600), default.gc_interval);
     }
 }

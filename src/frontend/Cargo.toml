@@ -5,6 +5,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
+anymap = "1.0.0-beta.2"
 api = { path = "../api" }
 async-stream = "0.3"
 async-trait = "0.1"
@@ -24,6 +25,7 @@ common-time = { path = "../common/time" }
 datafusion = "14.0.0"
 datafusion-common = "14.0.0"
 datafusion-expr = "14.0.0"
+datanode = { path = "../datanode" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"

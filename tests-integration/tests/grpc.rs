@@ -61,14 +61,13 @@ macro_rules! grpc_tests {
 }
 
 pub async fn test_auto_create_table(store_type: StorageType) {
-    let (addr, mut guard, fe_grpc_server, dn_grpc_server) =
+    let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server(store_type, "auto_create_table").await;
 
     let grpc_client = Client::with_urls(vec![addr]);
     let db = Database::new("greptime", grpc_client);
     insert_and_assert(&db).await;
     let _ = fe_grpc_server.shutdown().await;
-    let _ = dn_grpc_server.shutdown().await;
     guard.remove_all().await;
 }
 
@@ -128,7 +127,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
 
 pub async fn test_insert_and_select(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (addr, mut guard, fe_grpc_server, dn_grpc_server) =
+    let (addr, mut guard, fe_grpc_server) =
         setup_grpc_server(store_type, "insert_and_select").await;
 
     let grpc_client = Client::with_urls(vec![addr]);
@@ -173,7 +172,6 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     insert_and_assert(&db).await;
 
     let _ = fe_grpc_server.shutdown().await;
-    let _ = dn_grpc_server.shutdown().await;
     guard.remove_all().await;
 }
 

@@ -19,7 +19,6 @@ use servers::query_handler::OpentsdbProtocolHandler;
 use servers::{error as server_error, Mode};
 use snafu::prelude::*;
 
-use crate::error::Result;
 use crate::instance::Instance;
 
 #[async_trait]
@@ -29,12 +28,7 @@ impl OpentsdbProtocolHandler for Instance {
         // metric table and tags can be created upon insertion.
         match self.mode {
             Mode::Standalone => {
-                self.insert_opentsdb_metric(data_point)
-                    .await
-                    .map_err(BoxedError::new)
-                    .with_context(|_| server_error::PutOpentsdbDataPointSnafu {
-                        data_point: format!("{:?}", data_point),
-                    })?;
+                self.insert_opentsdb_metric(data_point).await?;
             }
             Mode::Distributed => {
                 self.dist_insert(vec![data_point.as_grpc_insert()])
@@ -51,9 +45,14 @@ impl OpentsdbProtocolHandler for Instance {
 }
 
 impl Instance {
-    async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> Result<()> {
-        let expr = data_point.as_grpc_insert();
-        self.handle_insert(expr).await?;
+    async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> server_error::Result<()> {
+        let insert_expr = data_point.as_grpc_insert();
+        self.handle_insert(insert_expr)
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| server_error::ExecuteQuerySnafu {
+                query: format!("{:?}", data_point),
+            })?;
         Ok(())
     }
 }
@@ -63,6 +62,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_query::Output;
+    use common_recordbatch::RecordBatches;
     use datafusion::arrow_print;
     use servers::query_handler::SqlQueryHandler;
     use session::context::QueryContext;
@@ -70,9 +70,9 @@ mod tests {
     use super::*;
     use crate::tests;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_exec() {
-        let instance = tests::create_frontend_instance().await;
+        let (instance, _guard) = tests::create_frontend_instance("test_exec").await;
         instance
             .exec(
                 &DataPoint::try_create(
@@ -88,9 +88,10 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_insert_opentsdb_metric() {
-        let instance = tests::create_frontend_instance().await;
+        let (instance, _guard) =
+            tests::create_frontend_instance("test_insert_opentsdb_metric").await;
 
         let data_point1 = DataPoint::new(
             "my_metric_1".to_string(),
@@ -124,11 +125,15 @@ mod tests {
         assert!(result.is_ok());
 
         let output = instance
-            .do_query("select * from my_metric_1", Arc::new(QueryContext::new()))
+            .do_query(
+                "select * from my_metric_1 order by greptime_timestamp",
+                Arc::new(QueryContext::new()),
+            )
             .await
             .unwrap();
         match output {
-            Output::RecordBatches(recordbatches) => {
+            Output::Stream(stream) => {
+                let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let recordbatches = recordbatches
                     .take()
                     .into_iter()

@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
+use servers::auth::UserProviderRef;
 use servers::grpc::GrpcServer;
 use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
@@ -35,7 +36,11 @@ use crate::prometheus::PrometheusOptions;
 pub(crate) struct Services;
 
 impl Services {
-    pub(crate) async fn start<T>(opts: &FrontendOptions, instance: Arc<T>) -> Result<()>
+    pub(crate) async fn start<T>(
+        opts: &FrontendOptions,
+        instance: Arc<T>,
+        user_provider: Option<UserProviderRef>,
+    ) -> Result<()>
     where
         T: FrontendInstance,
     {
@@ -69,8 +74,12 @@ impl Services {
                     .context(error::RuntimeResourceSnafu)?,
             );
 
-            let mysql_server =
-                MysqlServer::create_server(instance.clone(), mysql_io_runtime, opts.tls.clone());
+            let mysql_server = MysqlServer::create_server(
+                instance.clone(),
+                mysql_io_runtime,
+                opts.tls.clone(),
+                user_provider.clone(),
+            );
 
             Some((mysql_server, mysql_addr))
         } else {
@@ -90,9 +99,9 @@ impl Services {
 
             let pg_server = Box::new(PostgresServer::new(
                 instance.clone(),
-                opts.check_pwd,
                 opts.tls.clone(),
                 pg_io_runtime,
+                user_provider.clone(),
             )) as Box<dyn Server>;
 
             Some((pg_server, pg_addr))
@@ -122,6 +131,10 @@ impl Services {
             let http_addr = parse_addr(&http_options.addr)?;
 
             let mut http_server = HttpServer::new(instance.clone(), http_options.clone());
+            if let Some(user_provider) = user_provider {
+                http_server.set_user_provider(user_provider);
+            }
+
             if opentsdb_server_and_addr.is_some() {
                 http_server.set_opentsdb_handler(instance.clone());
             }

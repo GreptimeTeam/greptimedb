@@ -1,6 +1,11 @@
 <p align="center">
-    <img src="/docs/logo-text-padding.png" alt="GreptimeDB Logo" width="400px"></img>
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="/docs/logo-text-padding.png">
+    <source media="(prefers-color-scheme: dark)" srcset="/docs/logo-text-padding-dark.png">
+    <img alt="GreptimeDB Logo" src="/docs/logo-text-padding.png" width="400px">
+  </picture>
 </p>
+
 
 <h3 align="center">
     The next-generation hybrid timeseries/analytics processing database in the cloud

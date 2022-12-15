@@ -32,6 +32,10 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     type Entry: Entry;
     type AppendResponse: AppendResponse;
 
+    async fn start(&self) -> Result<(), Self::Error>;
+
+    async fn stop(&self) -> Result<(), Self::Error>;
+
     /// Append an `Entry` to WAL with given namespace
     async fn append(&self, mut e: Self::Entry) -> Result<Self::AppendResponse, Self::Error>;
 
@@ -65,6 +69,11 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// Create a namespace of the associate Namespace type
     // TODO(sunng87): confusion with `create_namespace`
     fn namespace(&self, id: namespace::Id) -> Self::Namespace;
+
+    /// Mark all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
+    /// the log files if all entries inside are obsolete. This method may not delete log
+    /// files immediately.
+    async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error>;
 }
 
 pub trait AppendResponse: Send + Sync {

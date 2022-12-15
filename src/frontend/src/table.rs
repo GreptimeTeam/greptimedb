@@ -506,43 +506,34 @@ impl PartitionExec {
     }
 }
 
-// FIXME(LFC): no allow, for clippy temporarily
-#[allow(clippy::print_stdout)]
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
-
     use api::v1::column::SemanticType;
     use api::v1::{column, Column, ColumnDataType};
-    use catalog::remote::MetaKvBackend;
+    use common_query::physical_plan::DfPhysicalPlanAdapter;
+    use common_recordbatch::adapter::RecordBatchStreamAdapter;
     use common_recordbatch::util;
-    use datafusion::arrow_print;
     use datafusion::execution::context::TaskContext;
-    use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+    use datafusion::physical_plan::expressions::{col as physical_col, PhysicalSortExpr};
+    use datafusion::physical_plan::sorts::sort::SortExec;
+    use datafusion::physical_plan::ExecutionPlan;
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};
     use datafusion_expr::lit;
-    use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
     use datanode::instance::Instance;
+    use datatypes::arrow::compute::sort::SortOptions;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use meta_client::client::{MetaClient, MetaClientBuilder};
+    use meta_client::client::MetaClient;
     use meta_client::rpc::router::RegionRoute;
     use meta_client::rpc::{Region, Table, TableRoute};
-    use meta_srv::metasrv::MetaSrvOptions;
-    use meta_srv::mocks::MockInfo;
-    use meta_srv::service::store::kv::KvStoreRef;
-    use meta_srv::service::store::memory::MemStore;
-    use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::TableRef;
-    use tempdir::TempDir;
 
     use super::*;
-    use crate::catalog::FrontendCatalogManager;
     use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
-    use crate::instance::distributed::DistInstance;
     use crate::partitioning::range::RangePartitionRule;
 
     #[tokio::test(flavor = "multi_thread")]
@@ -743,28 +734,77 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dist_table_scan() {
-        common_telemetry::init_default_ut_logging();
         let table = Arc::new(new_dist_table().await);
         // should scan all regions
-        // select * from numbers
-        let projection = None;
+        // select a, row_id from numbers
+        let projection = Some(vec![1, 2]);
         let filters = vec![];
-        exec_table_scan(table.clone(), projection, filters, None).await;
-        println!();
+        let expected_output = vec![
+            "+-----+--------+",
+            "| a   | row_id |",
+            "+-----+--------+",
+            "| 0   | 1      |",
+            "| 1   | 2      |",
+            "| 2   | 3      |",
+            "| 3   | 4      |",
+            "| 4   | 5      |",
+            "| 10  | 1      |",
+            "| 11  | 2      |",
+            "| 12  | 3      |",
+            "| 13  | 4      |",
+            "| 14  | 5      |",
+            "| 30  | 1      |",
+            "| 31  | 2      |",
+            "| 32  | 3      |",
+            "| 33  | 4      |",
+            "| 34  | 5      |",
+            "| 100 | 1      |",
+            "| 101 | 2      |",
+            "| 102 | 3      |",
+            "| 103 | 4      |",
+            "| 104 | 5      |",
+            "+-----+--------+",
+        ];
+        exec_table_scan(table.clone(), projection, filters, 4, expected_output).await;
 
         // should scan only region 1
         // select a, row_id from numbers where a < 10
         let projection = Some(vec![1, 2]);
         let filters = vec![binary_expr(col("a"), Operator::Lt, lit(10)).into()];
-        exec_table_scan(table.clone(), projection, filters, None).await;
-        println!();
+        let expected_output = vec![
+            "+---+--------+",
+            "| a | row_id |",
+            "+---+--------+",
+            "| 0 | 1      |",
+            "| 1 | 2      |",
+            "| 2 | 3      |",
+            "| 3 | 4      |",
+            "| 4 | 5      |",
+            "+---+--------+",
+        ];
+        exec_table_scan(table.clone(), projection, filters, 1, expected_output).await;
 
         // should scan region 1 and 2
         // select a, row_id from numbers where a < 15
         let projection = Some(vec![1, 2]);
         let filters = vec![binary_expr(col("a"), Operator::Lt, lit(15)).into()];
-        exec_table_scan(table.clone(), projection, filters, None).await;
-        println!();
+        let expected_output = vec![
+            "+----+--------+",
+            "| a  | row_id |",
+            "+----+--------+",
+            "| 0  | 1      |",
+            "| 1  | 2      |",
+            "| 2  | 3      |",
+            "| 3  | 4      |",
+            "| 4  | 5      |",
+            "| 10 | 1      |",
+            "| 11 | 2      |",
+            "| 12 | 3      |",
+            "| 13 | 4      |",
+            "| 14 | 5      |",
+            "+----+--------+",
+        ];
+        exec_table_scan(table.clone(), projection, filters, 2, expected_output).await;
 
         // should scan region 2 and 3
         // select a, row_id from numbers where a < 40 and a >= 10
@@ -774,8 +814,23 @@ mod test {
             binary_expr(col("a"), Operator::GtEq, lit(10)),
         )
         .into()];
-        exec_table_scan(table.clone(), projection, filters, None).await;
-        println!();
+        let expected_output = vec![
+            "+----+--------+",
+            "| a  | row_id |",
+            "+----+--------+",
+            "| 10 | 1      |",
+            "| 11 | 2      |",
+            "| 12 | 3      |",
+            "| 13 | 4      |",
+            "| 14 | 5      |",
+            "| 30 | 1      |",
+            "| 31 | 2      |",
+            "| 32 | 3      |",
+            "| 33 | 4      |",
+            "| 34 | 5      |",
+            "+----+--------+",
+        ];
+        exec_table_scan(table.clone(), projection, filters, 2, expected_output).await;
 
         // should scan all regions
         // select a, row_id from numbers where a < 1000 and row_id == 1
@@ -785,42 +840,59 @@ mod test {
             binary_expr(col("row_id"), Operator::Eq, lit(1)),
         )
         .into()];
-        exec_table_scan(table.clone(), projection, filters, None).await;
+        let expected_output = vec![
+            "+-----+--------+",
+            "| a   | row_id |",
+            "+-----+--------+",
+            "| 0   | 1      |",
+            "| 10  | 1      |",
+            "| 30  | 1      |",
+            "| 100 | 1      |",
+            "+-----+--------+",
+        ];
+        exec_table_scan(table.clone(), projection, filters, 4, expected_output).await;
     }
 
     async fn exec_table_scan(
         table: TableRef,
         projection: Option<Vec<usize>>,
         filters: Vec<Expr>,
-        limit: Option<usize>,
+        expected_partitions: usize,
+        expected_output: Vec<&str>,
     ) {
         let table_scan = table
-            .scan(&projection, filters.as_slice(), limit)
+            .scan(&projection, filters.as_slice(), None)
             .await
             .unwrap();
+        assert_eq!(
+            table_scan.output_partitioning().partition_count(),
+            expected_partitions
+        );
 
-        let task_ctx = Arc::new(TaskContext::new(
-            "0".to_string(),
-            "0".to_string(),
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-            Arc::new(RuntimeEnv::default()),
-        ));
-        for partition in 0..table_scan.output_partitioning().partition_count() {
-            let result = table_scan.execute(partition, task_ctx.clone()).unwrap();
-            let recordbatches = util::collect(result).await.unwrap();
+        let merge =
+            CoalescePartitionsExec::new(Arc::new(DfPhysicalPlanAdapter(table_scan.clone())));
 
-            let df_recordbatch = recordbatches
-                .into_iter()
-                .map(|r| r.df_recordbatch)
-                .collect::<Vec<DfRecordBatch>>();
+        let sort = SortExec::try_new(
+            vec![PhysicalSortExpr {
+                expr: physical_col("a", table_scan.schema().arrow_schema()).unwrap(),
+                options: SortOptions::default(),
+            }],
+            Arc::new(merge),
+        )
+        .unwrap();
+        assert_eq!(sort.output_partitioning().partition_count(), 1);
 
-            println!("DataFusion partition {}:", partition);
-            let pretty_print = arrow_print::write(&df_recordbatch);
-            let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
-            pretty_print.iter().for_each(|x| println!("{}", x));
-        }
+        let stream = sort
+            .execute(0, Arc::new(RuntimeEnv::default()))
+            .await
+            .unwrap();
+        let stream = Box::pin(RecordBatchStreamAdapter::try_new(stream).unwrap());
+
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            recordbatches.pretty_print().lines().collect::<Vec<_>>(),
+            expected_output
+        );
     }
 
     async fn new_dist_table() -> DistTable {
@@ -831,51 +903,12 @@ mod test {
         ];
         let schema = Arc::new(Schema::new(column_schemas.clone()));
 
-        let kv_store: KvStoreRef = Arc::new(MemStore::default()) as _;
-        let meta_srv =
-            meta_srv::mocks::mock(MetaSrvOptions::default(), kv_store.clone(), None).await;
-
-        let datanode_clients = Arc::new(DatanodeClients::new());
-
-        let mut datanode_instances = HashMap::new();
-        for datanode_id in 1..=4 {
-            let dn_instance = create_datanode_instance(datanode_id, meta_srv.clone()).await;
-            datanode_instances.insert(datanode_id, dn_instance.clone());
-
-            let (addr, client) = crate::tests::create_datanode_client(dn_instance).await;
-            datanode_clients
-                .insert_client(Peer::new(datanode_id, addr), client)
-                .await;
-        }
-
-        let MockInfo {
-            server_addr,
-            channel_manager,
-        } = meta_srv.clone();
-        let mut meta_client = MetaClientBuilder::new(1000, 0)
-            .enable_router()
-            .enable_store()
-            .channel_manager(channel_manager)
-            .build();
-        meta_client.start(&[&server_addr]).await.unwrap();
-        let meta_client = Arc::new(meta_client);
+        let (dist_instance, datanode_instances) = crate::tests::create_dist_instance().await;
+        let catalog_manager = dist_instance.catalog_manager();
+        let table_routes = catalog_manager.table_routes();
+        let datanode_clients = catalog_manager.datanode_clients();
 
         let table_name = TableName::new("greptime", "public", "dist_numbers");
-
-        let meta_backend = Arc::new(MetaKvBackend {
-            client: meta_client.clone(),
-        });
-        let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
-        let catalog_manager = Arc::new(FrontendCatalogManager::new(
-            meta_backend,
-            table_routes.clone(),
-            datanode_clients.clone(),
-        ));
-        let dist_instance = DistInstance::new(
-            meta_client.clone(),
-            catalog_manager,
-            datanode_clients.clone(),
-        );
 
         let sql = "
             CREATE TABLE greptime.public.dist_numbers (
@@ -900,17 +933,16 @@ mod test {
             _ => unreachable!(),
         };
 
-        wait_datanodes_alive(kv_store).await;
-
-        let factory = DefaultCreateExprFactory {};
-        let mut expr = factory.create_expr_by_stmt(&create_table).await.unwrap();
+        let mut expr = DefaultCreateExprFactory
+            .create_expr_by_stmt(&create_table)
+            .await
+            .unwrap();
         let _result = dist_instance
             .create_table(&mut expr, create_table.partitions)
             .await
             .unwrap();
 
         let table_route = table_routes.get_route(&table_name).await.unwrap();
-        println!("{}", serde_json::to_string_pretty(&table_route).unwrap());
 
         let mut region_to_datanode_mapping = HashMap::new();
         for region_route in table_route.region_routes.iter() {
@@ -953,20 +985,6 @@ mod test {
             table_routes,
             datanode_clients,
         }
-    }
-
-    async fn wait_datanodes_alive(kv_store: KvStoreRef) {
-        let wait = 10;
-        for _ in 0..wait {
-            let datanodes = meta_srv::lease::alive_datanodes(1000, &kv_store, |_, _| true)
-                .await
-                .unwrap();
-            if datanodes.len() >= 4 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await
-        }
-        panic!()
     }
 
     async fn insert_testing_data(
@@ -1018,30 +1036,6 @@ mod test {
             )
             .await
             .unwrap();
-    }
-
-    async fn create_datanode_instance(datanode_id: u64, meta_srv: MockInfo) -> Arc<Instance> {
-        let current = common_time::util::current_time_millis();
-        let wal_tmp_dir =
-            TempDir::new_in("/tmp", &format!("dist_table_test-wal-{}", current)).unwrap();
-        let data_tmp_dir =
-            TempDir::new_in("/tmp", &format!("dist_table_test-data-{}", current)).unwrap();
-        let opts = DatanodeOptions {
-            node_id: Some(datanode_id),
-            wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
-            storage: ObjectStoreConfig::File {
-                data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
-            },
-            ..Default::default()
-        };
-
-        let instance = Arc::new(
-            Instance::with_mock_meta_server(&opts, meta_srv)
-                .await
-                .unwrap(),
-        );
-        instance.start().await.unwrap();
-        instance
     }
 
     #[tokio::test(flavor = "multi_thread")]

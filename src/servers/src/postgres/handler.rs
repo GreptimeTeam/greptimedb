@@ -42,14 +42,12 @@ impl PostgresServerHandler {
     }
 }
 
-const CLIENT_METADATA_DATABASE: &str = "database";
-
 fn query_context_from_client_info<C>(client: &C) -> Arc<QueryContext>
 where
     C: ClientInfo,
 {
     let query_context = QueryContext::new();
-    if let Some(current_schema) = client.metadata().get(CLIENT_METADATA_DATABASE) {
+    if let Some(current_schema) = client.metadata().get(super::METADATA_DATABASE) {
         query_context.set_current_schema(current_schema);
     }
 

@@ -14,8 +14,10 @@
 
 use std::sync::Arc;
 
+use anymap::AnyMap;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
+use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
 use servers::Mode;
 use snafu::prelude::*;
@@ -40,7 +42,6 @@ pub struct FrontendOptions {
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
     pub mode: Mode,
-    pub datanode_rpc_addr: String,
     pub meta_client_opts: Option<MetaClientOpts>,
 }
 
@@ -55,15 +56,8 @@ impl Default for FrontendOptions {
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
             mode: Mode::Standalone,
-            datanode_rpc_addr: "127.0.0.1:3001".to_string(),
             meta_client_opts: None,
         }
-    }
-}
-
-impl FrontendOptions {
-    pub(crate) fn datanode_grpc_addr(&self) -> String {
-        self.datanode_rpc_addr.clone()
     }
 }
 
@@ -73,16 +67,15 @@ where
 {
     opts: FrontendOptions,
     instance: Option<T>,
+    plugins: AnyMap,
 }
 
-impl<T> Frontend<T>
-where
-    T: FrontendInstance,
-{
-    pub fn new(opts: FrontendOptions, instance: T) -> Self {
+impl<T: FrontendInstance> Frontend<T> {
+    pub fn new(opts: FrontendOptions, instance: T, plugins: AnyMap) -> Self {
         Self {
             opts,
             instance: Some(instance),
+            plugins,
         }
     }
 
@@ -96,6 +89,9 @@ where
         instance.start().await?;
 
         let instance = Arc::new(instance);
-        Services::start(&self.opts, instance).await
+
+        let provider = self.plugins.get::<UserProviderRef>().cloned();
+
+        Services::start(&self.opts, instance, provider).await
     }
 }

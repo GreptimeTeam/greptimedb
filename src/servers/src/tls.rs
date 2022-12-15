@@ -18,22 +18,32 @@ use std::io::{BufReader, Error, ErrorKind};
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde::{Deserialize, Serialize};
+use strum::EnumString;
 
 /// TlsMode is used for Mysql and Postgres server start up.
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq, EnumString)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsMode {
     #[default]
+    #[strum(to_string = "disable")]
     Disable,
+
+    #[strum(to_string = "prefer")]
     Prefer,
+
+    #[strum(to_string = "require")]
     Require,
+
     // TODO(SSebo): Implement the following 2 TSL mode described in
     // ["34.19.3. Protection Provided in Different Modes"](https://www.postgresql.org/docs/current/libpq-ssl.html)
+    #[strum(to_string = "verify-ca")]
     VerifyCa,
+
+    #[strum(to_string = "verify-full")]
     VerifyFull,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TlsOption {
     pub mode: TlsMode,
@@ -44,6 +54,24 @@ pub struct TlsOption {
 }
 
 impl TlsOption {
+    pub fn new(mode: Option<TlsMode>, cert_path: Option<String>, key_path: Option<String>) -> Self {
+        let mut tls_option = TlsOption::default();
+
+        if let Some(mode) = mode {
+            tls_option.mode = mode
+        };
+
+        if let Some(cert_path) = cert_path {
+            tls_option.cert_path = cert_path
+        };
+
+        if let Some(key_path) = key_path {
+            tls_option.key_path = key_path
+        };
+
+        tls_option
+    }
+
     pub fn setup(&self) -> Result<Option<ServerConfig>, Error> {
         if let TlsMode::Disable = self.mode {
             return Ok(None);
@@ -76,6 +104,31 @@ impl TlsOption {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tls::TlsMode::Disable;
+
+    #[test]
+    fn test_new_tls_option() {
+        assert_eq!(TlsOption::default(), TlsOption::new(None, None, None));
+        assert_eq!(
+            TlsOption {
+                mode: Disable,
+                ..Default::default()
+            },
+            TlsOption::new(Some(Disable), None, None)
+        );
+        assert_eq!(
+            TlsOption {
+                mode: Disable,
+                cert_path: "/path/to/cert_path".to_string(),
+                key_path: "/path/to/key_path".to_string(),
+            },
+            TlsOption::new(
+                Some(Disable),
+                Some("/path/to/cert_path".to_string()),
+                Some("/path/to/key_path".to_string())
+            )
+        );
+    }
 
     #[test]
     fn test_tls_option_disable() {

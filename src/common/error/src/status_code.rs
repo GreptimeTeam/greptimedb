@@ -62,6 +62,19 @@ pub enum StatusCode {
     /// Runtime resources exhausted, like creating threads failed.
     RuntimeResourcesExhausted = 6000,
     // ====== End of server related status code =======
+
+    // ====== Begin of auth related status code =====
+    /// User not exist
+    UserNotFound = 7000,
+    /// Unsupported password type
+    UnsupportedPasswordType = 7001,
+    /// Username and password does not match
+    UserPasswordMismatch = 7002,
+    /// Not found http authorization header
+    AuthHeaderNotFound = 7003,
+    /// Invalid http authorization header
+    InvalidAuthHeader = 7004,
+    // ====== End of auth related status code =====
 }
 
 impl StatusCode {

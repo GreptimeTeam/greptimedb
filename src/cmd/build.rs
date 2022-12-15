@@ -12,8 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+const DEFAULT_VALUE: &str = "unknown";
 fn main() {
-    build_data::set_GIT_BRANCH();
-    build_data::set_GIT_COMMIT();
-    build_data::set_GIT_DIRTY();
+    println!(
+        "cargo:rustc-env=GIT_COMMIT={}",
+        build_data::get_git_commit().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
+    );
+    println!(
+        "cargo:rustc-env=GIT_BRANCH={}",
+        build_data::get_git_branch().unwrap_or_else(|_| DEFAULT_VALUE.to_string())
+    );
+    println!(
+        "cargo:rustc-env=GIT_DIRTY={}",
+        build_data::get_git_dirty().map_or(DEFAULT_VALUE.to_string(), |v| v.to_string())
+    );
 }

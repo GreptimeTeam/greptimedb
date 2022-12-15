@@ -997,6 +997,7 @@ pub mod tests {
 
     use std::sync::Arc;
 
+    use common_telemetry::info;
     use datatypes::vectors::{Float32Vector, Int32Vector, NullVector};
     use rustpython_vm::builtins::PyList;
     use rustpython_vm::class::PyClassImpl;
@@ -1128,9 +1129,10 @@ pub mod tests {
     }
 
     #[test]
-    #[allow(clippy::print_stdout)]
     // for debug purpose, also this is already a test function so allow print_stdout shouldn't be a problem?
     fn test_execute_script() {
+        common_telemetry::init_default_ut_logging();
+
         fn is_eq<T: std::cmp::PartialEq + rustpython_vm::TryFromObject>(
             v: PyResult,
             i: T,
@@ -1179,7 +1181,7 @@ pub mod tests {
         for (code, pred) in snippet {
             let result = execute_script(&interpreter, code, None, pred);
 
-            println!(
+            info!(
                 "\u{001B}[35m{code}\u{001B}[0m: {:?}{}",
                 result.clone().map(|v| v.0),
                 result

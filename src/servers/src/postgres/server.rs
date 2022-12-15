@@ -19,11 +19,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::error;
+use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use pgwire::tokio::process_socket;
 use tokio;
 use tokio_rustls::TlsAcceptor;
 
+use crate::auth::UserProviderRef;
 use crate::error::Result;
 use crate::postgres::auth_handler::PgAuthStartupHandler;
 use crate::postgres::handler::PostgresServerHandler;
@@ -42,13 +44,15 @@ impl PostgresServer {
     /// Creates a new Postgres server with provided query_handler and async runtime
     pub fn new(
         query_handler: SqlQueryHandlerRef,
-        check_pwd: bool,
         tls: TlsOption,
         io_runtime: Arc<Runtime>,
+        user_provider: Option<UserProviderRef>,
     ) -> PostgresServer {
         let postgres_handler = Arc::new(PostgresServerHandler::new(query_handler));
-        let startup_handler =
-            Arc::new(PgAuthStartupHandler::new(check_pwd, tls.should_force_tls()));
+        let startup_handler = Arc::new(PgAuthStartupHandler::new(
+            user_provider,
+            tls.should_force_tls(),
+        ));
         PostgresServer {
             base_server: BaseTcpServer::create_server("Postgres", io_runtime),
             auth_handler: startup_handler,
@@ -76,6 +80,11 @@ impl PostgresServer {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
+                        match io_stream.peer_addr() {
+                            Ok(addr) => debug!("PostgreSQL client coming from {}", addr),
+                            Err(e) => warn!("Failed to get PostgreSQL client addr, err: {}", e),
+                        }
+
                         io_runtime.spawn(process_socket(
                             io_stream,
                             tls_acceptor.clone(),
@@ -99,6 +108,7 @@ impl Server for PostgresServer {
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let (stream, addr) = self.base_server.bind(listening).await?;
 
+        debug!("Starting PostgreSQL with TLS option: {:?}", self.tls);
         let tls_acceptor = self
             .tls
             .setup()?

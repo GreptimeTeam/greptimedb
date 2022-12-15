@@ -21,7 +21,7 @@ use common_base::BitVec;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
-use common_recordbatch::{util, RecordBatches, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use datatypes::types::{TimestampType, WrapperType};
 use datatypes::vectors::{
@@ -51,13 +51,9 @@ pub async fn to_object_result(output: std::result::Result<Output, impl ErrorExt>
 }
 
 async fn collect(stream: SendableRecordBatchStream) -> Result<ObjectResult> {
-    let schema = stream.schema();
-
-    let recordbatches = util::collect(stream)
+    let recordbatches = RecordBatches::try_collect(stream)
         .await
-        .and_then(|batches| RecordBatches::try_new(schema, batches))
         .context(error::CollectRecordBatchesSnafu)?;
-
     let object_result = build_result(recordbatches)?;
     Ok(object_result)
 }

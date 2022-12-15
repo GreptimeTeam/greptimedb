@@ -5,6 +5,8 @@ package greptime.v1.meta;
 import "greptime/v1/meta/common.proto";
 
 service Router {
+  rpc Create(CreateRequest) returns (RouteResponse) {}
+
   // Fetch routing information for tables. The smallest unit is the complete
   // routing information(all regions) of a table.
   // 
@@ -26,7 +28,14 @@ service Router {
   //
   rpc Route(RouteRequest) returns (RouteResponse) {}
 
-  rpc Create(CreateRequest) returns (RouteResponse) {}
+  rpc Delete(DeleteRequest) returns (RouteResponse) {}
+}
+
+message CreateRequest {
+  RequestHeader header = 1;
+
+  TableName table_name = 2;
+  repeated Partition partitions = 3;
 }
 
 message RouteRequest {
@@ -35,18 +44,17 @@ message RouteRequest {
   repeated TableName table_names = 2;
 }
 
+message DeleteRequest {
+  RequestHeader header = 1;
+
+  TableName table_name = 2; 
+}
+
 message RouteResponse {
   ResponseHeader header = 1;
 
   repeated Peer peers = 2;
   repeated TableRoute table_routes = 3;
-}
-
-message CreateRequest {
-  RequestHeader header = 1;
-
-  TableName table_name = 2;
-  repeated Partition partitions = 3;
 }
 
 message TableRoute {

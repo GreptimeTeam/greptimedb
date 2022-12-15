@@ -18,7 +18,8 @@ pub mod memory;
 
 use api::v1::meta::{
     store_server, BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
+    PutResponse, RangeRequest, RangeResponse,
 };
 use tonic::{Request, Response};
 
@@ -64,6 +65,13 @@ impl store_server::Store for MetaSrv {
     ) -> GrpcResult<DeleteRangeResponse> {
         let req = req.into_inner();
         let res = self.kv_store().delete_range(req).await?;
+
+        Ok(Response::new(res))
+    }
+
+    async fn move_value(&self, req: Request<MoveValueRequest>) -> GrpcResult<MoveValueResponse> {
+        let req = req.into_inner();
+        let res = self.kv_store().move_value(req).await?;
 
         Ok(Response::new(res))
     }
@@ -127,6 +135,16 @@ mod tests {
         let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None).await;
         let req = DeleteRangeRequest::default();
         let res = meta_srv.delete_range(req.into_request()).await;
+
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_move_value() {
+        let kv_store = Arc::new(MemStore::new());
+        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None).await;
+        let req = MoveValueRequest::default();
+        let res = meta_srv.move_value(req.into_request()).await;
 
         assert!(res.is_ok());
     }
