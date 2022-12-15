@@ -322,7 +322,7 @@ mod tests {
             column_name: "test".to_string(),
             semantic_type: 1,
             values: Some(values(&[vector.clone()]).unwrap()),
-            null_mask: null_mask(&vec![vector.clone()], vector.len()),
+            null_mask: null_mask(&[vector.clone()], vector.len()),
             datatype: wrapper.datatype() as i32,
         }
     }
