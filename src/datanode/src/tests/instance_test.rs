@@ -17,9 +17,8 @@ use std::sync::Arc;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_query::Output;
 use common_recordbatch::util;
-use datatypes::arrow::array::{Int64Array, UInt64Array};
-use datatypes::arrow_array::StringArray;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
 use session::context::QueryContext;
 
 use crate::instance::Instance;
@@ -66,12 +65,11 @@ async fn test_create_database_and_insert_query() {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
-                &Int64Array::from(vec![1655276557000, 1655276558000]),
-                batches[0]
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
+                Arc::new(Int64Vector::from_vec(vec![
+                    1655276557000_i64,
+                    1655276558000_i64
+                ])) as VectorRef,
+                *batches[0].column(0)
             );
         }
         _ => unreachable!(),
@@ -159,20 +157,12 @@ async fn assert_query_result(instance: &Instance, sql: &str, ts: i64, host: &str
             // let columns = batches[0].df_recordbatch.columns();
             assert_eq!(2, batches[0].num_columns());
             assert_eq!(
-                &StringArray::from(vec![host]),
-                batches[0]
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
+                Arc::new(StringVector::from(vec![host])) as VectorRef,
+                *batches[0].column(0)
             );
             assert_eq!(
-                &Int64Array::from(vec![ts]),
-                batches[0]
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
+                Arc::new(Int64Vector::from_vec(vec![ts])) as VectorRef,
+                *batches[0].column(1)
             );
         }
         _ => unreachable!(),
@@ -243,12 +233,11 @@ async fn test_execute_insert_query_with_i64_timestamp() {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
-                &Int64Array::from(vec![1655276557000, 1655276558000]),
-                batches[0]
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
+                Arc::new(Int64Vector::from_vec(vec![
+                    1655276557000_i64,
+                    1655276558000_i64
+                ])) as VectorRef,
+                *batches[0].column(0)
             );
         }
         _ => unreachable!(),
@@ -260,12 +249,11 @@ async fn test_execute_insert_query_with_i64_timestamp() {
             let batches = util::collect(s).await.unwrap();
             assert_eq!(1, batches[0].num_columns());
             assert_eq!(
-                &Int64Array::from(vec![1655276557000, 1655276558000]),
-                batches[0]
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
+                Arc::new(Int64Vector::from_vec(vec![
+                    1655276557000_i64,
+                    1655276558000_i64
+                ])) as VectorRef,
+                *batches[0].column(0)
             );
         }
         _ => unreachable!(),
@@ -286,12 +274,8 @@ async fn test_execute_query() {
             assert_eq!(numbers[0].column(0).len(), 1);
 
             assert_eq!(
-                numbers[0]
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap(),
-                &UInt64Array::from(vec![4950])
+                Arc::new(UInt64Vector::from_vec(vec![4950_u64])) as VectorRef,
+                *numbers[0].column(0),
             );
         }
         _ => unreachable!(),
@@ -313,12 +297,8 @@ async fn test_execute_show_databases_tables() {
             assert_eq!(databases[0].column(0).len(), 1);
 
             assert_eq!(
-                databases[0]
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap(),
-                &StringArray::from(vec![Some("public")])
+                *databases[0].column(0),
+                Arc::new(StringVector::from(vec![Some("public")])) as VectorRef
             );
         }
         _ => unreachable!(),
@@ -332,12 +312,8 @@ async fn test_execute_show_databases_tables() {
             assert_eq!(databases[0].column(0).len(), 1);
 
             assert_eq!(
-                databases[0]
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap(),
-                &StringArray::from(vec![Some("public")])
+                *databases[0].column(0),
+                Arc::new(StringVector::from(vec![Some("public")])) as VectorRef
             );
         }
         _ => unreachable!(),
@@ -381,12 +357,8 @@ async fn test_execute_show_databases_tables() {
             assert_eq!(databases[0].column(0).len(), 1);
 
             assert_eq!(
-                databases[0]
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap(),
-                &StringArray::from(vec![Some("demo")])
+                *databases[0].column(0),
+                Arc::new(StringVector::from(vec![Some("demo")])) as VectorRef
             );
         }
         _ => unreachable!(),
@@ -456,13 +428,13 @@ async fn test_alter_table() {
 
     let output = execute_sql(&instance, "select * from demo order by ts").await;
     let expected = "\
-        +-------+-----+--------+---------------------+--------+
-        | host  | cpu | memory | ts                  | my_tag |
-        +-------+-----+--------+---------------------+--------+
-        | host1 | 1.1 | 100    | 1970-01-01 00:00:01 |        |
-        | host2 | 2.2 | 200    | 1970-01-01 00:00:02 | hello  |
-        | host3 | 3.3 | 300    | 1970-01-01 00:00:03 |        |
-        +-------+-----+--------+---------------------+--------+\
++-------+-----+--------+---------------------+--------+
+| host  | cpu | memory | ts                  | my_tag |
++-------+-----+--------+---------------------+--------+
+| host1 | 1.1 | 100    | 1970-01-01T00:00:01 |        |
+| host2 | 2.2 | 200    | 1970-01-01T00:00:02 | hello  |
+| host3 | 3.3 | 300    | 1970-01-01T00:00:03 |        |
++-------+-----+--------+---------------------+--------+\
     "
     .to_string();
     check_output_stream(output, expected).await;
@@ -473,13 +445,13 @@ async fn test_alter_table() {
 
     let output = execute_sql(&instance, "select * from demo order by ts").await;
     let expected = "\
-        +-------+-----+---------------------+--------+
-        | host  | cpu | ts                  | my_tag |
-        +-------+-----+---------------------+--------+
-        | host1 | 1.1 | 1970-01-01 00:00:01 |        |
-        | host2 | 2.2 | 1970-01-01 00:00:02 | hello  |
-        | host3 | 3.3 | 1970-01-01 00:00:03 |        |
-        +-------+-----+---------------------+--------+\
++-------+-----+---------------------+--------+
+| host  | cpu | ts                  | my_tag |
++-------+-----+---------------------+--------+
+| host1 | 1.1 | 1970-01-01T00:00:01 |        |
+| host2 | 2.2 | 1970-01-01T00:00:02 | hello  |
+| host3 | 3.3 | 1970-01-01T00:00:03 |        |
++-------+-----+---------------------+--------+\
     "
     .to_string();
     check_output_stream(output, expected).await;
@@ -493,15 +465,15 @@ async fn test_alter_table() {
     assert!(matches!(output, Output::AffectedRows(1)));
 
     let output = execute_sql(&instance, "select * from demo order by ts").await;
-    let expected = "
-        +-------+-----+---------------------+--------+
-        | host  | cpu | ts                  | my_tag |
-        +-------+-----+---------------------+--------+
-        | host1 | 1.1 | 1970-01-01 00:00:01 |        |
-        | host2 | 2.2 | 1970-01-01 00:00:02 | hello  |
-        | host3 | 3.3 | 1970-01-01 00:00:03 |        |
-        | host4 | 400 | 1970-01-01 00:00:04 | world  |
-        +-------+-----+---------------------+--------+\
+    let expected = "\
++-------+-----+---------------------+--------+
+| host  | cpu | ts                  | my_tag |
++-------+-----+---------------------+--------+
+| host1 | 1.1 | 1970-01-01T00:00:01 |        |
+| host2 | 2.2 | 1970-01-01T00:00:02 | hello  |
+| host3 | 3.3 | 1970-01-01T00:00:03 |        |
+| host4 | 400 | 1970-01-01T00:00:04 | world  |
++-------+-----+---------------------+--------+\
     "
     .to_string();
     check_output_stream(output, expected).await;
@@ -543,12 +515,12 @@ async fn test_insert_with_default_value_for_type(type_name: &str) {
 
     let output = execute_sql(&instance, "select host, cpu from test_table").await;
     let expected = "\
-        +-------+-----+
-        | host  | cpu |
-        +-------+-----+
-        | host1 | 1.1 |
-        | host2 | 2.2 |
-        +-------+-----+\
++-------+-----+
+| host  | cpu |
++-------+-----+
+| host1 | 1.1 |
+| host2 | 2.2 |
++-------+-----+\
     "
     .to_string();
     check_output_stream(output, expected).await;
@@ -581,11 +553,11 @@ async fn test_use_database() {
 
     let output = execute_sql_in_db(&instance, "show tables", "db1").await;
     let expected = "\
-        +--------+
-        | Tables |
-        +--------+
-        | tb1    |
-        +--------+\
++--------+
+| Tables |
++--------+
+| tb1    |
++--------+\
     "
     .to_string();
     check_output_stream(output, expected).await;
@@ -600,11 +572,11 @@ async fn test_use_database() {
 
     let output = execute_sql_in_db(&instance, "select col_i32 from tb1", "db1").await;
     let expected = "\
-        +---------+
-        | col_i32 |
-        +---------+
-        | 1       |
-        +---------+\
++---------+
+| col_i32 |
++---------+
+| 1       |
++---------+\
     "
     .to_string();
     check_output_stream(output, expected).await;
@@ -613,11 +585,11 @@ async fn test_use_database() {
     // accessing tables in other databases.
     let output = execute_sql(&instance, "select number from public.numbers limit 1").await;
     let expected = "\
-        +--------+
-        | number |
-        +--------+
-        | 0      |
-        +--------+\
++--------+
+| number |
++--------+
+| 0      |
++--------+\
     "
     .to_string();
     check_output_stream(output, expected).await;
