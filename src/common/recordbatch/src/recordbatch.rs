@@ -80,6 +80,11 @@ impl RecordBatch {
     }
 
     #[inline]
+    pub fn columns(&self) -> &[VectorRef] {
+        &self.columns
+    }
+
+    #[inline]
     pub fn column(&self, idx: usize) -> &VectorRef {
         &self.columns[idx]
     }
@@ -190,9 +195,10 @@ mod tests {
 
         let batch = RecordBatch::new(schema.clone(), columns.clone()).unwrap();
         assert_eq!(3, batch.num_rows());
-        for i in 0..batch.num_columns() {
+        assert_eq!(&columns, batch.columns());
+        for (i, expect) in columns.iter().enumerate().take(batch.num_columns()) {
             let column = batch.column(i);
-            assert_eq!(columns[i], *column);
+            assert_eq!(expect, column);
         }
         assert_eq!(schema, batch.schema);
 
