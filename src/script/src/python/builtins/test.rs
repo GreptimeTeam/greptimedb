@@ -18,10 +18,10 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
-use datatypes::arrow::array::{Float64Array, Int64Array, PrimitiveArray};
-use datatypes::arrow::compute::cast::CastOptions;
-use datatypes::arrow::datatypes::DataType;
-use datatypes::vectors::VectorRef;
+use datatypes::arrow::array::{Float64Array, Int64Array};
+use datatypes::arrow::compute;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
+use datatypes::vectors::{Float64Vector, Int64Vector, VectorRef};
 use ron::from_str as from_ron_string;
 use rustpython_vm::builtins::{PyFloat, PyInt, PyList};
 use rustpython_vm::class::PyClassImpl;
@@ -68,17 +68,17 @@ fn convert_scalar_to_py_obj_and_back() {
             panic!("Convert errors, expect 1")
         }
         let col = DFColValue::Scalar(ScalarValue::List(
-            Some(Box::new(vec![
+            Some(vec![
                 ScalarValue::Int64(Some(1)),
                 ScalarValue::Int64(Some(2)),
-            ])),
-            Box::new(DataType::Int64),
+            ]),
+            Box::new(Field::new("item", ArrowDataType::Int64, false)),
         ));
         let to = try_into_py_obj(col, vm).unwrap();
         let back = try_into_columnar_value(to, vm).unwrap();
-        if let DFColValue::Scalar(ScalarValue::List(Some(list), ty)) = back {
+        if let DFColValue::Scalar(ScalarValue::List(Some(list), field)) = back {
             assert_eq!(list.len(), 2);
-            assert_eq!(ty.as_ref(), &DataType::Int64);
+            assert_eq!(*field.data_type(), ArrowDataType::Int64);
         }
         let list: Vec<PyObjectRef> = vec![vm.ctx.new_int(1).into(), vm.ctx.new_int(2).into()];
         let nested_list: Vec<PyObjectRef> =
@@ -92,12 +92,10 @@ fn convert_scalar_to_py_obj_and_back() {
             ));
         }
 
-        let list: PyVector = PyVector::from(
-            HelperVec::try_into_vector(
-                Arc::new(PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4])) as ArrayRef,
-            )
-            .unwrap(),
-        );
+        let list: PyVector =
+            PyVector::from(
+                Arc::new(Float64Vector::from_slice([0.1f64, 0.2, 0.3, 0.4])) as VectorRef
+            );
         let nested_list: Vec<PyObjectRef> = vec![list.into_pyobject(vm), vm.ctx.new_int(3).into()];
         let list_obj = vm.ctx.new_list(nested_list).into();
         let expect_err = try_into_columnar_value(list_obj, vm);
@@ -115,7 +113,7 @@ struct TestCase {
 #[derive(Debug, Serialize, Deserialize)]
 struct Var {
     value: PyValue,
-    ty: DataType,
+    ty: ArrowDataType,
 }
 
 /// for floating number comparison
@@ -189,25 +187,25 @@ impl PyValue {
     }
 }
 
-fn is_float(ty: &DataType) -> bool {
+fn is_float(ty: &ArrowDataType) -> bool {
     matches!(
         ty,
-        DataType::Float16 | DataType::Float32 | DataType::Float64
+        ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64
     )
 }
 
 /// unsigned included
-fn is_int(ty: &DataType) -> bool {
+fn is_int(ty: &ArrowDataType) -> bool {
     matches!(
         ty,
-        DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-            | DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
+        ArrowDataType::UInt8
+            | ArrowDataType::UInt16
+            | ArrowDataType::UInt32
+            | ArrowDataType::UInt64
+            | ArrowDataType::Int8
+            | ArrowDataType::Int16
+            | ArrowDataType::Int32
+            | ArrowDataType::Int64
     )
 }
 
@@ -217,7 +215,7 @@ impl PyValue {
             PyValue::FloatVec(v) => {
                 Arc::new(datatypes::vectors::Float64Vector::from_vec(v.clone()))
             }
-            PyValue::IntVec(v) => Arc::new(datatypes::vectors::Int64Vector::from_vec(v.clone())),
+            PyValue::IntVec(v) => Arc::new(Int64Vector::from_vec(v.clone())),
             PyValue::Int(v) => return Ok(vm.ctx.new_int(*v).into()),
             PyValue::Float(v) => return Ok(vm.ctx.new_float(*v).into()),
             Self::Bool(v) => return Ok(vm.ctx.new_bool(*v).into()),
@@ -234,16 +232,9 @@ impl PyValue {
             let res = res.to_arrow_array();
             let ty = res.data_type();
             if is_float(ty) {
-                let vec_f64 = arrow::compute::cast::cast(
-                    res.as_ref(),
-                    &DataType::Float64,
-                    CastOptions {
-                        wrapped: true,
-                        partial: true,
-                    },
-                )
-                .map_err(|err| format!("{err:#?}"))?;
-                assert_eq!(vec_f64.data_type(), &DataType::Float64);
+                let vec_f64 = compute::cast(&res, &ArrowDataType::Float64)
+                    .map_err(|err| format!("{err:#?}"))?;
+                assert_eq!(vec_f64.data_type(), &ArrowDataType::Float64);
                 let vec_f64 = vec_f64
                     .as_any()
                     .downcast_ref::<Float64Array>()
@@ -251,13 +242,6 @@ impl PyValue {
                 let ret = vec_f64
                     .into_iter()
                     .map(|v| v.map(|inner| inner.to_owned()))
-                    /* .enumerate()
-                    .map(|(idx, v)| {
-                        v.ok_or(format!(
-                            "No null element expected, found one in {idx} position"
-                        ))
-                        .map(|v| v.to_owned())
-                    })*/
                     .collect::<Vec<_>>();
                 if ret.iter().all(|x| x.is_some()) {
                     Ok(Self::FloatVec(
@@ -267,16 +251,9 @@ impl PyValue {
                     Ok(Self::FloatVecWithNull(ret))
                 }
             } else if is_int(ty) {
-                let vec_int = arrow::compute::cast::cast(
-                    res.as_ref(),
-                    &DataType::Int64,
-                    CastOptions {
-                        wrapped: true,
-                        partial: true,
-                    },
-                )
-                .map_err(|err| format!("{err:#?}"))?;
-                assert_eq!(vec_int.data_type(), &DataType::Int64);
+                let vec_int = compute::cast(&res, &ArrowDataType::Int64)
+                    .map_err(|err| format!("{err:#?}"))?;
+                assert_eq!(vec_int.data_type(), &ArrowDataType::Int64);
                 let vec_i64 = vec_int
                     .as_any()
                     .downcast_ref::<Int64Array>()
@@ -293,7 +270,7 @@ impl PyValue {
                     .collect::<Result<_, String>>()?;
                 Ok(Self::IntVec(ret))
             } else {
-                Err(format!("unspupported DataType:{ty:#?}"))
+                Err(format!("unspupported ArrowDataType:{ty:#?}"))
             }
         } else if is_instance::<PyInt>(obj, vm) {
             let res = obj

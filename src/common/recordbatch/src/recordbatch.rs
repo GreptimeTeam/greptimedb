@@ -80,8 +80,18 @@ impl RecordBatch {
     }
 
     #[inline]
+    pub fn columns(&self) -> &[VectorRef] {
+        &self.columns
+    }
+
+    #[inline]
     pub fn column(&self, idx: usize) -> &VectorRef {
         &self.columns[idx]
+    }
+
+    pub fn column_by_name(&self, name: &str) -> Option<&VectorRef> {
+        let idx = self.schema.column_index_by_name(name)?;
+        Some(&self.columns[idx])
     }
 
     #[inline]
@@ -179,17 +189,22 @@ mod tests {
         ]));
         let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
 
-        let v = Arc::new(UInt32Vector::from_slice(&[1, 2, 3]));
-        let columns: Vec<VectorRef> = vec![v.clone(), v.clone()];
+        let c1 = Arc::new(UInt32Vector::from_slice(&[1, 2, 3]));
+        let c2 = Arc::new(UInt32Vector::from_slice(&[4, 5, 6]));
+        let columns: Vec<VectorRef> = vec![c1, c2];
 
-        let batch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let batch = RecordBatch::new(schema.clone(), columns.clone()).unwrap();
         assert_eq!(3, batch.num_rows());
-        for i in 0..batch.num_columns() {
+        assert_eq!(&columns, batch.columns());
+        for (i, expect) in columns.iter().enumerate().take(batch.num_columns()) {
             let column = batch.column(i);
-            let actual = column.as_any().downcast_ref::<UInt32Vector>().unwrap();
-            assert_eq!(&*v, actual);
+            assert_eq!(expect, column);
         }
         assert_eq!(schema, batch.schema);
+
+        assert_eq!(columns[0], *batch.column_by_name("c1").unwrap());
+        assert_eq!(columns[1], *batch.column_by_name("c2").unwrap());
+        assert!(batch.column_by_name("c3").is_none());
 
         let converted =
             RecordBatch::try_from_df_record_batch(schema, batch.df_record_batch().clone()).unwrap();

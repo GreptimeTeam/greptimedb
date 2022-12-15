@@ -20,10 +20,12 @@ use std::io::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
 
+use common_recordbatch::RecordBatch;
 use console::style;
-use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-use datatypes::arrow::array::PrimitiveArray;
-use datatypes::arrow::datatypes::{DataType, Field, Schema};
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::vectors::{Float32Vector, Float64Vector, Int64Vector, VectorRef};
 use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
@@ -62,19 +64,26 @@ enum Predicate {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ColumnInfo {
-    pub ty: DataType,
+    pub ty: ArrowDataType,
     pub len: usize,
 }
 
-fn create_sample_recordbatch() -> DfRecordBatch {
-    let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
-    let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
-    let schema = Arc::new(Schema::from(vec![
-        Field::new("cpu", DataType::Float32, false),
-        Field::new("mem", DataType::Float64, false),
+fn create_sample_recordbatch() -> RecordBatch {
+    let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.6]);
+    let mem_array = Float64Vector::from_slice([0.1f64, 0.2, 0.3, 0.4]);
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), false),
+        ColumnSchema::new("mem", ConcreteDataType::float64_datatype(), false),
     ]));
 
-    DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap()
+    RecordBatch::new(
+        schema,
+        [
+            Arc::new(cpu_array) as VectorRef,
+            Arc::new(mem_array) as VectorRef,
+        ],
+    )
+    .unwrap()
 }
 
 /// test cases which read from a .ron file, deser,
@@ -102,8 +111,7 @@ fn run_ron_testcases() {
             Predicate::ParseIsErr { reason } => {
                 let copr = parse_and_compile_copr(&testcase.code);
                 if copr.is_ok() {
-                    eprintln!("Expect to be err, found{copr:#?}");
-                    panic!()
+                    panic!("Expect to be err, found{copr:#?}");
                 }
                 let res = &copr.unwrap_err();
                 println!(
@@ -113,24 +121,18 @@ fn run_ron_testcases() {
                 let (res, _) = get_error_reason_loc(res);
                 if !res.contains(&reason) {
                     eprintln!("{}", testcase.code);
-                    eprintln!("Parse Error, expect \"{reason}\" in \"{res}\", but not found.");
-                    panic!()
+                    panic!("Parse Error, expect \"{reason}\" in \"{res}\", but not found.");
                 }
             }
             Predicate::ExecIsOk { fields, columns } => {
                 let rb = create_sample_recordbatch();
-                let res = coprocessor::exec_coprocessor(&testcase.code, &rb);
-                if res.is_err() {
-                    dbg!(&res);
-                }
-                assert!(res.is_ok());
-                let res = res.unwrap();
+                let res = coprocessor::exec_coprocessor(&testcase.code, &rb).unwrap();
                 fields
                     .iter()
-                    .zip(&res.schema.arrow_schema().fields)
+                    .zip(res.schema.column_schemas())
                     .map(|(anno, real)| {
-                        if !(anno.datatype.clone().unwrap() == real.data_type
-                            && anno.is_nullable == real.is_nullable)
+                        if !(anno.datatype.as_ref().unwrap() == &real.data_type.as_arrow_type()
+                            && anno.is_nullable == real.is_nullable())
                         {
                             eprintln!("fields expect to be {anno:#?}, found to be {real:#?}.");
                             panic!()
@@ -139,17 +141,18 @@ fn run_ron_testcases() {
                     .count();
                 columns
                     .iter()
-                    .zip(res.df_recordbatch.columns())
-                    .map(|(anno, real)| {
-                        if !(&anno.ty == real.data_type() && anno.len == real.len()) {
-                            eprintln!(
+                    .enumerate()
+                    .map(|(i, anno)| {
+                        let real = res.column(i);
+                        if !(anno.ty == real.data_type().as_arrow_type() && anno.len == real.len())
+                        {
+                            panic!(
                                 "Unmatch type or length!Expect [{:#?}; {}], found [{:#?}; {}]",
                                 anno.ty,
                                 anno.len,
                                 real.data_type(),
                                 real.len()
                             );
-                            panic!()
                         }
                     })
                     .count();
@@ -166,17 +169,15 @@ fn run_ron_testcases() {
                     );
                     let (reason, _) = get_error_reason_loc(&res);
                     if !reason.contains(&part_reason) {
-                        eprintln!(
+                        panic!(
                             "{}\nExecute error, expect \"{reason}\" in \"{res}\", but not found.",
                             testcase.code,
                             reason = style(reason).green(),
                             res = style(res).red()
                         );
-                        panic!()
                     }
                 } else {
-                    eprintln!("{:#?}\nExpect Err(...), found Ok(...)", res);
-                    panic!();
+                    panic!("{:#?}\nExpect Err(...), found Ok(...)", res);
                 }
             }
         }
@@ -235,7 +236,7 @@ def calc_rvs(open_time, close):
     rv_180d = vector([calc_rv(close, open_time, timepoint, datetime("180d"))])
     return rv_7d, rv_15d, rv_30d, rv_60d, rv_90d, rv_180d
 "#;
-    let close_array = PrimitiveArray::from_slice([
+    let close_array = Float32Vector::from_slice([
         10106.79f32,
         10106.09,
         10108.73,
@@ -248,17 +249,20 @@ def calc_rvs(open_time, close):
         10117.08,
         10120.43,
     ]);
-    let open_time_array = PrimitiveArray::from_slice([
+    let open_time_array = Int64Vector::from_slice([
         300i64, 900i64, 1200i64, 1800i64, 2400i64, 3000i64, 3600i64, 4200i64, 4800i64, 5400i64,
         6000i64,
     ]);
-    let schema = Arc::new(Schema::from(vec![
-        Field::new("close", DataType::Float32, false),
-        Field::new("open_time", DataType::Int64, false),
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("close", ConcreteDataType::float32_datatype(), false),
+        ColumnSchema::new("open_time", ConcreteDataType::int64_datatype(), false),
     ]));
-    let rb = DfRecordBatch::try_new(
+    let rb = RecordBatch::new(
         schema,
-        vec![Arc::new(close_array), Arc::new(open_time_array)],
+        [
+            Arc::new(close_array) as VectorRef,
+            Arc::new(open_time_array) as VectorRef,
+        ],
     )
     .unwrap();
     let ret = coprocessor::exec_coprocessor(python_source, &rb);
@@ -297,14 +301,20 @@ def a(cpu, mem):
     ref = log2(fed/prev(fed))
     return (0.5 < cpu) & ~( cpu >= 0.75)
 "#;
-    let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
-    let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
-    let schema = Arc::new(Schema::from(vec![
-        Field::new("cpu", DataType::Float32, false),
-        Field::new("mem", DataType::Float64, false),
+    let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);
+    let mem_array = Float64Vector::from_slice([0.1f64, 0.2, 0.3, 0.4]);
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), false),
+        ColumnSchema::new("mem", ConcreteDataType::float64_datatype(), false),
     ]));
-    let rb =
-        DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
+    let rb = RecordBatch::new(
+        schema,
+        [
+            Arc::new(cpu_array) as VectorRef,
+            Arc::new(mem_array) as VectorRef,
+        ],
+    )
+    .unwrap();
     let ret = coprocessor::exec_coprocessor(python_source, &rb);
     if let Err(Error::PyParse {
         backtrace: _,

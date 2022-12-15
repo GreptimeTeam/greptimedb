@@ -21,10 +21,9 @@ mod test;
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::ColumnarValue as DFColValue;
 use datafusion_physical_expr::AggregateExpr;
-use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
-use datatypes::arrow::compute::cast::CastOptions;
-use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::compute;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
 use rustpython_vm::{pymodule, AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine};
@@ -37,7 +36,7 @@ fn type_cast_error(name: &str, ty: &str, vm: &VirtualMachine) -> PyBaseException
     vm.new_type_error(format!("Can't cast operand of type `{name}` into `{ty}`."))
 }
 
-fn collect_diff_types_string(values: &[ScalarValue], ty: &DataType) -> String {
+fn collect_diff_types_string(values: &[ScalarValue], ty: &ArrowDataType) -> String {
     values
         .iter()
         .enumerate()
@@ -54,6 +53,10 @@ fn collect_diff_types_string(values: &[ScalarValue], ty: &DataType) -> String {
             acc
         })
         .unwrap_or_else(|| "Nothing".to_string())
+}
+
+fn new_item_field(data_type: ArrowDataType) -> Field {
+    Field::new("item", data_type, false)
 }
 
 /// try to turn a Python Object into a PyVector or a scalar that can be use for calculate
@@ -109,7 +112,7 @@ pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResul
             // TODO(dennis): empty list, we set type as null.
             return Ok(DFColValue::Scalar(ScalarValue::List(
                 None,
-                Box::new(DataType::Null),
+                Box::new(new_item_field(ArrowDataType::Null)),
             )));
         }
 
@@ -121,8 +124,8 @@ pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResul
             )));
         }
         Ok(DFColValue::Scalar(ScalarValue::List(
-            Some(Box::new(ret)),
-            Box::new(ty),
+            Some(ret),
+            Box::new(new_item_field(ty)),
         )))
     } else {
         Err(vm.new_type_error(format!(
@@ -184,22 +187,14 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
 fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
     match col {
         DFColValue::Array(arr) => {
-            let res = arrow::compute::cast::cast(
-                arr.as_ref(),
-                &DataType::Float64,
-                CastOptions {
-                    wrapped: true,
-                    partial: true,
-                },
-            )
-            .map_err(|err| {
+            let res = compute::cast(&arr, &ArrowDataType::Float64).map_err(|err| {
                 vm.new_type_error(format!(
                     "Arrow Type Cast Fail(from {:#?} to {:#?}): {err:#?}",
                     arr.data_type(),
-                    DataType::Float64
+                    ArrowDataType::Float64
                 ))
             })?;
-            Ok(DFColValue::Array(res.into()))
+            Ok(DFColValue::Array(res))
         }
         DFColValue::Scalar(val) => {
             let val_in_f64 = match val {
@@ -210,7 +205,7 @@ fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
                     return Err(vm.new_type_error(format!(
                         "Can't cast type {:#?} to {:#?}",
                         val.get_datatype(),
-                        DataType::Float64
+                        ArrowDataType::Float64
                     )))
                 }
             };
@@ -284,17 +279,16 @@ pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
+    use arrow::compute::kernels::{aggregate, boolean, comparison};
     use common_function::scalars::function::FunctionContext;
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
-    use datafusion::arrow::compute::comparison::{gt_eq_scalar, lt_eq_scalar};
-    use datafusion::arrow::datatypes::DataType;
-    use datafusion::arrow::error::ArrowError;
-    use datafusion::arrow::scalar::{PrimitiveScalar, Scalar};
+    use datafusion::arrow::datatypes::DataType as ArrowDataType;
     use datafusion::physical_plan::expressions;
     use datafusion_expr::ColumnarValue as DFColValue;
     use datafusion_physical_expr::math_expressions;
-    use datatypes::arrow::array::{ArrayRef, NullArray};
+    use datatypes::arrow::array::{ArrayRef, Int64Array, NullArray};
+    use datatypes::arrow::error::ArrowError;
     use datatypes::arrow::{self, compute};
     use datatypes::vectors::{ConstantVector, Float64Vector, Helper, Int64Vector, VectorRef};
     use paste::paste;
@@ -385,11 +379,6 @@ pub(crate) mod greptime_builtin {
         vm: &VirtualMachine,
     ) -> PyResult<PyVector> {
         eval_func("clip", &[v0, v1, v2], vm)
-    }
-
-    #[pyfunction]
-    fn median(v: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        eval_aggr_func("median", &[v], vm)
     }
 
     #[pyfunction]
@@ -553,7 +542,7 @@ pub(crate) mod greptime_builtin {
     fn random(len: usize, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         // This is in a proc macro so using full path to avoid strange things
         // more info at: https://doc.rust-lang.org/reference/procedural-macros.html#procedural-macro-hygiene
-        let arg = NullArray::new(arrow::datatypes::DataType::Null, len);
+        let arg = NullArray::new(len);
         let args = &[DFColValue::Array(std::sync::Arc::new(arg) as _)];
         let res = math_expressions::random(args).map_err(|err| from_df_err(err, vm))?;
         let ret = try_into_py_obj(res, vm)?;
@@ -565,6 +554,17 @@ pub(crate) mod greptime_builtin {
     fn approx_distinct(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
         bind_aggr_fn!(
             ApproxDistinct,
+            vm,
+            &[values.to_arrow_array()],
+            values.to_arrow_array().data_type(),
+            expr0
+        );
+    }
+
+    #[pyfunction]
+    fn median(values: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+        bind_aggr_fn!(
+            Median,
             vm,
             &[values.to_arrow_array()],
             values.to_arrow_array().data_type(),
@@ -808,12 +808,16 @@ pub(crate) mod greptime_builtin {
         Ok(res.into())
     }
 
-    fn gen_none_array(data_type: DataType, len: usize, vm: &VirtualMachine) -> PyResult<ArrayRef> {
+    fn gen_none_array(
+        data_type: ArrowDataType,
+        len: usize,
+        vm: &VirtualMachine,
+    ) -> PyResult<ArrayRef> {
         macro_rules! match_none_array {
             ($VAR:ident, $LEN: ident, [$($TY:ident),*]) => {
                 paste!{
                     match $VAR{
-                        $(DataType::$TY => Arc::new(arrow::array::[<$TY Array>]::from(vec![None;$LEN])), )*
+                        $(ArrowDataType::$TY => Arc::new(arrow::array::[<$TY Array>]::from(vec![None;$LEN])), )*
                         _ => return Err(vm.new_type_error(format!("gen_none_array() does not support {:?}", data_type)))
                     }
                 }
@@ -829,10 +833,10 @@ pub(crate) mod greptime_builtin {
 
     #[pyfunction]
     fn prev(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let cur: ArrayRef = cur.to_arrow_array();
+        let cur = cur.to_arrow_array();
         if cur.len() == 0 {
             let ret = cur.slice(0, 0);
-            let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+            let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
                 vm.new_type_error(format!(
                     "Can't cast result into vector, result: {:?}, err: {:?}",
                     ret, e
@@ -842,10 +846,10 @@ pub(crate) mod greptime_builtin {
         }
         let cur = cur.slice(0, cur.len() - 1); // except the last one that is
         let fill = gen_none_array(cur.data_type().to_owned(), 1, vm)?;
-        let ret = compute::concatenate::concatenate(&[&*fill, &*cur]).map_err(|err| {
+        let ret = compute::concat(&[&*fill, &*cur]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
-        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+        let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
                 "Can't cast result into vector, result: {:?}, err: {:?}",
                 ret, e
@@ -856,10 +860,10 @@ pub(crate) mod greptime_builtin {
 
     #[pyfunction]
     fn next(cur: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let cur: ArrayRef = cur.to_arrow_array();
+        let cur = cur.to_arrow_array();
         if cur.len() == 0 {
             let ret = cur.slice(0, 0);
-            let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+            let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
                 vm.new_type_error(format!(
                     "Can't cast result into vector, result: {:?}, err: {:?}",
                     ret, e
@@ -869,10 +873,10 @@ pub(crate) mod greptime_builtin {
         }
         let cur = cur.slice(1, cur.len() - 1); // except the last one that is
         let fill = gen_none_array(cur.data_type().to_owned(), 1, vm)?;
-        let ret = compute::concatenate::concatenate(&[&*cur, &*fill]).map_err(|err| {
+        let ret = compute::concat(&[&*cur, &*fill]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
-        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+        let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
                 "Can't cast result into vector, result: {:?}, err: {:?}",
                 ret, e
@@ -881,55 +885,24 @@ pub(crate) mod greptime_builtin {
         Ok(ret.into())
     }
 
-    fn try_scalar_to_value(scalar: &dyn Scalar, vm: &VirtualMachine) -> PyResult<i64> {
-        let ty_error = |s: String| vm.new_type_error(s);
-        scalar
-            .as_any()
-            .downcast_ref::<PrimitiveScalar<i64>>()
-            .ok_or_else(|| {
-                ty_error(format!(
-                    "expect scalar to be i64, found{:?}",
-                    scalar.data_type()
-                ))
-            })?
-            .value()
-            .ok_or_else(|| ty_error("All element is Null in a time series array".to_string()))
-    }
-
     /// generate interval time point
     fn gen_inteveral(
-        oldest: &dyn Scalar,
-        newest: &dyn Scalar,
+        oldest: i64,
+        newest: i64,
         duration: i64,
         vm: &VirtualMachine,
-    ) -> PyResult<Vec<PrimitiveScalar<i64>>> {
-        use datatypes::arrow::datatypes::DataType;
-        match (oldest.data_type(), newest.data_type()) {
-            (DataType::Int64, DataType::Int64) => (),
-            _ => {
-                return Err(vm.new_type_error(format!(
-                    "Expect int64, found {:?} and {:?}",
-                    oldest.data_type(),
-                    newest.data_type()
-                )));
-            }
-        }
-
-        let oldest = try_scalar_to_value(oldest, vm)?;
-        let newest = try_scalar_to_value(newest, vm)?;
+    ) -> PyResult<Vec<i64>> {
         if oldest > newest {
             return Err(vm.new_value_error(format!("{oldest} is greater than {newest}")));
         }
-        let ret = if duration > 0 {
-            (oldest..=newest)
+        if duration > 0 {
+            let ret = (oldest..=newest)
                 .step_by(duration as usize)
-                .map(|v| PrimitiveScalar::new(DataType::Int64, Some(v)))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            Ok(ret)
         } else {
-            return Err(vm.new_value_error(format!("duration: {duration} is not positive number.")));
-        };
-
-        Ok(ret)
+            Err(vm.new_value_error(format!("duration: {duration} is not positive number.")))
+        }
     }
 
     /// `func`: exec on sliding window slice of given `arr`, expect it to always return a PyVector of one element
@@ -952,12 +925,19 @@ pub(crate) mod greptime_builtin {
         let arrow_error = |err: ArrowError| vm.new_runtime_error(format!("Arrow Error: {err:#?}"));
         let datatype_error =
             |err: datatypes::Error| vm.new_runtime_error(format!("DataType Errors!: {err:#?}"));
-        let ts: ArrayRef = ts.to_arrow_array();
-        let arr: ArrayRef = arr.to_arrow_array();
+        let ts_array_ref: ArrayRef = ts.to_arrow_array();
+        let ts = ts_array_ref
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .ok_or_else(|| {
+                vm.new_type_error(format!("ts must be int64, found: {:?}", ts_array_ref))
+            })?;
         let slices = {
-            let oldest = compute::aggregate::min(&*ts).map_err(arrow_error)?;
-            let newest = compute::aggregate::max(&*ts).map_err(arrow_error)?;
-            gen_inteveral(&*oldest, &*newest, duration, vm)?
+            let oldest = aggregate::min(ts)
+                .ok_or_else(|| vm.new_runtime_error("ts must has min value".to_string()))?;
+            let newest = aggregate::max(ts)
+                .ok_or_else(|| vm.new_runtime_error("ts must has max value".to_string()))?;
+            gen_inteveral(oldest, newest, duration, vm)?
         };
 
         let windows = {
@@ -969,11 +949,15 @@ pub(crate) mod greptime_builtin {
                     it
                 })
                 .map(|(first, second)| {
-                    compute::boolean::and(&gt_eq_scalar(&*ts, first), &lt_eq_scalar(&*ts, second))
-                        .map_err(arrow_error)
+                    let left = comparison::gt_eq_scalar(ts, *first).map_err(arrow_error)?;
+                    let right = comparison::lt_eq_scalar(ts, *second).map_err(arrow_error)?;
+                    boolean::and(&left, &right).map_err(arrow_error)
                 })
                 .map(|mask| match mask {
-                    Ok(mask) => compute::filter::filter(&*arr, &mask).map_err(arrow_error),
+                    Ok(mask) => {
+                        let arrow_arr = arr.to_arrow_array();
+                        compute::filter(&arrow_arr, &mask).map_err(arrow_error)
+                    }
                     Err(e) => Err(e),
                 })
                 .collect::<Result<Vec<_>, _>>()?
@@ -1013,16 +997,17 @@ pub(crate) mod greptime_builtin {
             .map(apply_interval_function)
             .collect::<Result<Vec<_>, _>>()?;
 
-        // 3. get returen vector and concat them
-        let ret = fn_results
-            .into_iter()
-            .try_reduce(|acc, x| {
-                compute::concatenate::concatenate(&[acc.as_ref(), x.as_ref()]).map(Arc::from)
-            })
-            .map_err(arrow_error)?
-            .unwrap_or_else(|| Arc::from(arr.slice(0, 0)));
+        // 3. get returned vector and concat them
+        let result_arrays: Vec<_> = fn_results
+            .iter()
+            .map(|vector| vector.to_arrow_array())
+            .collect();
+        let result_dyn_arrays: Vec<_> = result_arrays.iter().map(|v| v.as_ref()).collect();
+        let concat_array = compute::concat(&result_dyn_arrays).map_err(arrow_error)?;
+        let vector = Helper::try_into_vector(concat_array).map_err(datatype_error)?;
+
         // 4. return result vector
-        Ok(Helper::try_into_vector(ret).map_err(datatype_error)?.into())
+        Ok(PyVector::from(vector))
     }
 
     /// return first element in a `PyVector` in sliced new `PyVector`, if vector's length is zero, return a zero sized slice instead
@@ -1033,7 +1018,7 @@ pub(crate) mod greptime_builtin {
             0 => arr.slice(0, 0),
             _ => arr.slice(0, 1),
         };
-        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+        let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
                 "Can't cast result into vector, result: {:?}, err: {:?}",
                 ret, e
@@ -1050,7 +1035,7 @@ pub(crate) mod greptime_builtin {
             0 => arr.slice(0, 0),
             _ => arr.slice(arr.len() - 1, 1),
         };
-        let ret = Helper::try_into_vector(&*ret).map_err(|e| {
+        let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
                 "Can't cast result into vector, result: {:?}, err: {:?}",
                 ret, e
