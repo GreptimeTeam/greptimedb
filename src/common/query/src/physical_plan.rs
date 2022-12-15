@@ -320,8 +320,16 @@ mod test {
             .await
             .unwrap();
         let pretty_print = pretty::pretty_format_batches(&df_recordbatches).unwrap();
-        // TODO(ruihang): fill this assertion
-        assert_eq!(pretty_print.to_string().as_str(), "");
+        assert_eq!(
+            pretty_print.to_string(),
+            r#"+---+
+| a |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+"#
+        );
     }
 
     #[test]

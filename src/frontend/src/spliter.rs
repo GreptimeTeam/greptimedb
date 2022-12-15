@@ -187,9 +187,12 @@ mod tests {
 
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::types::{BooleanType, StringType};
+    use datatypes::prelude::ScalarVectorBuilder;
+    use datatypes::types::StringType;
     use datatypes::value::Value;
-    use datatypes::vectors::VectorBuilder;
+    use datatypes::vectors::{
+        BooleanVectorBuilder, Int16VectorBuilder, MutableVector, StringVectorBuilder,
+    };
     use serde::{Deserialize, Serialize};
     use store_api::storage::RegionNumber;
     use table::requests::InsertRequest;
@@ -351,17 +354,17 @@ mod tests {
 
     #[test]
     fn test_partition_values() {
-        let mut builder = VectorBuilder::new(ConcreteDataType::Boolean(BooleanType));
-        builder.push(&true.into());
-        builder.push(&false.into());
-        builder.push(&true.into());
-        let v1 = builder.finish();
+        let mut builder = BooleanVectorBuilder::with_capacity(3);
+        builder.push(Some(true));
+        builder.push(Some(false));
+        builder.push(Some(true));
+        let v1 = builder.to_vector();
 
-        let mut builder = VectorBuilder::new(ConcreteDataType::String(StringType));
-        builder.push(&"host1".into());
-        builder.push_null();
-        builder.push(&"host3".into());
-        let v2 = builder.finish();
+        let mut builder = StringVectorBuilder::with_capacity(3);
+        builder.push(Some("host1"));
+        builder.push(None);
+        builder.push(Some("host3"));
+        let v2 = builder.to_vector();
 
         let vectors = vec![v1, v2];
 
@@ -380,23 +383,23 @@ mod tests {
 
     fn mock_insert_request() -> InsertRequest {
         let mut columns_values = HashMap::with_capacity(4);
-        let mut builder = VectorBuilder::new(ConcreteDataType::Boolean(BooleanType));
-        builder.push(&true.into());
-        builder.push(&false.into());
-        builder.push(&true.into());
-        columns_values.insert("enable_reboot".to_string(), builder.finish());
+        let mut builder = BooleanVectorBuilder::with_capacity(3);
+        builder.push(Some(true));
+        builder.push(Some(false));
+        builder.push(Some(true));
+        columns_values.insert("enable_reboot".to_string(), builder.to_vector());
 
-        let mut builder = VectorBuilder::new(ConcreteDataType::String(StringType));
-        builder.push(&"host1".into());
-        builder.push_null();
-        builder.push(&"host3".into());
-        columns_values.insert("host".to_string(), builder.finish());
+        let mut builder = StringVectorBuilder::with_capacity(3);
+        builder.push(Some("host1"));
+        builder.push(None);
+        builder.push(Some("host3"));
+        columns_values.insert("host".to_string(), builder.to_vector());
 
-        let mut builder = VectorBuilder::new(ConcreteDataType::int16_datatype());
-        builder.push(&1_i16.into());
-        builder.push(&2_i16.into());
-        builder.push(&3_i16.into());
-        columns_values.insert("id".to_string(), builder.finish());
+        let mut builder = Int16VectorBuilder::with_capacity(3);
+        builder.push(Some(1_i16));
+        builder.push(Some(2_i16));
+        builder.push(Some(3_i16));
+        columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
@@ -408,22 +411,22 @@ mod tests {
 
     fn mock_wrong_insert_request() -> InsertRequest {
         let mut columns_values = HashMap::with_capacity(4);
-        let mut builder = VectorBuilder::new(ConcreteDataType::Boolean(BooleanType));
-        builder.push(&true.into());
-        builder.push(&false.into());
-        builder.push(&true.into());
-        columns_values.insert("enable_reboot".to_string(), builder.finish());
+        let mut builder = BooleanVectorBuilder::with_capacity(3);
+        builder.push(Some(true));
+        builder.push(Some(false));
+        builder.push(Some(true));
+        columns_values.insert("enable_reboot".to_string(), builder.to_vector());
 
-        let mut builder = VectorBuilder::new(ConcreteDataType::String(StringType));
-        builder.push(&"host1".into());
-        builder.push_null();
-        builder.push(&"host3".into());
-        columns_values.insert("host".to_string(), builder.finish());
+        let mut builder = StringVectorBuilder::with_capacity(3);
+        builder.push(Some("host1"));
+        builder.push(None);
+        builder.push(Some("host3"));
+        columns_values.insert("host".to_string(), builder.to_vector());
 
-        let mut builder = VectorBuilder::new(ConcreteDataType::int16_datatype());
-        builder.push(&1_i16.into());
+        let mut builder = Int16VectorBuilder::with_capacity(1);
+        builder.push(Some(1_i16));
         // two values are missing
-        columns_values.insert("id".to_string(), builder.finish());
+        columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),

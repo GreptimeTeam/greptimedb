@@ -695,22 +695,26 @@ mod tests {
             .await
             .unwrap();
         match output {
-            Output::Stream(stream) => {
-                let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-                let pretty_print = recordbatches.pretty_print();
-                let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
-                let expected = vec![
-                    "+----------------+---------------------+-----+--------+-----------+",
-                    "| host           | ts                  | cpu | memory | disk_util |",
-                    "+----------------+---------------------+-----+--------+-----------+",
-                    "| frontend.host1 | 1970-01-01 00:00:01 | 1.1 | 100    | 9.9       |",
-                    "| frontend.host2 | 1970-01-01 00:00:02 |     |        | 9.9       |",
-                    "| frontend.host3 | 1970-01-01 00:00:03 | 3.3 | 300    | 9.9       |",
-                    "+----------------+---------------------+-----+--------+-----------+",
-                ];
+            Output::RecordBatches(_) => {
+                unreachable!("Output::RecordBatches");
+            }
+            Output::AffectedRows(_) => {
+                unreachable!("Output::AffectedRows");
+            }
+            Output::Stream(s) => {
+                let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+                let pretty_print = batches.pretty_print().unwrap();
+                let expected = "\
++----------------+---------------------+-----+--------+-----------+
+| host           | ts                  | cpu | memory | disk_util |
++----------------+---------------------+-----+--------+-----------+
+| frontend.host1 | 1970-01-01T00:00:01 | 1.1 | 100    | 9.9       |
+| frontend.host2 | 1970-01-01T00:00:02 |     |        | 9.9       |
+| frontend.host3 | 1970-01-01T00:00:03 | 3.3 | 300    | 9.9       |
++----------------+---------------------+-----+--------+-----------+\
+                ";
                 assert_eq!(pretty_print, expected);
             }
-            _ => unreachable!(),
         };
 
         let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
@@ -718,21 +722,26 @@ mod tests {
             .await
             .unwrap();
         match output {
-            Output::Stream(stream) => {
-                let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-                let pretty_print = recordbatches.pretty_print();
-                let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
-                let expected = vec![
-                    "+----------------+---------------------+-----+--------+-----------+",
-                    "| host           | ts                  | cpu | memory | disk_util |",
-                    "+----------------+---------------------+-----+--------+-----------+",
-                    "| frontend.host2 | 1970-01-01 00:00:02 |     |        | 9.9       |",
-                    "| frontend.host3 | 1970-01-01 00:00:03 | 3.3 | 300    | 9.9       |",
-                    "+----------------+---------------------+-----+--------+-----------+",
-                ];
-                assert_eq!(pretty_print, expected);
+            Output::RecordBatches(_) => {
+                unreachable!("Output::RecordBatches")
             }
-            _ => unreachable!(),
+            Output::AffectedRows(_) => {
+                unreachable!("Output::AffectedRows")
+            }
+            Output::Stream(s) => {
+                let recordbatches = common_recordbatch::util::collect_batches(s).await.unwrap();
+                let pretty = recordbatches.pretty_print().unwrap();
+                let expected = "\
++----------------+---------------------+-----+--------+-----------+
+| host           | ts                  | cpu | memory | disk_util |
++----------------+---------------------+-----+--------+-----------+
+| frontend.host2 | 1970-01-01T00:00:02 |     |        | 9.9       |
+| frontend.host3 | 1970-01-01T00:00:03 | 3.3 | 300    | 9.9       |
++----------------+---------------------+-----+--------+-----------+\
+                    "
+                .to_string();
+                assert_eq!(pretty, expected);
+            }
         };
     }
 
@@ -791,7 +800,7 @@ mod tests {
                 ..Default::default()
             }),
             semantic_type: SemanticType::Timestamp as i32,
-            datatype: ColumnDataType::Timestamp as i32,
+            datatype: ColumnDataType::TimestampMillisecond as i32,
             ..Default::default()
         };
 
@@ -909,7 +918,7 @@ mod tests {
             },
             GrpcColumnDef {
                 name: "ts".to_string(),
-                datatype: ColumnDataType::Timestamp as i32,
+                datatype: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: true,
                 default_constraint: None,
             },

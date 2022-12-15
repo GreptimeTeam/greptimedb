@@ -113,7 +113,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
             ..Default::default()
         }),
         semantic_type: SemanticType::Timestamp as i32,
-        datatype: ColumnDataType::Timestamp as i32,
+        datatype: ColumnDataType::TimestampMillisecond as i32,
         ..Default::default()
     };
 
@@ -244,7 +244,7 @@ fn testing_create_expr() -> CreateExpr {
         },
         ColumnDef {
             name: "ts".to_string(),
-            datatype: 15, // timestamp
+            datatype: ColumnDataType::TimestampMillisecond as i32, // timestamp
             is_nullable: true,
             default_constraint: None,
         },

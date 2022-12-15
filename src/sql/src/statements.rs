@@ -422,9 +422,13 @@ mod tests {
         let sql_val = SqlValue::Boolean(true);
         let v = sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val);
         assert!(v.is_err());
-        assert!(format!("{:?}", v).contains(
-            "column_name: \"a\", expect: Float64(Float64), actual: Boolean(BooleanType)"
-        ));
+        assert!(
+            format!("{:?}", v).contains(
+                "column_name: \"a\", expect: Float64(Float64Type), actual: Boolean(BooleanType)"
+            ),
+            "v is {:?}",
+            v
+        );
     }
 
     #[test]

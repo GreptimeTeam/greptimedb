@@ -148,8 +148,8 @@ mod tests {
 
     use api::v1::{ColumnDataType, InsertExpr};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::types::StringType;
+    use datatypes::prelude::ScalarVectorBuilder;
+    use datatypes::vectors::{Int16VectorBuilder, MutableVector, StringVectorBuilder};
     use table::requests::InsertRequest;
 
     use super::to_insert_expr;
@@ -166,16 +166,16 @@ mod tests {
     fn mock_insert_request() -> InsertRequest {
         let mut columns_values = HashMap::with_capacity(4);
 
-        let mut builder = VectorBuilder::new(ConcreteDataType::String(StringType));
-        builder.push(&"host1".into());
-        builder.push_null();
-        builder.push(&"host3".into());
-        columns_values.insert("host".to_string(), builder.finish());
+        let mut builder = StringVectorBuilder::with_capacity(3);
+        builder.push(Some("host1"));
+        builder.push(None);
+        builder.push(Some("host3"));
+        columns_values.insert("host".to_string(), builder.to_vector());
 
-        let mut builder = ConcreteDataType::int16_datatype().create_mutable_vector(3);
-        builder.push(&1_i16.into());
-        builder.push(&2_i16.into());
-        builder.push(&3_i16.into());
+        let mut builder = Int16VectorBuilder::with_capacity(3);
+        builder.push(Some(1_i16));
+        builder.push(Some(2_i16));
+        builder.push(Some(3_i16));
         columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
