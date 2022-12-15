@@ -242,10 +242,10 @@ fn parse_column_default_constraint(
 // a column is not nullable but has a default value null.
 /// Create a `ColumnSchema` from `ColumnDef`.
 pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Result<ColumnSchema> {
-    let is_nullable = !column_def
+    let is_nullable = column_def
         .options
         .iter()
-        .any(|o| matches!(o.option, ColumnOption::NotNull))
+        .all(|o| !matches!(o.option, ColumnOption::NotNull))
         && !is_time_index;
 
     let name = column_def.name.value.clone();
@@ -266,10 +266,10 @@ pub fn sql_column_def_to_grpc_column_def(col: ColumnDef) -> Result<api::v1::Colu
     let name = col.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
 
-    let nullable = !col
+    let is_nullable = col
         .options
         .iter()
-        .any(|o| matches!(o.option, ColumnOption::NotNull));
+        .all(|o| !matches!(o.option, ColumnOption::NotNull));
 
     let default_constraint = parse_column_default_constraint(&name, &data_type, &col.options)?
         .map(ColumnDefaultConstraint::try_into) // serialize default constraint to bytes
@@ -282,7 +282,7 @@ pub fn sql_column_def_to_grpc_column_def(col: ColumnDef) -> Result<api::v1::Colu
     Ok(api::v1::ColumnDef {
         name,
         datatype: data_type,
-        is_nullable: nullable,
+        is_nullable,
         default_constraint,
     })
 }
