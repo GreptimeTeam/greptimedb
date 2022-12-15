@@ -445,7 +445,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Failed to create column datatype from List(ListType { inner: Boolean(BooleanType) })"
+            "Failed to create column datatype from List(ListType { item_type: Boolean(BooleanType) })"
         );
     }
 
