@@ -94,7 +94,7 @@ fn create_to_expr(
         create_if_not_exists: create.if_not_exists,
         // TODO(LFC): Fill in other table options.
         table_options: HashMap::from([("engine".to_string(), create.engine.clone())]),
-        table_id,
+        table_id: table_id.map(|id| api::v1::TableId { id }),
         region_ids,
     };
     Ok(expr)

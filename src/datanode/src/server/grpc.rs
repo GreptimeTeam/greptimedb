@@ -34,12 +34,12 @@ impl Instance {
     pub(crate) async fn handle_create(&self, expr: CreateTableExpr) -> AdminResult {
         // Respect CreateExpr's table id and region ids if present, or allocate table id
         // from local table id provider and set region id to 0.
-        let table_id = if let Some(table_id) = expr.table_id {
+        let table_id = if let Some(table_id) = &expr.table_id {
             info!(
                 "Creating table {:?}.{:?}.{:?} with table id from frontend: {}",
-                expr.catalog_name, expr.schema_name, expr.table_name, table_id
+                expr.catalog_name, expr.schema_name, expr.table_name, table_id.id
             );
-            table_id
+            table_id.id
         } else {
             match self.table_id_provider.as_ref() {
                 None => {
@@ -157,7 +157,7 @@ impl Instance {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::{ColumnDataType, ColumnDef};
+    use api::v1::{ColumnDataType, ColumnDef, TableId};
     use common_catalog::consts::MIN_USER_TABLE_ID;
     use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
@@ -287,7 +287,9 @@ mod tests {
             primary_keys: vec!["ts".to_string(), "host".to_string()],
             create_if_not_exists: true,
             table_options: Default::default(),
-            table_id: Some(MIN_USER_TABLE_ID),
+            table_id: Some(TableId {
+                id: MIN_USER_TABLE_ID,
+            }),
             region_ids: vec![0],
         }
     }

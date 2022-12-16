@@ -273,7 +273,7 @@ pub fn build_create_expr_from_insertion(
         primary_keys,
         create_if_not_exists: true,
         table_options: Default::default(),
-        table_id,
+        table_id: table_id.map(|id| api::v1::TableId { id }),
         region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
     };
 
@@ -516,7 +516,7 @@ mod tests {
             build_create_expr_from_insertion("", "", table_id, table_name, &insert_batch.0)
                 .unwrap();
 
-        assert_eq!(table_id, create_expr.table_id);
+        assert_eq!(table_id, create_expr.table_id.map(|x| x.id));
         assert_eq!(table_name, create_expr.table_name);
         assert_eq!(Some("Created on insertion".to_string()), create_expr.desc);
         assert_eq!(

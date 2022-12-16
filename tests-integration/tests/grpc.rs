@@ -15,7 +15,7 @@ use api::v1::alter_expr::Kind;
 use api::v1::column::SemanticType;
 use api::v1::{
     admin_result, column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-    CreateTableExpr, InsertExpr, MutateResult,
+    CreateTableExpr, InsertExpr, MutateResult, TableId,
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
@@ -259,7 +259,9 @@ fn testing_create_expr() -> CreateTableExpr {
         primary_keys: vec!["host".to_string()],
         create_if_not_exists: true,
         table_options: Default::default(),
-        table_id: Some(MIN_USER_TABLE_ID),
+        table_id: Some(TableId {
+            id: MIN_USER_TABLE_ID,
+        }),
         region_ids: vec![0],
     }
 }

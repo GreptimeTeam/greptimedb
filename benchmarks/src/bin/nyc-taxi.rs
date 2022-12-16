@@ -28,7 +28,7 @@ use arrow::record_batch::RecordBatch;
 use clap::Parser;
 use client::admin::Admin;
 use client::api::v1::column::Values;
-use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertExpr};
+use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertExpr, TableId};
 use client::{Client, Database, Select};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -346,7 +346,7 @@ fn create_table_expr() -> CreateTableExpr {
         create_if_not_exists: false,
         table_options: Default::default(),
         region_ids: vec![0],
-        table_id: Some(0),
+        table_id: Some(TableId { id: 0 }),
     }
 }
 

@@ -19,7 +19,7 @@ use api::helper::ColumnDataTypeWrapper;
 use api::result::AdminResultBuilder;
 use api::v1::{
     admin_expr, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr, CreateTableExpr, ObjectExpr,
-    ObjectResult,
+    ObjectResult, TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
@@ -112,7 +112,9 @@ impl DistInstance {
                 table_name: create_table.table_name.to_string()
             }
         );
-        create_table.table_id = Some(table_route.table.id as u32);
+        create_table.table_id = Some(TableId {
+            id: table_route.table.id as u32,
+        });
         self.put_table_global_meta(create_table, table_route)
             .await?;
 
@@ -274,10 +276,12 @@ impl DistInstance {
             .await
             .context(CatalogSnafu)?
         {
-            let existing_bytes = existing.unwrap(); //this unwrap is safe since we compare with empty bytes and failed
+            let existing_bytes = existing.unwrap(); // this unwrap is safe since we compare with empty bytes and failed
             let existing_value =
                 TableGlobalValue::from_bytes(&existing_bytes).context(CatalogEntrySerdeSnafu)?;
-            if existing_value.table_info.ident.table_id != create_table.table_id.unwrap() {
+            if existing_value.table_info.ident.table_id
+                != create_table.table_id.as_ref().unwrap().id
+            {
                 error!(
                     "Table with name {} already exists, value in catalog: {:?}",
                     key, existing_bytes

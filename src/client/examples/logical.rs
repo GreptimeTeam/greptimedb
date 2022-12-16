@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr};
+use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, TableId};
 use client::admin::Admin;
 use client::{Client, Database};
 use prost_09::Message;
@@ -62,7 +62,7 @@ async fn run() {
         primary_keys: vec!["key".to_string()],
         create_if_not_exists: false,
         table_options: Default::default(),
-        table_id: Some(1024),
+        table_id: Some(TableId { id: 1024 }),
         region_ids: vec![0],
     };
 
