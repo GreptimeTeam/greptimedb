@@ -288,11 +288,10 @@ mod tests {
     use store_api::storage::PutOperation;
 
     use super::*;
-    use crate::proto;
-    use crate::write_batch::tests;
+    use crate::{proto, write_batch};
 
     fn gen_new_batch_and_types() -> (WriteBatch, Vec<i32>) {
-        let mut batch = tests::new_test_batch();
+        let mut batch = write_batch::new_test_batch();
         for i in 0..10 {
             let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
             let boolv = Arc::new(BooleanVector::from(vec![Some(true), Some(false), None]));
@@ -347,7 +346,7 @@ mod tests {
     }
 
     fn gen_new_batch_and_types_with_none_column() -> (WriteBatch, Vec<i32>) {
-        let mut batch = tests::new_test_batch();
+        let mut batch = write_batch::new_test_batch();
         for _ in 0..10 {
             let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
             let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 0]));

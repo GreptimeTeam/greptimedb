@@ -501,7 +501,24 @@ impl<'a> IntoIterator for &'a WriteBatch {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub(crate) fn new_test_batch() -> WriteBatch {
+    use datatypes::type_id::LogicalTypeId;
+
+    use crate::test_util::write_batch_util;
+
+    write_batch_util::new_write_batch(
+        &[
+            ("k1", LogicalTypeId::UInt64, false),
+            (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
+            ("ts", LogicalTypeId::TimestampMillisecond, false),
+            ("v1", LogicalTypeId::Boolean, true),
+        ],
+        Some(2),
+    )
+}
+
+#[cfg(test)]
+mod tests {
     use std::iter;
     use std::sync::Arc;
 
@@ -547,18 +564,6 @@ pub(crate) mod tests {
 
         assert_eq!(0, put_data.num_rows());
         assert!(put_data.is_empty());
-    }
-
-    pub(crate) fn new_test_batch() -> WriteBatch {
-        write_batch_util::new_write_batch(
-            &[
-                ("k1", LogicalTypeId::UInt64, false),
-                (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-                ("ts", LogicalTypeId::TimestampMillisecond, false),
-                ("v1", LogicalTypeId::Boolean, true),
-            ],
-            Some(2),
-        )
     }
 
     #[test]
