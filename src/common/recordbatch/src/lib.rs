@@ -66,7 +66,7 @@ impl Stream for EmptyRecordBatchStream {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct RecordBatches {
     schema: SchemaRef,
     batches: Vec<RecordBatch>,
