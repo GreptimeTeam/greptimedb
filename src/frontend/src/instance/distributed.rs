@@ -142,14 +142,17 @@ impl DistInstance {
         Ok(Output::AffectedRows(0))
     }
 
-    async fn handle_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
-        let stmt = parse_stmt(sql)?;
+    async fn handle_statement(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {
                 let plan = self
                     .query_engine
                     .statement_to_plan(stmt, query_ctx)
-                    .context(error::ExecuteSqlSnafu { sql })?;
+                    .context(error::ExecuteStatementSnafu {})?;
                 self.query_engine.execute(&plan).await
             }
             Statement::CreateDatabase(stmt) => {
@@ -173,7 +176,30 @@ impl DistInstance {
             }
             _ => unreachable!(),
         }
-        .context(error::ExecuteSqlSnafu { sql })
+        .context(error::ExecuteStatementSnafu)
+    }
+
+    async fn handle_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        let stmts = parse_stmt(sql);
+        match stmts {
+            Ok(stmts) => {
+                let mut results = Vec::with_capacity(stmts.len());
+
+                for stmt in stmts {
+                    let result = self.handle_statement(stmt, query_ctx.clone()).await;
+                    let is_err = result.is_err();
+
+                    results.push(result);
+
+                    if is_err {
+                        break;
+                    }
+                }
+
+                results
+            }
+            Err(e) => vec![Err(e)],
+        }
     }
 
     /// Handles distributed database creation
@@ -310,11 +336,26 @@ impl SqlQueryHandler for DistInstance {
         &self,
         query: &str,
         query_ctx: QueryContextRef,
-    ) -> server_error::Result<Output> {
+    ) -> Vec<server_error::Result<Output>> {
         self.handle_sql(query, query_ctx)
             .await
+            .into_iter()
+            .map(|r| {
+                r.map_err(BoxedError::new)
+                    .context(server_error::ExecuteQuerySnafu { query })
+            })
+            .collect()
+    }
+
+    async fn do_statement_query(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.handle_statement(stmt, query_ctx)
+            .await
             .map_err(BoxedError::new)
-            .context(server_error::ExecuteQuerySnafu { query })
+            .context(server_error::ExecuteStatementSnafu)
     }
 }
 
@@ -555,7 +596,7 @@ mod test {
         let cases = [
             (
                 r"
-CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )  
+CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
 PARTITION BY RANGE COLUMNS (b) (
   PARTITION r0 VALUES LESS THAN ('hz'),
   PARTITION r1 VALUES LESS THAN ('sh'),
@@ -601,6 +642,7 @@ ENGINE=mito",
         let output = dist_instance
             .handle_sql(sql, QueryContext::arc())
             .await
+            .remove(0)
             .unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
@@ -611,6 +653,7 @@ ENGINE=mito",
         let output = dist_instance
             .handle_sql(sql, QueryContext::arc())
             .await
+            .remove(0)
             .unwrap();
         match output {
             Output::RecordBatches(r) => {
@@ -649,6 +692,7 @@ ENGINE=mito",
         dist_instance
             .handle_sql(sql, QueryContext::arc())
             .await
+            .remove(0)
             .unwrap();
 
         let sql = "
@@ -667,11 +711,16 @@ ENGINE=mito",
         dist_instance
             .handle_sql(sql, QueryContext::arc())
             .await
+            .remove(0)
             .unwrap();
 
         async fn assert_show_tables(instance: SqlQueryHandlerRef) {
             let sql = "show tables in test_show_tables";
-            let output = instance.do_query(sql, QueryContext::arc()).await.unwrap();
+            let output = instance
+                .do_query(sql, QueryContext::arc())
+                .await
+                .remove(0)
+                .unwrap();
             match output {
                 Output::RecordBatches(r) => {
                     let expected = r#"+--------------+

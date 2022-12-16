@@ -461,31 +461,18 @@ impl FrontendInstance for Instance {
     }
 }
 
-fn parse_stmt(sql: &str) -> Result<Statement> {
-    let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
-        .context(error::ParseSqlSnafu)?;
-    // TODO(LFC): Support executing multiple SQL queries,
-    // which seems to be a major change to our whole server framework?
-    ensure!(
-        stmt.len() == 1,
-        error::InvalidSqlSnafu {
-            err_msg: "Currently executing multiple SQL queries are not supported."
-        }
-    );
-    Ok(stmt.remove(0))
+fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
+    ParserContext::create_with_dialect(sql, &GenericDialect {}).context(error::ParseSqlSnafu)
 }
 
-#[async_trait]
-impl SqlQueryHandler for Instance {
-    async fn do_query(
+impl Instance {
+    async fn query_statement(
         &self,
-        query: &str,
+        stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        let stmt = parse_stmt(query)
-            .map_err(BoxedError::new)
-            .context(server_error::ExecuteQuerySnafu { query })?;
-
+        // TODO(sunng87): provide a better form to log or track statement
+        let query = &format!("{:?}", &stmt);
         match stmt {
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
@@ -494,7 +481,7 @@ impl SqlQueryHandler for Instance {
             | Statement::DescribeTable(_)
             | Statement::Explain(_)
             | Statement::Query(_) => {
-                return self.sql_handler.do_query(query, query_ctx).await;
+                return self.sql_handler.do_statement_query(stmt, query_ctx).await;
             }
             Statement::Insert(insert) => match self.mode {
                 Mode::Standalone => {
@@ -566,6 +553,45 @@ impl SqlQueryHandler for Instance {
         }
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu { query })
+    }
+}
+
+#[async_trait]
+impl SqlQueryHandler for Instance {
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<server_error::Result<Output>> {
+        match parse_stmt(query)
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQuerySnafu { query })
+        {
+            Ok(stmts) => {
+                let mut results = Vec::with_capacity(stmts.len());
+                for stmt in stmts {
+                    match self.query_statement(stmt, query_ctx.clone()).await {
+                        Ok(output) => results.push(Ok(output)),
+                        Err(e) => {
+                            results.push(Err(e));
+                            break;
+                        }
+                    }
+                }
+                results
+            }
+            Err(e) => {
+                vec![Err(e)]
+            }
+        }
+    }
+
+    async fn do_statement_query(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.query_statement(stmt, query_ctx).await
     }
 }
 
@@ -671,6 +697,7 @@ mod tests {
                         ) engine=mito with(regions=1);"#;
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
+            .remove(0)
             .unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
@@ -684,6 +711,7 @@ mod tests {
                                 "#;
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
+            .remove(0)
             .unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 3),
@@ -693,6 +721,7 @@ mod tests {
         let sql = "select * from demo";
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
+            .remove(0)
             .unwrap();
         match output {
             Output::RecordBatches(_) => {
@@ -720,6 +749,7 @@ mod tests {
         let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
+            .remove(0)
             .unwrap();
         match output {
             Output::RecordBatches(_) => {

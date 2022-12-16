@@ -59,13 +59,12 @@ macro_rules! http_tests {
 
 pub async fn test_sql_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_app(store_type, "sql_api").await;
+    let (app, mut guard) = setup_test_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app);
     let res = client.get("/v1/sql").send().await;
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    // body json: r#"{"code":1004,"error":"sql parameter is required."}"#
     assert_eq!(body.code(), 1004);
     assert_eq!(body.error().unwrap(), "sql parameter is required.");
     assert!(body.execution_time_ms().is_some());
@@ -77,9 +76,6 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    // body json:
-    // r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"number","data_type":"UInt32"}]},"rows":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]]}}]}"#
-
     assert!(body.success());
     assert!(body.execution_time_ms().is_some());
 
@@ -107,7 +103,6 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    // body json: r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"Timestamp"}]},"rows":[["host",66.6,1024.0,0]]}}]}"#
     assert!(body.success());
     assert!(body.execution_time_ms().is_some());
     let output = body.output().unwrap();
@@ -128,8 +123,6 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    // body json:
-    // r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"Timestamp"}]},"rows":[[66.6,0]]}}]}"#
     assert!(body.success());
     assert!(body.execution_time_ms().is_some());
     let output = body.output().unwrap();
@@ -150,8 +143,6 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    // body json:
-    // r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"Timestamp"}]},"rows":[[66.6,0]]}}]}"#
     assert!(body.success());
     assert!(body.execution_time_ms().is_some());
     let output = body.output().unwrap();
@@ -162,6 +153,44 @@ pub async fn test_sql_api(store_type: StorageType) {
             "records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
+
+    // test multi-statement
+    let res = client
+        .get("/v1/sql?sql=select cpu, ts from demo limit 1;select cpu, ts from demo where ts > 0;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    assert!(body.success());
+    assert!(body.execution_time_ms().is_some());
+    let outputs = body.output().unwrap();
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(
+        outputs[0],
+        serde_json::from_value::<JsonOutput>(json!({
+            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
+        })).unwrap()
+    );
+    assert_eq!(
+        outputs[1],
+        serde_json::from_value::<JsonOutput>(json!({
+            "records":{"rows":[]}
+        }))
+        .unwrap()
+    );
+
+    // test multi-statement with error
+    let res = client
+        .get("/v1/sql?sql=select cpu, ts from demo limit 1;select cpu, ts from demo2 where ts > 0;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    assert!(!body.success());
+    assert!(body.execution_time_ms().is_some());
+    assert!(body.error().unwrap().contains("not found"));
 
     guard.remove_all().await;
 }
@@ -206,7 +235,6 @@ def test(n):
     assert_eq!(res.status(), StatusCode::OK);
 
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    // body json: r#"{"code":0}"#
     assert_eq!(body.code(), 0);
     assert!(body.output().is_none());
 
@@ -215,8 +243,6 @@ def test(n):
     assert_eq!(res.status(), StatusCode::OK);
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
 
-    // body json:
-    // r#"{"code":0,"output":[{"records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}}]}"#
     assert_eq!(body.code(), 0);
     assert!(body.execution_time_ms().is_some());
     let output = body.output().unwrap();

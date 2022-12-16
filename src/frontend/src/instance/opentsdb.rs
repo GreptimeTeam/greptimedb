@@ -130,6 +130,7 @@ mod tests {
                 Arc::new(QueryContext::new()),
             )
             .await
+            .remove(0)
             .unwrap();
         match output {
             Output::Stream(stream) => {

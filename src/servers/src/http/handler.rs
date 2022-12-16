@@ -45,8 +45,11 @@ pub async fn sql(
     let sql_handler = &state.sql_handler;
     let start = Instant::now();
     let resp = if let Some(sql) = &params.sql {
-        // TODO(LFC): Sessions in http server.
         let query_ctx = Arc::new(QueryContext::new());
+        if let Some(db) = params.database {
+            query_ctx.set_current_schema(db.as_ref());
+        }
+
         JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
     } else {
         JsonResponse::with_error(
@@ -78,8 +81,8 @@ pub struct HealthQuery {}
 #[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct HealthResponse {}
 
-/// Handler to export healthy check  
-///      
+/// Handler to export healthy check
+///
 /// Currently simply return status "200 OK" (default) with an empty json payload "{}"
 #[axum_macros::debug_handler]
 pub async fn health(Query(_params): Query<HealthQuery>) -> Json<HealthResponse> {

@@ -33,7 +33,7 @@ use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
@@ -72,8 +72,7 @@ impl QueryEngine for DatafusionQueryEngine {
     fn sql_to_statement(&self, sql: &str) -> Result<Statement> {
         let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
             .context(error::ParseSqlSnafu)?;
-        // TODO(dennis): supports multi statement in one sql?
-        assert!(1 == statement.len());
+        ensure!(1 == statement.len(), error::MultipleStatementsSnafu { sql });
         Ok(statement.remove(0))
     }
 
@@ -280,6 +279,7 @@ mod tests {
             .sql_to_plan(sql, Arc::new(QueryContext::new()))
             .unwrap();
 
+        // TODO(sunng87): do not rely on to_string for compare
         assert_eq!(
             format!("{:?}", plan),
             r#"DfPlan(Limit: skip=0, fetch=20
@@ -297,6 +297,7 @@ mod tests {
         let plan = engine
             .sql_to_plan(sql, Arc::new(QueryContext::new()))
             .unwrap();
+
         let output = engine.execute(&plan).await.unwrap();
 
         match output {
