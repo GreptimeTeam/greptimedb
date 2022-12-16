@@ -253,7 +253,7 @@ impl<'a> ParserContext<'a> {
             .parse_column_def()
             .context(SyntaxSnafu { sql: self.sql })?;
 
-        if !matches!(column.data_type, DataType::Timestamp(_, _))
+        if !matches!(column.data_type, DataType::Timestamp(_, _) | DataType::BigInt(_))
             || matches!(self.parser.peek_token(), Token::Comma)
         {
             columns.push(column);
@@ -838,6 +838,39 @@ ENGINE=mito";
         let result3 = ParserContext::create_with_dialect(sql3, &GenericDialect {}).unwrap();
 
         assert_ne!(result1, result3);
+
+        // BIGINT as time index
+        let sql1 = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  b          bigint TIME INDEX,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+        let result1 = ParserContext::create_with_dialect(sql1, &GenericDialect {}).unwrap();
+
+        if let Statement::CreateTable(c) = &result1[0] {
+            assert_eq!(c.constraints.len(), 2);
+            let tc = c.constraints[0].clone();
+            match tc {
+                TableConstraint::Unique {
+                    name,
+                    columns,
+                    is_primary,
+                } => {
+                    assert_eq!(name.unwrap().to_string(), "__time_index");
+                    assert_eq!(columns.len(), 1);
+                    assert_eq!(&columns[0].value, "b");
+                    assert!(!is_primary);
+                }
+                _ => panic!("should be time index constraint"),
+            };
+        } else {
+            panic!("should be create_table statement");
+        }
     }
 
     #[test]
