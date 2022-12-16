@@ -182,7 +182,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(
         outputs[0],
         serde_json::from_value::<JsonOutput>(json!({
-            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"Timestamp"}]},"rows":[[66.6,0]]}
+            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
     assert_eq!(
