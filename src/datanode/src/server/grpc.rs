@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(request.catalog_name, "greptime".to_string());
         assert_eq!(request.schema_name, "public".to_string());
         assert_eq!(request.table_name, "my-metrics");
-        assert_eq!(request.desc, Some("blabla".to_string()));
+        assert_eq!(request.desc, Some("blabla little magic fairy".to_string()));
         assert_eq!(request.schema, expected_table_schema());
         assert_eq!(request.primary_key_indices, vec![1, 0]);
         assert!(request.create_if_not_exists);

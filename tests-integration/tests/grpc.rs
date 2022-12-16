@@ -161,8 +161,8 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     });
     let expr = AlterExpr {
         table_name: "test_table".to_string(),
-        catalog_name: None,
-        schema_name: None,
+        catalog_name: "".to_string(),
+        schema_name: "".to_string(),
         kind: Some(kind),
     };
     let result = admin.alter(expr).await.unwrap();

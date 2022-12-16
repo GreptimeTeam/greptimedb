@@ -56,7 +56,7 @@ impl TryFrom<AlterTable> for AlterExpr {
     type Error = crate::error::Error;
 
     fn try_from(value: AlterTable) -> Result<Self, Self::Error> {
-        let (catalog, schema, table) = table_idents_to_full_name(&value.table_name)?;
+        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&value.table_name)?;
 
         let kind = match value.alter_operation {
             AlterTableOperation::AddConstraint(_) => {
@@ -80,9 +80,9 @@ impl TryFrom<AlterTable> for AlterExpr {
             }
         };
         let expr = AlterExpr {
-            catalog_name: Some(catalog),
-            schema_name: Some(schema),
-            table_name: table,
+            catalog_name,
+            schema_name,
+            table_name,
             kind: Some(kind),
         };
 

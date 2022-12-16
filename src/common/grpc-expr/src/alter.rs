@@ -29,6 +29,16 @@ use crate::error::{
 
 /// Convert an [`AlterExpr`] to an optional [`AlterTableRequest`]
 pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
+    let catalog_name = if expr.catalog_name.is_empty() {
+        None
+    } else {
+        Some(expr.catalog_name)
+    };
+    let schema_name = if expr.schema_name.is_empty() {
+        None
+    } else {
+        Some(expr.schema_name)
+    };
     match expr.kind {
         Some(Kind::AddColumns(add_columns)) => {
             let add_column_requests = add_columns
@@ -57,8 +67,8 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
             };
 
             let request = AlterTableRequest {
-                catalog_name: expr.catalog_name,
-                schema_name: expr.schema_name,
+                catalog_name,
+                schema_name,
                 table_name: expr.table_name,
                 alter_kind,
             };
@@ -70,8 +80,8 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
             };
 
             let request = AlterTableRequest {
-                catalog_name: expr.catalog_name,
-                schema_name: expr.schema_name,
+                catalog_name,
+                schema_name,
                 table_name: expr.table_name,
                 alter_kind,
             };
@@ -181,8 +191,8 @@ mod tests {
     #[test]
     fn test_alter_expr_to_request() {
         let expr = AlterExpr {
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: "".to_string(),
+            schema_name: "".to_string(),
             table_name: "monitor".to_string(),
 
             kind: Some(Kind::AddColumns(AddColumns {
@@ -218,8 +228,8 @@ mod tests {
     #[test]
     fn test_drop_column_expr() {
         let expr = AlterExpr {
-            catalog_name: Some("test_catalog".to_string()),
-            schema_name: Some("test_schema".to_string()),
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
             table_name: "monitor".to_string(),
 
             kind: Some(Kind::DropColumns(DropColumns {

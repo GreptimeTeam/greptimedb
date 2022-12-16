@@ -359,8 +359,8 @@ impl Instance {
         );
         let expr = AlterExpr {
             table_name: table_name.to_string(),
-            schema_name: Some(schema_name.to_string()),
-            catalog_name: Some(catalog_name.to_string()),
+            schema_name: schema_name.to_string(),
+            catalog_name: catalog_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
         };
 

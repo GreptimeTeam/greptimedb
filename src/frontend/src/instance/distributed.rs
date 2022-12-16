@@ -196,8 +196,16 @@ impl DistInstance {
     }
 
     async fn handle_alter_table(&self, expr: AlterExpr) -> Result<AdminResult> {
-        let catalog_name = expr.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
-        let schema_name = expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
+        let catalog_name = if expr.catalog_name.is_empty() {
+            DEFAULT_CATALOG_NAME
+        } else {
+            expr.catalog_name.as_str()
+        };
+        let schema_name = if expr.schema_name.is_empty() {
+            DEFAULT_SCHEMA_NAME
+        } else {
+            expr.schema_name.as_str()
+        };
         let table_name = expr.table_name.as_str();
         let table = self
             .catalog_manager
