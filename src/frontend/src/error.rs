@@ -387,7 +387,7 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to execute source: {}", source))]
+    #[snafu(display("Failed to execute statement, source: {}", source))]
     ExecuteStatement {
         #[snafu(backtrace)]
         source: query::error::Error,

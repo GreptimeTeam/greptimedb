@@ -33,7 +33,7 @@ use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
@@ -72,7 +72,7 @@ impl QueryEngine for DatafusionQueryEngine {
     fn sql_to_statement(&self, sql: &str) -> Result<Statement> {
         let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
             .context(error::ParseSqlSnafu)?;
-        assert!(1 == statement.len());
+        ensure!(1 == statement.len(), error::MultipleStatementsSnafu { sql });
         Ok(statement.remove(0))
     }
 

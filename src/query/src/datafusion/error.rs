@@ -40,6 +40,9 @@ pub enum InnerError {
         source: sql::error::Error,
     },
 
+    #[snafu(display("The SQL string has multiple statements, sql: {}", sql))]
+    MultipleStatements { sql: String, backtrace: Backtrace },
+
     #[snafu(display("Cannot plan SQL: {}, source: {}", sql, source))]
     PlanSql {
         sql: String,
@@ -90,6 +93,7 @@ impl ErrorExt for InnerError {
             PlanSql { .. } => StatusCode::PlanQuery,
             ConvertDfRecordBatchStream { source } => source.status_code(),
             ExecutePhysicalPlan { source } => source.status_code(),
+            MultipleStatements { .. } => StatusCode::InvalidArguments,
         }
     }
 
