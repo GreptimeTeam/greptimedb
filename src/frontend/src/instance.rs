@@ -922,10 +922,10 @@ mod tests {
             },
         ];
         CreateTableExpr {
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: "".to_string(),
+            schema_name: "".to_string(),
             table_name: "demo".to_string(),
-            desc: None,
+            desc: "".to_string(),
             column_defs,
             time_index: "ts".to_string(),
             primary_keys: vec!["host".to_string()],

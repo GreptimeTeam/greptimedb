@@ -228,17 +228,15 @@ impl DistInstance {
         create_table: &CreateTableExpr,
         partitions: Option<Partitions>,
     ) -> Result<RouteResponse> {
-        let table_name = TableName::new(
-            create_table
-                .catalog_name
-                .clone()
-                .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
-            create_table
-                .schema_name
-                .clone()
-                .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
-            create_table.table_name.clone(),
-        );
+        let mut catalog_name = create_table.catalog_name.clone();
+        if catalog_name.is_empty() {
+            catalog_name = DEFAULT_CATALOG_NAME.to_string();
+        }
+        let mut schema_name = create_table.schema_name.clone();
+        if schema_name.is_empty() {
+            schema_name = DEFAULT_SCHEMA_NAME.to_string();
+        }
+        let table_name = TableName::new(catalog_name, schema_name, create_table.table_name.clone());
 
         let partitions = parse_partitions(create_table, partitions)?;
         let request = MetaCreateRequest {
@@ -423,13 +421,19 @@ fn create_table_global_value(
         created_on: DateTime::default(),
     };
 
+    let desc = if create_table.desc.is_empty() {
+        None
+    } else {
+        Some(create_table.desc.clone())
+    };
+
     let table_info = RawTableInfo {
         ident: TableIdent {
             table_id: table_route.table.id as u32,
             version: 0,
         },
         name: table_name.table_name.clone(),
-        desc: create_table.desc.clone(),
+        desc,
         catalog_name: table_name.catalog_name.clone(),
         schema_name: table_name.schema_name.clone(),
         meta,

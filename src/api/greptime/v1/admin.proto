@@ -32,10 +32,10 @@ message AdminResult {
 }
 
 message CreateTableExpr {
-  optional string catalog_name = 1;
-  optional string schema_name = 2;
+  string catalog_name = 1;
+  string schema_name = 2;
   string table_name = 3;
-  optional string desc = 4;
+  string desc = 4;
   repeated ColumnDef column_defs = 5;
   string time_index = 6;
   repeated string primary_keys = 7;

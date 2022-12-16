@@ -264,10 +264,10 @@ pub fn build_create_expr_from_insertion(
         .collect::<Vec<_>>();
 
     let expr = CreateTableExpr {
-        catalog_name: Some(catalog_name.to_string()),
-        schema_name: Some(schema_name.to_string()),
+        catalog_name: catalog_name.to_string(),
+        schema_name: schema_name.to_string(),
         table_name: table_name.to_string(),
-        desc: Some("Created on insertion".to_string()),
+        desc: "Created on insertion".to_string(),
         column_defs,
         time_index: timestamp_field_name,
         primary_keys,
@@ -518,7 +518,7 @@ mod tests {
 
         assert_eq!(table_id, create_expr.table_id.map(|x| x.id));
         assert_eq!(table_name, create_expr.table_name);
-        assert_eq!(Some("Created on insertion".to_string()), create_expr.desc);
+        assert_eq!("Created on insertion".to_string(), create_expr.desc);
         assert_eq!(
             vec![create_expr.column_defs[0].name.clone()],
             create_expr.primary_keys

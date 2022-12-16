@@ -221,10 +221,10 @@ fn build_values(column: &ArrayRef) -> Values {
 
 fn create_table_expr() -> CreateTableExpr {
     CreateTableExpr {
-        catalog_name: Some(CATALOG_NAME.to_string()),
-        schema_name: Some(SCHEMA_NAME.to_string()),
+        catalog_name: CATALOG_NAME.to_string(),
+        schema_name: SCHEMA_NAME.to_string(),
         table_name: TABLE_NAME.to_string(),
-        desc: None,
+        desc: "".to_string(),
         column_defs: vec![
             ColumnDef {
                 name: "VendorID".to_string(),

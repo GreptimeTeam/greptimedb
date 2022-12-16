@@ -137,12 +137,19 @@ pub fn create_expr_to_request(
         })
         .collect::<Result<Vec<usize>>>()?;
 
-    let catalog_name = expr
-        .catalog_name
-        .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-    let schema_name = expr
-        .schema_name
-        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+    let mut catalog_name = expr.catalog_name;
+    if catalog_name.is_empty() {
+        catalog_name = DEFAULT_CATALOG_NAME.to_string();
+    }
+    let mut schema_name = expr.schema_name;
+    if schema_name.is_empty() {
+        schema_name = DEFAULT_SCHEMA_NAME.to_string();
+    }
+    let desc = if expr.desc.is_empty() {
+        None
+    } else {
+        Some(expr.desc)
+    };
 
     let region_ids = if expr.region_ids.is_empty() {
         vec![0]
@@ -155,7 +162,7 @@ pub fn create_expr_to_request(
         catalog_name,
         schema_name,
         table_name: expr.table_name,
-        desc: expr.desc,
+        desc,
         schema,
         region_numbers: region_ids,
         primary_key_indices,

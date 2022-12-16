@@ -278,10 +278,10 @@ mod tests {
             },
         ];
         CreateTableExpr {
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: "".to_string(),
+            schema_name: "".to_string(),
             table_name: "my-metrics".to_string(),
-            desc: Some("blabla".to_string()),
+            desc: "blabla little magic fairy".to_string(),
             column_defs,
             time_index: "ts".to_string(),
             primary_keys: vec!["ts".to_string(), "host".to_string()],

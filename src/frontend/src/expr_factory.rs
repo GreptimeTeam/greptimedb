@@ -84,10 +84,10 @@ fn create_to_expr(
 
     let time_index = find_time_index(&create.constraints)?;
     let expr = CreateTableExpr {
-        catalog_name: Some(catalog_name),
-        schema_name: Some(schema_name),
+        catalog_name,
+        schema_name,
         table_name,
-        desc: None,
+        desc: "".to_string(),
         column_defs: columns_to_expr(&create.columns, &time_index)?,
         time_index,
         primary_keys: find_primary_keys(&create.constraints)?,

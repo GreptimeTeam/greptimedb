@@ -34,10 +34,10 @@ async fn run() {
     let client = Client::with_urls(vec!["127.0.0.1:3001"]);
 
     let create_table_expr = CreateTableExpr {
-        catalog_name: Some("greptime".to_string()),
-        schema_name: Some("public".to_string()),
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
         table_name: "test_logical_dist_exec".to_string(),
-        desc: None,
+        desc: "".to_string(),
         column_defs: vec![
             ColumnDef {
                 name: "timestamp".to_string(),
