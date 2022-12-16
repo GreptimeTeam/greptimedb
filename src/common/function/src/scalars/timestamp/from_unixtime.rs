@@ -17,16 +17,17 @@
 use std::fmt;
 use std::sync::Arc;
 
-use common_query::error::{IntoVectorSnafu, UnsupportedInputDataTypeSnafu};
+use common_query::error::{
+    ArrowComputeSnafu, IntoVectorSnafu, Result, TypeCastSnafu, UnsupportedInputDataTypeSnafu,
+};
 use common_query::prelude::{Signature, Volatility};
-use datatypes::arrow::compute::arithmetics;
-use datatypes::arrow::datatypes::DataType as ArrowDatatype;
-use datatypes::arrow::scalar::PrimitiveScalar;
+use datatypes::arrow::compute;
+use datatypes::arrow::datatypes::{DataType as ArrowDatatype, Int64Type};
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::{TimestampVector, VectorRef};
+use datatypes::vectors::{TimestampMillisecondVector, VectorRef};
 use snafu::ResultExt;
 
-use crate::error::Result;
 use crate::scalars::function::{Function, FunctionContext};
 
 #[derive(Clone, Debug, Default)]
@@ -40,7 +41,7 @@ impl Function for FromUnixtimeFunction {
     }
 
     fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::timestamp_millis_datatype())
+        Ok(ConcreteDataType::timestamp_millisecond_datatype())
     }
 
     fn signature(&self) -> Signature {
@@ -56,14 +57,18 @@ impl Function for FromUnixtimeFunction {
             ConcreteDataType::Int64(_) => {
                 let array = columns[0].to_arrow_array();
                 // Our timestamp vector's time unit is millisecond
-                let array = arithmetics::mul_scalar(
-                    &*array,
-                    &PrimitiveScalar::new(ArrowDatatype::Int64, Some(1000i64)),
-                );
+                let array = compute::multiply_scalar_dyn::<Int64Type>(&array, 1000i64)
+                    .context(ArrowComputeSnafu)?;
 
+                let arrow_datatype = &self.return_type(&[]).unwrap().as_arrow_type();
                 Ok(Arc::new(
-                    TimestampVector::try_from_arrow_array(array).context(IntoVectorSnafu {
-                        data_type: ArrowDatatype::Int64,
+                    TimestampMillisecondVector::try_from_arrow_array(
+                        compute::cast(&array, arrow_datatype).context(TypeCastSnafu {
+                            typ: ArrowDatatype::Int64,
+                        })?,
+                    )
+                    .context(IntoVectorSnafu {
+                        data_type: arrow_datatype.clone(),
                     })?,
                 ))
             }
@@ -71,8 +76,7 @@ impl Function for FromUnixtimeFunction {
                 function: NAME,
                 datatypes: columns.iter().map(|c| c.data_type()).collect::<Vec<_>>(),
             }
-            .fail()
-            .map_err(|e| e.into()),
+            .fail(),
         }
     }
 }
@@ -96,7 +100,7 @@ mod tests {
         let f = FromUnixtimeFunction::default();
         assert_eq!("from_unixtime", f.name());
         assert_eq!(
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             f.return_type(&[]).unwrap()
         );
 

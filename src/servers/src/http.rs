@@ -301,7 +301,7 @@ impl JsonResponse {
     }
 }
 
-async fn serve_api(Extension(api): Extension<Arc<OpenApi>>) -> impl IntoApiResponse {
+async fn serve_api(Extension(api): Extension<OpenApi>) -> impl IntoApiResponse {
     Json(api)
 }
 

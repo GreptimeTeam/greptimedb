@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_error::prelude::BoxedError;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_query::prelude::Expr;
 use common_recordbatch::error::Result as RecordBatchResult;
@@ -29,7 +30,7 @@ use futures::Stream;
 use snafu::prelude::*;
 use store_api::storage::RegionNumber;
 
-use crate::error::{Result, SchemaConversionSnafu, TableProjectionSnafu};
+use crate::error::{Result, SchemaConversionSnafu, TableProjectionSnafu, TablesRecordBatchSnafu};
 use crate::metadata::{
     TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType, TableVersion,
 };
@@ -145,11 +146,11 @@ impl Table for MemTable {
     ) -> Result<PhysicalPlanRef> {
         let df_recordbatch = if let Some(indices) = projection {
             self.recordbatch
-                .df_recordbatch
+                .df_record_batch()
                 .project(indices)
                 .context(TableProjectionSnafu)?
         } else {
-            self.recordbatch.df_recordbatch.clone()
+            self.recordbatch.df_record_batch().clone()
         };
 
         let rows = df_recordbatch.num_rows();
@@ -160,12 +161,12 @@ impl Table for MemTable {
         };
         let df_recordbatch = df_recordbatch.slice(0, limit);
 
-        let recordbatch = RecordBatch {
-            schema: Arc::new(
-                Schema::try_from(df_recordbatch.schema().clone()).context(SchemaConversionSnafu)?,
-            ),
+        let recordbatch = RecordBatch::try_from_df_record_batch(
+            Arc::new(Schema::try_from(df_recordbatch.schema()).context(SchemaConversionSnafu)?),
             df_recordbatch,
-        };
+        )
+        .map_err(BoxedError::new)
+        .context(TablesRecordBatchSnafu)?;
         Ok(Arc::new(SimpleTableScan::new(Box::pin(MemtableStream {
             schema: recordbatch.schema.clone(),
             recordbatch: Some(recordbatch),
@@ -197,28 +198,27 @@ impl Stream for MemtableStream {
 
 #[cfg(test)]
 mod test {
-    use common_query::physical_plan::RuntimeEnv;
     use common_recordbatch::util;
+    use datafusion::prelude::SessionContext;
     use datatypes::prelude::*;
     use datatypes::schema::ColumnSchema;
-    use datatypes::vectors::{Int32Vector, StringVector};
+    use datatypes::vectors::{Helper, Int32Vector, StringVector};
 
     use super::*;
 
     #[tokio::test]
     async fn test_scan_with_projection() {
+        let ctx = SessionContext::new();
         let table = build_testing_table();
 
         let scan_stream = table.scan(&Some(vec![1]), &[], None).await.unwrap();
-        let scan_stream = scan_stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .unwrap();
+        let scan_stream = scan_stream.execute(0, ctx.task_ctx()).unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
-        let columns = recordbatch[0].df_recordbatch.columns();
+        let columns = recordbatch[0].df_record_batch().columns();
         assert_eq!(1, columns.len());
 
-        let string_column = VectorHelper::try_into_vector(&columns[0]).unwrap();
+        let string_column = Helper::try_into_vector(&columns[0]).unwrap();
         let string_column = string_column
             .as_any()
             .downcast_ref::<StringVector>()
@@ -229,23 +229,22 @@ mod test {
 
     #[tokio::test]
     async fn test_scan_with_limit() {
+        let ctx = SessionContext::new();
         let table = build_testing_table();
 
         let scan_stream = table.scan(&None, &[], Some(2)).await.unwrap();
-        let scan_stream = scan_stream
-            .execute(0, Arc::new(RuntimeEnv::default()))
-            .unwrap();
+        let scan_stream = scan_stream.execute(0, ctx.task_ctx()).unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
-        let columns = recordbatch[0].df_recordbatch.columns();
+        let columns = recordbatch[0].df_record_batch().columns();
         assert_eq!(2, columns.len());
 
-        let i32_column = VectorHelper::try_into_vector(&columns[0]).unwrap();
+        let i32_column = Helper::try_into_vector(&columns[0]).unwrap();
         let i32_column = i32_column.as_any().downcast_ref::<Int32Vector>().unwrap();
         let i32_column = i32_column.iter_data().flatten().collect::<Vec<i32>>();
         assert_eq!(vec![-100], i32_column);
 
-        let string_column = VectorHelper::try_into_vector(&columns[1]).unwrap();
+        let string_column = Helper::try_into_vector(&columns[1]).unwrap();
         let string_column = string_column
             .as_any()
             .downcast_ref::<StringVector>()

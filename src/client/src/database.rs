@@ -318,12 +318,11 @@ mod tests {
 
     fn create_test_column(vector: VectorRef) -> Column {
         let wrapper: ColumnDataTypeWrapper = vector.data_type().try_into().unwrap();
-        let array = vector.to_arrow_array();
         Column {
             column_name: "test".to_string(),
             semantic_type: 1,
-            values: Some(values(&[array.clone()]).unwrap()),
-            null_mask: null_mask(&vec![array], vector.len()),
+            values: Some(values(&[vector.clone()]).unwrap()),
+            null_mask: null_mask(&[vector.clone()], vector.len()),
             datatype: wrapper.datatype() as i32,
         }
     }

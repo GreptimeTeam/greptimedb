@@ -32,7 +32,7 @@ use crate::schema::{StoreSchema, StoreSchemaRef};
 ///
 /// The user schema is the schema that only contains columns that user could visit,
 /// as well as what the schema user created.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct RegionSchema {
     /// Schema that only contains columns that user defined, excluding internal columns
     /// that are reserved and used by the storage engine.
@@ -162,7 +162,7 @@ mod tests {
         let expect_schema = schema_util::new_schema_with_version(
             &[
                 ("k0", LogicalTypeId::Int64, false),
-                ("timestamp", LogicalTypeId::Timestamp, false),
+                ("timestamp", LogicalTypeId::TimestampMillisecond, false),
                 ("v0", LogicalTypeId::Int64, true),
             ],
             Some(1),

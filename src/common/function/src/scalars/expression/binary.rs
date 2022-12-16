@@ -14,10 +14,10 @@
 
 use std::iter;
 
+use common_query::error::Result;
 use datatypes::prelude::*;
-use datatypes::vectors::ConstantVector;
+use datatypes::vectors::{ConstantVector, Helper};
 
-use crate::error::Result;
 use crate::scalars::expression::ctx::EvalContext;
 
 pub fn scalar_binary_op<L: Scalar, R: Scalar, O: Scalar, F>(
@@ -36,10 +36,9 @@ where
 
     let result = match (l.is_const(), r.is_const()) {
         (false, true) => {
-            let left: &<L as Scalar>::VectorType = unsafe { VectorHelper::static_cast(l) };
-            let right: &ConstantVector = unsafe { VectorHelper::static_cast(r) };
-            let right: &<R as Scalar>::VectorType =
-                unsafe { VectorHelper::static_cast(right.inner()) };
+            let left: &<L as Scalar>::VectorType = unsafe { Helper::static_cast(l) };
+            let right: &ConstantVector = unsafe { Helper::static_cast(r) };
+            let right: &<R as Scalar>::VectorType = unsafe { Helper::static_cast(right.inner()) };
             let b = right.get_data(0);
 
             let it = left.iter_data().map(|a| f(a, b, ctx));
@@ -47,8 +46,8 @@ where
         }
 
         (false, false) => {
-            let left: &<L as Scalar>::VectorType = unsafe { VectorHelper::static_cast(l) };
-            let right: &<R as Scalar>::VectorType = unsafe { VectorHelper::static_cast(r) };
+            let left: &<L as Scalar>::VectorType = unsafe { Helper::static_cast(l) };
+            let right: &<R as Scalar>::VectorType = unsafe { Helper::static_cast(r) };
 
             let it = left
                 .iter_data()
@@ -58,25 +57,22 @@ where
         }
 
         (true, false) => {
-            let left: &ConstantVector = unsafe { VectorHelper::static_cast(l) };
-            let left: &<L as Scalar>::VectorType =
-                unsafe { VectorHelper::static_cast(left.inner()) };
+            let left: &ConstantVector = unsafe { Helper::static_cast(l) };
+            let left: &<L as Scalar>::VectorType = unsafe { Helper::static_cast(left.inner()) };
             let a = left.get_data(0);
 
-            let right: &<R as Scalar>::VectorType = unsafe { VectorHelper::static_cast(r) };
+            let right: &<R as Scalar>::VectorType = unsafe { Helper::static_cast(r) };
             let it = right.iter_data().map(|b| f(a, b, ctx));
             <O as Scalar>::VectorType::from_owned_iterator(it)
         }
 
         (true, true) => {
-            let left: &ConstantVector = unsafe { VectorHelper::static_cast(l) };
-            let left: &<L as Scalar>::VectorType =
-                unsafe { VectorHelper::static_cast(left.inner()) };
+            let left: &ConstantVector = unsafe { Helper::static_cast(l) };
+            let left: &<L as Scalar>::VectorType = unsafe { Helper::static_cast(left.inner()) };
             let a = left.get_data(0);
 
-            let right: &ConstantVector = unsafe { VectorHelper::static_cast(r) };
-            let right: &<R as Scalar>::VectorType =
-                unsafe { VectorHelper::static_cast(right.inner()) };
+            let right: &ConstantVector = unsafe { Helper::static_cast(r) };
+            let right: &<R as Scalar>::VectorType = unsafe { Helper::static_cast(right.inner()) };
             let b = right.get_data(0);
 
             let it = iter::repeat(a)

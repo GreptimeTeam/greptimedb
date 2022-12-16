@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datatypes::prelude::ScalarVector;
+use datatypes::prelude::{ScalarVector, WrapperType};
 use datatypes::type_id::LogicalTypeId;
-use datatypes::vectors::{Int64Vector, TimestampVector, UInt64Vector, UInt8Vector};
+use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
 use store_api::storage::OpType;
 
 use crate::error::Result;
@@ -45,8 +45,12 @@ pub fn new_projected_schema() -> ProjectedSchemaRef {
 
 /// Build a new batch, with 0 sequence and op_type.
 pub fn new_kv_batch(key_values: &[(i64, Option<i64>)]) -> Batch {
-    let key = Arc::new(TimestampVector::from_values(key_values.iter().map(|v| v.0)));
-    let value = Arc::new(Int64Vector::from_iter(key_values.iter().map(|v| v.1)));
+    let key = Arc::new(TimestampMillisecondVector::from_values(
+        key_values.iter().map(|v| v.0),
+    ));
+    let value = Arc::new(Int64Vector::from(
+        key_values.iter().map(|v| v.1).collect::<Vec<_>>(),
+    ));
     let sequences = Arc::new(UInt64Vector::from_vec(vec![0; key_values.len()]));
     let op_types = Arc::new(UInt8Vector::from_vec(vec![0; key_values.len()]));
 
@@ -55,7 +59,9 @@ pub fn new_kv_batch(key_values: &[(i64, Option<i64>)]) -> Batch {
 
 /// Build a new batch from (key, value, sequence, op_type)
 pub fn new_full_kv_batch(all_values: &[(i64, i64, u64, OpType)]) -> Batch {
-    let key = Arc::new(TimestampVector::from_values(all_values.iter().map(|v| v.0)));
+    let key = Arc::new(TimestampMillisecondVector::from_values(
+        all_values.iter().map(|v| v.0),
+    ));
     let value = Arc::new(Int64Vector::from_values(all_values.iter().map(|v| v.1)));
     let sequences = Arc::new(UInt64Vector::from_values(all_values.iter().map(|v| v.2)));
     let op_types = Arc::new(UInt8Vector::from_values(
@@ -70,7 +76,7 @@ fn check_kv_batch(batches: &[Batch], expect: &[&[(i64, Option<i64>)]]) {
         let key = batch
             .column(0)
             .as_any()
-            .downcast_ref::<TimestampVector>()
+            .downcast_ref::<TimestampMillisecondVector>()
             .unwrap();
         let value = batch
             .column(1)
@@ -79,7 +85,7 @@ fn check_kv_batch(batches: &[Batch], expect: &[&[(i64, Option<i64>)]]) {
             .unwrap();
 
         for (i, (k, v)) in key_values.iter().enumerate() {
-            assert_eq!(key.get_data(i).unwrap().value(), *k);
+            assert_eq!(key.get_data(i).unwrap().into_native(), *k);
             assert_eq!(value.get_data(i), *v,);
         }
     }
@@ -92,7 +98,7 @@ pub async fn collect_kv_batch(reader: &mut dyn BatchReader) -> Vec<(i64, Option<
         let key = batch
             .column(0)
             .as_any()
-            .downcast_ref::<TimestampVector>()
+            .downcast_ref::<TimestampMillisecondVector>()
             .unwrap();
         let value = batch
             .column(1)
@@ -101,7 +107,7 @@ pub async fn collect_kv_batch(reader: &mut dyn BatchReader) -> Vec<(i64, Option<
             .unwrap();
 
         for (k, v) in key.iter_data().zip(value.iter_data()) {
-            result.push((k.unwrap().value(), v));
+            result.push((k.unwrap().into(), v));
         }
     }
 

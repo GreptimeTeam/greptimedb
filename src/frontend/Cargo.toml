@@ -22,11 +22,9 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
-    "simd",
-] }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+datafusion = "14.0.0"
+datafusion-common = "14.0.0"
+datafusion-expr = "14.0.0"
 datanode = { path = "../datanode" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
@@ -44,7 +42,6 @@ servers = { path = "../servers" }
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
-sqlparser = "0.15"
 store-api = { path = "../store-api" }
 substrait = { path = "../common/substrait" }
 table = { path = "../table" }

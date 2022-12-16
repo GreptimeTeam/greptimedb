@@ -140,7 +140,6 @@ impl LogicalOptimizer for DatafusionQueryEngine {
             LogicalPlan::DfPlan(df_plan) => {
                 let optimized_plan =
                     self.state
-                        .df_context()
                         .optimize(df_plan)
                         .context(error::DatafusionSnafu {
                             msg: "Fail to optimize logical plan",
@@ -162,14 +161,11 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         let _timer = timer!(metric::METRIC_CREATE_PHYSICAL_ELAPSED);
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
-                let physical_plan = self
-                    .state
-                    .df_context()
-                    .create_physical_plan(df_plan)
-                    .await
-                    .context(error::DatafusionSnafu {
+                let physical_plan = self.state.create_physical_plan(df_plan).await.context(
+                    error::DatafusionSnafu {
                         msg: "Fail to create physical plan",
-                    })?;
+                    },
+                )?;
 
                 Ok(Arc::new(PhysicalPlanAdapter::new(
                     Arc::new(
@@ -192,22 +188,19 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
         let _timer = timer!(metric::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
-        let config = &self.state.df_context().state.lock().config;
-        let optimizers = &config.physical_optimizers;
 
-        let mut new_plan = plan
+        let new_plan = plan
             .as_any()
             .downcast_ref::<PhysicalPlanAdapter>()
             .context(error::PhysicalPlanDowncastSnafu)?
             .df_plan();
 
-        for optimizer in optimizers {
-            new_plan = optimizer
-                .optimize(new_plan, config)
+        let new_plan =
+            self.state
+                .optimize_physical_plan(new_plan)
                 .context(error::DatafusionSnafu {
                     msg: "Fail to optimize physical plan",
                 })?;
-        }
         Ok(Arc::new(PhysicalPlanAdapter::new(plan.schema(), new_plan)))
     }
 }
@@ -223,7 +216,7 @@ impl QueryExecutor for DatafusionQueryEngine {
         match plan.output_partitioning().partition_count() {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan
-                .execute(0, ctx.state().runtime())
+                .execute(0, ctx.state().task_ctx())
                 .context(error::ExecutePhysicalPlanSnafu)?),
             _ => {
                 // merge into a single partition
@@ -231,11 +224,11 @@ impl QueryExecutor for DatafusionQueryEngine {
                     CoalescePartitionsExec::new(Arc::new(DfPhysicalPlanAdapter(plan.clone())));
                 // CoalescePartitionsExec must produce a single partition
                 assert_eq!(1, plan.output_partitioning().partition_count());
-                let df_stream = plan.execute(0, ctx.state().runtime()).await.context(
-                    error::DatafusionSnafu {
-                        msg: "Failed to execute DataFusion merge exec",
-                    },
-                )?;
+                let df_stream =
+                    plan.execute(0, ctx.state().task_ctx())
+                        .context(error::DatafusionSnafu {
+                            msg: "Failed to execute DataFusion merge exec",
+                        })?;
                 let stream = RecordBatchStreamAdapter::try_new(df_stream)
                     .context(error::ConvertDfRecordBatchStreamSnafu)?;
                 Ok(Box::pin(stream))
@@ -253,8 +246,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
-    use datafusion::field_util::{FieldExt, SchemaExt};
-    use datatypes::arrow::array::UInt64Array;
+    use datatypes::vectors::{UInt64Vector, VectorRef};
     use session::context::QueryContext;
     use table::table::numbers::NumbersTable;
 
@@ -290,10 +282,10 @@ mod tests {
         // TODO(sunng87): do not rely on to_string for compare
         assert_eq!(
             format!("{:?}", plan),
-            r#"DfPlan(Limit: 20
-  Projection: #SUM(numbers.number)
-    Aggregate: groupBy=[[]], aggr=[[SUM(#numbers.number)]]
-      TableScan: numbers projection=None)"#
+            r#"DfPlan(Limit: skip=0, fetch=20
+  Projection: SUM(numbers.number)
+    Aggregate: groupBy=[[]], aggr=[[SUM(numbers.number)]]
+      TableScan: numbers)"#
         );
     }
 
@@ -312,20 +304,20 @@ mod tests {
             Output::Stream(recordbatch) => {
                 let numbers = util::collect(recordbatch).await.unwrap();
                 assert_eq!(1, numbers.len());
-                assert_eq!(numbers[0].df_recordbatch.num_columns(), 1);
-                assert_eq!(1, numbers[0].schema.arrow_schema().fields().len());
+                assert_eq!(numbers[0].num_columns(), 1);
+                assert_eq!(1, numbers[0].schema.num_columns());
                 assert_eq!(
                     "SUM(numbers.number)",
-                    numbers[0].schema.arrow_schema().field(0).name()
+                    numbers[0].schema.column_schemas()[0].name
                 );
 
-                let columns = numbers[0].df_recordbatch.columns();
-                assert_eq!(1, columns.len());
-                assert_eq!(columns[0].len(), 1);
+                let batch = &numbers[0];
+                assert_eq!(1, batch.num_columns());
+                assert_eq!(batch.column(0).len(), 1);
 
                 assert_eq!(
-                    *columns[0].as_any().downcast_ref::<UInt64Array>().unwrap(),
-                    UInt64Array::from_slice(&[4950])
+                    *batch.column(0),
+                    Arc::new(UInt64Vector::from_slice(&[4950])) as VectorRef
                 );
             }
             _ => unreachable!(),

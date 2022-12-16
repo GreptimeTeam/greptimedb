@@ -14,7 +14,7 @@
 
 use std::fmt::Debug;
 
-use datafusion::logical_plan::LogicalPlan as DfLogicalPlan;
+use datafusion_expr::LogicalPlan as DfLogicalPlan;
 
 /// A LogicalPlan represents the different types of relational
 /// operators (such as Projection, Filter, etc) and can be created by

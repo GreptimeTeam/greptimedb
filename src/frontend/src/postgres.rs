@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use servers::tls::TlsOption;
 
@@ -22,7 +20,7 @@ pub struct PostgresOptions {
     pub addr: String,
     pub runtime_size: usize,
     #[serde(default = "Default::default")]
-    pub tls: Arc<TlsOption>,
+    pub tls: TlsOption,
 }
 
 impl Default for PostgresOptions {

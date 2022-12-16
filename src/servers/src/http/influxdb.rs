@@ -48,12 +48,12 @@ pub async fn influxdb_write(
 
 fn parse_time_precision(value: &str) -> Result<Precision> {
     match value {
-        "n" => Ok(Precision::NANOSECOND),
-        "u" => Ok(Precision::MICROSECOND),
-        "ms" => Ok(Precision::MILLISECOND),
-        "s" => Ok(Precision::SECOND),
-        "m" => Ok(Precision::MINUTE),
-        "h" => Ok(Precision::HOUR),
+        "n" => Ok(Precision::Nanosecond),
+        "u" => Ok(Precision::Microsecond),
+        "ms" => Ok(Precision::Millisecond),
+        "s" => Ok(Precision::Second),
+        "m" => Ok(Precision::Minute),
+        "h" => Ok(Precision::Hour),
         unknown => TimePrecisionSnafu {
             name: unknown.to_string(),
         }
@@ -69,12 +69,12 @@ mod tests {
 
     #[test]
     fn test_parse_time_precision() {
-        assert_eq!(Precision::NANOSECOND, parse_time_precision("n").unwrap());
-        assert_eq!(Precision::MICROSECOND, parse_time_precision("u").unwrap());
-        assert_eq!(Precision::MILLISECOND, parse_time_precision("ms").unwrap());
-        assert_eq!(Precision::SECOND, parse_time_precision("s").unwrap());
-        assert_eq!(Precision::MINUTE, parse_time_precision("m").unwrap());
-        assert_eq!(Precision::HOUR, parse_time_precision("h").unwrap());
+        assert_eq!(Precision::Nanosecond, parse_time_precision("n").unwrap());
+        assert_eq!(Precision::Microsecond, parse_time_precision("u").unwrap());
+        assert_eq!(Precision::Millisecond, parse_time_precision("ms").unwrap());
+        assert_eq!(Precision::Second, parse_time_precision("s").unwrap());
+        assert_eq!(Precision::Minute, parse_time_precision("m").unwrap());
+        assert_eq!(Precision::Hour, parse_time_precision("h").unwrap());
         assert!(parse_time_precision("unknown").is_err());
     }
 }

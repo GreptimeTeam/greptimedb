@@ -18,9 +18,10 @@ use arrow::datatypes::DataType as ArrowDataType;
 use common_base::bytes::StringBytes;
 use serde::{Deserialize, Serialize};
 
-use crate::data_type::DataType;
-use crate::prelude::{DataTypeRef, LogicalTypeId, Value};
-use crate::scalars::ScalarVectorBuilder;
+use crate::data_type::{DataType, DataTypeRef};
+use crate::prelude::ScalarVectorBuilder;
+use crate::type_id::LogicalTypeId;
+use crate::value::Value;
 use crate::vectors::{MutableVector, StringVectorBuilder};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,5 +52,9 @@ impl DataType for StringType {
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(StringVectorBuilder::with_capacity(capacity))
+    }
+
+    fn is_timestamp_compatible(&self) -> bool {
+        false
     }
 }

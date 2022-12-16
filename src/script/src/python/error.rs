@@ -105,6 +105,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
+
+    #[snafu(display("Failed to create record batch, source: {}", source))]
+    NewRecordBatch {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
 }
 
 impl From<QueryError> for Error {
@@ -121,7 +127,9 @@ impl ErrorExt for Error {
             | Error::PyRuntime { .. }
             | Error::Other { .. } => StatusCode::Internal,
 
-            Error::RecordBatch { source } => source.status_code(),
+            Error::RecordBatch { source } | Error::NewRecordBatch { source } => {
+                source.status_code()
+            }
             Error::DatabaseQuery { source } => source.status_code(),
             Error::TypeCast { source } => source.status_code(),
 

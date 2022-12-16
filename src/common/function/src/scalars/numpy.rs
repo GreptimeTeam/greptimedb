@@ -12,9 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::error::Result;
+mod clip;
+mod interp;
 
-pub trait Serializable: Send + Sync {
-    /// Serialize a column of value with given type to JSON value
-    fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>>;
+use std::sync::Arc;
+
+use clip::ClipFunction;
+
+use crate::scalars::function_registry::FunctionRegistry;
+
+pub(crate) struct NumpyFunction;
+
+impl NumpyFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(ClipFunction::default()));
+    }
 }

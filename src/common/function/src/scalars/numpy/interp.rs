@@ -14,41 +14,18 @@
 
 use std::sync::Arc;
 
-use datatypes::arrow::array::PrimitiveArray;
-use datatypes::arrow::compute::cast::primitive_to_primitive;
-use datatypes::arrow::datatypes::DataType::Float64;
+use common_query::error::{self, Result};
+use datatypes::arrow::compute::cast;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ScalarVector;
-use datatypes::type_id::LogicalTypeId;
 use datatypes::value::Value;
-use datatypes::vectors::{Float64Vector, PrimitiveVector, Vector, VectorRef};
-use datatypes::{arrow, with_match_primitive_type_id};
-use snafu::{ensure, Snafu};
-
-#[derive(Debug, Snafu)]
-pub enum Error {
-    #[snafu(display(
-        "The length of the args is not enough, expect at least: {}, have: {}",
-        expect,
-        actual,
-    ))]
-    ArgsLenNotEnough { expect: usize, actual: usize },
-
-    #[snafu(display("The sample {} is empty", name))]
-    SampleEmpty { name: String },
-
-    #[snafu(display(
-        "The length of the len1: {} don't match the length of the len2: {}",
-        len1,
-        len2,
-    ))]
-    LenNotEquals { len1: usize, len2: usize },
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
+use datatypes::vectors::{Float64Vector, Vector, VectorRef};
+use datatypes::with_match_primitive_type_id;
+use snafu::{ensure, ResultExt};
 
 /* search the biggest number that smaller than x in xp */
-fn linear_search_ascending_vector(x: Value, xp: &PrimitiveVector<f64>) -> usize {
+fn linear_search_ascending_vector(x: Value, xp: &Float64Vector) -> usize {
     for i in 0..xp.len() {
         if x < xp.get(i) {
             return i - 1;
@@ -58,7 +35,7 @@ fn linear_search_ascending_vector(x: Value, xp: &PrimitiveVector<f64>) -> usize 
 }
 
 /* search the biggest number that smaller than x in xp */
-fn binary_search_ascending_vector(key: Value, xp: &PrimitiveVector<f64>) -> usize {
+fn binary_search_ascending_vector(key: Value, xp: &Float64Vector) -> usize {
     let mut left = 0;
     let mut right = xp.len();
     /* If len <= 4 use linear search. */
@@ -77,27 +54,33 @@ fn binary_search_ascending_vector(key: Value, xp: &PrimitiveVector<f64>) -> usiz
     left - 1
 }
 
-fn concrete_type_to_primitive_vector(arg: &VectorRef) -> Result<PrimitiveVector<f64>> {
+fn concrete_type_to_primitive_vector(arg: &VectorRef) -> Result<Float64Vector> {
     with_match_primitive_type_id!(arg.data_type().logical_type_id(), |$S| {
         let tmp = arg.to_arrow_array();
-        let from = tmp.as_any().downcast_ref::<PrimitiveArray<$S>>().expect("cast failed");
-        let array = primitive_to_primitive(from, &Float64);
-        Ok(PrimitiveVector::new(array))
+        let array = cast(&tmp, &ArrowDataType::Float64).context(error::TypeCastSnafu {
+            typ: ArrowDataType::Float64,
+        })?;
+        // Safety: array has been cast to Float64Array.
+        Ok(Float64Vector::try_from_arrow_array(array).unwrap())
     },{
         unreachable!()
     })
 }
 
 /// https://github.com/numpy/numpy/blob/b101756ac02e390d605b2febcded30a1da50cc2c/numpy/core/src/multiarray/compiled_base.c#L491
+#[allow(unused)]
 pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
     let mut left = None;
     let mut right = None;
 
     ensure!(
         args.len() >= 3,
-        ArgsLenNotEnoughSnafu {
-            expect: 3_usize,
-            actual: args.len()
+        error::InvalidFuncArgsSnafu {
+            err_msg: format!(
+                "The length of the args is not enough, expect at least: {}, have: {}",
+                3,
+                args.len()
+            ),
         }
     );
 
@@ -109,9 +92,12 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
     if args.len() > 3 {
         ensure!(
             args.len() == 5,
-            ArgsLenNotEnoughSnafu {
-                expect: 5_usize,
-                actual: args.len()
+            error::InvalidFuncArgsSnafu {
+                err_msg: format!(
+                    "The length of the args is not enough, expect at least: {}, have: {}",
+                    5,
+                    args.len()
+                ),
             }
         );
 
@@ -123,14 +109,32 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
             .get_data(0);
     }
 
-    ensure!(x.len() != 0, SampleEmptySnafu { name: "x" });
-    ensure!(xp.len() != 0, SampleEmptySnafu { name: "xp" });
-    ensure!(fp.len() != 0, SampleEmptySnafu { name: "fp" });
+    ensure!(
+        x.len() != 0,
+        error::InvalidFuncArgsSnafu {
+            err_msg: "The sample x is empty",
+        }
+    );
+    ensure!(
+        xp.len() != 0,
+        error::InvalidFuncArgsSnafu {
+            err_msg: "The sample xp is empty",
+        }
+    );
+    ensure!(
+        fp.len() != 0,
+        error::InvalidFuncArgsSnafu {
+            err_msg: "The sample fp is empty",
+        }
+    );
     ensure!(
         xp.len() == fp.len(),
-        LenNotEqualsSnafu {
-            len1: xp.len(),
-            len2: fp.len(),
+        error::InvalidFuncArgsSnafu {
+            err_msg: format!(
+                "The length of the len1: {} don't match the length of the len2: {}",
+                xp.len(),
+                fp.len()
+            ),
         }
     );
 
@@ -147,7 +151,7 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
 
     let res;
     if xp.len() == 1 {
-        res = x
+        let datas = x
             .iter_data()
             .map(|x| {
                 if Value::from(x) < xp.get(0) {
@@ -158,7 +162,8 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
                     fp.get_data(0)
                 }
             })
-            .collect::<Float64Vector>();
+            .collect::<Vec<_>>();
+        res = Float64Vector::from(datas);
     } else {
         let mut j = 0;
         /* only pre-calculate slopes if there are relatively few of them. */
@@ -185,7 +190,7 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
             }
             slopes = Some(slopes_tmp);
         }
-        res = x
+        let datas = x
             .iter_data()
             .map(|x| match x {
                 Some(xi) => {
@@ -248,7 +253,8 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
                 }
                 _ => None,
             })
-            .collect::<Float64Vector>();
+            .collect::<Vec<_>>();
+        res = Float64Vector::from(datas);
     }
     Ok(Arc::new(res) as _)
 }
@@ -257,8 +263,7 @@ pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::prelude::ScalarVectorBuilder;
-    use datatypes::vectors::{Int32Vector, Int64Vector, PrimitiveVectorBuilder};
+    use datatypes::vectors::{Int32Vector, Int64Vector};
 
     use super::*;
     #[test]
@@ -341,12 +346,8 @@ mod tests {
         assert!(matches!(vector.get(0), Value::Float64(v) if v==x[0] as f64));
 
         // x=None output:Null
-        let input = [None, Some(0.0), Some(0.3)];
-        let mut builder = PrimitiveVectorBuilder::with_capacity(input.len());
-        for v in input {
-            builder.push(v);
-        }
-        let x = builder.finish();
+        let input = vec![None, Some(0.0), Some(0.3)];
+        let x = Float64Vector::from(input);
         let args: Vec<VectorRef> = vec![
             Arc::new(x),
             Arc::new(Int64Vector::from_vec(xp)),

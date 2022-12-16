@@ -43,10 +43,10 @@ use servers::error as server_error;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use sql::ast::Value as SqlValue;
 use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
-use sqlparser::ast::Value as SqlValue;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 
 use crate::catalog::FrontendCatalogManager;
@@ -563,11 +563,12 @@ fn find_partition_columns(
 
 #[cfg(test)]
 mod test {
+    use itertools::Itertools;
     use servers::query_handler::SqlQueryHandlerRef;
     use session::context::QueryContext;
+    use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
-    use sqlparser::dialect::GenericDialect;
 
     use super::*;
     use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
@@ -647,7 +648,9 @@ ENGINE=mito",
                     "| public              |",
                     "| test_show_databases |",
                     "+---------------------+",
-                ];
+                ]
+                .into_iter()
+                .join("\n");
                 let expected2 = vec![
                     "+---------------------+",
                     "| Schemas             |",
@@ -655,9 +658,10 @@ ENGINE=mito",
                     "| test_show_databases |",
                     "| public              |",
                     "+---------------------+",
-                ];
-                let pretty = r.pretty_print();
-                let lines = pretty.lines().collect::<Vec<_>>();
+                ]
+                .into_iter()
+                .join("\n");
+                let lines = r.pretty_print().unwrap();
                 assert!(lines == expected1 || lines == expected2)
             }
             _ => unreachable!(),
@@ -703,14 +707,12 @@ ENGINE=mito",
                 .unwrap();
             match output {
                 Output::RecordBatches(r) => {
-                    let expected = vec![
-                        "+--------------+",
-                        "| Tables       |",
-                        "+--------------+",
-                        "| dist_numbers |",
-                        "+--------------+",
-                    ];
-                    assert_eq!(r.pretty_print().lines().collect::<Vec<_>>(), expected);
+                    let expected = r#"+--------------+
+| Tables       |
++--------------+
+| dist_numbers |
++--------------+"#;
+                    assert_eq!(r.pretty_print().unwrap(), expected);
                 }
                 _ => unreachable!(),
             }

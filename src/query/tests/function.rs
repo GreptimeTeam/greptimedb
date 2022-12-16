@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// FIXME(yingwen): Consider move all tests under query/tests to query/src so we could reuse
+// more codes.
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
@@ -22,8 +24,8 @@ use common_recordbatch::{util, RecordBatch};
 use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::types::PrimitiveElement;
-use datatypes::vectors::PrimitiveVector;
+use datatypes::types::WrapperType;
+use datatypes::vectors::Helper;
 use query::query_engine::QueryEngineFactory;
 use query::QueryEngine;
 use rand::Rng;
@@ -47,7 +49,7 @@ pub fn create_query_engine() -> Arc<dyn QueryEngine> {
                 column_schemas.push(column_schema);
 
                 let numbers = (1..=10).map(|_| rng.gen::<$T>()).collect::<Vec<$T>>();
-                let column: VectorRef = Arc::new(PrimitiveVector::<$T>::from_vec(numbers.to_vec()));
+                let column: VectorRef = Arc::new(<$T as Scalar>::VectorType::from_vec(numbers.to_vec()));
                 columns.push(column);
             )*
         }
@@ -77,8 +79,7 @@ pub async fn get_numbers_from_table<'s, T>(
     engine: Arc<dyn QueryEngine>,
 ) -> Vec<T>
 where
-    T: PrimitiveElement,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    T: WrapperType,
 {
     let sql = format!("SELECT {} FROM {}", column_name, table_name);
     let plan = engine
@@ -92,8 +93,21 @@ where
     };
     let numbers = util::collect(recordbatch_stream).await.unwrap();
 
-    let columns = numbers[0].df_recordbatch.columns();
-    let column = VectorHelper::try_into_vector(&columns[0]).unwrap();
-    let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(&column) };
+    let column = numbers[0].column(0);
+    let column: &<T as Scalar>::VectorType = unsafe { Helper::static_cast(column) };
     column.iter_data().flatten().collect::<Vec<T>>()
+}
+
+pub fn get_value_from_batches(column_name: &str, batches: Vec<RecordBatch>) -> Value {
+    assert_eq!(1, batches.len());
+    assert_eq!(batches[0].num_columns(), 1);
+    assert_eq!(1, batches[0].schema.num_columns());
+    assert_eq!(column_name, batches[0].schema.column_schemas()[0].name);
+
+    let batch = &batches[0];
+    assert_eq!(1, batch.num_columns());
+    assert_eq!(batch.column(0).len(), 1);
+    let v = batch.column(0);
+    assert_eq!(1, v.len());
+    v.get(0)
 }

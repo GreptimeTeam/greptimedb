@@ -15,7 +15,8 @@
 use common_base::BitVec;
 
 use crate::scalars::ScalarVector;
-use crate::vectors::{ConstantVector, NullVector, Vector};
+use crate::vectors::constant::ConstantVector;
+use crate::vectors::{NullVector, Vector};
 
 // To implement `find_unique()` correctly, we need to keep in mind that always marks an element as
 // selected when it is different from the previous one, and leaves the `selected` unchanged
@@ -70,7 +71,7 @@ pub(crate) fn find_unique_null(
         return;
     }
 
-    let is_first_not_duplicate = prev_vector.map(|pv| pv.is_empty()).unwrap_or(true);
+    let is_first_not_duplicate = prev_vector.map(NullVector::is_empty).unwrap_or(true);
     if is_first_not_duplicate {
         selected.set(0, true);
     }
@@ -104,8 +105,11 @@ pub(crate) fn find_unique_constant(
 mod tests {
     use std::sync::Arc;
 
+    use common_time::{Date, DateTime};
+
     use super::*;
-    use crate::vectors::{Int32Vector, StringVector, VectorOp};
+    use crate::timestamp::*;
+    use crate::vectors::{Int32Vector, StringVector, Vector, VectorOp};
 
     fn check_bitmap(expect: &[bool], selected: &BitVec) {
         let actual = selected.iter().collect::<Vec<_>>();
@@ -121,7 +125,7 @@ mod tests {
         input: impl Iterator<Item = Option<i32>>,
         prev: Option<&[i32]>,
     ) {
-        let input = Int32Vector::from_iter(input);
+        let input = Int32Vector::from(input.collect::<Vec<_>>());
         let prev = prev.map(Int32Vector::from_slice);
 
         let mut selected = BitVec::repeat(false, input.len());
@@ -341,7 +345,6 @@ mod tests {
 
     macro_rules! impl_find_unique_date_like_test {
         ($VectorType: ident, $ValueType: ident, $method: ident) => {{
-            use common_time::$ValueType;
             use $crate::vectors::$VectorType;
 
             let v = $VectorType::from_iterator([8, 8, 9, 10].into_iter().map($ValueType::$method));
@@ -356,6 +359,9 @@ mod tests {
     fn test_find_unique_date_like() {
         impl_find_unique_date_like_test!(DateVector, Date, new);
         impl_find_unique_date_like_test!(DateTimeVector, DateTime, new);
-        impl_find_unique_date_like_test!(TimestampVector, Timestamp, from_millis);
+        impl_find_unique_date_like_test!(TimestampSecondVector, TimestampSecond, from);
+        impl_find_unique_date_like_test!(TimestampMillisecondVector, TimestampMillisecond, from);
+        impl_find_unique_date_like_test!(TimestampMicrosecondVector, TimestampMicrosecond, from);
+        impl_find_unique_date_like_test!(TimestampNanosecondVector, TimestampNanosecond, from);
     }
 }

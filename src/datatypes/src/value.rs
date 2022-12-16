@@ -15,6 +15,7 @@
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
 
+use arrow::datatypes::{DataType as ArrowDataType, Field};
 use common_base::bytes::{Bytes, StringBytes};
 use common_time::date::Date;
 use common_time::datetime::DateTime;
@@ -22,10 +23,12 @@ use common_time::timestamp::{TimeUnit, Timestamp};
 use datafusion_common::ScalarValue;
 pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 
 use crate::error::{self, Result};
 use crate::prelude::*;
 use crate::type_id::LogicalTypeId;
+use crate::types::ListType;
 use crate::vectors::ListVector;
 
 pub type OrderedF32 = OrderedFloat<f32>;
@@ -125,10 +128,10 @@ impl Value {
             Value::Float64(_) => ConcreteDataType::float64_datatype(),
             Value::String(_) => ConcreteDataType::string_datatype(),
             Value::Binary(_) => ConcreteDataType::binary_datatype(),
-            Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
             Value::Date(_) => ConcreteDataType::date_datatype(),
             Value::DateTime(_) => ConcreteDataType::datetime_datatype(),
             Value::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
+            Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
         }
     }
 
@@ -193,8 +196,94 @@ impl Value {
             Value::List(_) => LogicalTypeId::List,
             Value::Date(_) => LogicalTypeId::Date,
             Value::DateTime(_) => LogicalTypeId::DateTime,
-            Value::Timestamp(_) => LogicalTypeId::Timestamp,
+            Value::Timestamp(t) => match t.unit() {
+                TimeUnit::Second => LogicalTypeId::TimestampSecond,
+                TimeUnit::Millisecond => LogicalTypeId::TimestampMillisecond,
+                TimeUnit::Microsecond => LogicalTypeId::TimestampMicrosecond,
+                TimeUnit::Nanosecond => LogicalTypeId::TimestampNanosecond,
+            },
         }
+    }
+
+    /// Convert the value into [`ScalarValue`] according to the `output_type`.
+    pub fn try_to_scalar_value(&self, output_type: &ConcreteDataType) -> Result<ScalarValue> {
+        // Compare logical type, since value might not contains full type information.
+        let value_type_id = self.logical_type_id();
+        let output_type_id = output_type.logical_type_id();
+        ensure!(
+            output_type_id == value_type_id || self.is_null(),
+            error::ToScalarValueSnafu {
+                reason: format!(
+                    "expect value to return output_type {:?}, actual: {:?}",
+                    output_type_id, value_type_id,
+                ),
+            }
+        );
+
+        let scalar_value = match self {
+            Value::Boolean(v) => ScalarValue::Boolean(Some(*v)),
+            Value::UInt8(v) => ScalarValue::UInt8(Some(*v)),
+            Value::UInt16(v) => ScalarValue::UInt16(Some(*v)),
+            Value::UInt32(v) => ScalarValue::UInt32(Some(*v)),
+            Value::UInt64(v) => ScalarValue::UInt64(Some(*v)),
+            Value::Int8(v) => ScalarValue::Int8(Some(*v)),
+            Value::Int16(v) => ScalarValue::Int16(Some(*v)),
+            Value::Int32(v) => ScalarValue::Int32(Some(*v)),
+            Value::Int64(v) => ScalarValue::Int64(Some(*v)),
+            Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
+            Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
+            Value::String(v) => ScalarValue::Utf8(Some(v.as_utf8().to_string())),
+            Value::Binary(v) => ScalarValue::LargeBinary(Some(v.to_vec())),
+            Value::Date(v) => ScalarValue::Date32(Some(v.val())),
+            Value::DateTime(v) => ScalarValue::Date64(Some(v.val())),
+            Value::Null => to_null_value(output_type),
+            Value::List(list) => {
+                // Safety: The logical type of the value and output_type are the same.
+                let list_type = output_type.as_list().unwrap();
+                list.try_to_scalar_value(list_type)?
+            }
+            Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
+        };
+
+        Ok(scalar_value)
+    }
+}
+
+fn to_null_value(output_type: &ConcreteDataType) -> ScalarValue {
+    match output_type {
+        ConcreteDataType::Null(_) => ScalarValue::Null,
+        ConcreteDataType::Boolean(_) => ScalarValue::Boolean(None),
+        ConcreteDataType::Int8(_) => ScalarValue::Int8(None),
+        ConcreteDataType::Int16(_) => ScalarValue::Int16(None),
+        ConcreteDataType::Int32(_) => ScalarValue::Int32(None),
+        ConcreteDataType::Int64(_) => ScalarValue::Int64(None),
+        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(None),
+        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(None),
+        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(None),
+        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(None),
+        ConcreteDataType::Float32(_) => ScalarValue::Float32(None),
+        ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
+        ConcreteDataType::Binary(_) => ScalarValue::LargeBinary(None),
+        ConcreteDataType::String(_) => ScalarValue::Utf8(None),
+        ConcreteDataType::Date(_) => ScalarValue::Date32(None),
+        ConcreteDataType::DateTime(_) => ScalarValue::Date64(None),
+        ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
+        ConcreteDataType::List(_) => {
+            ScalarValue::List(None, Box::new(new_item_field(output_type.as_arrow_type())))
+        }
+    }
+}
+
+fn new_item_field(data_type: ArrowDataType) -> Field {
+    Field::new("item", data_type, false)
+}
+
+fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
+    match unit {
+        TimeUnit::Second => ScalarValue::TimestampSecond(val, None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(val, None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(val, None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(val, None),
     }
 }
 
@@ -277,6 +366,9 @@ impl_value_from!(Float32, f32);
 impl_value_from!(Float64, f64);
 impl_value_from!(String, StringBytes);
 impl_value_from!(Binary, Bytes);
+impl_value_from!(Date, Date);
+impl_value_from!(DateTime, DateTime);
+impl_value_from!(Timestamp, Timestamp);
 
 impl From<String> for Value {
     fn from(string: String) -> Value {
@@ -293,12 +385,6 @@ impl From<&str> for Value {
 impl From<Vec<u8>> for Value {
     fn from(bytes: Vec<u8>) -> Value {
         Value::Binary(bytes.into())
-    }
-}
-
-impl From<Timestamp> for Value {
-    fn from(v: Timestamp) -> Self {
-        Value::Timestamp(v)
     }
 }
 
@@ -337,6 +423,7 @@ impl TryFrom<Value> for serde_json::Value {
     }
 }
 
+// TODO(yingwen): Consider removing the `datatype` field from `ListValue`.
 /// List value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ListValue {
@@ -361,6 +448,24 @@ impl ListValue {
 
     pub fn datatype(&self) -> &ConcreteDataType {
         &self.datatype
+    }
+
+    fn try_to_scalar_value(&self, output_type: &ListType) -> Result<ScalarValue> {
+        let vs = if let Some(items) = self.items() {
+            Some(
+                items
+                    .iter()
+                    .map(|v| v.try_to_scalar_value(output_type.item_type()))
+                    .collect::<Result<Vec<_>>>()?,
+            )
+        } else {
+            None
+        };
+
+        Ok(ScalarValue::List(
+            vs,
+            Box::new(new_item_field(output_type.item_type().as_arrow_type())),
+        ))
     }
 }
 
@@ -391,6 +496,7 @@ impl TryFrom<ScalarValue> for Value {
 
     fn try_from(v: ScalarValue) -> Result<Self> {
         let v = match v {
+            ScalarValue::Null => Value::Null,
             ScalarValue::Boolean(b) => Value::from(b),
             ScalarValue::Float32(f) => Value::from(f),
             ScalarValue::Float64(f) => Value::from(f),
@@ -405,8 +511,10 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
                 Value::from(s.map(StringBytes::from))
             }
-            ScalarValue::Binary(b) | ScalarValue::LargeBinary(b) => Value::from(b.map(Bytes::from)),
-            ScalarValue::List(vs, t) => {
+            ScalarValue::Binary(b)
+            | ScalarValue::LargeBinary(b)
+            | ScalarValue::FixedSizeBinary(_, b) => Value::from(b.map(Bytes::from)),
+            ScalarValue::List(vs, field) => {
                 let items = if let Some(vs) = vs {
                     let vs = vs
                         .into_iter()
@@ -416,7 +524,7 @@ impl TryFrom<ScalarValue> for Value {
                 } else {
                     None
                 };
-                let datatype = t.as_ref().try_into()?;
+                let datatype = ConcreteDataType::try_from(field.data_type())?;
                 Value::List(ListValue::new(items, datatype))
             }
             ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
@@ -435,7 +543,13 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::TimestampNanosecond(t, _) => t
                 .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
-            _ => {
+            ScalarValue::Decimal128(_, _, _)
+            | ScalarValue::Time64(_)
+            | ScalarValue::IntervalYearMonth(_)
+            | ScalarValue::IntervalDayTime(_)
+            | ScalarValue::IntervalMonthDayNano(_)
+            | ScalarValue::Struct(_, _)
+            | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.get_datatype(),
                 }
@@ -545,15 +659,6 @@ impl<'a> Ord for ValueRef<'a> {
     }
 }
 
-/// A helper trait to convert copyable types to `ValueRef`.
-///
-/// It could replace the usage of `Into<ValueRef<'a>>`, thus avoid confusion between `Into<Value>`
-/// and `Into<ValueRef<'a>>` in generic codes. One typical usage is the [`Primitive`](crate::primitive_traits::Primitive) trait.
-pub trait IntoValueRef<'a> {
-    /// Convert itself to [ValueRef].
-    fn into_value_ref(self) -> ValueRef<'a>;
-}
-
 macro_rules! impl_value_ref_from {
     ($Variant:ident, $Type:ident) => {
         impl From<$Type> for ValueRef<'_> {
@@ -562,24 +667,9 @@ macro_rules! impl_value_ref_from {
             }
         }
 
-        impl<'a> IntoValueRef<'a> for $Type {
-            fn into_value_ref(self) -> ValueRef<'a> {
-                ValueRef::$Variant(self.into())
-            }
-        }
-
         impl From<Option<$Type>> for ValueRef<'_> {
             fn from(value: Option<$Type>) -> Self {
                 match value {
-                    Some(v) => ValueRef::$Variant(v.into()),
-                    None => ValueRef::Null,
-                }
-            }
-        }
-
-        impl<'a> IntoValueRef<'a> for Option<$Type> {
-            fn into_value_ref(self) -> ValueRef<'a> {
-                match self {
                     Some(v) => ValueRef::$Variant(v.into()),
                     None => ValueRef::Null,
                 }
@@ -599,6 +689,9 @@ impl_value_ref_from!(Int32, i32);
 impl_value_ref_from!(Int64, i64);
 impl_value_ref_from!(Float32, f32);
 impl_value_ref_from!(Float64, f64);
+impl_value_ref_from!(Date, Date);
+impl_value_ref_from!(DateTime, DateTime);
+impl_value_ref_from!(Timestamp, Timestamp);
 
 impl<'a> From<&'a str> for ValueRef<'a> {
     fn from(string: &'a str) -> ValueRef<'a> {
@@ -628,6 +721,7 @@ impl<'a> From<Option<ListValueRef<'a>>> for ValueRef<'a> {
 /// if it becomes bottleneck.
 #[derive(Debug, Clone, Copy)]
 pub enum ListValueRef<'a> {
+    // TODO(yingwen): Consider replace this by VectorRef.
     Indexed { vector: &'a ListVector, idx: usize },
     Ref { val: &'a ListValue },
 }
@@ -785,19 +879,16 @@ mod tests {
                 Some(Box::new(vec![Value::Int32(1), Value::Null])),
                 ConcreteDataType::int32_datatype()
             )),
-            ScalarValue::List(
-                Some(Box::new(vec![
-                    ScalarValue::Int32(Some(1)),
-                    ScalarValue::Int32(None)
-                ])),
-                Box::new(ArrowDataType::Int32)
+            ScalarValue::new_list(
+                Some(vec![ScalarValue::Int32(Some(1)), ScalarValue::Int32(None)]),
+                ArrowDataType::Int32,
             )
             .try_into()
             .unwrap()
         );
         assert_eq!(
             Value::List(ListValue::new(None, ConcreteDataType::uint32_datatype())),
-            ScalarValue::List(None, Box::new(ArrowDataType::UInt32))
+            ScalarValue::new_list(None, ArrowDataType::UInt32)
                 .try_into()
                 .unwrap()
         );
@@ -981,6 +1072,10 @@ mod tests {
             )),
         );
         check_type_and_value(
+            &ConcreteDataType::list_datatype(ConcreteDataType::null_datatype()),
+            &Value::List(ListValue::default()),
+        );
+        check_type_and_value(
             &ConcreteDataType::date_datatype(),
             &Value::Date(Date::new(1)),
         );
@@ -989,8 +1084,8 @@ mod tests {
             &Value::DateTime(DateTime::new(1)),
         );
         check_type_and_value(
-            &ConcreteDataType::timestamp_millis_datatype(),
-            &Value::Timestamp(Timestamp::from_millis(1)),
+            &ConcreteDataType::timestamp_millisecond_datatype(),
+            &Value::Timestamp(Timestamp::new_millisecond(1)),
         );
     }
 
@@ -1085,7 +1180,7 @@ mod tests {
 
         assert_eq!(
             serde_json::Value::Number(1.into()),
-            to_json(Value::Timestamp(Timestamp::from_millis(1)))
+            to_json(Value::Timestamp(Timestamp::new_millisecond(1)))
         );
 
         let json_value: serde_json::Value =
@@ -1143,7 +1238,7 @@ mod tests {
         check_as_value_ref!(Int64, -12);
         check_as_value_ref!(Float32, OrderedF32::from(16.0));
         check_as_value_ref!(Float64, OrderedF64::from(16.0));
-        check_as_value_ref!(Timestamp, Timestamp::from_millis(1));
+        check_as_value_ref!(Timestamp, Timestamp::new_millisecond(1));
 
         assert_eq!(
             ValueRef::String("hello"),
@@ -1209,59 +1304,6 @@ mod tests {
     }
 
     #[test]
-    fn test_into_value_ref() {
-        macro_rules! check_into_value_ref {
-            ($Variant: ident, $data: expr, $PrimitiveType: ident, $Wrapper: ident) => {
-                let data: $PrimitiveType = $data;
-                assert_eq!(
-                    ValueRef::$Variant($Wrapper::from(data)),
-                    data.into_value_ref()
-                );
-                assert_eq!(
-                    ValueRef::$Variant($Wrapper::from(data)),
-                    ValueRef::from(data)
-                );
-                assert_eq!(
-                    ValueRef::$Variant($Wrapper::from(data)),
-                    Some(data).into_value_ref()
-                );
-                assert_eq!(
-                    ValueRef::$Variant($Wrapper::from(data)),
-                    ValueRef::from(Some(data))
-                );
-                let x: Option<$PrimitiveType> = None;
-                assert_eq!(ValueRef::Null, x.into_value_ref());
-                assert_eq!(ValueRef::Null, x.into());
-            };
-        }
-
-        macro_rules! check_primitive_into_value_ref {
-            ($Variant: ident, $data: expr, $PrimitiveType: ident) => {
-                check_into_value_ref!($Variant, $data, $PrimitiveType, $PrimitiveType)
-            };
-        }
-
-        check_primitive_into_value_ref!(Boolean, true, bool);
-        check_primitive_into_value_ref!(UInt8, 10, u8);
-        check_primitive_into_value_ref!(UInt16, 20, u16);
-        check_primitive_into_value_ref!(UInt32, 30, u32);
-        check_primitive_into_value_ref!(UInt64, 40, u64);
-        check_primitive_into_value_ref!(Int8, -10, i8);
-        check_primitive_into_value_ref!(Int16, -20, i16);
-        check_primitive_into_value_ref!(Int32, -30, i32);
-        check_primitive_into_value_ref!(Int64, -40, i64);
-        check_into_value_ref!(Float32, 10.0, f32, OrderedF32);
-        check_into_value_ref!(Float64, 10.0, f64, OrderedF64);
-
-        let hello = "hello";
-        assert_eq!(
-            ValueRef::Binary(hello.as_bytes()),
-            ValueRef::from(hello.as_bytes())
-        );
-        assert_eq!(ValueRef::String(hello), ValueRef::from(hello));
-    }
-
-    #[test]
     fn test_display() {
         assert_eq!(Value::Null.to_string(), "Null");
         assert_eq!(Value::UInt8(8).to_string(), "8");
@@ -1301,10 +1343,248 @@ mod tests {
         assert_eq!(
             Value::List(ListValue::new(
                 Some(Box::new(vec![])),
-                ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
+                ConcreteDataType::timestamp_second_datatype(),
             ))
             .to_string(),
-            "Timestamp[]"
+            "TimestampSecond[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+            ))
+            .to_string(),
+            "TimestampMillisecond[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+            ))
+            .to_string(),
+            "TimestampMicrosecond[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                Some(Box::new(vec![])),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ))
+            .to_string(),
+            "TimestampNanosecond[]"
+        );
+    }
+
+    #[test]
+    fn test_not_null_value_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::Boolean(Some(true)),
+            Value::Boolean(true)
+                .try_to_scalar_value(&ConcreteDataType::boolean_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Boolean(Some(false)),
+            Value::Boolean(false)
+                .try_to_scalar_value(&ConcreteDataType::boolean_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt8(Some(u8::MIN + 1)),
+            Value::UInt8(u8::MIN + 1)
+                .try_to_scalar_value(&ConcreteDataType::uint8_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt16(Some(u16::MIN + 2)),
+            Value::UInt16(u16::MIN + 2)
+                .try_to_scalar_value(&ConcreteDataType::uint16_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt32(Some(u32::MIN + 3)),
+            Value::UInt32(u32::MIN + 3)
+                .try_to_scalar_value(&ConcreteDataType::uint32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt64(Some(u64::MIN + 4)),
+            Value::UInt64(u64::MIN + 4)
+                .try_to_scalar_value(&ConcreteDataType::uint64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int8(Some(i8::MIN + 4)),
+            Value::Int8(i8::MIN + 4)
+                .try_to_scalar_value(&ConcreteDataType::int8_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int16(Some(i16::MIN + 5)),
+            Value::Int16(i16::MIN + 5)
+                .try_to_scalar_value(&ConcreteDataType::int16_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int32(Some(i32::MIN + 6)),
+            Value::Int32(i32::MIN + 6)
+                .try_to_scalar_value(&ConcreteDataType::int32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int64(Some(i64::MIN + 7)),
+            Value::Int64(i64::MIN + 7)
+                .try_to_scalar_value(&ConcreteDataType::int64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Float32(Some(8.0f32)),
+            Value::Float32(OrderedFloat(8.0f32))
+                .try_to_scalar_value(&ConcreteDataType::float32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Float64(Some(9.0f64)),
+            Value::Float64(OrderedFloat(9.0f64))
+                .try_to_scalar_value(&ConcreteDataType::float64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Utf8(Some("hello".to_string())),
+            Value::String(StringBytes::from("hello"))
+                .try_to_scalar_value(&ConcreteDataType::string_datatype(),)
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::LargeBinary(Some("world".as_bytes().to_vec())),
+            Value::Binary(Bytes::from("world".as_bytes()))
+                .try_to_scalar_value(&ConcreteDataType::binary_datatype())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_null_value_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::Boolean(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::boolean_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt8(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::uint8_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt16(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::uint16_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt32(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::uint32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt64(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::uint64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int8(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::int8_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int16(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::int16_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int32(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::int32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int64(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::int64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Float32(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::float32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Float64(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::float64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Utf8(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::string_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::LargeBinary(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::binary_datatype())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_list_value_to_scalar_value() {
+        let items = Some(Box::new(vec![Value::Int32(-1), Value::Null]));
+        let list = Value::List(ListValue::new(items, ConcreteDataType::int32_datatype()));
+        let df_list = list
+            .try_to_scalar_value(&ConcreteDataType::list_datatype(
+                ConcreteDataType::int32_datatype(),
+            ))
+            .unwrap();
+        assert!(matches!(df_list, ScalarValue::List(_, _)));
+        match df_list {
+            ScalarValue::List(vs, field) => {
+                assert_eq!(ArrowDataType::Int32, *field.data_type());
+
+                let vs = vs.unwrap();
+                assert_eq!(
+                    vs,
+                    vec![ScalarValue::Int32(Some(-1)), ScalarValue::Int32(None)]
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_timestamp_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::TimestampSecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Second, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampMillisecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Millisecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampMicrosecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Microsecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampNanosecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Nanosecond, Some(1))
         );
     }
 }

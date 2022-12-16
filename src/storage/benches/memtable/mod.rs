@@ -20,9 +20,11 @@ pub mod util;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use common_time::Timestamp;
 use datatypes::prelude::ScalarVectorBuilder;
-use datatypes::vectors::{StringVectorBuilder, TimestampVectorBuilder, UInt64VectorBuilder};
+use datatypes::timestamp::TimestampMillisecond;
+use datatypes::vectors::{
+    StringVectorBuilder, TimestampMillisecondVectorBuilder, UInt64VectorBuilder,
+};
 use rand::distributions::Alphanumeric;
 use rand::prelude::ThreadRng;
 use rand::Rng;
@@ -69,11 +71,11 @@ fn kvs_with_index(
     values: &[(Option<u64>, String)],
 ) -> KeyValues {
     let mut key_builders = (
-        TimestampVectorBuilder::with_capacity(keys.len()),
+        TimestampMillisecondVectorBuilder::with_capacity(keys.len()),
         UInt64VectorBuilder::with_capacity(keys.len()),
     );
     for key in keys {
-        key_builders.0.push(Some(Timestamp::from_millis(key.0)));
+        key_builders.0.push(Some(TimestampMillisecond::from(key.0)));
         key_builders.1.push(Some(key.1));
     }
     let row_keys = vec![

@@ -140,7 +140,7 @@ mod tests {
     use common_time::timestamp::Timestamp;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::value::Value;
-    use datatypes::vectors::{Int64Vector, TimestampVector};
+    use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
     use store_api::storage::{PutOperation, WriteRequest};
 
     use super::*;
@@ -153,7 +153,7 @@ mod tests {
     fn new_test_write_batch() -> WriteBatch {
         write_batch_util::new_write_batch(
             &[
-                ("ts", LogicalTypeId::Timestamp, false),
+                ("ts", LogicalTypeId::TimestampMillisecond, false),
                 ("value", LogicalTypeId::Int64, true),
             ],
             Some(0),
@@ -162,7 +162,7 @@ mod tests {
 
     fn new_region_schema() -> RegionSchemaRef {
         let desc = RegionDescBuilder::new("test")
-            .timestamp(("ts", LogicalTypeId::Timestamp, false))
+            .timestamp(("ts", LogicalTypeId::TimestampMillisecond, false))
             .push_value_column(("value", LogicalTypeId::Int64, true))
             .enable_version_column(false)
             .build();
@@ -173,9 +173,9 @@ mod tests {
 
     fn put_batch(batch: &mut WriteBatch, data: &[(i64, Option<i64>)]) {
         let mut put_data = PutData::with_num_columns(2);
-        let ts = TimestampVector::from_values(data.iter().map(|v| v.0));
+        let ts = TimestampMillisecondVector::from_values(data.iter().map(|v| v.0));
         put_data.add_key_column("ts", Arc::new(ts)).unwrap();
-        let value = Int64Vector::from_iter(data.iter().map(|v| v.1));
+        let value = Int64Vector::from(data.iter().map(|v| v.1).collect::<Vec<_>>());
         put_data.add_value_column("value", Arc::new(value)).unwrap();
 
         batch.put(put_data).unwrap();
@@ -195,7 +195,10 @@ mod tests {
             for i in 0..row_num {
                 let ts = batch.column(0).get(i);
                 let v = batch.column(1).get(i);
-                assert_eq!(Value::Timestamp(Timestamp::from_millis(data[index].0)), ts);
+                assert_eq!(
+                    Value::Timestamp(Timestamp::new_millisecond(data[index].0)),
+                    ts
+                );
                 assert_eq!(Value::from(data[index].1), v);
                 assert_eq!(Value::from(sequence), batch.column(2).get(i));
 

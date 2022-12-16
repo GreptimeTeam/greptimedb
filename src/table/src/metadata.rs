@@ -68,7 +68,7 @@ pub struct TableIdent {
     pub version: TableVersion,
 }
 
-#[derive(Clone, Debug, Builder, PartialEq)]
+#[derive(Clone, Debug, Builder, PartialEq, Eq)]
 #[builder(pattern = "mutable")]
 pub struct TableMeta {
     pub schema: SchemaRef,
@@ -322,7 +322,7 @@ impl TableMeta {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Builder)]
+#[derive(Clone, Debug, PartialEq, Eq, Builder)]
 #[builder(pattern = "owned")]
 pub struct TableInfo {
     /// Id and version of the table.
@@ -383,7 +383,7 @@ impl From<TableId> for TableIdent {
 }
 
 /// Struct used to serialize and deserialize [`TableMeta`].
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct RawTableMeta {
     pub schema: RawSchema,
     pub primary_key_indices: Vec<usize>,
@@ -431,7 +431,7 @@ impl TryFrom<RawTableMeta> for TableMeta {
 }
 
 /// Struct used to serialize and deserialize [`TableInfo`].
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct RawTableInfo {
     pub ident: TableIdent,
     pub name: String,
@@ -483,8 +483,12 @@ mod tests {
     fn new_test_schema() -> Schema {
         let column_schemas = vec![
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
-                .with_time_index(true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
             ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
         ];
         SchemaBuilder::try_from(column_schemas)
@@ -607,8 +611,12 @@ mod tests {
             ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new("col3", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
-                .with_time_index(true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
         ];
         let schema = Arc::new(
             SchemaBuilder::try_from(column_schemas)

@@ -37,14 +37,14 @@ pub struct PostgresServer {
     base_server: BaseTcpServer,
     auth_handler: Arc<PgAuthStartupHandler>,
     query_handler: Arc<PostgresServerHandler>,
-    tls: Arc<TlsOption>,
+    tls: TlsOption,
 }
 
 impl PostgresServer {
     /// Creates a new Postgres server with provided query_handler and async runtime
     pub fn new(
         query_handler: SqlQueryHandlerRef,
-        tls: Arc<TlsOption>,
+        tls: TlsOption,
         io_runtime: Arc<Runtime>,
         user_provider: Option<UserProviderRef>,
     ) -> PostgresServer {

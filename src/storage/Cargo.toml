@@ -6,7 +6,7 @@ license = "Apache-2.0"
 
 [dependencies]
 arc-swap = "1.0"
-arrow-format = { version = "0.4", features = ["ipc"] }
+async-compat = "0.2"
 async-stream = "0.3"
 async-trait = "0.1"
 bytes = "1.1"
@@ -22,6 +22,7 @@ futures-util = "0.3"
 lazy_static = "1.4"
 object-store = { path = "../object-store" }
 paste = "1.0"
+parquet = { version = "26", features = ["async"] }
 planus = "0.2"
 prost = "0.11"
 regex = "1.5"

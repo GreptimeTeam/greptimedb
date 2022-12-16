@@ -259,7 +259,7 @@ impl AccessLayer for FsAccessLayer {
             opts.predicate.clone(),
         );
 
-        let stream = reader.chunk_stream(opts.batch_size).await?;
+        let stream = reader.chunk_stream().await?;
         Ok(Box::new(stream))
     }
 }

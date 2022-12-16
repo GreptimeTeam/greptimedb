@@ -15,22 +15,19 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, MutableArray, Utf8ValuesIter};
-use arrow::bitmap::utils::ZipValidity;
-use serde_json::Value as JsonValue;
-use snafu::{OptionExt, ResultExt};
+use arrow::array::{Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef};
+use snafu::ResultExt;
 
 use crate::arrow_array::{MutableStringArray, StringArray};
 use crate::data_type::ConcreteDataType;
-use crate::error::{Result, SerializeSnafu};
+use crate::error::{self, Result};
 use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
-use crate::types::StringType;
 use crate::value::{Value, ValueRef};
 use crate::vectors::{self, MutableVector, Validity, Vector, VectorRef};
 
-/// String array wrapper
-#[derive(Debug, Clone, PartialEq)]
+/// Vector of strings.
+#[derive(Debug, PartialEq)]
 pub struct StringVector {
     array: StringArray,
 }
@@ -38,6 +35,16 @@ pub struct StringVector {
 impl StringVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
+    }
+
+    fn to_array_data(&self) -> ArrayData {
+        self.array.data().clone()
+    }
+
+    fn from_array_data(data: ArrayData) -> Self {
+        Self {
+            array: StringArray::from(data),
+        }
     }
 }
 
@@ -50,19 +57,7 @@ impl From<StringArray> for StringVector {
 impl From<Vec<Option<String>>> for StringVector {
     fn from(data: Vec<Option<String>>) -> Self {
         Self {
-            array: StringArray::from(data),
-        }
-    }
-}
-
-impl From<Vec<String>> for StringVector {
-    fn from(data: Vec<String>) -> Self {
-        Self {
-            array: StringArray::from(
-                data.into_iter()
-                    .map(Option::Some)
-                    .collect::<Vec<Option<String>>>(),
-            ),
+            array: StringArray::from_iter(data),
         }
     }
 }
@@ -70,7 +65,31 @@ impl From<Vec<String>> for StringVector {
 impl From<Vec<Option<&str>>> for StringVector {
     fn from(data: Vec<Option<&str>>) -> Self {
         Self {
-            array: StringArray::from(data),
+            array: StringArray::from_iter(data),
+        }
+    }
+}
+
+impl From<&[Option<String>]> for StringVector {
+    fn from(data: &[Option<String>]) -> Self {
+        Self {
+            array: StringArray::from_iter(data),
+        }
+    }
+}
+
+impl From<&[Option<&str>]> for StringVector {
+    fn from(data: &[Option<&str>]) -> Self {
+        Self {
+            array: StringArray::from_iter(data),
+        }
+    }
+}
+
+impl From<Vec<String>> for StringVector {
+    fn from(data: Vec<String>) -> Self {
+        Self {
+            array: StringArray::from_iter(data.into_iter().map(Some)),
         }
     }
 }
@@ -78,18 +97,14 @@ impl From<Vec<Option<&str>>> for StringVector {
 impl From<Vec<&str>> for StringVector {
     fn from(data: Vec<&str>) -> Self {
         Self {
-            array: StringArray::from(
-                data.into_iter()
-                    .map(Option::Some)
-                    .collect::<Vec<Option<&str>>>(),
-            ),
+            array: StringArray::from_iter(data.into_iter().map(Some)),
         }
     }
 }
 
 impl Vector for StringVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::String(StringType::default())
+        ConcreteDataType::string_datatype()
     }
 
     fn vector_type_name(&self) -> String {
@@ -105,11 +120,13 @@ impl Vector for StringVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        Arc::new(self.array.clone())
+        let data = self.to_array_data();
+        Arc::new(StringArray::from(data))
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        Box::new(self.array.clone())
+        let data = self.to_array_data();
+        Box::new(StringArray::from(data))
     }
 
     fn validity(&self) -> Validity {
@@ -117,7 +134,11 @@ impl Vector for StringVector {
     }
 
     fn memory_size(&self) -> usize {
-        self.len() * std::mem::size_of::<i64>() + self.array.values().len()
+        self.array.get_buffer_memory_size()
+    }
+
+    fn null_count(&self) -> usize {
+        self.array.null_count()
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -125,7 +146,8 @@ impl Vector for StringVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        Arc::new(Self::from(self.array.slice(offset, length)))
+        let data = self.array.data().slice(offset, length);
+        Arc::new(Self::from_array_data(data))
     }
 
     fn get(&self, index: usize) -> Value {
@@ -140,7 +162,7 @@ impl Vector for StringVector {
 impl ScalarVector for StringVector {
     type OwnedItem = String;
     type RefItem<'a> = &'a str;
-    type Iter<'a> = ZipValidity<'a, &'a str, Utf8ValuesIter<'a, i32>>;
+    type Iter<'a> = ArrayIter<&'a StringArray>;
     type Builder = StringVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
@@ -157,7 +179,7 @@ impl ScalarVector for StringVector {
 }
 
 pub struct StringVectorBuilder {
-    buffer: MutableStringArray,
+    mutable_array: MutableStringArray,
 }
 
 impl MutableVector for StringVectorBuilder {
@@ -166,7 +188,7 @@ impl MutableVector for StringVectorBuilder {
     }
 
     fn len(&self) -> usize {
-        self.buffer.len()
+        self.mutable_array.len()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -182,12 +204,15 @@ impl MutableVector for StringVectorBuilder {
     }
 
     fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
-        self.buffer.push(value.as_string()?);
+        match value.as_string()? {
+            Some(v) => self.mutable_array.append_value(v),
+            None => self.mutable_array.append_null(),
+        }
         Ok(())
     }
 
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
-        vectors::impl_extend_for_builder!(self.buffer, vector, StringVector, offset, length)
+        vectors::impl_extend_for_builder!(self, vector, StringVector, offset, length)
     }
 }
 
@@ -196,30 +221,30 @@ impl ScalarVectorBuilder for StringVectorBuilder {
 
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            buffer: MutableStringArray::with_capacity(capacity),
+            mutable_array: MutableStringArray::with_capacity(capacity, 0),
         }
     }
 
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>) {
-        self.buffer.push(value)
+        match value {
+            Some(v) => self.mutable_array.append_value(v),
+            None => self.mutable_array.append_null(),
+        }
     }
 
     fn finish(&mut self) -> Self::VectorType {
-        Self::VectorType {
-            array: std::mem::take(&mut self.buffer).into(),
+        StringVector {
+            array: self.mutable_array.finish(),
         }
     }
 }
 
 impl Serializable for StringVector {
-    fn serialize_to_json(&self) -> crate::error::Result<Vec<JsonValue>> {
+    fn serialize_to_json(&self) -> Result<Vec<serde_json::Value>> {
         self.iter_data()
-            .map(|v| match v {
-                None => Ok(serde_json::Value::Null),
-                Some(s) => serde_json::to_value(s),
-            })
+            .map(serde_json::to_value)
             .collect::<serde_json::Result<_>>()
-            .context(SerializeSnafu)
+            .context(error::SerializeSnafu)
     }
 }
 
@@ -227,60 +252,9 @@ vectors::impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::DataType as ArrowDataType;
-    use serde_json;
+    use arrow::datatypes::DataType;
 
     use super::*;
-    use crate::data_type::DataType;
-
-    #[test]
-    fn test_string_vector_misc() {
-        let strs = vec!["hello", "greptime", "rust"];
-        let v = StringVector::from(strs.clone());
-        assert_eq!(3, v.len());
-        assert_eq!("StringVector", v.vector_type_name());
-        assert!(!v.is_const());
-        assert_eq!(Validity::AllValid, v.validity());
-        assert!(!v.only_null());
-        assert_eq!(41, v.memory_size());
-
-        for (i, s) in strs.iter().enumerate() {
-            assert_eq!(Value::from(*s), v.get(i));
-            assert_eq!(ValueRef::from(*s), v.get_ref(i));
-            assert_eq!(Value::from(*s), v.try_get(i).unwrap());
-        }
-
-        let arrow_arr = v.to_arrow_array();
-        assert_eq!(3, arrow_arr.len());
-        assert_eq!(&ArrowDataType::Utf8, arrow_arr.data_type());
-    }
-
-    #[test]
-    fn test_serialize_string_vector() {
-        let mut builder = StringVectorBuilder::with_capacity(3);
-        builder.push(Some("hello"));
-        builder.push(None);
-        builder.push(Some("world"));
-        let string_vector = builder.finish();
-        let serialized =
-            serde_json::to_string(&string_vector.serialize_to_json().unwrap()).unwrap();
-        assert_eq!(r#"["hello",null,"world"]"#, serialized);
-    }
-
-    #[test]
-    fn test_from_arrow_array() {
-        let mut builder = MutableStringArray::new();
-        builder.push(Some("A"));
-        builder.push(Some("B"));
-        builder.push::<&str>(None);
-        builder.push(Some("D"));
-        let string_array: StringArray = builder.into();
-        let vector = StringVector::from(string_array);
-        assert_eq!(
-            r#"["A","B",null,"D"]"#,
-            serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap(),
-        );
-    }
 
     #[test]
     fn test_string_vector_build_get() {
@@ -310,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_string_vector_builder() {
-        let mut builder = StringType::default().create_mutable_vector(3);
+        let mut builder = StringVectorBuilder::with_capacity(3);
         builder.push_value_ref(ValueRef::String("hello")).unwrap();
         assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
 
@@ -323,5 +297,74 @@ mod tests {
 
         let expect: VectorRef = Arc::new(StringVector::from_slice(&["hello", "one", "two"]));
         assert_eq!(expect, vector);
+    }
+
+    #[test]
+    fn test_string_vector_misc() {
+        let strs = vec!["hello", "greptime", "rust"];
+        let v = StringVector::from(strs.clone());
+        assert_eq!(3, v.len());
+        assert_eq!("StringVector", v.vector_type_name());
+        assert!(!v.is_const());
+        assert!(v.validity().is_all_valid());
+        assert!(!v.only_null());
+        assert_eq!(128, v.memory_size());
+
+        for (i, s) in strs.iter().enumerate() {
+            assert_eq!(Value::from(*s), v.get(i));
+            assert_eq!(ValueRef::from(*s), v.get_ref(i));
+            assert_eq!(Value::from(*s), v.try_get(i).unwrap());
+        }
+
+        let arrow_arr = v.to_arrow_array();
+        assert_eq!(3, arrow_arr.len());
+        assert_eq!(&DataType::Utf8, arrow_arr.data_type());
+    }
+
+    #[test]
+    fn test_serialize_string_vector() {
+        let mut builder = StringVectorBuilder::with_capacity(3);
+        builder.push(Some("hello"));
+        builder.push(None);
+        builder.push(Some("world"));
+        let string_vector = builder.finish();
+        let serialized =
+            serde_json::to_string(&string_vector.serialize_to_json().unwrap()).unwrap();
+        assert_eq!(r#"["hello",null,"world"]"#, serialized);
+    }
+
+    #[test]
+    fn test_from_arrow_array() {
+        let mut builder = MutableStringArray::new();
+        builder.append_option(Some("A"));
+        builder.append_option(Some("B"));
+        builder.append_null();
+        builder.append_option(Some("D"));
+        let string_array: StringArray = builder.finish();
+        let vector = StringVector::from(string_array);
+        assert_eq!(
+            r#"["A","B",null,"D"]"#,
+            serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_from_non_option_string() {
+        let nul = String::from_utf8(vec![0]).unwrap();
+        let corpus = vec!["😅😅😅", "😍😍😍😍", "🥵🥵", nul.as_str()];
+        let vector = StringVector::from(corpus);
+        let serialized = serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap();
+        assert_eq!(r#"["😅😅😅","😍😍😍😍","🥵🥵","\u0000"]"#, serialized);
+
+        let corpus = vec![
+            "🀀🀀🀀".to_string(),
+            "🀁🀁🀁".to_string(),
+            "🀂🀂🀂".to_string(),
+            "🀃🀃🀃".to_string(),
+            "🀆🀆".to_string(),
+        ];
+        let vector = StringVector::from(corpus);
+        let serialized = serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap();
+        assert_eq!(r#"["🀀🀀🀀","🀁🀁🀁","🀂🀂🀂","🀃🀃🀃","🀆🀆"]"#, serialized);
     }
 }

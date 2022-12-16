@@ -21,12 +21,12 @@ pub mod insert;
 pub mod query;
 pub mod show;
 pub mod statement;
-
 use std::str::FromStr;
 
 use api::helper::ColumnDataTypeWrapper;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::Timestamp;
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::DateTimeType;
@@ -79,7 +79,7 @@ fn parse_string_to_value(
     data_type: &ConcreteDataType,
 ) -> Result<Value> {
     ensure!(
-        data_type.stringifiable(),
+        data_type.is_stringifiable(),
         ColumnTypeMismatchSnafu {
             column_name,
             expect: data_type.clone(),
@@ -112,8 +112,8 @@ fn parse_string_to_value(
         ConcreteDataType::Timestamp(t) => {
             if let Ok(ts) = Timestamp::from_str(&s) {
                 Ok(Value::Timestamp(Timestamp::new(
-                    ts.convert_to(t.unit),
-                    t.unit,
+                    ts.convert_to(t.unit()),
+                    t.unit(),
                 )))
             } else {
                 ParseSqlValueSnafu {
@@ -301,7 +301,10 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
         SqlDataType::Custom(obj_name) => match &obj_name.0[..] {
             [type_name] => {
-                if type_name.value.eq_ignore_ascii_case(DateTimeType::name()) {
+                if type_name
+                    .value
+                    .eq_ignore_ascii_case(DateTimeType::default().name())
+                {
                     Ok(ConcreteDataType::datetime_datatype())
                 } else {
                     error::SqlTypeNotSupportedSnafu {
@@ -315,7 +318,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             }
             .fail(),
         },
-        SqlDataType::Timestamp => Ok(ConcreteDataType::timestamp_millis_datatype()),
+        SqlDataType::Timestamp(_) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -333,7 +336,7 @@ mod tests {
     use datatypes::value::OrderedFloat;
 
     use super::*;
-    use crate::ast::{DataType, Ident};
+    use crate::ast::{Ident, TimezoneInfo};
     use crate::statements::ColumnOption;
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
@@ -373,8 +376,8 @@ mod tests {
             ConcreteDataType::datetime_datatype(),
         );
         check_type(
-            SqlDataType::Timestamp,
-            ConcreteDataType::timestamp_millis_datatype(),
+            SqlDataType::Timestamp(TimezoneInfo::None),
+            ConcreteDataType::timestamp_millisecond_datatype(),
         );
     }
 
@@ -419,9 +422,13 @@ mod tests {
         let sql_val = SqlValue::Boolean(true);
         let v = sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val);
         assert!(v.is_err());
-        assert!(format!("{:?}", v).contains(
-            "column_name: \"a\", expect: Float64(Float64), actual: Boolean(BooleanType)"
-        ));
+        assert!(
+            format!("{:?}", v).contains(
+                "column_name: \"a\", expect: Float64(Float64Type), actual: Boolean(BooleanType)"
+            ),
+            "v is {:?}",
+            v
+        );
     }
 
     #[test]
@@ -471,7 +478,7 @@ mod tests {
         match parse_string_to_value(
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
-            &ConcreteDataType::timestamp_millis_datatype(),
+            &ConcreteDataType::timestamp_millisecond_datatype(),
         )
         .unwrap()
         {
@@ -570,7 +577,7 @@ mod tests {
         // test basic
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: DataType::Double,
+            data_type: SqlDataType::Double,
             collation: None,
             options: vec![],
         };
@@ -585,7 +592,7 @@ mod tests {
         // test not null
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: DataType::Double,
+            data_type: SqlDataType::Double,
             collation: None,
             options: vec![ColumnOptionDef {
                 name: None,

@@ -33,7 +33,7 @@ use table::test_util::MemTable;
 use crate::create_testing_sql_query_handler;
 use crate::mysql::{all_datatype_testing_data, MysqlTextRow, TestingData};
 
-fn create_mysql_server(table: MemTable, tls: Arc<TlsOption>) -> Result<Box<dyn Server>> {
+fn create_mysql_server(table: MemTable, tls: TlsOption) -> Result<Box<dyn Server>> {
     let query_handler = create_testing_sql_query_handler(table);
     let io_runtime = Arc::new(
         RuntimeBuilder::default()
@@ -125,7 +125,7 @@ async fn test_shutdown_mysql_server() -> Result<()> {
 async fn test_query_all_datatypes() -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
-    let server_tls = Arc::new(TlsOption::default());
+    let server_tls = TlsOption::default();
     let client_tls = false;
 
     do_test_query_all_datatypes(server_tls, client_tls).await?;
@@ -134,11 +134,11 @@ async fn test_query_all_datatypes() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_server_prefer_secure_client_plain() -> Result<()> {
-    let server_tls = Arc::new(TlsOption {
+    let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Prefer,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server.key".to_owned(),
-    });
+    };
 
     let client_tls = false;
     do_test_query_all_datatypes(server_tls, client_tls).await?;
@@ -147,11 +147,11 @@ async fn test_server_prefer_secure_client_plain() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_server_prefer_secure_client_secure() -> Result<()> {
-    let server_tls = Arc::new(TlsOption {
+    let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Prefer,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server.key".to_owned(),
-    });
+    };
 
     let client_tls = true;
     do_test_query_all_datatypes(server_tls, client_tls).await?;
@@ -160,11 +160,11 @@ async fn test_server_prefer_secure_client_secure() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_server_require_secure_client_secure() -> Result<()> {
-    let server_tls = Arc::new(TlsOption {
+    let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server.key".to_owned(),
-    });
+    };
 
     let client_tls = true;
     do_test_query_all_datatypes(server_tls, client_tls).await?;
@@ -173,11 +173,11 @@ async fn test_server_require_secure_client_secure() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_server_required_secure_client_plain() -> Result<()> {
-    let server_tls = Arc::new(TlsOption {
+    let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server.key".to_owned(),
-    });
+    };
 
     let client_tls = false;
 
@@ -202,7 +202,7 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     Ok(())
 }
 
-async fn do_test_query_all_datatypes(server_tls: Arc<TlsOption>, client_tls: bool) -> Result<()> {
+async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let TestingData {
         column_schemas,

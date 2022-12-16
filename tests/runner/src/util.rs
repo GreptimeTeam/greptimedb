@@ -98,8 +98,23 @@ pub fn values_to_string(data_type: ColumnDataType, values: Values) -> Vec<String
             .into_iter()
             .map(|v| v.to_string())
             .collect(),
-        ColumnDataType::Timestamp => values
-            .ts_millis_values
+        ColumnDataType::TimestampSecond => values
+            .ts_second_values
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect(),
+        ColumnDataType::TimestampMillisecond => values
+            .ts_millisecond_values
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect(),
+        ColumnDataType::TimestampMicrosecond => values
+            .ts_microsecond_values
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect(),
+        ColumnDataType::TimestampNanosecond => values
+            .ts_nanosecond_values
             .into_iter()
             .map(|v| v.to_string())
             .collect(),

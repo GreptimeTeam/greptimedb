@@ -13,39 +13,48 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::ops::Range;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, ListArray};
-use arrow::bitmap::utils::ZipValidity;
-use arrow::bitmap::MutableBitmap;
+use arrow::array::{
+    Array, ArrayData, ArrayRef, BooleanBufferBuilder, Int32BufferBuilder, ListArray,
+};
+use arrow::buffer::Buffer;
 use arrow::datatypes::DataType as ArrowDataType;
 use serde_json::Value as JsonValue;
-use snafu::prelude::*;
 
+use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::Result;
-use crate::prelude::*;
+use crate::scalars::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::types::ListType;
-use crate::value::{ListValue, ListValueRef};
-use crate::vectors::{impl_try_from_arrow_array_for_vector, impl_validity_for_vector};
-
-type ArrowListArray = ListArray<i32>;
+use crate::value::{ListValue, ListValueRef, Value, ValueRef};
+use crate::vectors::{self, Helper, MutableVector, Validity, Vector, VectorRef};
 
 /// Vector of Lists, basically backed by Arrow's `ListArray`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct ListVector {
-    array: ArrowListArray,
-    inner_datatype: ConcreteDataType,
+    array: ListArray,
+    /// The datatype of the items in the list.
+    item_type: ConcreteDataType,
 }
 
 impl ListVector {
-    /// Only iterate values in the [ListVector].
-    ///
-    /// Be careful to use this method as it would ignore validity and replace null
-    /// by empty vector.
-    pub fn values_iter(&self) -> Box<dyn Iterator<Item = Result<VectorRef>> + '_> {
-        Box::new(self.array.values_iter().map(VectorHelper::try_into_vector))
+    /// Iterate elements as [VectorRef].
+    pub fn values_iter(&self) -> impl Iterator<Item = Result<Option<VectorRef>>> + '_ {
+        self.array
+            .iter()
+            .map(|value_opt| value_opt.map(Helper::try_into_vector).transpose())
+    }
+
+    fn to_array_data(&self) -> ArrayData {
+        self.array.data().clone()
+    }
+
+    fn from_array_data_and_type(data: ArrayData, item_type: ConcreteDataType) -> Self {
+        Self {
+            array: ListArray::from(data),
+            item_type,
+        }
     }
 
     pub(crate) fn as_arrow(&self) -> &dyn Array {
@@ -55,7 +64,7 @@ impl ListVector {
 
 impl Vector for ListVector {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::List(ListType::new(self.inner_datatype.clone()))
+        ConcreteDataType::List(ListType::new(self.item_type.clone()))
     }
 
     fn vector_type_name(&self) -> String {
@@ -71,21 +80,25 @@ impl Vector for ListVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        Arc::new(self.array.clone())
+        let data = self.to_array_data();
+        Arc::new(ListArray::from(data))
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        Box::new(self.array.clone())
+        let data = self.to_array_data();
+        Box::new(ListArray::from(data))
     }
 
     fn validity(&self) -> Validity {
-        impl_validity_for_vector!(self.array)
+        vectors::impl_validity_for_vector!(self.array)
     }
 
     fn memory_size(&self) -> usize {
-        let offsets_bytes = self.array.offsets().len() * std::mem::size_of::<i64>();
-        let value_refs_bytes = self.array.values().len() * std::mem::size_of::<Arc<dyn Array>>();
-        offsets_bytes + value_refs_bytes
+        self.array.get_buffer_memory_size()
+    }
+
+    fn null_count(&self) -> usize {
+        self.array.null_count()
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -93,7 +106,8 @@ impl Vector for ListVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        Arc::new(ListVector::from(self.array.slice(offset, length)))
+        let data = self.array.data().slice(offset, length);
+        Arc::new(Self::from_array_data_and_type(data, self.item_type.clone()))
     }
 
     fn get(&self, index: usize) -> Value {
@@ -102,7 +116,7 @@ impl Vector for ListVector {
         }
 
         let array = &self.array.value(index);
-        let vector = VectorHelper::try_into_vector(array).unwrap_or_else(|_| {
+        let vector = Helper::try_into_vector(array).unwrap_or_else(|_| {
             panic!(
                 "arrow array with datatype {:?} cannot converted to our vector",
                 array.data_type()
@@ -113,7 +127,7 @@ impl Vector for ListVector {
             .collect::<Vec<Value>>();
         Value::List(ListValue::new(
             Some(Box::new(values)),
-            self.inner_datatype.clone(),
+            self.item_type.clone(),
         ))
     }
 
@@ -131,7 +145,7 @@ impl Serializable for ListVector {
             .iter()
             .map(|v| match v {
                 None => Ok(JsonValue::Null),
-                Some(v) => VectorHelper::try_into_vector(v)
+                Some(v) => Helper::try_into_vector(v)
                     .and_then(|v| v.serialize_to_json())
                     .map(JsonValue::Array),
             })
@@ -139,70 +153,64 @@ impl Serializable for ListVector {
     }
 }
 
-impl From<ArrowListArray> for ListVector {
-    fn from(array: ArrowListArray) -> Self {
-        let inner_datatype = ConcreteDataType::from_arrow_type(match array.data_type() {
-            ArrowDataType::List(field) => &field.data_type,
-            _ => unreachable!(),
+impl From<ListArray> for ListVector {
+    fn from(array: ListArray) -> Self {
+        let item_type = ConcreteDataType::from_arrow_type(match array.data_type() {
+            ArrowDataType::List(field) => field.data_type(),
+            other => panic!(
+                "Try to create ListVector from an arrow array with type {:?}",
+                other
+            ),
         });
-        Self {
-            array,
-            inner_datatype,
-        }
+        Self { array, item_type }
     }
 }
 
-impl_try_from_arrow_array_for_vector!(ArrowListArray, ListVector);
+vectors::impl_try_from_arrow_array_for_vector!(ListArray, ListVector);
 
-pub struct ListVectorIter<'a> {
+pub struct ListIter<'a> {
     vector: &'a ListVector,
-    iter: ZipValidity<'a, usize, Range<usize>>,
+    idx: usize,
 }
 
-impl<'a> ListVectorIter<'a> {
-    pub fn new(vector: &'a ListVector) -> ListVectorIter<'a> {
-        let iter = ZipValidity::new(
-            0..vector.len(),
-            vector.array.validity().as_ref().map(|x| x.iter()),
-        );
-
-        Self { vector, iter }
+impl<'a> ListIter<'a> {
+    fn new(vector: &'a ListVector) -> ListIter {
+        ListIter { vector, idx: 0 }
     }
 }
 
-impl<'a> Iterator for ListVectorIter<'a> {
+impl<'a> Iterator for ListIter<'a> {
     type Item = Option<ListValueRef<'a>>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|idx_opt| {
-            idx_opt.map(|idx| ListValueRef::Indexed {
-                vector: self.vector,
-                idx,
-            })
-        })
+        if self.idx >= self.vector.len() {
+            return None;
+        }
+
+        let idx = self.idx;
+        self.idx += 1;
+
+        if self.vector.is_null(idx) {
+            return Some(None);
+        }
+
+        Some(Some(ListValueRef::Indexed {
+            vector: self.vector,
+            idx,
+        }))
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.iter.size_hint()
-    }
-
-    #[inline]
-    fn nth(&mut self, n: usize) -> Option<Self::Item> {
-        self.iter.nth(n).map(|idx_opt| {
-            idx_opt.map(|idx| ListValueRef::Indexed {
-                vector: self.vector,
-                idx,
-            })
-        })
+        (self.vector.len(), Some(self.vector.len()))
     }
 }
 
 impl ScalarVector for ListVector {
     type OwnedItem = ListValue;
     type RefItem<'a> = ListValueRef<'a>;
-    type Iter<'a> = ListVectorIter<'a>;
+    type Iter<'a> = ListIter<'a>;
     type Builder = ListVectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
@@ -214,86 +222,68 @@ impl ScalarVector for ListVector {
     }
 
     fn iter_data(&self) -> Self::Iter<'_> {
-        ListVectorIter::new(self)
+        ListIter::new(self)
     }
 }
 
-// Some codes are ported from arrow2's MutableListArray.
+// Ports from arrow's GenericListBuilder.
+// See https://github.com/apache/arrow-rs/blob/94565bca99b5d9932a3e9a8e094aaf4e4384b1e5/arrow-array/src/builder/generic_list_builder.rs
+/// [ListVector] builder.
 pub struct ListVectorBuilder {
-    inner_type: ConcreteDataType,
-    offsets: Vec<i32>,
-    values: Box<dyn MutableVector>,
-    validity: Option<MutableBitmap>,
+    item_type: ConcreteDataType,
+    offsets_builder: Int32BufferBuilder,
+    null_buffer_builder: NullBufferBuilder,
+    values_builder: Box<dyn MutableVector>,
 }
 
 impl ListVectorBuilder {
-    pub fn with_type_capacity(inner_type: ConcreteDataType, capacity: usize) -> ListVectorBuilder {
-        let mut offsets = Vec::with_capacity(capacity + 1);
-        offsets.push(0);
-        // The actual required capacity might greater than the capacity of the `ListVector`
-        // if there exists child vector that has more than one element.
-        let values = inner_type.create_mutable_vector(capacity);
+    /// Creates a new [`ListVectorBuilder`]. `item_type` is the data type of the list item, `capacity`
+    /// is the number of items to pre-allocate space for in this builder.
+    pub fn with_type_capacity(item_type: ConcreteDataType, capacity: usize) -> ListVectorBuilder {
+        let mut offsets_builder = Int32BufferBuilder::new(capacity + 1);
+        offsets_builder.append(0);
+        // The actual required capacity might be greater than the capacity of the `ListVector`
+        // if the child vector has more than one element.
+        let values_builder = item_type.create_mutable_vector(capacity);
 
         ListVectorBuilder {
-            inner_type,
-            offsets,
-            values,
-            validity: None,
+            item_type,
+            offsets_builder,
+            null_buffer_builder: NullBufferBuilder::new(capacity),
+            values_builder,
         }
     }
 
-    #[inline]
-    fn last_offset(&self) -> i32 {
-        *self.offsets.last().unwrap()
+    /// Finish the current variable-length list vector slot.
+    fn finish_list(&mut self, is_valid: bool) {
+        self.offsets_builder
+            .append(i32::try_from(self.values_builder.len()).unwrap());
+        self.null_buffer_builder.append(is_valid);
     }
 
     fn push_null(&mut self) {
-        self.offsets.push(self.last_offset());
-        match &mut self.validity {
-            Some(validity) => validity.push(false),
-            None => self.init_validity(),
-        }
-    }
-
-    fn init_validity(&mut self) {
-        let len = self.offsets.len() - 1;
-
-        let mut validity = MutableBitmap::with_capacity(self.offsets.capacity());
-        validity.extend_constant(len, true);
-        validity.set(len - 1, false);
-        self.validity = Some(validity)
+        self.finish_list(false);
     }
 
     fn push_list_value(&mut self, list_value: &ListValue) -> Result<()> {
         if let Some(items) = list_value.items() {
             for item in &**items {
-                self.values.push_value_ref(item.as_value_ref())?;
+                self.values_builder.push_value_ref(item.as_value_ref())?;
             }
         }
-        self.push_valid();
+
+        self.finish_list(true);
         Ok(())
-    }
-
-    /// Needs to be called when a valid value was extended to this builder.
-    fn push_valid(&mut self) {
-        let size = self.values.len();
-        let size = i32::try_from(size).unwrap();
-        assert!(size >= *self.offsets.last().unwrap());
-
-        self.offsets.push(size);
-        if let Some(validity) = &mut self.validity {
-            validity.push(true)
-        }
     }
 }
 
 impl MutableVector for ListVectorBuilder {
     fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::list_datatype(self.inner_type.clone())
+        ConcreteDataType::list_datatype(self.item_type.clone())
     }
 
     fn len(&self) -> usize {
-        self.offsets.len() - 1
+        self.null_buffer_builder.len()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -348,51 +338,181 @@ impl ScalarVectorBuilder for ListVectorBuilder {
         self.push_value_ref(value.into()).unwrap_or_else(|e| {
             panic!(
                 "Failed to push value, expect value type {:?}, err:{}",
-                self.inner_type, e
+                self.item_type, e
             );
         });
     }
 
     fn finish(&mut self) -> Self::VectorType {
-        let array = ArrowListArray::try_new(
-            ConcreteDataType::list_datatype(self.inner_type.clone()).as_arrow_type(),
-            std::mem::take(&mut self.offsets).into(),
-            self.values.to_vector().to_arrow_array(),
-            std::mem::take(&mut self.validity).map(|x| x.into()),
-        )
-        .unwrap(); // The `ListVectorBuilder` itself should ensure it always builds a valid array.
+        let len = self.len();
+        let values_vector = self.values_builder.to_vector();
+        let values_arr = values_vector.to_arrow_array();
+        let values_data = values_arr.data();
+
+        let offset_buffer = self.offsets_builder.finish();
+        let null_bit_buffer = self.null_buffer_builder.finish();
+        // Re-initialize the offsets_builder.
+        self.offsets_builder.append(0);
+        let data_type = ConcreteDataType::list_datatype(self.item_type.clone()).as_arrow_type();
+        let array_data_builder = ArrayData::builder(data_type)
+            .len(len)
+            .add_buffer(offset_buffer)
+            .add_child_data(values_data.clone())
+            .null_bit_buffer(null_bit_buffer);
+
+        let array_data = unsafe { array_data_builder.build_unchecked() };
+        let array = ListArray::from(array_data);
 
         ListVector {
             array,
-            inner_datatype: self.inner_type.clone(),
+            item_type: self.item_type.clone(),
+        }
+    }
+}
+
+// Ports from https://github.com/apache/arrow-rs/blob/94565bca99b5d9932a3e9a8e094aaf4e4384b1e5/arrow-array/src/builder/null_buffer_builder.rs
+/// Builder for creating the null bit buffer.
+/// This builder only materializes the buffer when we append `false`.
+/// If you only append `true`s to the builder, what you get will be
+/// `None` when calling [`finish`](#method.finish).
+/// This optimization is **very** important for the performance.
+#[derive(Debug)]
+struct NullBufferBuilder {
+    bitmap_builder: Option<BooleanBufferBuilder>,
+    /// Store the length of the buffer before materializing.
+    len: usize,
+    capacity: usize,
+}
+
+impl NullBufferBuilder {
+    /// Creates a new empty builder.
+    /// `capacity` is the number of bits in the null buffer.
+    fn new(capacity: usize) -> Self {
+        Self {
+            bitmap_builder: None,
+            len: 0,
+            capacity,
+        }
+    }
+
+    fn len(&self) -> usize {
+        if let Some(b) = &self.bitmap_builder {
+            b.len()
+        } else {
+            self.len
+        }
+    }
+
+    /// Appends a `true` into the builder
+    /// to indicate that this item is not null.
+    #[inline]
+    fn append_non_null(&mut self) {
+        if let Some(buf) = self.bitmap_builder.as_mut() {
+            buf.append(true)
+        } else {
+            self.len += 1;
+        }
+    }
+
+    /// Appends a `false` into the builder
+    /// to indicate that this item is null.
+    #[inline]
+    fn append_null(&mut self) {
+        self.materialize_if_needed();
+        self.bitmap_builder.as_mut().unwrap().append(false);
+    }
+
+    /// Appends a boolean value into the builder.
+    #[inline]
+    fn append(&mut self, not_null: bool) {
+        if not_null {
+            self.append_non_null()
+        } else {
+            self.append_null()
+        }
+    }
+
+    /// Builds the null buffer and resets the builder.
+    /// Returns `None` if the builder only contains `true`s.
+    fn finish(&mut self) -> Option<Buffer> {
+        let buf = self.bitmap_builder.as_mut().map(|b| b.finish());
+        self.bitmap_builder = None;
+        self.len = 0;
+        buf
+    }
+
+    #[inline]
+    fn materialize_if_needed(&mut self) {
+        if self.bitmap_builder.is_none() {
+            self.materialize()
+        }
+    }
+
+    #[cold]
+    fn materialize(&mut self) {
+        if self.bitmap_builder.is_none() {
+            let mut b = BooleanBufferBuilder::new(self.len.max(self.capacity));
+            b.append_n(self.len, true);
+            self.bitmap_builder = Some(b);
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use arrow::array::{MutableListArray, MutablePrimitiveArray, TryExtend};
+pub mod tests {
+    use arrow::array::{Int32Array, Int32Builder, ListBuilder};
     use serde_json::json;
 
     use super::*;
+    use crate::scalars::ScalarRef;
     use crate::types::ListType;
+    use crate::vectors::Int32Vector;
+
+    pub fn new_list_vector(data: &[Option<Vec<Option<i32>>>]) -> ListVector {
+        let mut builder =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 8);
+        for vec_opt in data {
+            if let Some(vec) = vec_opt {
+                let values = vec.iter().map(|v| Value::from(*v)).collect();
+                let values = Some(Box::new(values));
+                let list_value = ListValue::new(values, ConcreteDataType::int32_datatype());
+
+                builder.push(Some(ListValueRef::Ref { val: &list_value }));
+            } else {
+                builder.push(None);
+            }
+        }
+
+        builder.finish()
+    }
+
+    fn new_list_array(data: &[Option<Vec<Option<i32>>>]) -> ListArray {
+        let mut builder = ListBuilder::new(Int32Builder::new());
+        for vec_opt in data {
+            if let Some(vec) = vec_opt {
+                for value_opt in vec {
+                    builder.values().append_option(*value_opt);
+                }
+
+                builder.append(true);
+            } else {
+                builder.append(false);
+            }
+        }
+
+        builder.finish()
+    }
 
     #[test]
     fn test_list_vector() {
         let data = vec![
-            Some(vec![Some(1i32), Some(2), Some(3)]),
+            Some(vec![Some(1), Some(2), Some(3)]),
             None,
             Some(vec![Some(4), None, Some(6)]),
         ];
 
-        let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i32>>::new();
-        arrow_array.try_extend(data).unwrap();
-        let arrow_array: ArrowListArray = arrow_array.into();
+        let list_vector = new_list_vector(&data);
 
-        let list_vector = ListVector {
-            array: arrow_array.clone(),
-            inner_datatype: ConcreteDataType::int32_datatype(),
-        };
         assert_eq!(
             ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype())),
             list_vector.data_type()
@@ -403,30 +523,34 @@ mod tests {
         assert!(list_vector.is_null(1));
         assert!(!list_vector.is_null(2));
 
+        let arrow_array = new_list_array(&data);
         assert_eq!(
             arrow_array,
-            list_vector
+            *list_vector
                 .to_arrow_array()
                 .as_any()
-                .downcast_ref::<ArrowListArray>()
+                .downcast_ref::<ListArray>()
                 .unwrap()
-                .clone()
         );
-        assert_eq!(
-            Validity::Slots(arrow_array.validity().unwrap()),
-            list_vector.validity()
-        );
-        assert_eq!(
-            arrow_array.offsets().len() * std::mem::size_of::<i64>()
-                + arrow_array.values().len() * std::mem::size_of::<Arc<dyn Array>>(),
-            list_vector.memory_size()
-        );
+        let validity = list_vector.validity();
+        assert!(!validity.is_all_null());
+        assert!(!validity.is_all_valid());
+        assert!(validity.is_set(0));
+        assert!(!validity.is_set(1));
+        assert!(validity.is_set(2));
+        assert_eq!(256, list_vector.memory_size());
 
-        let slice = list_vector.slice(0, 2);
+        let slice = list_vector.slice(0, 2).to_arrow_array();
+        let sliced_array = slice.as_any().downcast_ref::<ListArray>().unwrap();
         assert_eq!(
-            "ListArray[[1, 2, 3], None]",
-            format!("{:?}", slice.to_arrow_array())
+            Int32Array::from_iter_values([1, 2, 3]),
+            *sliced_array
+                .value(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
         );
+        assert!(sliced_array.is_null(1));
 
         assert_eq!(
             Value::List(ListValue::new(
@@ -467,52 +591,48 @@ mod tests {
     #[test]
     fn test_from_arrow_array() {
         let data = vec![
-            Some(vec![Some(1u32), Some(2), Some(3)]),
+            Some(vec![Some(1), Some(2), Some(3)]),
             None,
             Some(vec![Some(4), None, Some(6)]),
         ];
 
-        let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<u32>>::new();
-        arrow_array.try_extend(data).unwrap();
-        let arrow_array: ArrowListArray = arrow_array.into();
+        let arrow_array = new_list_array(&data);
         let array_ref: ArrayRef = Arc::new(arrow_array);
+        let expect = new_list_vector(&data);
 
+        // Test try from ArrayRef
         let list_vector = ListVector::try_from_arrow_array(array_ref).unwrap();
-        assert_eq!(
-            "ListVector { array: ListArray[[1, 2, 3], None, [4, None, 6]], inner_datatype: UInt32(UInt32) }",
-            format!("{:?}", list_vector)
-        );
+        assert_eq!(expect, list_vector);
+
+        // Test from
+        let arrow_array = new_list_array(&data);
+        let list_vector = ListVector::from(arrow_array);
+        assert_eq!(expect, list_vector);
     }
 
     #[test]
     fn test_iter_list_vector_values() {
         let data = vec![
-            Some(vec![Some(1i64), Some(2), Some(3)]),
+            Some(vec![Some(1), Some(2), Some(3)]),
             None,
             Some(vec![Some(4), None, Some(6)]),
         ];
 
-        let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i64>>::new();
-        arrow_array.try_extend(data).unwrap();
-        let arrow_array: ArrowListArray = arrow_array.into();
+        let list_vector = new_list_vector(&data);
 
-        let list_vector = ListVector::from(arrow_array);
         assert_eq!(
-            ConcreteDataType::List(ListType::new(ConcreteDataType::int64_datatype())),
+            ConcreteDataType::List(ListType::new(ConcreteDataType::int32_datatype())),
             list_vector.data_type()
         );
         let mut iter = list_vector.values_iter();
         assert_eq!(
-            "Int64[1, 2, 3]",
-            format!("{:?}", iter.next().unwrap().unwrap().to_arrow_array())
+            Arc::new(Int32Vector::from_slice(&[1, 2, 3])) as VectorRef,
+            *iter.next().unwrap().unwrap().unwrap()
         );
+        assert!(iter.next().unwrap().unwrap().is_none());
         assert_eq!(
-            "Int64[]",
-            format!("{:?}", iter.next().unwrap().unwrap().to_arrow_array())
-        );
-        assert_eq!(
-            "Int64[4, None, 6]",
-            format!("{:?}", iter.next().unwrap().unwrap().to_arrow_array())
+            Arc::new(Int32Vector::from(vec![Some(4), None, Some(6)])) as VectorRef,
+            *iter.next().unwrap().unwrap().unwrap(),
         );
         assert!(iter.next().is_none())
     }
@@ -520,28 +640,16 @@ mod tests {
     #[test]
     fn test_serialize_to_json() {
         let data = vec![
-            Some(vec![Some(1i64), Some(2), Some(3)]),
+            Some(vec![Some(1), Some(2), Some(3)]),
             None,
             Some(vec![Some(4), None, Some(6)]),
         ];
 
-        let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i64>>::new();
-        arrow_array.try_extend(data).unwrap();
-        let arrow_array: ArrowListArray = arrow_array.into();
-
-        let list_vector = ListVector::from(arrow_array);
+        let list_vector = new_list_vector(&data);
         assert_eq!(
             vec![json!([1, 2, 3]), json!(null), json!([4, null, 6]),],
             list_vector.serialize_to_json().unwrap()
         );
-    }
-
-    fn new_list_vector(data: Vec<Option<Vec<Option<i32>>>>) -> ListVector {
-        let mut arrow_array = MutableListArray::<i32, MutablePrimitiveArray<i32>>::new();
-        arrow_array.try_extend(data).unwrap();
-        let arrow_array: ArrowListArray = arrow_array.into();
-
-        ListVector::from(arrow_array)
     }
 
     #[test]
@@ -567,14 +675,14 @@ mod tests {
             None,
             Some(vec![Some(7), Some(8), None]),
         ];
-        let input = new_list_vector(data);
+        let input = new_list_vector(&data);
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder
             .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
             .is_err());
         let vector = builder.to_vector();
 
-        let expect: VectorRef = Arc::new(new_list_vector(vec![
+        let expect: VectorRef = Arc::new(new_list_vector(&[
             Some(vec![Some(4), None, Some(6)]),
             None,
             Some(vec![Some(7), Some(8), None]),
@@ -599,7 +707,7 @@ mod tests {
         }));
         let vector = builder.finish();
 
-        let expect = new_list_vector(vec![None, Some(vec![Some(4), None, Some(6)])]);
+        let expect = new_list_vector(&[None, Some(vec![Some(4), None, Some(6)])]);
         assert_eq!(expect, vector);
 
         assert!(vector.get_data(0).is_none());

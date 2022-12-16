@@ -104,6 +104,12 @@ macro_rules! define_timestamp_with_unit {
                     [<Timestamp $unit>]::from_native(val)
                 }
             }
+
+            impl From<[<Timestamp $unit>]> for i64{
+                fn from(val: [<Timestamp $unit>]) -> Self {
+                    val.0.value()
+                }
+            }
         }
     };
 }
@@ -116,6 +122,18 @@ define_timestamp_with_unit!(Nanosecond);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_to_serde_json_value() {
+        let ts = TimestampSecond::new(123);
+        let val = serde_json::Value::from(ts);
+        match val {
+            serde_json::Value::String(s) => {
+                assert_eq!("1970-01-01 00:02:03+0000", s);
+            }
+            _ => unreachable!(),
+        }
+    }
 
     #[test]
     fn test_timestamp_scalar() {

@@ -14,6 +14,7 @@
 
 use core::default::Default;
 use std::cmp::Ordering;
+use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
@@ -34,10 +35,31 @@ impl Timestamp {
         Self { unit, value }
     }
 
-    pub fn from_millis(value: i64) -> Self {
+    pub fn new_second(value: i64) -> Self {
+        Self {
+            value,
+            unit: TimeUnit::Second,
+        }
+    }
+
+    pub fn new_millisecond(value: i64) -> Self {
         Self {
             value,
             unit: TimeUnit::Millisecond,
+        }
+    }
+
+    pub fn new_microsecond(value: i64) -> Self {
+        Self {
+            value,
+            unit: TimeUnit::Microsecond,
+        }
+    }
+
+    pub fn new_nanosecond(value: i64) -> Self {
+        Self {
+            value,
+            unit: TimeUnit::Nanosecond,
         }
     }
 
@@ -54,6 +76,8 @@ impl Timestamp {
         self.value * self.unit.factor() / unit.factor()
     }
 
+    /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
+    /// represent, this function simply print the timestamp unit and value in plain string.
     pub fn to_iso8601_string(&self) -> String {
         let nano_factor = TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor();
 
@@ -65,8 +89,11 @@ impl Timestamp {
             nsecs += nano_factor;
         }
 
-        let datetime = Utc.timestamp(secs, nsecs as u32);
-        format!("{}", datetime.format("%Y-%m-%d %H:%M:%S%.f%z"))
+        if let LocalResult::Single(datetime) = Utc.timestamp_opt(secs, nsecs as u32) {
+            format!("{}", datetime.format("%Y-%m-%d %H:%M:%S%.f%z"))
+        } else {
+            format!("[Timestamp{}: {}]", self.unit, self.value)
+        }
     }
 }
 
@@ -168,6 +195,25 @@ pub enum TimeUnit {
     Nanosecond,
 }
 
+impl Display for TimeUnit {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeUnit::Second => {
+                write!(f, "Second")
+            }
+            TimeUnit::Millisecond => {
+                write!(f, "Millisecond")
+            }
+            TimeUnit::Microsecond => {
+                write!(f, "Microsecond")
+            }
+            TimeUnit::Nanosecond => {
+                write!(f, "Nanosecond")
+            }
+        }
+    }
+}
+
 impl TimeUnit {
     pub fn factor(&self) -> i64 {
         match self {
@@ -249,10 +295,11 @@ mod tests {
     // but expected timestamp is in UTC timezone
     fn check_from_str(s: &str, expect: &str) {
         let ts = Timestamp::from_str(s).unwrap();
-        let time = NaiveDateTime::from_timestamp(
+        let time = NaiveDateTime::from_timestamp_opt(
             ts.value / 1_000_000_000,
             (ts.value % 1_000_000_000) as u32,
-        );
+        )
+        .unwrap();
         assert_eq!(expect, time.to_string());
     }
 
@@ -265,7 +312,13 @@ mod tests {
         check_from_str(
             "2020-09-08 13:42:29",
             &NaiveDateTime::from_timestamp_opt(
-                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                1599572549
+                    - Local
+                        .timestamp_opt(0, 0)
+                        .unwrap()
+                        .offset()
+                        .fix()
+                        .local_minus_utc() as i64,
                 0,
             )
             .unwrap()
@@ -275,7 +328,13 @@ mod tests {
         check_from_str(
             "2020-09-08T13:42:29",
             &NaiveDateTime::from_timestamp_opt(
-                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                1599572549
+                    - Local
+                        .timestamp_opt(0, 0)
+                        .unwrap()
+                        .offset()
+                        .fix()
+                        .local_minus_utc() as i64,
                 0,
             )
             .unwrap()
@@ -285,7 +344,13 @@ mod tests {
         check_from_str(
             "2020-09-08 13:42:29.042",
             &NaiveDateTime::from_timestamp_opt(
-                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                1599572549
+                    - Local
+                        .timestamp_opt(0, 0)
+                        .unwrap()
+                        .offset()
+                        .fix()
+                        .local_minus_utc() as i64,
                 42000000,
             )
             .unwrap()
@@ -296,7 +361,13 @@ mod tests {
         check_from_str(
             "2020-09-08T13:42:29.042",
             &NaiveDateTime::from_timestamp_opt(
-                1599572549 - Local.timestamp(0, 0).offset().fix().local_minus_utc() as i64,
+                1599572549
+                    - Local
+                        .timestamp_opt(0, 0)
+                        .unwrap()
+                        .offset()
+                        .fix()
+                        .local_minus_utc() as i64,
                 42000000,
             )
             .unwrap()
@@ -316,19 +387,19 @@ mod tests {
         assert_eq!(datetime_str, ts.to_iso8601_string());
 
         let ts_millis = 1668070237000;
-        let ts = Timestamp::from_millis(ts_millis);
+        let ts = Timestamp::new_millisecond(ts_millis);
         assert_eq!("2022-11-10 08:50:37+0000", ts.to_iso8601_string());
 
         let ts_millis = -1000;
-        let ts = Timestamp::from_millis(ts_millis);
+        let ts = Timestamp::new_millisecond(ts_millis);
         assert_eq!("1969-12-31 23:59:59+0000", ts.to_iso8601_string());
 
         let ts_millis = -1;
-        let ts = Timestamp::from_millis(ts_millis);
+        let ts = Timestamp::new_millisecond(ts_millis);
         assert_eq!("1969-12-31 23:59:59.999+0000", ts.to_iso8601_string());
 
         let ts_millis = -1001;
-        let ts = Timestamp::from_millis(ts_millis);
+        let ts = Timestamp::new_millisecond(ts_millis);
         assert_eq!("1969-12-31 23:59:58.999+0000", ts.to_iso8601_string());
     }
 

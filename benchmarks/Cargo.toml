@@ -5,10 +5,10 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-arrow = "10"
+arrow = "26.0.0"
 clap = { version = "4.0", features = ["derive"] }
 client = { path = "../src/client" }
 indicatif = "0.17.1"
 itertools = "0.10.5"
-parquet = { version = "*" }
+parquet = "26.0.0"
 tokio = { version = "1.21", features = ["full"] }

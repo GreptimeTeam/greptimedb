@@ -244,7 +244,7 @@ mod test {
             ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(
                 "timestamps",
-                ConcreteDataType::timestamp_millis_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
                 true,
             ),
             ColumnSchema::new("dates", ConcreteDataType::date_datatype(), true),

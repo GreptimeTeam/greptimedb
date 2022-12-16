@@ -12,68 +12,59 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod binary;
-pub mod boolean;
-mod builder;
-pub mod constant;
-pub mod date;
-pub mod datetime;
-mod eq;
-mod helper;
-mod list;
-pub mod mutable;
-pub mod null;
-mod operations;
-pub mod primitive;
-mod string;
-mod timestamp;
-
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef};
-use arrow::bitmap::Bitmap;
-pub use binary::*;
-pub use boolean::*;
-pub use builder::VectorBuilder;
-pub use constant::*;
-pub use date::*;
-pub use datetime::*;
-pub use helper::Helper;
-pub use list::*;
-pub use mutable::MutableVector;
-pub use null::*;
-pub use operations::VectorOp;
-pub use primitive::*;
 use snafu::ensure;
-pub use string::*;
-pub use timestamp::*;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
+use crate::vectors::operations::VectorOp;
 
-#[derive(Debug, PartialEq)]
-pub enum Validity<'a> {
-    /// Whether the array slot is valid or not (null).
-    Slots(&'a Bitmap),
-    /// All slots are valid.
-    AllValid,
-    /// All slots are null.
-    AllNull,
-}
+mod binary;
+mod boolean;
+mod constant;
+mod date;
+mod datetime;
+mod eq;
+mod helper;
+mod list;
+mod null;
+mod operations;
+mod primitive;
+mod string;
+mod timestamp;
+mod validity;
 
-impl<'a> Validity<'a> {
-    pub fn slots(&self) -> Option<&Bitmap> {
-        match self {
-            Validity::Slots(bitmap) => Some(bitmap),
-            _ => None,
-        }
-    }
-}
+pub use binary::{BinaryVector, BinaryVectorBuilder};
+pub use boolean::{BooleanVector, BooleanVectorBuilder};
+pub use constant::ConstantVector;
+pub use date::{DateVector, DateVectorBuilder};
+pub use datetime::{DateTimeVector, DateTimeVectorBuilder};
+pub use helper::Helper;
+pub use list::{ListIter, ListVector, ListVectorBuilder};
+pub use null::{NullVector, NullVectorBuilder};
+pub use primitive::{
+    Float32Vector, Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector,
+    Int16VectorBuilder, Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder,
+    Int8Vector, Int8VectorBuilder, PrimitiveIter, PrimitiveVector, PrimitiveVectorBuilder,
+    UInt16Vector, UInt16VectorBuilder, UInt32Vector, UInt32VectorBuilder, UInt64Vector,
+    UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder,
+};
+pub use string::{StringVector, StringVectorBuilder};
+pub use timestamp::{
+    TimestampMicrosecondVector, TimestampMicrosecondVectorBuilder, TimestampMillisecondVector,
+    TimestampMillisecondVectorBuilder, TimestampNanosecondVector, TimestampNanosecondVectorBuilder,
+    TimestampSecondVector, TimestampSecondVectorBuilder,
+};
+pub use validity::Validity;
 
+// TODO(yingwen): arrow 28.0 implements Clone for all arrays, we could upgrade to it and simplify
+// some codes in methods such as `to_arrow_array()` and `to_boxed_arrow_array()`.
 /// Vector of data values.
 pub trait Vector: Send + Sync + Serializable + Debug + VectorOp {
     /// Returns the data type of the vector.
@@ -110,13 +101,7 @@ pub trait Vector: Send + Sync + Serializable + Debug + VectorOp {
     /// The number of null slots on this [`Vector`].
     /// # Implementation
     /// This is `O(1)`.
-    fn null_count(&self) -> usize {
-        match self.validity() {
-            Validity::Slots(bitmap) => bitmap.null_count(),
-            Validity::AllValid => 0,
-            Validity::AllNull => self.len(),
-        }
-    }
+    fn null_count(&self) -> usize;
 
     /// Returns true when it's a ConstantColumn
     fn is_const(&self) -> bool {
@@ -165,6 +150,42 @@ pub trait Vector: Send + Sync + Serializable + Debug + VectorOp {
 
 pub type VectorRef = Arc<dyn Vector>;
 
+/// Mutable vector that could be used to build an immutable vector.
+pub trait MutableVector: Send + Sync {
+    /// Returns the data type of the vector.
+    fn data_type(&self) -> ConcreteDataType;
+
+    /// Returns the length of the vector.
+    fn len(&self) -> usize;
+
+    /// Returns whether the vector is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Convert to Any, to enable dynamic casting.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Convert to mutable Any, to enable dynamic casting.
+    fn as_mut_any(&mut self) -> &mut dyn Any;
+
+    /// Convert `self` to an (immutable) [VectorRef] and reset `self`.
+    fn to_vector(&mut self) -> VectorRef;
+
+    /// Push value ref to this mutable vector.
+    ///
+    /// Returns error if data types mismatch.
+    fn push_value_ref(&mut self, value: ValueRef) -> Result<()>;
+
+    /// Extend this mutable vector by slice of `vector`.
+    ///
+    /// Returns error if data types mismatch.
+    ///
+    /// # Panics
+    /// Panics if `offset + length > vector.len()`.
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()>;
+}
+
 /// Helper to define `try_from_arrow_array(array: arrow::array::ArrayRef)` function.
 macro_rules! impl_try_from_arrow_array_for_vector {
     ($Array: ident, $Vector: ident) => {
@@ -172,16 +193,20 @@ macro_rules! impl_try_from_arrow_array_for_vector {
             pub fn try_from_arrow_array(
                 array: impl AsRef<dyn arrow::array::Array>,
             ) -> crate::error::Result<$Vector> {
-                Ok($Vector::from(
-                    array
-                        .as_ref()
-                        .as_any()
-                        .downcast_ref::<$Array>()
-                        .with_context(|| crate::error::ConversionSnafu {
-                            from: std::format!("{:?}", array.as_ref().data_type()),
-                        })?
-                        .clone(),
-                ))
+                use snafu::OptionExt;
+
+                let data = array
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<$Array>()
+                    .with_context(|| crate::error::ConversionSnafu {
+                        from: std::format!("{:?}", array.as_ref().data_type()),
+                    })?
+                    .data()
+                    .clone();
+
+                let concrete_array = $Array::from(data);
+                Ok($Vector::from(concrete_array))
             }
         }
     };
@@ -189,10 +214,7 @@ macro_rules! impl_try_from_arrow_array_for_vector {
 
 macro_rules! impl_validity_for_vector {
     ($array: expr) => {
-        match $array.validity() {
-            Some(bitmap) => Validity::Slots(bitmap),
-            None => Validity::AllValid,
-        }
+        Validity::from_array_data($array.data())
     };
 }
 
@@ -219,10 +241,11 @@ macro_rules! impl_get_ref_for_vector {
 }
 
 macro_rules! impl_extend_for_builder {
-    ($mutable_array: expr, $vector: ident, $VectorType: ident, $offset: ident, $length: ident) => {{
+    ($mutable_vector: expr, $vector: ident, $VectorType: ident, $offset: ident, $length: ident) => {{
         use snafu::OptionExt;
 
-        let concrete_vector = $vector
+        let sliced_vector = $vector.slice($offset, $length);
+        let concrete_vector = sliced_vector
             .as_any()
             .downcast_ref::<$VectorType>()
             .with_context(|| crate::error::CastTypeSnafu {
@@ -232,8 +255,9 @@ macro_rules! impl_extend_for_builder {
                     stringify!($VectorType)
                 ),
             })?;
-        let slice = concrete_vector.array.slice($offset, $length);
-        $mutable_array.extend_trusted_len(slice.iter());
+        for value in concrete_vector.iter_data() {
+            $mutable_vector.push(value);
+        }
         Ok(())
     }};
 }
@@ -245,27 +269,27 @@ pub(crate) use {
 
 #[cfg(test)]
 pub mod tests {
-    use arrow::array::{Array, PrimitiveArray};
+    use arrow::array::{Array, Int32Array, UInt8Array};
     use serde_json;
 
-    use super::helper::Helper;
     use super::*;
     use crate::data_type::DataType;
-    use crate::types::PrimitiveElement;
+    use crate::types::{Int32Type, LogicalPrimitiveType};
+    use crate::vectors::helper::Helper;
 
     #[test]
     fn test_df_columns_to_vector() {
-        let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1, 2, 3]));
+        let df_column: Arc<dyn Array> = Arc::new(Int32Array::from(vec![1, 2, 3]));
         let vector = Helper::try_into_vector(df_column).unwrap();
         assert_eq!(
-            i32::build_data_type().as_arrow_type(),
+            Int32Type::build_data_type().as_arrow_type(),
             vector.data_type().as_arrow_type()
         );
     }
 
     #[test]
     fn test_serialize_i32_vector() {
-        let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::<i32>::from_slice(vec![1, 2, 3]));
+        let df_column: Arc<dyn Array> = Arc::new(Int32Array::from(vec![1, 2, 3]));
         let json_value = Helper::try_into_vector(df_column)
             .unwrap()
             .serialize_to_json()
@@ -275,7 +299,7 @@ pub mod tests {
 
     #[test]
     fn test_serialize_i8_vector() {
-        let df_column: Arc<dyn Array> = Arc::new(PrimitiveArray::from_slice(vec![1u8, 2u8, 3u8]));
+        let df_column: Arc<dyn Array> = Arc::new(UInt8Array::from(vec![1, 2, 3]));
         let json_value = Helper::try_into_vector(df_column)
             .unwrap()
             .serialize_to_json()
