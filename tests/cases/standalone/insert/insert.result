@@ -11,15 +11,15 @@ MutateResult { success: 5, failure: 0 }
 
 SELECT * FROM integers;
 
-+----------------------------+
-| ts, #Timestamp, #Timestamp |
-+----------------------------+
-| 1                          |
-| 2                          |
-| 3                          |
-| 4                          |
-| 5                          |
-+----------------------------+
++---------------------------------------+
+| ts, #Timestamp, #TimestampMillisecond |
++---------------------------------------+
+| 1                                     |
+| 2                                     |
+| 3                                     |
+| 4                                     |
+| 5                                     |
++---------------------------------------+
 
 CREATE TABLE IF NOT EXISTS presentations (
     presentation_date TIMESTAMP,

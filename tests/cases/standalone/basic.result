@@ -21,6 +21,7 @@ Affected Rows: 3
 
 SELECT * FROM system_metrics;
 
+
 +-------+-------+----------+-------------+-----------+-------------------------+
 | host  | idc   | cpu_util | memory_util | disk_util | ts                      |
 +-------+-------+----------+-------------+-----------+-------------------------+
@@ -57,4 +58,3 @@ SELECT idc, avg(memory_util) FROM system_metrics GROUP BY idc ORDER BY idc;
 DROP TABLE system_metrics;
 
 Affected Rows: 1
-
