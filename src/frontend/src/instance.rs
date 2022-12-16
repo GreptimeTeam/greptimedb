@@ -471,6 +471,7 @@ impl Instance {
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        // TODO(sunng87): provide a better form to log or track statement
         let query = &format!("{:?}", &stmt);
         match stmt {
             Statement::CreateDatabase(_)
