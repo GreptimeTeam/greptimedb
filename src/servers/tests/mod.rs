@@ -65,7 +65,7 @@ impl SqlQueryHandler for DummyInstance {
         _stmt: sql::statements::statement::Statement,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        unreachable!()
+        unimplemented!()
     }
 }
 
