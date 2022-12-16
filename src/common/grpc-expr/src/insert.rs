@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::{SemanticType, Values};
-use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateExpr};
+use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateTableExpr};
 use common_base::BitVec;
 use common_time::timestamp::Timestamp;
 use common_time::{Date, DateTime};
@@ -45,7 +45,7 @@ fn build_column_def(column_name: &str, datatype: i32, nullable: bool) -> ColumnD
         name: column_name.to_string(),
         datatype,
         is_nullable: nullable,
-        default_constraint: None,
+        default_constraint: vec![],
     }
 }
 
@@ -214,7 +214,7 @@ pub fn build_create_expr_from_insertion(
     table_id: Option<TableId>,
     table_name: &str,
     columns: &[Column],
-) -> Result<CreateExpr> {
+) -> Result<CreateTableExpr> {
     let mut new_columns: HashSet<String> = HashSet::default();
     let mut column_defs = Vec::default();
     let mut primary_key_indices = Vec::default();
@@ -263,17 +263,17 @@ pub fn build_create_expr_from_insertion(
         .map(|idx| columns[*idx].column_name.clone())
         .collect::<Vec<_>>();
 
-    let expr = CreateExpr {
-        catalog_name: Some(catalog_name.to_string()),
-        schema_name: Some(schema_name.to_string()),
+    let expr = CreateTableExpr {
+        catalog_name: catalog_name.to_string(),
+        schema_name: schema_name.to_string(),
         table_name: table_name.to_string(),
-        desc: Some("Created on insertion".to_string()),
+        desc: "Created on insertion".to_string(),
         column_defs,
         time_index: timestamp_field_name,
         primary_keys,
         create_if_not_exists: true,
         table_options: Default::default(),
-        table_id,
+        table_id: table_id.map(|id| api::v1::TableId { id }),
         region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
     };
 
@@ -516,9 +516,9 @@ mod tests {
             build_create_expr_from_insertion("", "", table_id, table_name, &insert_batch.0)
                 .unwrap();
 
-        assert_eq!(table_id, create_expr.table_id);
+        assert_eq!(table_id, create_expr.table_id.map(|x| x.id));
         assert_eq!(table_name, create_expr.table_name);
-        assert_eq!(Some("Created on insertion".to_string()), create_expr.desc);
+        assert_eq!("Created on insertion".to_string(), create_expr.desc);
         assert_eq!(
             vec![create_expr.column_defs[0].name.clone()],
             create_expr.primary_keys

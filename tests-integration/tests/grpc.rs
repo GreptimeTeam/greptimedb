@@ -15,7 +15,7 @@ use api::v1::alter_expr::Kind;
 use api::v1::column::SemanticType;
 use api::v1::{
     admin_result, column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-    CreateExpr, InsertExpr, MutateResult,
+    CreateTableExpr, InsertExpr, MutateResult, TableId,
 };
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
@@ -151,7 +151,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         name: "test_column".to_string(),
         datatype: ColumnDataType::Int64.into(),
         is_nullable: true,
-        default_constraint: None,
+        default_constraint: vec![],
     };
     let kind = Kind::AddColumns(AddColumns {
         add_columns: vec![AddColumn {
@@ -161,8 +161,8 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     });
     let expr = AlterExpr {
         table_name: "test_table".to_string(),
-        catalog_name: None,
-        schema_name: None,
+        catalog_name: "".to_string(),
+        schema_name: "".to_string(),
         kind: Some(kind),
     };
     let result = admin.alter(expr).await.unwrap();
@@ -222,44 +222,46 @@ async fn insert_and_assert(db: &Database) {
     }
 }
 
-fn testing_create_expr() -> CreateExpr {
+fn testing_create_expr() -> CreateTableExpr {
     let column_defs = vec![
         ColumnDef {
             name: "host".to_string(),
             datatype: ColumnDataType::String as i32,
             is_nullable: false,
-            default_constraint: None,
+            default_constraint: vec![],
         },
         ColumnDef {
             name: "cpu".to_string(),
             datatype: ColumnDataType::Float64 as i32,
             is_nullable: true,
-            default_constraint: None,
+            default_constraint: vec![],
         },
         ColumnDef {
             name: "memory".to_string(),
             datatype: ColumnDataType::Float64 as i32,
             is_nullable: true,
-            default_constraint: None,
+            default_constraint: vec![],
         },
         ColumnDef {
             name: "ts".to_string(),
             datatype: ColumnDataType::TimestampMillisecond as i32, // timestamp
             is_nullable: true,
-            default_constraint: None,
+            default_constraint: vec![],
         },
     ];
-    CreateExpr {
-        catalog_name: None,
-        schema_name: None,
+    CreateTableExpr {
+        catalog_name: "".to_string(),
+        schema_name: "".to_string(),
         table_name: "demo".to_string(),
-        desc: Some("blabla".to_string()),
+        desc: "blabla little magic fairy".to_string(),
         column_defs,
         time_index: "ts".to_string(),
         primary_keys: vec!["host".to_string()],
         create_if_not_exists: true,
         table_options: Default::default(),
-        table_id: Some(MIN_USER_TABLE_ID),
+        table_id: Some(TableId {
+            id: MIN_USER_TABLE_ID,
+        }),
         region_ids: vec![0],
     }
 }

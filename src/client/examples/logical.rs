@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{ColumnDataType, ColumnDef, CreateExpr};
+use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, TableId};
 use client::admin::Admin;
 use client::{Client, Database};
 use prost_09::Message;
@@ -33,36 +33,36 @@ fn main() {
 async fn run() {
     let client = Client::with_urls(vec!["127.0.0.1:3001"]);
 
-    let create_table_expr = CreateExpr {
-        catalog_name: Some("greptime".to_string()),
-        schema_name: Some("public".to_string()),
+    let create_table_expr = CreateTableExpr {
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
         table_name: "test_logical_dist_exec".to_string(),
-        desc: None,
+        desc: "".to_string(),
         column_defs: vec![
             ColumnDef {
                 name: "timestamp".to_string(),
                 datatype: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "key".to_string(),
                 datatype: ColumnDataType::Uint64 as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "value".to_string(),
                 datatype: ColumnDataType::Uint64 as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
         ],
         time_index: "timestamp".to_string(),
         primary_keys: vec!["key".to_string()],
         create_if_not_exists: false,
         table_options: Default::default(),
-        table_id: Some(1024),
+        table_id: Some(TableId { id: 1024 }),
         region_ids: vec![0],
     };
 

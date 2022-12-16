@@ -18,8 +18,8 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::result::AdminResultBuilder;
 use api::v1::{
-    admin_expr, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr, CreateExpr, ObjectExpr,
-    ObjectResult,
+    admin_expr, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr, CreateTableExpr, ObjectExpr,
+    ObjectResult, TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
@@ -86,7 +86,7 @@ impl DistInstance {
 
     pub(crate) async fn create_table(
         &self,
-        create_table: &mut CreateExpr,
+        create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
     ) -> Result<Output> {
         let response = self.create_table_in_meta(create_table, partitions).await?;
@@ -112,7 +112,9 @@ impl DistInstance {
                 table_name: create_table.table_name.to_string()
             }
         );
-        create_table.table_id = Some(table_route.table.id as u32);
+        create_table.table_id = Some(TableId {
+            id: table_route.table.id as u32,
+        });
         self.put_table_global_meta(create_table, table_route)
             .await?;
 
@@ -194,8 +196,16 @@ impl DistInstance {
     }
 
     async fn handle_alter_table(&self, expr: AlterExpr) -> Result<AdminResult> {
-        let catalog_name = expr.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
-        let schema_name = expr.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
+        let catalog_name = if expr.catalog_name.is_empty() {
+            DEFAULT_CATALOG_NAME
+        } else {
+            expr.catalog_name.as_str()
+        };
+        let schema_name = if expr.schema_name.is_empty() {
+            DEFAULT_SCHEMA_NAME
+        } else {
+            expr.schema_name.as_str()
+        };
         let table_name = expr.table_name.as_str();
         let table = self
             .catalog_manager
@@ -223,20 +233,18 @@ impl DistInstance {
 
     async fn create_table_in_meta(
         &self,
-        create_table: &CreateExpr,
+        create_table: &CreateTableExpr,
         partitions: Option<Partitions>,
     ) -> Result<RouteResponse> {
-        let table_name = TableName::new(
-            create_table
-                .catalog_name
-                .clone()
-                .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
-            create_table
-                .schema_name
-                .clone()
-                .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
-            create_table.table_name.clone(),
-        );
+        let mut catalog_name = create_table.catalog_name.clone();
+        if catalog_name.is_empty() {
+            catalog_name = DEFAULT_CATALOG_NAME.to_string();
+        }
+        let mut schema_name = create_table.schema_name.clone();
+        if schema_name.is_empty() {
+            schema_name = DEFAULT_SCHEMA_NAME.to_string();
+        }
+        let table_name = TableName::new(catalog_name, schema_name, create_table.table_name.clone());
 
         let partitions = parse_partitions(create_table, partitions)?;
         let request = MetaCreateRequest {
@@ -252,7 +260,7 @@ impl DistInstance {
     // TODO(LFC): Maybe move this to FrontendCatalogManager's "register_table" method?
     async fn put_table_global_meta(
         &self,
-        create_table: &CreateExpr,
+        create_table: &CreateTableExpr,
         table_route: &TableRoute,
     ) -> Result<()> {
         let table_name = &table_route.table.table_name;
@@ -274,10 +282,12 @@ impl DistInstance {
             .await
             .context(CatalogSnafu)?
         {
-            let existing_bytes = existing.unwrap(); //this unwrap is safe since we compare with empty bytes and failed
+            let existing_bytes = existing.unwrap(); // this unwrap is safe since we compare with empty bytes and failed
             let existing_value =
                 TableGlobalValue::from_bytes(&existing_bytes).context(CatalogEntrySerdeSnafu)?;
-            if existing_value.table_info.ident.table_id != create_table.table_id.unwrap() {
+            if existing_value.table_info.ident.table_id
+                != create_table.table_id.as_ref().unwrap().id
+            {
                 error!(
                     "Table with name {} already exists, value in catalog: {:?}",
                     key, existing_bytes
@@ -340,7 +350,7 @@ impl GrpcAdminHandler for DistInstance {
 }
 
 fn create_table_global_value(
-    create_table: &CreateExpr,
+    create_table: &CreateTableExpr,
     table_route: &TableRoute,
 ) -> Result<TableGlobalValue> {
     let table_name = &table_route.table.table_name;
@@ -419,13 +429,19 @@ fn create_table_global_value(
         created_on: DateTime::default(),
     };
 
+    let desc = if create_table.desc.is_empty() {
+        None
+    } else {
+        Some(create_table.desc.clone())
+    };
+
     let table_info = RawTableInfo {
         ident: TableIdent {
             table_id: table_route.table.id as u32,
             version: 0,
         },
         name: table_name.table_name.clone(),
-        desc: create_table.desc.clone(),
+        desc,
         catalog_name: table_name.catalog_name.clone(),
         schema_name: table_name.schema_name.clone(),
         meta,
@@ -440,7 +456,7 @@ fn create_table_global_value(
 }
 
 fn parse_partitions(
-    create_table: &CreateExpr,
+    create_table: &CreateTableExpr,
     partitions: Option<Partitions>,
 ) -> Result<Vec<MetaPartition>> {
     // If partitions are not defined by user, use the timestamp column (which has to be existed) as
@@ -455,7 +471,7 @@ fn parse_partitions(
 }
 
 fn find_partition_entries(
-    create_table: &CreateExpr,
+    create_table: &CreateTableExpr,
     partitions: &Option<Partitions>,
     partition_columns: &[String],
 ) -> Result<Vec<Vec<PartitionBound>>> {
@@ -505,7 +521,7 @@ fn find_partition_entries(
 }
 
 fn find_partition_columns(
-    create_table: &CreateExpr,
+    create_table: &CreateTableExpr,
     partitions: &Option<Partitions>,
 ) -> Result<Vec<String>> {
     let columns = if let Some(partitions) = partitions {

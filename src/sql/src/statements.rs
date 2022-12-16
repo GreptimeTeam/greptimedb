@@ -283,7 +283,7 @@ pub fn sql_column_def_to_grpc_column_def(col: ColumnDef) -> Result<api::v1::Colu
         name,
         datatype: data_type,
         is_nullable,
-        default_constraint,
+        default_constraint: default_constraint.unwrap_or_default(),
     })
 }
 
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
         assert_eq!(ColumnDataType::Float64 as i32, grpc_column_def.datatype);
-        assert_eq!(None, grpc_column_def.default_constraint);
+        assert!(grpc_column_def.default_constraint.is_empty());
 
         // test not null
         let column_def = ColumnDef {

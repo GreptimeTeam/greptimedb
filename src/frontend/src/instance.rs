@@ -25,7 +25,7 @@ use api::v1::alter_expr::Kind;
 use api::v1::object_expr::Expr;
 use api::v1::{
     admin_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, Column, CreateDatabaseExpr,
-    CreateExpr, DropTableExpr, ExprHeader, InsertExpr, ObjectExpr,
+    CreateTableExpr, DropTableExpr, ExprHeader, InsertExpr, ObjectExpr,
     ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
@@ -196,7 +196,7 @@ impl Instance {
     /// Handle create expr.
     pub async fn handle_create_table(
         &self,
-        mut expr: CreateExpr,
+        mut expr: CreateTableExpr,
         partitions: Option<Partitions>,
     ) -> Result<Output> {
         if let Some(v) = &self.dist_instance {
@@ -206,7 +206,7 @@ impl Instance {
                 header: Some(ExprHeader {
                     version: PROTOCOL_VERSION,
                 }),
-                expr: Some(admin_expr::Expr::Create(expr)),
+                expr: Some(admin_expr::Expr::CreateTable(expr)),
             };
             let result = self
                 .grpc_admin_handler
@@ -359,8 +359,8 @@ impl Instance {
         );
         let expr = AlterExpr {
             table_name: table_name.to_string(),
-            schema_name: Some(schema_name.to_string()),
-            catalog_name: Some(catalog_name.to_string()),
+            schema_name: schema_name.to_string(),
+            catalog_name: catalog_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
         };
 
@@ -630,7 +630,7 @@ impl GrpcAdminHandler for Instance {
     async fn exec_admin_request(&self, mut expr: AdminExpr) -> server_error::Result<AdminResult> {
         // Force the default to be `None` rather than `Some(0)` comes from gRPC decode.
         // Related issue: #480
-        if let Some(api::v1::admin_expr::Expr::Create(create)) = &mut expr.expr {
+        if let Some(api::v1::admin_expr::Expr::CreateTable(create)) = &mut expr.expr {
             create.table_id = None;
         }
         self.grpc_admin_handler.exec_admin_request(expr).await
@@ -808,7 +808,7 @@ mod tests {
         let create_expr = create_expr();
         let admin_expr = AdminExpr {
             header: Some(ExprHeader::default()),
-            expr: Some(admin_expr::Expr::Create(create_expr)),
+            expr: Some(admin_expr::Expr::CreateTable(create_expr)),
         };
         let result = GrpcAdminHandler::exec_admin_request(&*instance, admin_expr)
             .await
@@ -886,48 +886,46 @@ mod tests {
         }
     }
 
-    fn create_expr() -> CreateExpr {
+    fn create_expr() -> CreateTableExpr {
         let column_defs = vec![
             GrpcColumnDef {
                 name: "host".to_string(),
                 datatype: ColumnDataType::String as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             GrpcColumnDef {
                 name: "cpu".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             GrpcColumnDef {
                 name: "memory".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             GrpcColumnDef {
                 name: "disk_util".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: Some(
-                    ColumnDefaultConstraint::Value(Value::from(9.9f64))
-                        .try_into()
-                        .unwrap(),
-                ),
+                default_constraint: ColumnDefaultConstraint::Value(Value::from(9.9f64))
+                    .try_into()
+                    .unwrap(),
             },
             GrpcColumnDef {
                 name: "ts".to_string(),
                 datatype: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
         ];
-        CreateExpr {
-            catalog_name: None,
-            schema_name: None,
+        CreateTableExpr {
+            catalog_name: "".to_string(),
+            schema_name: "".to_string(),
             table_name: "demo".to_string(),
-            desc: None,
+            desc: "".to_string(),
             column_defs,
             time_index: "ts".to_string(),
             primary_keys: vec!["host".to_string()],
