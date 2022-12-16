@@ -44,7 +44,7 @@ use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use servers::query_handler::{
-    GrpcAdminHandler, GrpcAdminHandlerRef, GrpcQueryHandler, GrpcQueryHandlerRef,
+    CatalogHandler, GrpcAdminHandler, GrpcAdminHandlerRef, GrpcQueryHandler, GrpcQueryHandlerRef,
     InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
     ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
 };
@@ -79,6 +79,7 @@ pub trait FrontendInstance:
     + InfluxdbLineProtocolHandler
     + PrometheusProtocolHandler
     + ScriptHandler
+    + CatalogHandler
     + Send
     + Sync
     + 'static
@@ -634,6 +635,15 @@ impl GrpcAdminHandler for Instance {
             create.table_id = None;
         }
         self.grpc_admin_handler.exec_admin_request(expr).await
+    }
+}
+
+impl CatalogHandler for Instance {
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
+        self.catalog_manager
+            .schema(catalog, schema)
+            .map(|s| s.is_some())
+            .context(server_error::CatalogSnafu)
     }
 }
 
