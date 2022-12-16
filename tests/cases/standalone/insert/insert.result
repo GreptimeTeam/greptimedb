@@ -37,3 +37,7 @@ insert into presentations values (1, 'Eduardo Pena', 'Analytical Query Processin
 
 MutateResult { success: 1, failure: 0 }
 
+DROP TABLE integers;
+
+MutateResult { success: 1, failure: 0 }
+
