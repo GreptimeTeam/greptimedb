@@ -27,6 +27,6 @@ tokio = { version = "1.18", features = ["full"] }
 
 [dev-dependencies]
 datafusion-expr = "14.0.0"
+parquet = { version = "26", features = ["async"] }
 tempdir = "0.3"
 tokio-util = { version = "0.7", features = ["compat"] }
-parquet = { version = "26", features = ["async"] }

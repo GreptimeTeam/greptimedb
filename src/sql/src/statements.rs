@@ -245,7 +245,8 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
     let is_nullable = column_def
         .options
         .iter()
-        .any(|o| matches!(o.option, ColumnOption::Null));
+        .all(|o| !matches!(o.option, ColumnOption::NotNull))
+        && !is_time_index;
 
     let name = column_def.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&column_def.data_type)?;
@@ -265,10 +266,10 @@ pub fn sql_column_def_to_grpc_column_def(col: ColumnDef) -> Result<api::v1::Colu
     let name = col.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
 
-    let nullable = !col
+    let is_nullable = col
         .options
         .iter()
-        .any(|o| matches!(o.option, ColumnOption::NotNull));
+        .all(|o| !matches!(o.option, ColumnOption::NotNull));
 
     let default_constraint = parse_column_default_constraint(&name, &data_type, &col.options)?
         .map(ColumnDefaultConstraint::try_into) // serialize default constraint to bytes
@@ -281,7 +282,7 @@ pub fn sql_column_def_to_grpc_column_def(col: ColumnDef) -> Result<api::v1::Colu
     Ok(api::v1::ColumnDef {
         name,
         datatype: data_type,
-        is_nullable: nullable,
+        is_nullable,
         default_constraint,
     })
 }
@@ -602,5 +603,52 @@ mod tests {
 
         let grpc_column_def = sql_column_def_to_grpc_column_def(column_def).unwrap();
         assert!(!grpc_column_def.is_nullable);
+    }
+
+    #[test]
+    pub fn test_column_def_to_schema() {
+        let column_def = ColumnDef {
+            name: "col".into(),
+            data_type: SqlDataType::Double,
+            collation: None,
+            options: vec![],
+        };
+
+        let column_schema = column_def_to_schema(&column_def, false).unwrap();
+
+        assert_eq!("col", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            column_schema.data_type
+        );
+        assert!(column_schema.is_nullable());
+        assert!(!column_schema.is_time_index());
+
+        let column_schema = column_def_to_schema(&column_def, true).unwrap();
+
+        assert_eq!("col", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            column_schema.data_type
+        );
+        assert!(!column_schema.is_nullable());
+        assert!(column_schema.is_time_index());
+
+        let column_def = ColumnDef {
+            name: "col2".into(),
+            data_type: SqlDataType::String,
+            collation: None,
+            options: vec![ColumnOptionDef {
+                name: None,
+                option: ColumnOption::NotNull,
+            }],
+        };
+
+        let column_schema = column_def_to_schema(&column_def, false).unwrap();
+
+        assert_eq!("col2", column_schema.name);
+        assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
+        assert!(!column_schema.is_nullable());
+        assert!(!column_schema.is_time_index());
     }
 }
