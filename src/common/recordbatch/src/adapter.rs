@@ -122,7 +122,7 @@ impl Stream for RecordBatchStreamAdapter {
 enum AsyncRecordBatchStreamAdapterState {
     Uninit(FutureStream),
     Ready(DfSendableRecordBatchStream),
-    Failed(Option<DataFusionError>),
+    Failed,
 }
 
 pub struct AsyncRecordBatchStreamAdapter {
@@ -152,11 +152,18 @@ impl Stream for AsyncRecordBatchStreamAdapter {
         loop {
             match &mut self.state {
                 AsyncRecordBatchStreamAdapterState::Uninit(stream_future) => {
-                    self.state = match ready!(Pin::new(stream_future).poll(cx)) {
-                        Ok(stream) => AsyncRecordBatchStreamAdapterState::Ready(stream),
-                        Err(e) => AsyncRecordBatchStreamAdapterState::Failed(Some(e)),
+                    match ready!(Pin::new(stream_future).poll(cx)) {
+                        Ok(stream) => {
+                            self.state = AsyncRecordBatchStreamAdapterState::Ready(stream);
+                            continue;
+                        }
+                        Err(e) => {
+                            self.state = AsyncRecordBatchStreamAdapterState::Failed;
+                            return Poll::Ready(Some(
+                                Err(e).context(error::InitRecordbatchStreamSnafu),
+                            ));
+                        }
                     };
-                    continue;
                 }
                 AsyncRecordBatchStreamAdapterState::Ready(stream) => {
                     return Poll::Ready(ready!(Pin::new(stream).poll_next(cx)).map(|x| {
@@ -164,17 +171,7 @@ impl Stream for AsyncRecordBatchStreamAdapter {
                         RecordBatch::try_from_df_record_batch(self.schema(), df_record_batch)
                     }))
                 }
-                AsyncRecordBatchStreamAdapterState::Failed(e) => {
-                    return match e.take() {
-                        Some(e) => Poll::Ready(Some(
-                            error::CreateRecordBatchesSnafu {
-                                reason: format!("Read error {:?} from stream", e),
-                            }
-                            .fail(),
-                        )),
-                        None => Poll::Ready(None),
-                    }
-                }
+                AsyncRecordBatchStreamAdapterState::Failed => return Poll::Ready(None),
             }
         }
     }
@@ -282,7 +279,7 @@ mod test {
         let result = RecordBatches::try_collect(Box::pin(adapter)).await;
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Failed to create RecordBatches, reason: Read error External(External { source: Internal. }) from stream"
+            "Failed to init Recordbatch stream, source: External error: External error, source: Internal"
         );
     }
 }
