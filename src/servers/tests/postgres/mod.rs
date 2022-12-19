@@ -243,6 +243,9 @@ async fn test_using_db() -> Result<()> {
     let client = create_connection_with_given_db(server_port, "testdb").await;
     assert!(client.is_err());
 
+    let client = create_connection_without_db(server_port).await;
+    assert!(client.is_err());
+
     let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)
         .await
         .unwrap();
@@ -335,6 +338,13 @@ async fn create_connection_with_given_db(
         "host=127.0.0.1 port={} connect_timeout=2 dbname={}",
         port, db
     );
+    let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
+    tokio::spawn(conn);
+    Ok(client)
+}
+
+async fn create_connection_without_db(port: u16) -> std::result::Result<Client, PgError> {
+    let url = format!("host=127.0.0.1 port={} connect_timeout=2", port);
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     tokio::spawn(conn);
     Ok(client)
