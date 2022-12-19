@@ -161,3 +161,27 @@ pub async fn check_port(ip_addr: SocketAddr, timeout: Duration) -> bool {
 
     tokio::time::timeout(timeout, check_task).await.is_ok()
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_display_nullable_column() {
+        let data_type = ColumnDataType::Int64;
+        let values = Values {
+            i64_values: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+            ..Default::default()
+        };
+        let null_mask = vec![0b00100000, 0b00000010];
+        let result = values_to_string(data_type, values, null_mask);
+        let expected: Vec<String> = [
+            "1", "2", "3", "4", "5", "__NULL__", "6", "7", "8", "__NULL__", "9",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        assert_eq!(result, expected);
+    }
+}
