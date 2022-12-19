@@ -479,6 +479,68 @@ async fn test_alter_table() {
     check_output_stream(output, expected).await;
 }
 
+#[tokio::test]
+async fn test_rename_table() {
+    let instance = Instance::new_mock().await.unwrap();
+    instance.start().await.unwrap();
+
+    let output = execute_sql(&instance, "create database db").await;
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    let output = execute_sql_in_db(
+        &instance,
+        "create table demo(host string, cpu double, memory double, ts timestamp, time index(ts))",
+        "db",
+    ).await;
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    // make sure table insertion is ok before altering table name
+    let output = execute_sql_in_db(
+        &instance,
+        "insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000)",
+        "db",
+    ).await;
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    // rename table
+    let output = execute_sql_in_db(&instance, "alter table demo rename demo2", "db").await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql_in_db(
+        &instance,
+        "show tables",
+        "db",
+    ).await;
+    let expect = vec![
+        "+--------+",
+        "| Tables |",
+        "+--------+",
+        "| demo2  |",
+        "+--------+",
+    ];
+    check_output_stream(output, expect).await;
+
+    // make sure table insertion is ok after altered table name
+    let output = execute_sql_in_db(
+        &instance,
+        "insert into demo2(host, cpu, memory, ts) values ('host2', 2.2, 200, 2000)",
+        "db",
+    ).await;
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+
+    let output = execute_sql_in_db(&instance, "select * from demo2 order by ts", "db").await;
+    let expected = vec![
+        "+-------+-----+--------+---------------------+",
+        "| host  | cpu | memory | ts                  |",
+        "+-------+-----+--------+---------------------+",
+        "| host1 | 1.1 | 100    | 1970-01-01 00:00:01 |",
+        "| host2 | 2.2 | 200    | 1970-01-01 00:00:02 |",
+        "+-------+-----+--------+---------------------+",
+    ];
+    check_output_stream(output, expected).await;
+}
+
 async fn test_insert_with_default_value_for_type(type_name: &str) {
     let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_create");
     let instance = Instance::with_mock_meta_client(&opts).await.unwrap();

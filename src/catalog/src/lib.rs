@@ -14,6 +14,8 @@
 
 #![feature(assert_matches)]
 
+extern crate core;
+
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -185,6 +187,10 @@ pub struct RegisterSchemaRequest {
 /// Formats table fully-qualified name
 pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {
     format!("{catalog}.{schema}.{table}")
+}
+
+pub fn format_full_table_name_by_id(catalog: &str, schema: &str, table_id: &TableId) -> String {
+    format!("{}.{}.{}", catalog, schema, table_id)
 }
 
 pub trait CatalogProviderFactory {

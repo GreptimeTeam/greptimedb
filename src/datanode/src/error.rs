@@ -205,6 +205,12 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Failed to rename table, source: {}", source))]
+    RenameTable {
+        #[snafu(backtrace)]
+        source: catalog::error::Error,
+    },
+
     #[snafu(display("Failed to register a new schema, source: {}", source))]
     RegisterSchema {
         #[snafu(backtrace)]
@@ -350,6 +356,7 @@ impl ErrorExt for Error {
             | Error::StartGrpc { .. }
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
+            | Error::RenameTable { .. }
             | Error::RegisterSchema { .. }
             | Error::IntoPhysicalPlan { .. }
             | Error::UnsupportedExpr { .. }

@@ -363,7 +363,6 @@ impl CatalogManager for LocalCatalogManager {
                     .register_table(
                         catalog_name.clone(),
                         schema_name.clone(),
-                        request.table_name.clone(),
                         request.table_id,
                     )
                     .await?;
@@ -381,7 +380,30 @@ impl CatalogManager for LocalCatalogManager {
     }
 
     async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
-        todo!()
+        let started = self.init_lock.lock().await;
+
+        ensure!(
+            *started,
+            IllegalManagerStateSnafu {
+                msg: "Catalog manager not started",
+            }
+        );
+
+        let catalog_name = &request.catalog;
+        let schema_name = &request.schema;
+
+        let catalog = self
+            .catalogs
+            .catalog(catalog_name)?
+            .context(CatalogNotFoundSnafu { catalog_name })?;
+        let schema = catalog
+            .schema(schema_name)?
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", catalog_name, schema_name),
+            })?;
+
+        schema.rename_table(&request.table_name, request.new_table_name, request.table)?;
+        Ok(true)
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {

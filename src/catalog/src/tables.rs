@@ -40,9 +40,7 @@ use table::{Table, TableRef};
 
 use crate::error::{Error, InsertCatalogRecordSnafu};
 use crate::system::{build_schema_insert_request, build_table_insert_request, SystemCatalogTable};
-use crate::{
-    format_full_table_name, CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef,
-};
+use crate::{CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef, format_full_table_name_by_id};
 
 /// Tables holds all tables created by user.
 pub struct Tables {
@@ -237,8 +235,8 @@ impl SchemaProvider for InformationSchema {
         panic!("System catalog & schema does not support deregister table")
     }
 
-    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> crate::error::Result<Option<TableRef>> {
-        todo!()
+    fn rename_table(&self, _name: &str, _new_name: String, _table: TableRef) -> crate::error::Result<Option<TableRef>> {
+        panic!("System catalog & schema does not support rename table")
     }
 
     fn table_exist(&self, name: &str) -> Result<bool, Error> {
@@ -270,10 +268,9 @@ impl SystemCatalog {
         &self,
         catalog: String,
         schema: String,
-        table_name: String,
         table_id: TableId,
     ) -> crate::error::Result<usize> {
-        let full_table_name = format_full_table_name(&catalog, &schema, &table_name);
+        let full_table_name = format_full_table_name_by_id(&catalog, &schema, &table_id);
         let request = build_table_insert_request(full_table_name, table_id);
         self.information_schema
             .system

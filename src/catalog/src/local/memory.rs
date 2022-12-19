@@ -67,7 +67,7 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(())
     }
 
-    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
+    async fn rename_table(&self, _request: RenameTableRequest) -> Result<bool> {
         todo!()
     }
 

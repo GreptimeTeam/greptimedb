@@ -433,7 +433,7 @@ impl CatalogManager for RemoteCatalogManager {
         .fail()
     }
 
-    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
+    async fn rename_table(&self, _request: RenameTableRequest) -> Result<bool> {
         todo!()
     }
 
@@ -765,7 +765,7 @@ impl SchemaProvider for RemoteSchemaProvider {
         prev
     }
 
-    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> Result<Option<TableRef>> {
+    fn rename_table(&self, _name: &str, _new_name: String, _table: TableRef) -> Result<Option<TableRef>> {
         todo!()
     }
 
