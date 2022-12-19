@@ -43,6 +43,7 @@ pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + S
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PrometheusProtocolHandlerRef = Arc<dyn PrometheusProtocolHandler + Send + Sync>;
 pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
+pub type CatalogHandlerRef = Arc<dyn CatalogHandler + Send + Sync>;
 
 #[async_trait]
 pub trait SqlQueryHandler {
@@ -99,4 +100,9 @@ pub trait PrometheusProtocolHandler {
     async fn read(&self, database: &str, request: ReadRequest) -> Result<PrometheusResponse>;
     /// Handling push gateway requests
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
+}
+
+pub trait CatalogHandler {
+    /// check if schema is valid
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool>;
 }

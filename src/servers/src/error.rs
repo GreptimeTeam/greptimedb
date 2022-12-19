@@ -20,6 +20,7 @@ use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::DecodeError;
+use catalog;
 use common_error::prelude::*;
 use hyper::header::ToStrError;
 use serde_json::json;
@@ -239,6 +240,9 @@ pub enum Error {
         source: FromUtf8Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Error accessing catalog: {}", source))]
+    CatalogError { source: catalog::error::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -258,6 +262,7 @@ impl ErrorExt for Error {
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
             | GrpcReflectionService { .. }
+            | CatalogError { .. }
             | BuildingContext { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
