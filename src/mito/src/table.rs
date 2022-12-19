@@ -200,23 +200,31 @@ impl<R: Region> Table for MitoTable<R> {
     }
 
     /// Alter table changes the schemas of the table.
-    async fn alter(&self, req: AlterTableRequest) -> TableResult<()> {
+    async fn alter(&self, req: &AlterTableRequest) -> TableResult<()> {
         let _lock = self.alter_lock.lock().await;
 
         let table_info = self.table_info();
         let table_name = &table_info.name;
-        let table_meta = &table_info.meta;
-        let mut new_meta = table_meta
-            .builder_with_alter_kind(table_name, &req.alter_kind)?
-            .build()
-            .context(error::BuildTableMetaSnafu { table_name })?;
-
-        let alter_op = create_alter_operation(table_name, &req.alter_kind, &mut new_meta)?;
 
         let mut new_info = TableInfo::clone(&*table_info);
+
+        // setup new table info
+        match req.alter_kind {
+            AlterKind::RenameTable { new_table_name: ref new_name } => {
+                new_info.name = new_name.clone();
+            }
+            AlterKind::AddColumns {..} | AlterKind:: DropColumns{..} => {
+                let table_meta = &table_info.meta;
+                let new_meta = table_meta
+                    .builder_with_alter_kind(table_name, &req.alter_kind)?
+                    .build()
+                    .context(error::BuildTableMetaSnafu { table_name })?;
+                new_info.meta = new_meta.clone();
+            }
+        };
+
         // Increase version of the table.
         new_info.ident.version = table_info.ident.version + 1;
-        new_info.meta = new_meta;
 
         // Persist the alteration to the manifest.
         logging::debug!(
@@ -234,9 +242,16 @@ impl<R: Region> Table for MitoTable<R> {
             .context(UpdateTableManifestSnafu {
                 table_name: &self.table_info().name,
             })?;
+        // let kind = &req.alter_kind;
+        if let AlterKind::RenameTable { .. } = &req.alter_kind {
+            // Update in memory metadata of the table.
+            self.set_table_info(new_info);
+            return Ok(());
+        }
 
         // TODO(yingwen): Error handling. Maybe the region need to provide a method to
         // validate the request first.
+        let alter_op = create_alter_operation(table_name, &req.alter_kind, &mut new_info.meta)?;
         let region = self.region();
         let region_meta = region.in_memory_metadata();
         let alter_req = AlterRequest {
@@ -485,6 +500,8 @@ fn create_alter_operation(
         AlterKind::DropColumns { names } => Ok(AlterOperation::DropColumns {
             names: names.to_vec(),
         }),
+        // No need to build alter operation when reaming tables.
+        AlterKind::RenameTable { .. } => unreachable!(),
     }
 }
 

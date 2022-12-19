@@ -52,6 +52,7 @@ message AlterExpr {
   oneof kind {
     AddColumns add_columns = 4;
     DropColumns drop_columns = 5;
+    RenameTable rename_table = 6;
   }
 }
 
@@ -72,6 +73,10 @@ message AddColumns {
 
 message DropColumns {
   repeated DropColumn drop_columns = 1;
+}
+
+message RenameTable {
+  string new_table_name = 1;
 }
 
 message AddColumn {

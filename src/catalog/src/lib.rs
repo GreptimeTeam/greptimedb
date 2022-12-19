@@ -93,6 +93,10 @@ pub trait CatalogManager: CatalogList {
     /// returns whether the table deregistered.
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool>;
 
+    /// Rename a table within given catalog/schema/table_name to catalog manager,
+    /// returns whether the table renamed.
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool>;
+
     /// Register a schema with catalog name and schema name. Retuens whether the
     /// schema registered.
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
@@ -136,6 +140,29 @@ impl Debug for RegisterTableRequest {
             .field("catalog", &self.catalog)
             .field("schema", &self.schema)
             .field("table_name", &self.table_name)
+            .field("table_id", &self.table_id)
+            .field("table", &self.table.table_info())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct RenameTableRequest {
+    pub catalog: String,
+    pub schema: String,
+    pub table_name: String,
+    pub new_table_name: String,
+    pub table_id: TableId,
+    pub table: TableRef,
+}
+
+impl Debug for RenameTableRequest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenameTableRequest")
+            .field("catalog", &self.catalog)
+            .field("schema", &self.schema)
+            .field("table_name", &self.table_name)
+            .field("new_table_name", &self.new_table_name)
             .field("table_id", &self.table_id)
             .field("table", &self.table.table_info())
             .finish()

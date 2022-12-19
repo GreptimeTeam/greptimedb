@@ -15,6 +15,8 @@
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::prelude::*;
+use catalog::{DeregisterTableRequest, RegisterTableRequest};
+use common_error::ext::BoxedError;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::column_def_to_schema;
 use table::engine::{EngineContext, TableReference};
@@ -30,8 +32,8 @@ impl SqlHandler {
         let schema_name = req.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = &req.table_name.to_string();
         let table_ref = TableReference {
-            catalog: catalog_name,
-            schema: schema_name,
+            catalog: &catalog_name.to_string(),
+            schema: &schema_name.to_string(),
             table: table_name,
         };
 
@@ -43,12 +45,20 @@ impl SqlHandler {
                 table_name: &full_table_name,
             }
         );
-        self.table_engine
+        let kind = req.alter_kind.clone();
+        let table = self.table_engine
             .alter_table(&ctx, req)
             .await
             .context(error::AlterTableSnafu {
-                table_name: full_table_name,
+                table_name: full_table_name.clone(),
             })?;
+        match kind {
+            AlterKind::RenameTable { .. } => {
+                // TODO alter table name in catalog manager
+            }
+            _ => {}
+        }
+
         // Tried in MySQL, it really prints "Affected Rows: 0".
         Ok(Output::AffectedRows(0))
     }
@@ -63,7 +73,7 @@ impl SqlHandler {
                 return error::InvalidSqlSnafu {
                     msg: format!("unsupported table constraint {table_constraint}"),
                 }
-                .fail()
+                    .fail();
             }
             AlterTableOperation::AddColumn { column_def } => AlterKind::AddColumns {
                 columns: vec![AddColumnRequest {
@@ -76,12 +86,8 @@ impl SqlHandler {
             AlterTableOperation::DropColumn { name } => AlterKind::DropColumns {
                 names: vec![name.value.clone()],
             },
-            AlterTableOperation::RenameTable { .. } => {
-                // TODO update proto to support alter table name
-                return error::InvalidSqlSnafu {
-                    msg: format!("rename table not unsupported yet"),
-                }
-                .fail();
+            AlterTableOperation::RenameTable { new_table_name } => AlterKind::RenameTable {
+                new_table_name: new_table_name.clone(),
             }
         };
         Ok(AlterTableRequest {

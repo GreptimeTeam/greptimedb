@@ -107,14 +107,14 @@ impl TableMetaBuilder {
 }
 
 impl TableMeta {
-    pub fn row_key_column_names(&self) -> impl Iterator<Item = &String> {
+    pub fn row_key_column_names(&self) -> impl Iterator<Item=&String> {
         let columns_schemas = &self.schema.column_schemas();
         self.primary_key_indices
             .iter()
             .map(|idx| &columns_schemas[*idx].name)
     }
 
-    pub fn value_column_names(&self) -> impl Iterator<Item = &String> {
+    pub fn value_column_names(&self) -> impl Iterator<Item=&String> {
         let columns_schemas = &self.schema.column_schemas();
         self.value_indices
             .iter()
@@ -132,6 +132,8 @@ impl TableMeta {
         match alter_kind {
             AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
             AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
+            // No need to rebuild table meta when renaming tables.
+            AlterKind::RenameTable { .. } => panic!("No need to rebuild table meta when renaming the table: {}", table_name),
         }
     }
 
@@ -148,13 +150,13 @@ impl TableMeta {
             &new_column.name,
             new_column.data_type.clone(),
         )
-        .is_nullable(new_column.is_nullable())
-        .default_constraint(new_column.default_constraint().cloned())
-        .build()
-        .context(error::BuildColumnDescriptorSnafu {
-            table_name,
-            column_name: &new_column.name,
-        })?;
+            .is_nullable(new_column.is_nullable())
+            .default_constraint(new_column.default_constraint().cloned())
+            .build()
+            .context(error::BuildColumnDescriptorSnafu {
+                table_name,
+                column_name: &new_column.name,
+            })?;
 
         // Bump next column id.
         self.next_column_id += 1;
@@ -268,7 +270,7 @@ impl TableMeta {
                     column_name: *column_name,
                     table_name,
                 }
-                .fail()?;
+                    .fail()?;
             }
         }
 

@@ -25,12 +25,9 @@ use table::metadata::TableId;
 use table::table::TableIdProvider;
 use table::TableRef;
 
-use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
+use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, TableNotFoundSnafu};
 use crate::schema::SchemaProvider;
-use crate::{
-    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
-    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProviderRef,
-};
+use crate::{CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest, SchemaProviderRef};
 
 /// Simple in-memory list of catalogs
 pub struct MemoryCatalogManager {
@@ -68,6 +65,10 @@ impl CatalogManager for MemoryCatalogManager {
     async fn start(&self) -> Result<()> {
         self.table_id.store(MIN_USER_TABLE_ID, Ordering::Relaxed);
         Ok(())
+    }
+
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
+        todo!()
     }
 
     async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
@@ -285,6 +286,25 @@ impl SchemaProvider for MemorySchemaProvider {
             Ok(Some(existing.clone()))
         } else {
             Ok(tables.insert(name, table))
+        }
+    }
+
+    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> Result<Option<TableRef>> {
+        let mut tables = self.tables.write().unwrap();
+        if let Some(existing) = tables.get(name) {
+            // if table with the same name but different table id exists, then it's a fatal bug
+            if existing.table_info().ident.table_id != table.table_info().ident.table_id {
+                error!(
+                    "Unexpected table rename: {:?}, existing: {:?}",
+                    table.table_info(),
+                    existing.table_info()
+                );
+                return TableExistsSnafu { table: name }.fail()?;
+            }
+            tables.remove(name);
+            Ok(tables.insert(new_name, table))
+        } else {
+            TableNotFoundSnafu { table_info: name.to_string() }.fail()?
         }
     }
 

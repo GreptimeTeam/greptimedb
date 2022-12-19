@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::alter_expr::Kind;
-use api::v1::{AlterExpr, CreateTableExpr, DropColumns};
+use api::v1::{AlterExpr, CreateTableExpr, DropColumns, RenameTable};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use snafu::{ensure, OptionExt, ResultExt};

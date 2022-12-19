@@ -237,6 +237,10 @@ impl SchemaProvider for InformationSchema {
         panic!("System catalog & schema does not support deregister table")
     }
 
+    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> crate::error::Result<Option<TableRef>> {
+        todo!()
+    }
+
     fn table_exist(&self, name: &str) -> Result<bool, Error> {
         Ok(name.eq_ignore_ascii_case("tables")
             || name.eq_ignore_ascii_case(SYSTEM_CATALOG_TABLE_NAME))

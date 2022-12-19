@@ -241,6 +241,10 @@ impl SchemaProvider for SchemaProviderAdapter {
             .transpose()
     }
 
+    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> catalog::error::Result<Option<TableRef>> {
+        todo!()
+    }
+
     fn table_exist(&self, name: &str) -> Result<bool, Error> {
         Ok(self.df_schema_provider.table_exist(name))
     }

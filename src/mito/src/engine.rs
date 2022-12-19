@@ -29,7 +29,7 @@ use store_api::storage::{
 };
 use table::engine::{EngineContext, TableEngine, TableReference};
 use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
-use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::table::TableRef;
 use table::{Result as TableResult, Table};
 use tokio::sync::Mutex;
@@ -472,7 +472,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let schema_name = req.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = &req.table_name.clone();
 
-        let table_ref = TableReference {
+        let mut table_ref = TableReference {
             catalog: catalog_name,
             schema: schema_name,
             table: table_name,
@@ -483,9 +483,20 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         logging::info!("start altering table {} with request {:?}", table_name, req);
         table
-            .alter(req)
+            .alter(&req)
             .await
             .context(error::AlterTableSnafu { table_name })?;
+
+        match &req.alter_kind {
+            AlterKind::RenameTable { new_table_name } => {
+                let mut tables = self.tables.write().unwrap();
+                tables.remove(&table_ref.to_string());
+                table_ref.table = new_table_name.as_str();
+                tables.insert(table_ref.to_string(), table.clone());
+            }
+            _ => {}
+        }
+
         Ok(table)
     }
 
@@ -1045,6 +1056,27 @@ mod tests {
         assert_eq!(&[1, 2], &new_meta.value_indices[..]);
         assert_eq!(new_schema.timestamp_column(), old_schema.timestamp_column());
         assert_eq!(new_schema.version(), old_schema.version() + 1);
+    }
+
+    #[tokio::test]
+    async fn test_alter_table_rename_table() {
+        let (_engine, table_engine, _table, _object_store, _dir) =
+            test_util::setup_mock_engine_and_table().await;
+
+        let req = AlterTableRequest {
+            catalog_name: None,
+            schema_name: None,
+            table_name: TABLE_NAME.to_string(),
+            alter_kind: AlterKind::RenameTable {
+                new_table_name: String::from("new_table"),
+            },
+        };
+        let table = table_engine
+            .alter_table(&EngineContext::default(), req)
+            .await
+            .unwrap();
+
+        assert_eq!(table.table_info().name, "new_table");
     }
 
     #[tokio::test]

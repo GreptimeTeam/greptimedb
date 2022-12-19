@@ -40,11 +40,7 @@ use crate::helper::{
     SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
 };
 use crate::remote::{Kv, KvBackendRef};
-use crate::{
-    handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
-    DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
-};
+use crate::{handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef, RenameTableRequest};
 
 /// Catalog manager based on metasrv.
 pub struct RemoteCatalogManager {
@@ -437,6 +433,10 @@ impl CatalogManager for RemoteCatalogManager {
         .fail()
     }
 
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
+        todo!()
+    }
+
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         let catalog_name = request.catalog;
         let schema_name = request.schema;
@@ -763,6 +763,10 @@ impl SchemaProvider for RemoteSchemaProvider {
         .join()
         .unwrap();
         prev
+    }
+
+    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> Result<Option<TableRef>> {
+        todo!()
     }
 
     /// Checks if table exists in schema provider based on locally opened table map.
