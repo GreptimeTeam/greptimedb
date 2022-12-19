@@ -21,9 +21,10 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
-use common_recordbatch::error::{Error as RecordBatchError, Result as RecordBatchResult};
+use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream};
 use common_telemetry::logging;
 use datatypes::schema::ColumnSchema;
@@ -189,7 +190,7 @@ impl<R: Region> Table for MitoTable<R> {
         let stream_schema = schema.clone();
 
         let stream = Box::pin(async_stream::try_stream! {
-            while let Some(chunk) = reader.next_chunk().await.map_err(RecordBatchError::new)? {
+            while let Some(chunk) = reader.next_chunk().await.map_err(BoxedError::new).context(ExternalSnafu)? {
                 yield RecordBatch::new(stream_schema.clone(), chunk.columns)?
             }
         });

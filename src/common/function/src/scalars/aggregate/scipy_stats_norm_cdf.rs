@@ -23,7 +23,7 @@ use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;
 use datatypes::prelude::*;
 use datatypes::value::{ListValue, OrderedFloat};
-use datatypes::vectors::{ConstantVector, Float64Vector, ListVector};
+use datatypes::vectors::{ConstantVector, Float64Vector, Helper, ListVector};
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -33,18 +33,12 @@ use statrs::statistics::Statistics;
 // https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.norm.html
 
 #[derive(Debug, Default)]
-pub struct ScipyStatsNormCdf<T>
-where
-    T: Primitive + AsPrimitive<f64> + std::iter::Sum<T>,
-{
+pub struct ScipyStatsNormCdf<T> {
     values: Vec<T>,
     x: Option<f64>,
 }
 
-impl<T> ScipyStatsNormCdf<T>
-where
-    T: Primitive + AsPrimitive<f64> + std::iter::Sum<T>,
-{
+impl<T> ScipyStatsNormCdf<T> {
     fn push(&mut self, value: T) {
         self.values.push(value);
     }
@@ -52,8 +46,8 @@ where
 
 impl<T> Accumulator for ScipyStatsNormCdf<T>
 where
-    T: Primitive + AsPrimitive<f64> + std::iter::Sum<T>,
-    for<'a> T: Scalar<RefType<'a> = T>,
+    T: WrapperType + std::iter::Sum<T>,
+    T::Native: AsPrimitive<f64>,
 {
     fn state(&self) -> Result<Vec<Value>> {
         let nums = self
@@ -64,7 +58,7 @@ where
         Ok(vec![
             Value::List(ListValue::new(
                 Some(Box::new(nums)),
-                T::default().into().data_type(),
+                T::LogicalType::build_data_type(),
             )),
             self.x.into(),
         ])
@@ -86,14 +80,14 @@ where
         let mut len = 1;
         let column: &<T as Scalar>::VectorType = if column.is_const() {
             len = column.len();
-            let column: &ConstantVector = unsafe { VectorHelper::static_cast(column) };
-            unsafe { VectorHelper::static_cast(column.inner()) }
+            let column: &ConstantVector = unsafe { Helper::static_cast(column) };
+            unsafe { Helper::static_cast(column.inner()) }
         } else {
-            unsafe { VectorHelper::static_cast(column) }
+            unsafe { Helper::static_cast(column) }
         };
 
         let x = &values[1];
-        let x = VectorHelper::check_get_scalar::<f64>(x).context(error::InvalidInputsSnafu {
+        let x = Helper::check_get_scalar::<f64>(x).context(error::InvalidInputTypeSnafu {
             err_msg: "expecting \"SCIPYSTATSNORMCDF\" function's second argument to be a positive integer",
         })?;
         let first = x.get(0);
@@ -160,19 +154,19 @@ where
                 ),
             })?;
         for value in values.values_iter() {
-            let value = value.context(FromScalarValueSnafu)?;
-            let column: &<T as Scalar>::VectorType = unsafe { VectorHelper::static_cast(&value) };
-            for v in column.iter_data().flatten() {
-                self.push(v);
+            if let Some(value) = value.context(FromScalarValueSnafu)? {
+                let column: &<T as Scalar>::VectorType = unsafe { Helper::static_cast(&value) };
+                for v in column.iter_data().flatten() {
+                    self.push(v);
+                }
             }
         }
         Ok(())
     }
 
     fn evaluate(&self) -> Result<Value> {
-        let values = self.values.iter().map(|&v| v.as_()).collect::<Vec<_>>();
-        let mean = values.clone().mean();
-        let std_dev = values.std_dev();
+        let mean = self.values.iter().map(|v| v.into_native().as_()).mean();
+        let std_dev = self.values.iter().map(|v| v.into_native().as_()).std_dev();
         if mean.is_nan() || std_dev.is_nan() {
             Ok(Value::Null)
         } else {
@@ -198,7 +192,7 @@ impl AggregateFunctionCreator for ScipyStatsNormCdfAccumulatorCreator {
             with_match_primitive_type_id!(
                 input_type.logical_type_id(),
                 |$S| {
-                    Ok(Box::new(ScipyStatsNormCdf::<$S>::default()))
+                    Ok(Box::new(ScipyStatsNormCdf::<<$S as LogicalPrimitiveType>::Wrapper>::default()))
                 },
                 {
                     let err_msg = format!(
@@ -230,7 +224,7 @@ impl AggregateFunctionCreator for ScipyStatsNormCdfAccumulatorCreator {
 
 #[cfg(test)]
 mod test {
-    use datatypes::vectors::PrimitiveVector;
+    use datatypes::vectors::{Float64Vector, Int32Vector};
 
     use super::*;
     #[test]
@@ -244,12 +238,8 @@ mod test {
         // test update no null-value batch
         let mut scipy_stats_norm_cdf = ScipyStatsNormCdf::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(-1i32),
-                Some(1),
-                Some(2),
-            ])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(-1i32), Some(1), Some(2)])),
+            Arc::new(Float64Vector::from(vec![
                 Some(2.0_f64),
                 Some(2.0_f64),
                 Some(2.0_f64),
@@ -264,13 +254,8 @@ mod test {
         // test update null-value batch
         let mut scipy_stats_norm_cdf = ScipyStatsNormCdf::<i32>::default();
         let v: Vec<VectorRef> = vec![
-            Arc::new(PrimitiveVector::<i32>::from(vec![
-                Some(-2i32),
-                None,
-                Some(3),
-                Some(4),
-            ])),
-            Arc::new(PrimitiveVector::<f64>::from(vec![
+            Arc::new(Int32Vector::from(vec![Some(-2i32), None, Some(3), Some(4)])),
+            Arc::new(Float64Vector::from(vec![
                 Some(2.0_f64),
                 None,
                 Some(2.0_f64),

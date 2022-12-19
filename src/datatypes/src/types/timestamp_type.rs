@@ -50,6 +50,18 @@ pub enum TimestampType {
     Nanosecond(TimestampNanosecondType),
 }
 
+impl TimestampType {
+    /// Returns the [`TimeUnit`] of this type.
+    pub fn unit(&self) -> TimeUnit {
+        match self {
+            TimestampType::Second(_) => TimeUnit::Second,
+            TimestampType::Millisecond(_) => TimeUnit::Millisecond,
+            TimestampType::Microsecond(_) => TimeUnit::Microsecond,
+            TimestampType::Nanosecond(_) => TimeUnit::Nanosecond,
+        }
+    }
+}
+
 macro_rules! impl_data_type_for_timestamp {
     ($unit: ident) => {
         paste! {
@@ -58,7 +70,7 @@ macro_rules! impl_data_type_for_timestamp {
 
             impl DataType for [<Timestamp $unit Type>] {
                 fn name(&self) -> &str {
-                    stringify!([<Timestamp $unit Type>])
+                    stringify!([<Timestamp $unit>])
                 }
 
                 fn logical_type_id(&self) -> LogicalTypeId {
@@ -82,11 +94,11 @@ macro_rules! impl_data_type_for_timestamp {
                 }
             }
 
-
             impl LogicalPrimitiveType for [<Timestamp $unit Type>] {
                 type ArrowPrimitive = [<Arrow Timestamp $unit Type>];
                 type Native = i64;
                 type Wrapper = [<Timestamp $unit>];
+                type LargestType = Self;
 
                 fn build_data_type() -> ConcreteDataType {
                     ConcreteDataType::Timestamp(TimestampType::$unit(
@@ -113,6 +125,9 @@ macro_rules! impl_data_type_for_timestamp {
                 fn cast_value_ref(value: ValueRef) -> crate::Result<Option<Self::Wrapper>> {
                     match value {
                         ValueRef::Null => Ok(None),
+                        ValueRef::Int64(v) =>{
+                            Ok(Some([<Timestamp $unit>]::from(v)))
+                        }
                         ValueRef::Timestamp(t) => match t.unit() {
                             TimeUnit::$unit => Ok(Some([<Timestamp $unit>](t))),
                             other => error::CastTypeSnafu {
@@ -138,3 +153,28 @@ impl_data_type_for_timestamp!(Nanosecond);
 impl_data_type_for_timestamp!(Second);
 impl_data_type_for_timestamp!(Millisecond);
 impl_data_type_for_timestamp!(Microsecond);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timestamp_type_unit() {
+        assert_eq!(
+            TimeUnit::Second,
+            TimestampType::Second(TimestampSecondType).unit()
+        );
+        assert_eq!(
+            TimeUnit::Millisecond,
+            TimestampType::Millisecond(TimestampMillisecondType).unit()
+        );
+        assert_eq!(
+            TimeUnit::Microsecond,
+            TimestampType::Microsecond(TimestampMicrosecondType).unit()
+        );
+        assert_eq!(
+            TimeUnit::Nanosecond,
+            TimestampType::Nanosecond(TimestampNanosecondType).unit()
+        );
+    }
+}

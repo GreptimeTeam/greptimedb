@@ -20,7 +20,8 @@ use client::{Database, ObjectResult};
 use common_query::prelude::Expr;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatches};
-use datafusion::logical_plan::{LogicalPlan, LogicalPlanBuilder};
+use datafusion::datasource::DefaultTableSource;
+use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
 use meta_client::rpc::TableName;
 use snafu::ResultExt;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -82,7 +83,7 @@ impl DatanodeInstance {
 
         let mut builder = LogicalPlanBuilder::scan_with_filters(
             &table_scan.table_name.to_string(),
-            table_provider,
+            Arc::new(DefaultTableSource::new(table_provider)),
             table_scan.projection.clone(),
             table_scan
                 .filters
@@ -104,11 +105,9 @@ impl DatanodeInstance {
                 .context(error::BuildDfLogicalPlanSnafu)?;
         }
 
-        if let Some(limit) = table_scan.limit {
-            builder = builder
-                .limit(limit)
-                .context(error::BuildDfLogicalPlanSnafu)?;
-        }
+        builder
+            .limit(0, table_scan.limit)
+            .context(error::BuildDfLogicalPlanSnafu)?;
 
         builder.build().context(error::BuildDfLogicalPlanSnafu)
     }

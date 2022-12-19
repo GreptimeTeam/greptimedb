@@ -14,15 +14,15 @@
 
 use catalog::SchemaProviderRef;
 use common_error::snafu::ensure;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::VectorBuilder;
+use datatypes::data_type::DataType;
+use datatypes::prelude::{ConcreteDataType, MutableVector};
 use snafu::{OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
 use sql::statements;
 use sql::statements::insert::Insert;
 use table::requests::InsertRequest;
 
-use crate::error::{self, Result};
+use crate::error::{self, BuildVectorSnafu, Result};
 
 // TODO(fys): Extract the common logic in datanode and frontend in the future.
 #[allow(dead_code)]
@@ -49,7 +49,7 @@ pub(crate) fn insert_to_request(
     };
     let rows_num = values.len();
 
-    let mut columns_builders: Vec<(&String, &ConcreteDataType, VectorBuilder)> =
+    let mut columns_builders: Vec<(&String, &ConcreteDataType, Box<dyn MutableVector>)> =
         Vec::with_capacity(columns_num);
 
     if columns.is_empty() {
@@ -58,7 +58,7 @@ pub(crate) fn insert_to_request(
             columns_builders.push((
                 &column_schema.name,
                 data_type,
-                VectorBuilder::with_capacity(data_type.clone(), rows_num),
+                data_type.create_mutable_vector(rows_num),
             ));
         }
     } else {
@@ -73,7 +73,7 @@ pub(crate) fn insert_to_request(
             columns_builders.push((
                 column_name,
                 data_type,
-                VectorBuilder::with_capacity(data_type.clone(), rows_num),
+                data_type.create_mutable_vector(rows_num),
             ));
         }
     }
@@ -100,7 +100,7 @@ pub(crate) fn insert_to_request(
         table_name,
         columns_values: columns_builders
             .into_iter()
-            .map(|(c, _, mut b)| (c.to_owned(), b.finish()))
+            .map(|(c, _, mut b)| (c.to_owned(), b.to_vector()))
             .collect(),
     })
 }
@@ -109,11 +109,12 @@ fn add_row_to_vector(
     column_name: &str,
     data_type: &ConcreteDataType,
     sql_val: &SqlValue,
-    builder: &mut VectorBuilder,
+    builder: &mut Box<dyn MutableVector>,
 ) -> Result<()> {
     let value = statements::sql_value_to_value(column_name, data_type, sql_val)
         .context(error::ParseSqlSnafu)?;
-    builder.push(&value);
-
+    builder
+        .push_value_ref(value.as_value_ref())
+        .context(BuildVectorSnafu { value })?;
     Ok(())
 }

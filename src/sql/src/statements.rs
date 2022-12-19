@@ -21,12 +21,12 @@ pub mod insert;
 pub mod query;
 pub mod show;
 pub mod statement;
-
 use std::str::FromStr;
 
 use api::helper::ColumnDataTypeWrapper;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::Timestamp;
+use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::DateTimeType;
@@ -79,7 +79,7 @@ fn parse_string_to_value(
     data_type: &ConcreteDataType,
 ) -> Result<Value> {
     ensure!(
-        data_type.stringifiable(),
+        data_type.is_stringifiable(),
         ColumnTypeMismatchSnafu {
             column_name,
             expect: data_type.clone(),
@@ -112,8 +112,8 @@ fn parse_string_to_value(
         ConcreteDataType::Timestamp(t) => {
             if let Ok(ts) = Timestamp::from_str(&s) {
                 Ok(Value::Timestamp(Timestamp::new(
-                    ts.convert_to(t.unit),
-                    t.unit,
+                    ts.convert_to(t.unit()),
+                    t.unit(),
                 )))
             } else {
                 ParseSqlValueSnafu {
@@ -245,7 +245,8 @@ pub fn column_def_to_schema(column_def: &ColumnDef, is_time_index: bool) -> Resu
     let is_nullable = column_def
         .options
         .iter()
-        .any(|o| matches!(o.option, ColumnOption::Null));
+        .all(|o| !matches!(o.option, ColumnOption::NotNull))
+        && !is_time_index;
 
     let name = column_def.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&column_def.data_type)?;
@@ -265,10 +266,10 @@ pub fn sql_column_def_to_grpc_column_def(col: ColumnDef) -> Result<api::v1::Colu
     let name = col.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
 
-    let nullable = !col
+    let is_nullable = col
         .options
         .iter()
-        .any(|o| matches!(o.option, ColumnOption::NotNull));
+        .all(|o| !matches!(o.option, ColumnOption::NotNull));
 
     let default_constraint = parse_column_default_constraint(&name, &data_type, &col.options)?
         .map(ColumnDefaultConstraint::try_into) // serialize default constraint to bytes
@@ -281,8 +282,8 @@ pub fn sql_column_def_to_grpc_column_def(col: ColumnDef) -> Result<api::v1::Colu
     Ok(api::v1::ColumnDef {
         name,
         datatype: data_type,
-        is_nullable: nullable,
-        default_constraint,
+        is_nullable,
+        default_constraint: default_constraint.unwrap_or_default(),
     })
 }
 
@@ -301,7 +302,10 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
         SqlDataType::Custom(obj_name) => match &obj_name.0[..] {
             [type_name] => {
-                if type_name.value.eq_ignore_ascii_case(DateTimeType::name()) {
+                if type_name
+                    .value
+                    .eq_ignore_ascii_case(DateTimeType::default().name())
+                {
                     Ok(ConcreteDataType::datetime_datatype())
                 } else {
                     error::SqlTypeNotSupportedSnafu {
@@ -315,7 +319,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             }
             .fail(),
         },
-        SqlDataType::Timestamp => Ok(ConcreteDataType::timestamp_millis_datatype()),
+        SqlDataType::Timestamp(_) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -333,7 +337,7 @@ mod tests {
     use datatypes::value::OrderedFloat;
 
     use super::*;
-    use crate::ast::{DataType, Ident};
+    use crate::ast::{Ident, TimezoneInfo};
     use crate::statements::ColumnOption;
 
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
@@ -373,8 +377,8 @@ mod tests {
             ConcreteDataType::datetime_datatype(),
         );
         check_type(
-            SqlDataType::Timestamp,
-            ConcreteDataType::timestamp_millis_datatype(),
+            SqlDataType::Timestamp(TimezoneInfo::None),
+            ConcreteDataType::timestamp_millisecond_datatype(),
         );
     }
 
@@ -419,9 +423,13 @@ mod tests {
         let sql_val = SqlValue::Boolean(true);
         let v = sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val);
         assert!(v.is_err());
-        assert!(format!("{:?}", v).contains(
-            "column_name: \"a\", expect: Float64(Float64), actual: Boolean(BooleanType)"
-        ));
+        assert!(
+            format!("{:?}", v).contains(
+                "column_name: \"a\", expect: Float64(Float64Type), actual: Boolean(BooleanType)"
+            ),
+            "v is {:?}",
+            v
+        );
     }
 
     #[test]
@@ -471,7 +479,7 @@ mod tests {
         match parse_string_to_value(
             "timestamp_col",
             "2022-02-22T00:01:01+08:00".to_string(),
-            &ConcreteDataType::timestamp_millis_datatype(),
+            &ConcreteDataType::timestamp_millisecond_datatype(),
         )
         .unwrap()
         {
@@ -570,7 +578,7 @@ mod tests {
         // test basic
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: DataType::Double,
+            data_type: SqlDataType::Double,
             collation: None,
             options: vec![],
         };
@@ -580,12 +588,12 @@ mod tests {
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
         assert_eq!(ColumnDataType::Float64 as i32, grpc_column_def.datatype);
-        assert_eq!(None, grpc_column_def.default_constraint);
+        assert!(grpc_column_def.default_constraint.is_empty());
 
         // test not null
         let column_def = ColumnDef {
             name: "col".into(),
-            data_type: DataType::Double,
+            data_type: SqlDataType::Double,
             collation: None,
             options: vec![ColumnOptionDef {
                 name: None,
@@ -595,5 +603,52 @@ mod tests {
 
         let grpc_column_def = sql_column_def_to_grpc_column_def(column_def).unwrap();
         assert!(!grpc_column_def.is_nullable);
+    }
+
+    #[test]
+    pub fn test_column_def_to_schema() {
+        let column_def = ColumnDef {
+            name: "col".into(),
+            data_type: SqlDataType::Double,
+            collation: None,
+            options: vec![],
+        };
+
+        let column_schema = column_def_to_schema(&column_def, false).unwrap();
+
+        assert_eq!("col", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            column_schema.data_type
+        );
+        assert!(column_schema.is_nullable());
+        assert!(!column_schema.is_time_index());
+
+        let column_schema = column_def_to_schema(&column_def, true).unwrap();
+
+        assert_eq!("col", column_schema.name);
+        assert_eq!(
+            ConcreteDataType::float64_datatype(),
+            column_schema.data_type
+        );
+        assert!(!column_schema.is_nullable());
+        assert!(column_schema.is_time_index());
+
+        let column_def = ColumnDef {
+            name: "col2".into(),
+            data_type: SqlDataType::String,
+            collation: None,
+            options: vec![ColumnOptionDef {
+                name: None,
+                option: ColumnOption::NotNull,
+            }],
+        };
+
+        let column_schema = column_def_to_schema(&column_def, false).unwrap();
+
+        assert_eq!("col2", column_schema.name);
+        assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
+        assert!(!column_schema.is_nullable());
+        assert!(!column_schema.is_time_index());
     }
 }

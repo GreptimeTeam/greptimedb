@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use anymap::AnyMap;
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
@@ -138,14 +136,14 @@ impl TryFrom<StartCommand> for FrontendOptions {
         if let Some(addr) = cmd.mysql_addr {
             opts.mysql_options = Some(MysqlOptions {
                 addr,
-                tls: Arc::new(tls_option.clone()),
+                tls: tls_option.clone(),
                 ..Default::default()
             });
         }
         if let Some(addr) = cmd.postgres_addr {
             opts.postgres_options = Some(PostgresOptions {
                 addr,
-                tls: Arc::new(tls_option),
+                tls: tls_option,
                 ..Default::default()
             });
         }

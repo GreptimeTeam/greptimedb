@@ -20,6 +20,7 @@ use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::DecodeError;
+use catalog;
 use common_error::prelude::*;
 use hyper::header::ToStrError;
 use serde_json::json;
@@ -74,6 +75,12 @@ pub enum Error {
     #[snafu(display("Failed to execute query: {}, source: {}", query, source))]
     ExecuteQuery {
         query: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to execute sql statement, source: {}", source))]
+    ExecuteStatement {
         #[snafu(backtrace)]
         source: BoxedError,
     },
@@ -233,6 +240,9 @@ pub enum Error {
         source: FromUtf8Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Error accessing catalog: {}", source))]
+    CatalogError { source: catalog::error::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -252,11 +262,13 @@ impl ErrorExt for Error {
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
             | GrpcReflectionService { .. }
+            | CatalogError { .. }
             | BuildingContext { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
+            | ExecuteStatement { source, .. }
             | ExecuteInsert { source, .. }
             | ExecuteAlter { source, .. }
             | PutOpentsdbDataPoint { source, .. } => source.status_code(),

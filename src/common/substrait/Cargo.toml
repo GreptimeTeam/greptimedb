@@ -10,10 +10,8 @@ catalog = { path = "../../catalog" }
 common-catalog = { path = "../catalog" }
 common-error = { path = "../error" }
 common-telemetry = { path = "../telemetry" }
-datafusion = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2", features = [
-    "simd",
-] }
-datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+datafusion = "14.0.0"
+datafusion-expr = "14.0.0"
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 prost = "0.9"

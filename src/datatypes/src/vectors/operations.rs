@@ -19,10 +19,11 @@ mod replicate;
 use common_base::BitVec;
 
 use crate::error::Result;
-use crate::types::PrimitiveElement;
+use crate::types::LogicalPrimitiveType;
+use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
-    BinaryVector, BooleanVector, ConstantVector, DateTimeVector, DateVector, ListVector,
-    NullVector, PrimitiveVector, StringVector, TimestampVector, Vector, VectorRef,
+    BinaryVector, BooleanVector, ListVector, NullVector, PrimitiveVector, StringVector, Vector,
+    VectorRef,
 };
 
 /// Vector compute operations.
@@ -59,10 +60,10 @@ pub trait VectorOp {
 }
 
 macro_rules! impl_scalar_vector_op {
-    ($( { $VectorType: ident, $replicate: ident } ),+) => {$(
+    ($($VectorType: ident),+) => {$(
         impl VectorOp for $VectorType {
             fn replicate(&self, offsets: &[usize]) -> VectorRef {
-                replicate::$replicate(self, offsets)
+                replicate::replicate_scalar(self, offsets)
             }
 
             fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
@@ -77,28 +78,21 @@ macro_rules! impl_scalar_vector_op {
     )+};
 }
 
-impl_scalar_vector_op!(
-    { BinaryVector, replicate_scalar },
-    { BooleanVector, replicate_scalar },
-    { ListVector, replicate_scalar },
-    { StringVector, replicate_scalar },
-    { DateVector, replicate_date },
-    { DateTimeVector, replicate_datetime },
-    { TimestampVector, replicate_timestamp }
-);
+impl_scalar_vector_op!(BinaryVector, BooleanVector, ListVector, StringVector);
 
-impl VectorOp for ConstantVector {
+impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        replicate::replicate_constant(self, offsets)
+        std::sync::Arc::new(replicate::replicate_primitive(self, offsets))
     }
 
     fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
-        let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<ConstantVector>());
-        find_unique::find_unique_constant(self, selected, prev_vector);
+        let prev_vector =
+            prev_vector.and_then(|pv| pv.as_any().downcast_ref::<PrimitiveVector<T>>());
+        find_unique::find_unique_scalar(self, selected, prev_vector);
     }
 
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
-        filter::filter_constant(self, filter)
+        filter::filter_non_constant!(self, PrimitiveVector<T>, filter)
     }
 }
 
@@ -117,21 +111,17 @@ impl VectorOp for NullVector {
     }
 }
 
-impl<T> VectorOp for PrimitiveVector<T>
-where
-    T: PrimitiveElement,
-{
+impl VectorOp for ConstantVector {
     fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        replicate::replicate_primitive(self, offsets)
+        self.replicate_vector(offsets)
     }
 
     fn find_unique(&self, selected: &mut BitVec, prev_vector: Option<&dyn Vector>) {
-        let prev_vector =
-            prev_vector.and_then(|pv| pv.as_any().downcast_ref::<PrimitiveVector<T>>());
-        find_unique::find_unique_scalar(self, selected, prev_vector);
+        let prev_vector = prev_vector.and_then(|pv| pv.as_any().downcast_ref::<ConstantVector>());
+        find_unique::find_unique_constant(self, selected, prev_vector);
     }
 
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
-        filter::filter_non_constant!(self, PrimitiveVector<T>, filter)
+        self.filter_vector(filter)
     }
 }

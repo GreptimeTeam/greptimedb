@@ -101,8 +101,17 @@ pub fn values_to_string(
         ),
         ColumnDataType::Datetime => build_nullable_iter!(null_iter, values.i64_values.into_iter()),
         ColumnDataType::Date => build_nullable_iter!(null_iter, values.i32_values.into_iter()),
-        ColumnDataType::Timestamp => {
-            build_nullable_iter!(null_iter, values.ts_millis_values.into_iter())
+        ColumnDataType::TimestampSecond => {
+            build_nullable_iter!(null_iter, values.ts_second_values.into_iter())
+        }
+        ColumnDataType::TimestampMillisecond => {
+            build_nullable_iter!(null_iter, values.ts_millisecond_values.into_iter())
+        }
+        ColumnDataType::TimestampMicrosecond => {
+            build_nullable_iter!(null_iter, values.ts_microsecond_values.into_iter())
+        }
+        ColumnDataType::TimestampNanosecond => {
+            build_nullable_iter!(null_iter, values.ts_nanosecond_values.into_iter())
         }
     }
 }

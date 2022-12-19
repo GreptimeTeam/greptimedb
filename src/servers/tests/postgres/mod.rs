@@ -31,14 +31,14 @@ use servers::tls::TlsOption;
 use table::test_util::MemTable;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
-use crate::create_testing_sql_query_handler;
+use crate::create_testing_instance;
 
 fn create_postgres_server(
     table: MemTable,
     check_pwd: bool,
-    tls: Arc<TlsOption>,
+    tls: TlsOption,
 ) -> Result<Box<dyn Server>> {
-    let query_handler = create_testing_sql_query_handler(table);
+    let instance = Arc::new(create_testing_instance(table));
     let io_runtime = Arc::new(
         RuntimeBuilder::default()
             .worker_threads(4)
@@ -55,7 +55,8 @@ fn create_postgres_server(
     };
 
     Ok(Box::new(PostgresServer::new(
-        query_handler,
+        instance.clone(),
+        instance,
         tls,
         io_runtime,
         user_provider,
@@ -194,11 +195,11 @@ async fn test_query_pg_concurrently() -> Result<()> {
 async fn test_server_secure_prefer_client_plain() -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
-    let server_tls = Arc::new(TlsOption {
+    let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Prefer,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server.key".to_owned(),
-    });
+    };
 
     let client_tls = false;
     do_simple_query(server_tls, client_tls).await?;
@@ -209,11 +210,11 @@ async fn test_server_secure_prefer_client_plain() -> Result<()> {
 async fn test_server_secure_require_client_plain() -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
-    let server_tls = Arc::new(TlsOption {
+    let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server.key".to_owned(),
-    });
+    };
     let server_port = start_test_server(server_tls).await?;
     let r = create_plain_connection(server_port, false).await;
     assert!(r.is_err());
@@ -224,11 +225,11 @@ async fn test_server_secure_require_client_plain() -> Result<()> {
 async fn test_server_secure_require_client_secure() -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
-    let server_tls = Arc::new(TlsOption {
+    let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
         key_path: "tests/ssl/server.key".to_owned(),
-    });
+    };
 
     let client_tls = true;
     do_simple_query(server_tls, client_tls).await?;
@@ -237,13 +238,13 @@ async fn test_server_secure_require_client_secure() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_using_db() -> Result<()> {
-    let server_port = start_test_server(Arc::new(TlsOption::default())).await?;
+    let server_port = start_test_server(TlsOption::default()).await?;
 
-    let client = create_connection_with_given_db(server_port, "testdb")
-        .await
-        .unwrap();
-    let result = client.simple_query("SELECT uint32s FROM numbers").await;
-    assert!(result.is_err());
+    let client = create_connection_with_given_db(server_port, "testdb").await;
+    assert!(client.is_err());
+
+    let client = create_connection_without_db(server_port).await;
+    assert!(client.is_err());
 
     let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)
         .await
@@ -253,7 +254,7 @@ async fn test_using_db() -> Result<()> {
     Ok(())
 }
 
-async fn start_test_server(server_tls: Arc<TlsOption>) -> Result<u16> {
+async fn start_test_server(server_tls: TlsOption) -> Result<u16> {
     common_telemetry::init_default_ut_logging();
     let table = MemTable::default_numbers_table();
     let pg_server = create_postgres_server(table, false, server_tls)?;
@@ -262,7 +263,7 @@ async fn start_test_server(server_tls: Arc<TlsOption>) -> Result<u16> {
     Ok(server_addr.port())
 }
 
-async fn do_simple_query(server_tls: Arc<TlsOption>, client_tls: bool) -> Result<()> {
+async fn do_simple_query(server_tls: TlsOption, client_tls: bool) -> Result<()> {
     let server_port = start_test_server(server_tls).await?;
 
     if !client_tls {
@@ -284,11 +285,14 @@ async fn create_secure_connection(
 ) -> std::result::Result<Client, PgError> {
     let url = if with_pwd {
         format!(
-            "sslmode=require host=127.0.0.1 port={} user=test_user password=test_pwd connect_timeout=2",
-            port
+            "sslmode=require host=127.0.0.1 port={} user=test_user password=test_pwd connect_timeout=2, dbname={}",
+            port, DEFAULT_SCHEMA_NAME
         )
     } else {
-        format!("host=127.0.0.1 port={} connect_timeout=2", port)
+        format!(
+            "host=127.0.0.1 port={} connect_timeout=2 dbname={}",
+            port, DEFAULT_SCHEMA_NAME
+        )
     };
 
     let mut config = rustls::ClientConfig::builder()
@@ -312,11 +316,14 @@ async fn create_plain_connection(
 ) -> std::result::Result<Client, PgError> {
     let url = if with_pwd {
         format!(
-            "host=127.0.0.1 port={} user=test_user password=test_pwd connect_timeout=2",
-            port
+            "host=127.0.0.1 port={} user=test_user password=test_pwd connect_timeout=2 dbname={}",
+            port, DEFAULT_SCHEMA_NAME
         )
     } else {
-        format!("host=127.0.0.1 port={} connect_timeout=2", port)
+        format!(
+            "host=127.0.0.1 port={} connect_timeout=2 dbname={}",
+            port, DEFAULT_SCHEMA_NAME
+        )
     };
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     tokio::spawn(conn);
@@ -331,6 +338,13 @@ async fn create_connection_with_given_db(
         "host=127.0.0.1 port={} connect_timeout=2 dbname={}",
         port, db
     );
+    let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
+    tokio::spawn(conn);
+    Ok(client)
+}
+
+async fn create_connection_without_db(port: u16) -> std::result::Result<Client, PgError> {
+    let url = format!("host=127.0.0.1 port={} connect_timeout=2", port);
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     tokio::spawn(conn);
     Ok(client)

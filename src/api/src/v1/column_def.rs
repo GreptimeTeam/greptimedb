@@ -23,12 +23,13 @@ impl ColumnDef {
     pub fn try_as_column_schema(&self) -> Result<ColumnSchema> {
         let data_type = ColumnDataTypeWrapper::try_new(self.datatype)?;
 
-        let constraint = match &self.default_constraint {
-            None => None,
-            Some(v) => Some(
-                ColumnDefaultConstraint::try_from(&v[..])
+        let constraint = if self.default_constraint.is_empty() {
+            None
+        } else {
+            Some(
+                ColumnDefaultConstraint::try_from(self.default_constraint.as_slice())
                     .context(error::ConvertColumnDefaultConstraintSnafu { column: &self.name })?,
-            ),
+            )
         };
 
         ColumnSchema::new(&self.name, data_type.into(), self.is_nullable)

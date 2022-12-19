@@ -73,7 +73,7 @@ impl MysqlInstanceShim {
         }
     }
 
-    async fn do_query(&self, query: &str) -> Result<Output> {
+    async fn do_query(&self, query: &str) -> Vec<Result<Output>> {
         debug!("Start executing query: '{}'", query);
         let start = Instant::now();
 
@@ -82,7 +82,7 @@ impl MysqlInstanceShim {
         // components, this is quick and dirty, there must be a better way to do it.
         let output =
             if let Some(output) = crate::mysql::federated::check(query, self.session.context()) {
-                Ok(output)
+                vec![Ok(output)]
             } else {
                 self.query_handler
                     .do_query(query, self.session.context())
@@ -193,14 +193,17 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        let output = self.do_query(query).await;
+        let outputs = self.do_query(query).await;
         let mut writer = MysqlResultWriter::new(writer);
-        writer.write(query, output).await
+        for output in outputs {
+            writer.write(query, output).await?;
+        }
+        Ok(())
     }
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
         let query = format!("USE {}", database.trim());
-        let output = self.do_query(&query).await;
+        let output = self.do_query(&query).await.remove(0);
         if let Err(e) = output {
             w.error(ErrorKind::ER_UNKNOWN_ERROR, e.to_string().as_bytes())
                 .await

@@ -59,6 +59,7 @@ impl LogicalPrimitiveType for DateType {
     type ArrowPrimitive = Date32Type;
     type Native = i32;
     type Wrapper = Date;
+    type LargestType = Self;
 
     fn build_data_type() -> ConcreteDataType {
         ConcreteDataType::date_datatype()

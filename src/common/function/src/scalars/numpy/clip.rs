@@ -15,14 +15,15 @@
 use std::fmt;
 use std::sync::Arc;
 
+use common_query::error::Result;
 use common_query::prelude::{Signature, Volatility};
-use datatypes::data_type::{ConcreteDataType, DataType};
-use datatypes::prelude::{Scalar, VectorRef};
-use datatypes::with_match_primitive_type_id;
-use num_traits::AsPrimitive;
+use datatypes::arrow::compute;
+use datatypes::arrow::datatypes::ArrowPrimitiveType;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::prelude::*;
+use datatypes::vectors::PrimitiveVector;
 use paste::paste;
 
-use crate::error::Result;
 use crate::scalars::expression::{scalar_binary_op, EvalContext};
 use crate::scalars::function::{Function, FunctionContext};
 
@@ -34,25 +35,32 @@ macro_rules! define_eval {
     ($O: ident) => {
         paste! {
             fn [<eval_ $O>](columns: &[VectorRef]) -> Result<VectorRef> {
-                with_match_primitive_type_id!(columns[0].data_type().logical_type_id(), |$S| {
-                    with_match_primitive_type_id!(columns[1].data_type().logical_type_id(), |$T| {
-                        with_match_primitive_type_id!(columns[2].data_type().logical_type_id(), |$R| {
-                            // clip(a, min, max) is equals to min(max(a, min), max)
-                            let col: VectorRef = Arc::new(scalar_binary_op::<$S, $T, $O, _>(&columns[0], &columns[1], scalar_max, &mut EvalContext::default())?);
-                            let col = scalar_binary_op::<$O, $R, $O, _>(&col, &columns[2], scalar_min, &mut EvalContext::default())?;
-                            Ok(Arc::new(col))
-                        }, {
-                            unreachable!()
-                        })
-                    }, {
-                        unreachable!()
-                    })
-                }, {
-                    unreachable!()
-                })
+                fn cast_vector(input: &VectorRef) -> VectorRef {
+                    Arc::new(PrimitiveVector::<<$O as WrapperType>::LogicalType>::try_from_arrow_array(
+                        compute::cast(&input.to_arrow_array(), &<<<$O as WrapperType>::LogicalType as LogicalPrimitiveType>::ArrowPrimitive as ArrowPrimitiveType>::DATA_TYPE).unwrap()
+                    ).unwrap()) as _
+                }
+                let operator_1 = cast_vector(&columns[0]);
+                let operator_2 = cast_vector(&columns[1]);
+                let operator_3 = cast_vector(&columns[2]);
+
+                // clip(a, min, max) is equals to min(max(a, min), max)
+                let col: VectorRef = Arc::new(scalar_binary_op::<$O, $O, $O, _>(
+                    &operator_1,
+                    &operator_2,
+                    scalar_max,
+                    &mut EvalContext::default(),
+                )?);
+                let col = scalar_binary_op::<$O, $O, $O, _>(
+                    &col,
+                    &operator_3,
+                    scalar_min,
+                    &mut EvalContext::default(),
+                )?;
+                Ok(Arc::new(col))
             }
         }
-    }
+    };
 }
 
 define_eval!(i64);
@@ -108,27 +116,23 @@ pub fn max<T: PartialOrd>(input: T, max: T) -> T {
 }
 
 #[inline]
-fn scalar_min<S, T, O>(left: Option<S>, right: Option<T>, _ctx: &mut EvalContext) -> Option<O>
+fn scalar_min<O>(left: Option<O>, right: Option<O>, _ctx: &mut EvalContext) -> Option<O>
 where
-    S: AsPrimitive<O>,
-    T: AsPrimitive<O>,
     O: Scalar + Copy + PartialOrd,
 {
     match (left, right) {
-        (Some(left), Some(right)) => Some(min(left.as_(), right.as_())),
+        (Some(left), Some(right)) => Some(min(left, right)),
         _ => None,
     }
 }
 
 #[inline]
-fn scalar_max<S, T, O>(left: Option<S>, right: Option<T>, _ctx: &mut EvalContext) -> Option<O>
+fn scalar_max<O>(left: Option<O>, right: Option<O>, _ctx: &mut EvalContext) -> Option<O>
 where
-    S: AsPrimitive<O>,
-    T: AsPrimitive<O>,
     O: Scalar + Copy + PartialOrd,
 {
     match (left, right) {
-        (Some(left), Some(right)) => Some(max(left.as_(), right.as_())),
+        (Some(left), Some(right)) => Some(max(left, right)),
         _ => None,
     }
 }
@@ -143,11 +147,15 @@ impl fmt::Display for ClipFunction {
 mod tests {
     use common_query::prelude::TypeSignature;
     use datatypes::value::Value;
-    use datatypes::vectors::{ConstantVector, Float32Vector, Int32Vector, UInt32Vector};
+    use datatypes::vectors::{
+        ConstantVector, Float32Vector, Int16Vector, Int32Vector, Int8Vector, UInt16Vector,
+        UInt32Vector, UInt8Vector,
+    };
 
     use super::*;
+
     #[test]
-    fn test_clip_function() {
+    fn test_clip_signature() {
         let clip = ClipFunction::default();
 
         assert_eq!("clip", clip.name());
@@ -190,16 +198,21 @@ mod tests {
                              volatility: Volatility::Immutable
                          } if  valid_types == ConcreteDataType::numerics()
         ));
+    }
+
+    #[test]
+    fn test_clip_fn_signed() {
+        let clip = ClipFunction::default();
 
         // eval with signed integers
         let args: Vec<VectorRef> = vec![
             Arc::new(Int32Vector::from_values(0..10)),
             Arc::new(ConstantVector::new(
-                Arc::new(Int32Vector::from_vec(vec![3])),
+                Arc::new(Int8Vector::from_vec(vec![3])),
                 10,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(Int32Vector::from_vec(vec![6])),
+                Arc::new(Int16Vector::from_vec(vec![6])),
                 10,
             )),
         ];
@@ -217,16 +230,21 @@ mod tests {
                 assert!(matches!(vector.get(i), Value::Int64(v) if v == 6));
             }
         }
+    }
+
+    #[test]
+    fn test_clip_fn_unsigned() {
+        let clip = ClipFunction::default();
 
         // eval with unsigned integers
         let args: Vec<VectorRef> = vec![
-            Arc::new(UInt32Vector::from_values(0..10)),
+            Arc::new(UInt8Vector::from_values(0..10)),
             Arc::new(ConstantVector::new(
                 Arc::new(UInt32Vector::from_vec(vec![3])),
                 10,
             )),
             Arc::new(ConstantVector::new(
-                Arc::new(UInt32Vector::from_vec(vec![6])),
+                Arc::new(UInt16Vector::from_vec(vec![6])),
                 10,
             )),
         ];
@@ -244,12 +262,17 @@ mod tests {
                 assert!(matches!(vector.get(i), Value::UInt64(v) if v == 6));
             }
         }
+    }
+
+    #[test]
+    fn test_clip_fn_float() {
+        let clip = ClipFunction::default();
 
         // eval with floats
         let args: Vec<VectorRef> = vec![
-            Arc::new(Int32Vector::from_values(0..10)),
+            Arc::new(Int8Vector::from_values(0..10)),
             Arc::new(ConstantVector::new(
-                Arc::new(Int32Vector::from_vec(vec![3])),
+                Arc::new(UInt32Vector::from_vec(vec![3])),
                 10,
             )),
             Arc::new(ConstantVector::new(

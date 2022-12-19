@@ -19,7 +19,8 @@ use common_query::prelude::{
     ColumnarValue, ReturnTypeFunction, ScalarFunctionImplementation, ScalarUdf, ScalarValue,
 };
 use datatypes::error::Error as DataTypeError;
-use datatypes::prelude::{ConcreteDataType, VectorHelper};
+use datatypes::prelude::*;
+use datatypes::vectors::Helper;
 use snafu::ResultExt;
 
 use crate::scalars::function::{FunctionContext, FunctionRef};
@@ -47,7 +48,7 @@ pub fn create_udf(func: FunctionRef) -> ScalarUdf {
         let args: Result<Vec<_>, DataTypeError> = args
             .iter()
             .map(|arg| match arg {
-                ColumnarValue::Scalar(v) => VectorHelper::try_from_scalar_value(v.clone(), rows),
+                ColumnarValue::Scalar(v) => Helper::try_from_scalar_value(v.clone(), rows),
                 ColumnarValue::Vector(v) => Ok(v.clone()),
             })
             .collect();

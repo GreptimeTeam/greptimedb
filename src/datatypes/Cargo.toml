@@ -9,10 +9,12 @@ default = []
 test = []
 
 [dependencies]
+arrow = { version = "26.0" }
+arrow-schema = { version = "26.0", features = ["serde"] }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+datafusion-common = "14.0"
 enum_dispatch = "0.3"
 num = "0.4"
 num-traits = "0.2"
@@ -21,17 +23,3 @@ paste = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
-
-[dependencies.arrow]
-package = "arrow2"
-version = "0.10"
-features = [
-    "io_csv",
-    "io_json",
-    "io_parquet",
-    "io_parquet_compression",
-    "io_ipc",
-    "ahash",
-    "compute",
-    "serde_types",
-]

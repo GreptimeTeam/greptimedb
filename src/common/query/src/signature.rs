@@ -15,7 +15,7 @@
 //! Signature module contains foundational types that are used to represent signatures, types,
 //! and return types of functions.
 //! Copied and modified from datafusion.
-pub use datafusion::physical_plan::functions::Volatility;
+pub use datafusion_expr::Volatility;
 use datafusion_expr::{Signature as DfSignature, TypeSignature as DfTypeSignature};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::DataType;

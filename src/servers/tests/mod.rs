@@ -23,7 +23,7 @@ use common_query::Output;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::Result;
 use servers::query_handler::{
-    ScriptHandler, ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
+    CatalogHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
 };
 use table::test_util::MemTable;
 
@@ -54,9 +54,18 @@ impl DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Result<Output> {
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         let plan = self.query_engine.sql_to_plan(query, query_ctx).unwrap();
-        Ok(self.query_engine.execute(&plan).await.unwrap())
+        let output = self.query_engine.execute(&plan).await.unwrap();
+        vec![Ok(output)]
+    }
+
+    async fn do_statement_query(
+        &self,
+        _stmt: sql::statements::statement::Statement,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        unimplemented!()
     }
 }
 
@@ -80,6 +89,12 @@ impl ScriptHandler for DummyInstance {
         let py_script = self.scripts.read().unwrap().get(name).unwrap().clone();
 
         Ok(py_script.execute(EvalContext::default()).await.unwrap())
+    }
+}
+
+impl CatalogHandler for DummyInstance {
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+        Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
     }
 }
 

@@ -25,7 +25,7 @@ use api::v1::alter_expr::Kind;
 use api::v1::object_expr::Expr;
 use api::v1::{
     admin_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, Column, CreateDatabaseExpr,
-    CreateExpr, DropTableExpr, ExprHeader, InsertExpr, ObjectExpr,
+    CreateTableExpr, DropTableExpr, ExprHeader, InsertExpr, ObjectExpr,
     ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
@@ -44,7 +44,7 @@ use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use servers::query_handler::{
-    GrpcAdminHandler, GrpcAdminHandlerRef, GrpcQueryHandler, GrpcQueryHandlerRef,
+    CatalogHandler, GrpcAdminHandler, GrpcAdminHandlerRef, GrpcQueryHandler, GrpcQueryHandlerRef,
     InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
     ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
 };
@@ -79,6 +79,7 @@ pub trait FrontendInstance:
     + InfluxdbLineProtocolHandler
     + PrometheusProtocolHandler
     + ScriptHandler
+    + CatalogHandler
     + Send
     + Sync
     + 'static
@@ -196,7 +197,7 @@ impl Instance {
     /// Handle create expr.
     pub async fn handle_create_table(
         &self,
-        mut expr: CreateExpr,
+        mut expr: CreateTableExpr,
         partitions: Option<Partitions>,
     ) -> Result<Output> {
         if let Some(v) = &self.dist_instance {
@@ -206,7 +207,7 @@ impl Instance {
                 header: Some(ExprHeader {
                     version: PROTOCOL_VERSION,
                 }),
-                expr: Some(admin_expr::Expr::Create(expr)),
+                expr: Some(admin_expr::Expr::CreateTable(expr)),
             };
             let result = self
                 .grpc_admin_handler
@@ -359,8 +360,8 @@ impl Instance {
         );
         let expr = AlterExpr {
             table_name: table_name.to_string(),
-            schema_name: Some(schema_name.to_string()),
-            catalog_name: Some(catalog_name.to_string()),
+            schema_name: schema_name.to_string(),
+            catalog_name: catalog_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
         };
 
@@ -461,31 +462,18 @@ impl FrontendInstance for Instance {
     }
 }
 
-fn parse_stmt(sql: &str) -> Result<Statement> {
-    let mut stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
-        .context(error::ParseSqlSnafu)?;
-    // TODO(LFC): Support executing multiple SQL queries,
-    // which seems to be a major change to our whole server framework?
-    ensure!(
-        stmt.len() == 1,
-        error::InvalidSqlSnafu {
-            err_msg: "Currently executing multiple SQL queries are not supported."
-        }
-    );
-    Ok(stmt.remove(0))
+fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
+    ParserContext::create_with_dialect(sql, &GenericDialect {}).context(error::ParseSqlSnafu)
 }
 
-#[async_trait]
-impl SqlQueryHandler for Instance {
-    async fn do_query(
+impl Instance {
+    async fn query_statement(
         &self,
-        query: &str,
+        stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        let stmt = parse_stmt(query)
-            .map_err(BoxedError::new)
-            .context(server_error::ExecuteQuerySnafu { query })?;
-
+        // TODO(sunng87): provide a better form to log or track statement
+        let query = &format!("{:?}", &stmt);
         match stmt {
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
@@ -494,7 +482,7 @@ impl SqlQueryHandler for Instance {
             | Statement::DescribeTable(_)
             | Statement::Explain(_)
             | Statement::Query(_) => {
-                return self.sql_handler.do_query(query, query_ctx).await;
+                return self.sql_handler.do_statement_query(stmt, query_ctx).await;
             }
             Statement::Insert(insert) => match self.mode {
                 Mode::Standalone => {
@@ -570,6 +558,45 @@ impl SqlQueryHandler for Instance {
 }
 
 #[async_trait]
+impl SqlQueryHandler for Instance {
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<server_error::Result<Output>> {
+        match parse_stmt(query)
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQuerySnafu { query })
+        {
+            Ok(stmts) => {
+                let mut results = Vec::with_capacity(stmts.len());
+                for stmt in stmts {
+                    match self.query_statement(stmt, query_ctx.clone()).await {
+                        Ok(output) => results.push(Ok(output)),
+                        Err(e) => {
+                            results.push(Err(e));
+                            break;
+                        }
+                    }
+                }
+                results
+            }
+            Err(e) => {
+                vec![Err(e)]
+            }
+        }
+    }
+
+    async fn do_statement_query(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.query_statement(stmt, query_ctx).await
+    }
+}
+
+#[async_trait]
 impl ScriptHandler for Instance {
     async fn insert_script(&self, name: &str, script: &str) -> server_error::Result<()> {
         if let Some(handler) = &self.script_handler {
@@ -630,10 +657,19 @@ impl GrpcAdminHandler for Instance {
     async fn exec_admin_request(&self, mut expr: AdminExpr) -> server_error::Result<AdminResult> {
         // Force the default to be `None` rather than `Some(0)` comes from gRPC decode.
         // Related issue: #480
-        if let Some(api::v1::admin_expr::Expr::Create(create)) = &mut expr.expr {
+        if let Some(api::v1::admin_expr::Expr::CreateTable(create)) = &mut expr.expr {
             create.table_id = None;
         }
         self.grpc_admin_handler.exec_admin_request(expr).await
+    }
+}
+
+impl CatalogHandler for Instance {
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
+        self.catalog_manager
+            .schema(catalog, schema)
+            .map(|s| s.is_some())
+            .context(server_error::CatalogSnafu)
     }
 }
 
@@ -671,6 +707,7 @@ mod tests {
                         ) engine=mito with(regions=1);"#;
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
+            .remove(0)
             .unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
@@ -684,6 +721,7 @@ mod tests {
                                 "#;
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
+            .remove(0)
             .unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 3),
@@ -693,46 +731,57 @@ mod tests {
         let sql = "select * from demo";
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
+            .remove(0)
             .unwrap();
         match output {
-            Output::Stream(stream) => {
-                let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-                let pretty_print = recordbatches.pretty_print();
-                let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
-                let expected = vec![
-                    "+----------------+---------------------+-----+--------+-----------+",
-                    "| host           | ts                  | cpu | memory | disk_util |",
-                    "+----------------+---------------------+-----+--------+-----------+",
-                    "| frontend.host1 | 1970-01-01 00:00:01 | 1.1 | 100    | 9.9       |",
-                    "| frontend.host2 | 1970-01-01 00:00:02 |     |        | 9.9       |",
-                    "| frontend.host3 | 1970-01-01 00:00:03 | 3.3 | 300    | 9.9       |",
-                    "+----------------+---------------------+-----+--------+-----------+",
-                ];
+            Output::RecordBatches(_) => {
+                unreachable!("Output::RecordBatches");
+            }
+            Output::AffectedRows(_) => {
+                unreachable!("Output::AffectedRows");
+            }
+            Output::Stream(s) => {
+                let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+                let pretty_print = batches.pretty_print().unwrap();
+                let expected = "\
++----------------+---------------------+-----+--------+-----------+
+| host           | ts                  | cpu | memory | disk_util |
++----------------+---------------------+-----+--------+-----------+
+| frontend.host1 | 1970-01-01T00:00:01 | 1.1 | 100    | 9.9       |
+| frontend.host2 | 1970-01-01T00:00:02 |     |        | 9.9       |
+| frontend.host3 | 1970-01-01T00:00:03 | 3.3 | 300    | 9.9       |
++----------------+---------------------+-----+--------+-----------+\
+                ";
                 assert_eq!(pretty_print, expected);
             }
-            _ => unreachable!(),
         };
 
         let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
         let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
+            .remove(0)
             .unwrap();
         match output {
-            Output::Stream(stream) => {
-                let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-                let pretty_print = recordbatches.pretty_print();
-                let pretty_print = pretty_print.lines().collect::<Vec<&str>>();
-                let expected = vec![
-                    "+----------------+---------------------+-----+--------+-----------+",
-                    "| host           | ts                  | cpu | memory | disk_util |",
-                    "+----------------+---------------------+-----+--------+-----------+",
-                    "| frontend.host2 | 1970-01-01 00:00:02 |     |        | 9.9       |",
-                    "| frontend.host3 | 1970-01-01 00:00:03 | 3.3 | 300    | 9.9       |",
-                    "+----------------+---------------------+-----+--------+-----------+",
-                ];
-                assert_eq!(pretty_print, expected);
+            Output::RecordBatches(_) => {
+                unreachable!("Output::RecordBatches")
             }
-            _ => unreachable!(),
+            Output::AffectedRows(_) => {
+                unreachable!("Output::AffectedRows")
+            }
+            Output::Stream(s) => {
+                let recordbatches = common_recordbatch::util::collect_batches(s).await.unwrap();
+                let pretty = recordbatches.pretty_print().unwrap();
+                let expected = "\
++----------------+---------------------+-----+--------+-----------+
+| host           | ts                  | cpu | memory | disk_util |
++----------------+---------------------+-----+--------+-----------+
+| frontend.host2 | 1970-01-01T00:00:02 |     |        | 9.9       |
+| frontend.host3 | 1970-01-01T00:00:03 | 3.3 | 300    | 9.9       |
++----------------+---------------------+-----+--------+-----------+\
+                    "
+                .to_string();
+                assert_eq!(pretty, expected);
+            }
         };
     }
 
@@ -787,11 +836,11 @@ mod tests {
         let expected_ts_col = Column {
             column_name: "ts".to_string(),
             values: Some(column::Values {
-                ts_millis_values: vec![1000, 2000, 3000, 4000],
+                ts_millisecond_values: vec![1000, 2000, 3000, 4000],
                 ..Default::default()
             }),
             semantic_type: SemanticType::Timestamp as i32,
-            datatype: ColumnDataType::Timestamp as i32,
+            datatype: ColumnDataType::TimestampMillisecond as i32,
             ..Default::default()
         };
 
@@ -799,7 +848,7 @@ mod tests {
         let create_expr = create_expr();
         let admin_expr = AdminExpr {
             header: Some(ExprHeader::default()),
-            expr: Some(admin_expr::Expr::Create(create_expr)),
+            expr: Some(admin_expr::Expr::CreateTable(create_expr)),
         };
         let result = GrpcAdminHandler::exec_admin_request(&*instance, admin_expr)
             .await
@@ -877,48 +926,46 @@ mod tests {
         }
     }
 
-    fn create_expr() -> CreateExpr {
+    fn create_expr() -> CreateTableExpr {
         let column_defs = vec![
             GrpcColumnDef {
                 name: "host".to_string(),
                 datatype: ColumnDataType::String as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             GrpcColumnDef {
                 name: "cpu".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             GrpcColumnDef {
                 name: "memory".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             GrpcColumnDef {
                 name: "disk_util".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: Some(
-                    ColumnDefaultConstraint::Value(Value::from(9.9f64))
-                        .try_into()
-                        .unwrap(),
-                ),
+                default_constraint: ColumnDefaultConstraint::Value(Value::from(9.9f64))
+                    .try_into()
+                    .unwrap(),
             },
             GrpcColumnDef {
                 name: "ts".to_string(),
-                datatype: ColumnDataType::Timestamp as i32,
+                datatype: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
         ];
-        CreateExpr {
-            catalog_name: None,
-            schema_name: None,
+        CreateTableExpr {
+            catalog_name: "".to_string(),
+            schema_name: "".to_string(),
             table_name: "demo".to_string(),
-            desc: None,
+            desc: "".to_string(),
             column_defs,
             time_index: "ts".to_string(),
             primary_keys: vec!["host".to_string()],

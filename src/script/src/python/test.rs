@@ -12,19 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::print_stdout, clippy::print_stderr)]
-// for debug purpose, also this is already a
-// test module so allow print_stdout shouldn't be a problem?
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
 
+use common_recordbatch::RecordBatch;
 use common_telemetry::{error, info};
 use console::style;
-use datafusion_common::record_batch::RecordBatch as DfRecordBatch;
-use datatypes::arrow::array::PrimitiveArray;
-use datatypes::arrow::datatypes::{DataType, Field, Schema};
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
+use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::vectors::{Float32Vector, Float64Vector, Int64Vector, VectorRef};
 use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
@@ -63,19 +62,26 @@ enum Predicate {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ColumnInfo {
-    pub ty: DataType,
+    pub ty: ArrowDataType,
     pub len: usize,
 }
 
-fn create_sample_recordbatch() -> DfRecordBatch {
-    let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.6]);
-    let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
-    let schema = Arc::new(Schema::from(vec![
-        Field::new("cpu", DataType::Float32, false),
-        Field::new("mem", DataType::Float64, false),
+fn create_sample_recordbatch() -> RecordBatch {
+    let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.6]);
+    let mem_array = Float64Vector::from_slice([0.1f64, 0.2, 0.3, 0.4]);
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), false),
+        ColumnSchema::new("mem", ConcreteDataType::float64_datatype(), false),
     ]));
 
-    DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap()
+    RecordBatch::new(
+        schema,
+        [
+            Arc::new(cpu_array) as VectorRef,
+            Arc::new(mem_array) as VectorRef,
+        ],
+    )
+    .unwrap()
 }
 
 /// test cases which read from a .ron file, deser,
@@ -120,37 +126,27 @@ fn run_ron_testcases() {
             }
             Predicate::ExecIsOk { fields, columns } => {
                 let rb = create_sample_recordbatch();
-                let res = coprocessor::exec_coprocessor(&testcase.code, &rb);
-                if res.is_err() {
-                    dbg!(&res);
-                }
-                assert!(res.is_ok());
-                let res = res.unwrap();
+                let res = coprocessor::exec_coprocessor(&testcase.code, &rb).unwrap();
                 fields
                     .iter()
-                    .zip(&res.schema.arrow_schema().fields)
-                    .map(|(anno, real)| {
+                    .zip(res.schema.column_schemas())
+                    .for_each(|(anno, real)| {
                         assert!(
-                            anno.datatype.clone().unwrap() == real.data_type
-                                && anno.is_nullable == real.is_nullable,
+                            anno.datatype.as_ref().unwrap() == &real.data_type.as_arrow_type()
+                                && anno.is_nullable == real.is_nullable(),
                             "Fields expected to be {anno:#?}, actual {real:#?}"
                         );
-                    })
-                    .count();
-                columns
-                    .iter()
-                    .zip(res.df_recordbatch.columns())
-                    .map(|(anno, real)| {
-                        assert!(
-                            &anno.ty == real.data_type() && anno.len == real.len(),
-                            "Type or length not match! Expect [{:#?}; {}], actual [{:#?}; {}]",
-                            anno.ty,
-                            anno.len,
-                            real.data_type(),
-                            real.len()
-                        );
-                    })
-                    .count();
+                    });
+                columns.iter().zip(res.columns()).for_each(|(anno, real)| {
+                    assert!(
+                        anno.ty == real.data_type().as_arrow_type() && anno.len == real.len(),
+                        "Type or length not match! Expect [{:#?}; {}], actual [{:#?}; {}]",
+                        anno.ty,
+                        anno.len,
+                        real.data_type(),
+                        real.len()
+                    );
+                });
             }
             Predicate::ExecIsErr {
                 reason: part_reason,
@@ -229,7 +225,7 @@ def calc_rvs(open_time, close):
     rv_180d = vector([calc_rv(close, open_time, timepoint, datetime("180d"))])
     return rv_7d, rv_15d, rv_30d, rv_60d, rv_90d, rv_180d
 "#;
-    let close_array = PrimitiveArray::from_slice([
+    let close_array = Float32Vector::from_slice([
         10106.79f32,
         10106.09,
         10108.73,
@@ -242,17 +238,20 @@ def calc_rvs(open_time, close):
         10117.08,
         10120.43,
     ]);
-    let open_time_array = PrimitiveArray::from_slice([
+    let open_time_array = Int64Vector::from_slice([
         300i64, 900i64, 1200i64, 1800i64, 2400i64, 3000i64, 3600i64, 4200i64, 4800i64, 5400i64,
         6000i64,
     ]);
-    let schema = Arc::new(Schema::from(vec![
-        Field::new("close", DataType::Float32, false),
-        Field::new("open_time", DataType::Int64, false),
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("close", ConcreteDataType::float32_datatype(), false),
+        ColumnSchema::new("open_time", ConcreteDataType::int64_datatype(), false),
     ]));
-    let rb = DfRecordBatch::try_new(
+    let rb = RecordBatch::new(
         schema,
-        vec![Arc::new(close_array), Arc::new(open_time_array)],
+        [
+            Arc::new(close_array) as VectorRef,
+            Arc::new(open_time_array) as VectorRef,
+        ],
     )
     .unwrap();
     let ret = coprocessor::exec_coprocessor(python_source, &rb);
@@ -291,14 +290,20 @@ def a(cpu, mem):
     ref = log2(fed/prev(fed))
     return (0.5 < cpu) & ~( cpu >= 0.75)
 "#;
-    let cpu_array = PrimitiveArray::from_slice([0.9f32, 0.8, 0.7, 0.3]);
-    let mem_array = PrimitiveArray::from_slice([0.1f64, 0.2, 0.3, 0.4]);
-    let schema = Arc::new(Schema::from(vec![
-        Field::new("cpu", DataType::Float32, false),
-        Field::new("mem", DataType::Float64, false),
+    let cpu_array = Float32Vector::from_slice([0.9f32, 0.8, 0.7, 0.3]);
+    let mem_array = Float64Vector::from_slice([0.1f64, 0.2, 0.3, 0.4]);
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), false),
+        ColumnSchema::new("mem", ConcreteDataType::float64_datatype(), false),
     ]));
-    let rb =
-        DfRecordBatch::try_new(schema, vec![Arc::new(cpu_array), Arc::new(mem_array)]).unwrap();
+    let rb = RecordBatch::new(
+        schema,
+        [
+            Arc::new(cpu_array) as VectorRef,
+            Arc::new(mem_array) as VectorRef,
+        ],
+    )
+    .unwrap();
     let ret = coprocessor::exec_coprocessor(python_source, &rb);
     if let Err(Error::PyParse {
         backtrace: _,

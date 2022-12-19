@@ -34,7 +34,7 @@ impl RegionDescBuilder {
             ColumnDescriptorBuilder::new(
                 1,
                 TIMESTAMP_NAME,
-                ConcreteDataType::timestamp_millis_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
             )
             .is_nullable(false)
             .build()

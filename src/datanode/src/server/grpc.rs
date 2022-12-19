@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::result::AdminResultBuilder;
-use api::v1::{AdminResult, AlterExpr, CreateExpr, DropTableExpr};
+use api::v1::{AdminResult, AlterExpr, CreateTableExpr, DropTableExpr};
 use common_error::prelude::{ErrorExt, StatusCode};
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
@@ -31,15 +31,15 @@ use crate::sql::SqlRequest;
 
 impl Instance {
     /// Handle gRPC create table requests.
-    pub(crate) async fn handle_create(&self, expr: CreateExpr) -> AdminResult {
+    pub(crate) async fn handle_create(&self, expr: CreateTableExpr) -> AdminResult {
         // Respect CreateExpr's table id and region ids if present, or allocate table id
         // from local table id provider and set region id to 0.
-        let table_id = if let Some(table_id) = expr.table_id {
+        let table_id = if let Some(table_id) = &expr.table_id {
             info!(
                 "Creating table {:?}.{:?}.{:?} with table id from frontend: {}",
-                expr.catalog_name, expr.schema_name, expr.table_name, table_id
+                expr.catalog_name, expr.schema_name, expr.table_name, table_id.id
             );
-            table_id
+            table_id.id
         } else {
             match self.table_id_provider.as_ref() {
                 None => {
@@ -157,7 +157,7 @@ impl Instance {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::{ColumnDataType, ColumnDef};
+    use api::v1::{ColumnDataType, ColumnDef, TableId};
     use common_catalog::consts::MIN_USER_TABLE_ID;
     use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(request.catalog_name, "greptime".to_string());
         assert_eq!(request.schema_name, "public".to_string());
         assert_eq!(request.table_name, "my-metrics");
-        assert_eq!(request.desc, Some("blabla".to_string()));
+        assert_eq!(request.desc, Some("blabla little magic fairy".to_string()));
         assert_eq!(request.schema, expected_table_schema());
         assert_eq!(request.primary_key_indices, vec![1, 0]);
         assert!(request.create_if_not_exists);
@@ -214,7 +214,7 @@ mod tests {
             name: "a".to_string(),
             datatype: 1024,
             is_nullable: true,
-            default_constraint: None,
+            default_constraint: vec![],
         };
         let result = column_def.try_as_column_schema();
         assert!(matches!(
@@ -226,7 +226,7 @@ mod tests {
             name: "a".to_string(),
             datatype: ColumnDataType::String as i32,
             is_nullable: true,
-            default_constraint: None,
+            default_constraint: vec![],
         };
         let column_schema = column_def.try_as_column_schema().unwrap();
         assert_eq!(column_schema.name, "a");
@@ -238,7 +238,7 @@ mod tests {
             name: "a".to_string(),
             datatype: ColumnDataType::String as i32,
             is_nullable: true,
-            default_constraint: Some(default_constraint.clone().try_into().unwrap()),
+            default_constraint: default_constraint.clone().try_into().unwrap(),
         };
         let column_schema = column_def.try_as_column_schema().unwrap();
         assert_eq!(column_schema.name, "a");
@@ -250,44 +250,46 @@ mod tests {
         );
     }
 
-    fn testing_create_expr() -> CreateExpr {
+    fn testing_create_expr() -> CreateTableExpr {
         let column_defs = vec![
             ColumnDef {
                 name: "host".to_string(),
                 datatype: ColumnDataType::String as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "ts".to_string(),
-                datatype: ColumnDataType::Timestamp as i32,
+                datatype: ColumnDataType::TimestampMillisecond as i32,
                 is_nullable: false,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "cpu".to_string(),
                 datatype: ColumnDataType::Float32 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
             ColumnDef {
                 name: "memory".to_string(),
                 datatype: ColumnDataType::Float64 as i32,
                 is_nullable: true,
-                default_constraint: None,
+                default_constraint: vec![],
             },
         ];
-        CreateExpr {
-            catalog_name: None,
-            schema_name: None,
+        CreateTableExpr {
+            catalog_name: "".to_string(),
+            schema_name: "".to_string(),
             table_name: "my-metrics".to_string(),
-            desc: Some("blabla".to_string()),
+            desc: "blabla little magic fairy".to_string(),
             column_defs,
             time_index: "ts".to_string(),
             primary_keys: vec!["ts".to_string(), "host".to_string()],
             create_if_not_exists: true,
             table_options: Default::default(),
-            table_id: Some(MIN_USER_TABLE_ID),
+            table_id: Some(TableId {
+                id: MIN_USER_TABLE_ID,
+            }),
             region_ids: vec![0],
         }
     }
@@ -295,8 +297,12 @@ mod tests {
     fn expected_table_schema() -> SchemaRef {
         let column_schemas = vec![
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), false)
-                .with_time_index(true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
             ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ];

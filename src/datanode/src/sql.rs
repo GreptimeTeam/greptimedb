@@ -154,8 +154,12 @@ mod tests {
                 ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
                 ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
                 ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true)
-                    .with_time_index(true),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    true,
+                )
+                .with_time_index(true),
             ];
 
             Arc::new(
@@ -284,11 +288,11 @@ mod tests {
                 let ts = &columns_values["ts"];
                 assert_eq!(2, ts.len());
                 assert_eq!(
-                    Value::from(Timestamp::from_millis(1655276557000i64)),
+                    Value::from(Timestamp::new_millisecond(1655276557000i64)),
                     ts.get(0)
                 );
                 assert_eq!(
-                    Value::from(Timestamp::from_millis(1655276558000i64)),
+                    Value::from(Timestamp::new_millisecond(1655276558000i64)),
                     ts.get(1)
                 );
             }

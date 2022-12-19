@@ -61,7 +61,12 @@ enum DataType {
   FLOAT64 = 11;
   STRING = 12;
   BINARY = 13;
-  TIMESTAMP = 14;
+  DATE = 14;
+  DATETIME = 15;
+  TIMESTAMP_SECOND = 16;
+  TIMESTAMP_MILLISECOND = 17;
+  TIMESTAMP_MICROSECOND = 18;
+  TIMESTAMP_NANOSECOND = 19;
 }
 
 message Values {
@@ -81,5 +86,10 @@ message Values {
   repeated bool bool_values = 11;
   repeated bytes binary_values = 12;
   repeated string string_values = 13;
-  repeated int64  timestamp_values = 14;
+  repeated int32 date_values = 14;
+  repeated int64 datetime_values = 15;
+  repeated int64 ts_second_values = 16;
+  repeated int64 ts_millisecond_values = 17;
+  repeated int64 ts_microsecond_values = 18;
+  repeated int64 ts_nanosecond_values = 19;
 }

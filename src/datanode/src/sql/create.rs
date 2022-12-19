@@ -375,7 +375,7 @@ mod tests {
                 .data_type
         );
         assert_eq!(
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             request
                 .schema
                 .column_schema_by_name("ts")

@@ -18,15 +18,15 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::{SemanticType, Values};
-use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateExpr};
+use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateTableExpr};
 use common_base::BitVec;
 use common_time::timestamp::Timestamp;
 use common_time::{Date, DateTime};
-use datatypes::data_type::ConcreteDataType;
+use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::{ValueRef, VectorRef};
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
-use datatypes::vectors::VectorBuilder;
+use datatypes::vectors::MutableVector;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
@@ -45,7 +45,7 @@ fn build_column_def(column_name: &str, datatype: i32, nullable: bool) -> ColumnD
         name: column_name.to_string(),
         datatype,
         is_nullable: nullable,
-        default_constraint: None,
+        default_constraint: vec![],
     }
 }
 
@@ -99,7 +99,7 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
     let column_datatype = wrapper.datatype();
 
     let rows = rows as usize;
-    let mut vector = VectorBuilder::with_capacity(wrapper.into(), rows);
+    let mut vector = ConcreteDataType::from(wrapper).create_mutable_vector(rows);
 
     if let Some(values) = &column.values {
         let values = collect_column_values(column_datatype, values);
@@ -110,21 +110,31 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
 
         for i in 0..rows {
             if let Some(true) = nulls_iter.next() {
-                vector.push_null();
+                vector
+                    .push_value_ref(ValueRef::Null)
+                    .context(CreateVectorSnafu)?;
             } else {
-                let value_ref = values_iter.next().context(InvalidColumnProtoSnafu {
-                    err_msg: format!(
-                        "value not found at position {} of column {}",
-                        i, &column.column_name
-                    ),
-                })?;
-                vector.try_push_ref(value_ref).context(CreateVectorSnafu)?;
+                let value_ref = values_iter
+                    .next()
+                    .with_context(|| InvalidColumnProtoSnafu {
+                        err_msg: format!(
+                            "value not found at position {} of column {}",
+                            i, &column.column_name
+                        ),
+                    })?;
+                vector
+                    .push_value_ref(value_ref)
+                    .context(CreateVectorSnafu)?;
             }
         }
     } else {
-        (0..rows).for_each(|_| vector.push_null());
+        (0..rows).try_for_each(|_| {
+            vector
+                .push_value_ref(ValueRef::Null)
+                .context(CreateVectorSnafu)
+        })?;
     }
-    Ok(vector.finish())
+    Ok(vector.to_vector())
 }
 
 fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Vec<ValueRef> {
@@ -174,9 +184,24 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
                 DateTime::new(*v)
             ))
         }
-        ColumnDataType::Timestamp => {
-            collect_values!(values.ts_millis_values, |v| ValueRef::Timestamp(
-                Timestamp::from_millis(*v)
+        ColumnDataType::TimestampSecond => {
+            collect_values!(values.ts_second_values, |v| ValueRef::Timestamp(
+                Timestamp::new_second(*v)
+            ))
+        }
+        ColumnDataType::TimestampMillisecond => {
+            collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
+                Timestamp::new_millisecond(*v)
+            ))
+        }
+        ColumnDataType::TimestampMicrosecond => {
+            collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
+                Timestamp::new_microsecond(*v)
+            ))
+        }
+        ColumnDataType::TimestampNanosecond => {
+            collect_values!(values.ts_millisecond_values, |v| ValueRef::Timestamp(
+                Timestamp::new_nanosecond(*v)
             ))
         }
     }
@@ -189,7 +214,7 @@ pub fn build_create_expr_from_insertion(
     table_id: Option<TableId>,
     table_name: &str,
     columns: &[Column],
-) -> Result<CreateExpr> {
+) -> Result<CreateTableExpr> {
     let mut new_columns: HashSet<String> = HashSet::default();
     let mut column_defs = Vec::default();
     let mut primary_key_indices = Vec::default();
@@ -238,17 +263,17 @@ pub fn build_create_expr_from_insertion(
         .map(|idx| columns[*idx].column_name.clone())
         .collect::<Vec<_>>();
 
-    let expr = CreateExpr {
-        catalog_name: Some(catalog_name.to_string()),
-        schema_name: Some(schema_name.to_string()),
+    let expr = CreateTableExpr {
+        catalog_name: catalog_name.to_string(),
+        schema_name: schema_name.to_string(),
         table_name: table_name.to_string(),
-        desc: Some("Created on insertion".to_string()),
+        desc: "Created on insertion".to_string(),
         column_defs,
         time_index: timestamp_field_name,
         primary_keys,
         create_if_not_exists: true,
         table_options: Default::default(),
-        table_id,
+        table_id: table_id.map(|id| api::v1::TableId { id }),
         region_ids: vec![0], // TODO:(hl): region id should be allocated by frontend
     };
 
@@ -289,10 +314,7 @@ pub fn insertion_expr_to_request(
                         },
                     )?;
                     let data_type = &column_schema.data_type;
-                    entry.insert(VectorBuilder::with_capacity(
-                        data_type.clone(),
-                        row_count as usize,
-                    ))
+                    entry.insert(data_type.create_mutable_vector(row_count as usize))
                 }
             };
             add_values_to_builder(vector_builder, values, row_count as usize, null_mask)?;
@@ -300,7 +322,7 @@ pub fn insertion_expr_to_request(
     }
     let columns_values = columns_builders
         .into_iter()
-        .map(|(column_name, mut vector_builder)| (column_name, vector_builder.finish()))
+        .map(|(column_name, mut vector_builder)| (column_name, vector_builder.to_vector()))
         .collect();
 
     Ok(InsertRequest {
@@ -312,7 +334,7 @@ pub fn insertion_expr_to_request(
 }
 
 fn add_values_to_builder(
-    builder: &mut VectorBuilder,
+    builder: &mut Box<dyn MutableVector>,
     values: Values,
     row_count: usize,
     null_mask: Vec<u8>,
@@ -323,9 +345,11 @@ fn add_values_to_builder(
     if null_mask.is_empty() {
         ensure!(values.len() == row_count, IllegalInsertDataSnafu);
 
-        values.iter().for_each(|value| {
-            builder.push(value);
-        });
+        values.iter().try_for_each(|value| {
+            builder
+                .push_value_ref(value.as_value_ref())
+                .context(CreateVectorSnafu)
+        })?;
     } else {
         let null_mask = BitVec::from_vec(null_mask);
         ensure!(
@@ -336,9 +360,13 @@ fn add_values_to_builder(
         let mut idx_of_values = 0;
         for idx in 0..row_count {
             match is_null(&null_mask, idx) {
-                Some(true) => builder.push(&Value::Null),
+                Some(true) => builder
+                    .push_value_ref(ValueRef::Null)
+                    .context(CreateVectorSnafu)?,
                 _ => {
-                    builder.push(&values[idx_of_values]);
+                    builder
+                        .push_value_ref(values[idx_of_values].as_value_ref())
+                        .context(CreateVectorSnafu)?;
                     idx_of_values += 1
                 }
             }
@@ -418,9 +446,9 @@ fn convert_values(data_type: &ConcreteDataType, values: Values) -> Vec<Value> {
             .map(|v| Value::Date(v.into()))
             .collect(),
         ConcreteDataType::Timestamp(_) => values
-            .ts_millis_values
+            .ts_millisecond_values
             .into_iter()
-            .map(|v| Value::Timestamp(Timestamp::from_millis(v)))
+            .map(|v| Value::Timestamp(Timestamp::new_millisecond(v)))
             .collect(),
         ConcreteDataType::Null(_) => unreachable!(),
         ConcreteDataType::List(_) => unreachable!(),
@@ -488,9 +516,9 @@ mod tests {
             build_create_expr_from_insertion("", "", table_id, table_name, &insert_batch.0)
                 .unwrap();
 
-        assert_eq!(table_id, create_expr.table_id);
+        assert_eq!(table_id, create_expr.table_id.map(|x| x.id));
         assert_eq!(table_name, create_expr.table_name);
-        assert_eq!(Some("Created on insertion".to_string()), create_expr.desc);
+        assert_eq!("Created on insertion".to_string(), create_expr.desc);
         assert_eq!(
             vec![create_expr.column_defs[0].name.clone()],
             create_expr.primary_keys
@@ -543,7 +571,7 @@ mod tests {
         );
 
         assert_eq!(
-            ConcreteDataType::timestamp_millis_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
                     column_defs
@@ -624,8 +652,8 @@ mod tests {
         assert_eq!(Value::Float64(0.1.into()), memory.get(1));
 
         let ts = insert_req.columns_values.get("ts").unwrap();
-        assert_eq!(Value::Timestamp(Timestamp::from_millis(100)), ts.get(0));
-        assert_eq!(Value::Timestamp(Timestamp::from_millis(101)), ts.get(1));
+        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(100)), ts.get(0));
+        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(101)), ts.get(1));
     }
 
     #[test]
@@ -675,8 +703,12 @@ mod tests {
                 ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
                 ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
                 ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                ColumnSchema::new("ts", ConcreteDataType::timestamp_millis_datatype(), true)
-                    .with_time_index(true),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    true,
+                )
+                .with_time_index(true),
             ];
 
             Arc::new(
@@ -741,7 +773,7 @@ mod tests {
         };
 
         let ts_vals = column::Values {
-            ts_millis_values: vec![100, 101],
+            ts_millisecond_values: vec![100, 101],
             ..Default::default()
         };
         let ts_column = Column {
@@ -749,7 +781,7 @@ mod tests {
             semantic_type: TIMESTAMP_SEMANTIC_TYPE,
             values: Some(ts_vals),
             null_mask: vec![0],
-            datatype: ColumnDataType::Timestamp as i32,
+            datatype: ColumnDataType::TimestampMillisecond as i32,
         };
 
         (

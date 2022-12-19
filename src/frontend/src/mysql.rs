@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use servers::tls::TlsOption;
 
@@ -22,7 +20,7 @@ pub struct MysqlOptions {
     pub addr: String,
     pub runtime_size: usize,
     #[serde(default = "Default::default")]
-    pub tls: Arc<TlsOption>,
+    pub tls: TlsOption,
 }
 
 impl Default for MysqlOptions {
@@ -30,7 +28,7 @@ impl Default for MysqlOptions {
         Self {
             addr: "127.0.0.1:4002".to_string(),
             runtime_size: 2,
-            tls: Arc::new(TlsOption::default()),
+            tls: TlsOption::default(),
         }
     }
 }

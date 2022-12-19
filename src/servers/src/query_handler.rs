@@ -19,6 +19,7 @@ use api::v1::{AdminExpr, AdminResult, ObjectExpr, ObjectResult};
 use async_trait::async_trait;
 use common_query::Output;
 use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
@@ -42,10 +43,17 @@ pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + S
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PrometheusProtocolHandlerRef = Arc<dyn PrometheusProtocolHandler + Send + Sync>;
 pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
+pub type CatalogHandlerRef = Arc<dyn CatalogHandler + Send + Sync>;
 
 #[async_trait]
 pub trait SqlQueryHandler {
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Result<Output>;
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>>;
+
+    async fn do_statement_query(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output>;
 }
 
 #[async_trait]
@@ -92,4 +100,9 @@ pub trait PrometheusProtocolHandler {
     async fn read(&self, database: &str, request: ReadRequest) -> Result<PrometheusResponse>;
     /// Handling push gateway requests
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
+}
+
+pub trait CatalogHandler {
+    /// check if schema is valid
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool>;
 }

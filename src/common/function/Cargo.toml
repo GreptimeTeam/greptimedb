@@ -11,7 +11,7 @@ common-error = { path = "../error" }
 common-function-macro = { path = "../function-macro" }
 common-query = { path = "../query" }
 common-time = { path = "../time" }
-datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", branch = "arrow2" }
+datafusion-common = "14.0.0"
 datatypes = { path = "../../datatypes" }
 libc = "0.2"
 num = "0.4"

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{
-    BooleanVector, Float64Vector, StringVector, TimestampVector, UInt64Vector,
+    BooleanVector, Float64Vector, StringVector, TimestampMillisecondVector, UInt64Vector,
 };
 use rand::Rng;
 use storage::proto;
@@ -31,7 +31,7 @@ pub fn new_test_batch() -> WriteBatch {
         &[
             ("k1", LogicalTypeId::UInt64, false),
             (consts::VERSION_COLUMN_NAME, LogicalTypeId::UInt64, false),
-            ("ts", LogicalTypeId::Timestamp, false),
+            ("ts", LogicalTypeId::TimestampMillisecond, false),
             ("v1", LogicalTypeId::Boolean, true),
             ("4", LogicalTypeId::Float64, false),
             ("5", LogicalTypeId::Float64, false),
@@ -71,7 +71,7 @@ pub fn gen_new_batch_and_types(putdate_nums: usize) -> (WriteBatch, Vec<i32>) {
         rng.fill(&mut fvs[..]);
         let intv = Arc::new(UInt64Vector::from_slice(&intvs));
         let boolv = Arc::new(BooleanVector::from(boolvs.to_vec()));
-        let tsv = Arc::new(TimestampVector::from_values(tsvs));
+        let tsv = Arc::new(TimestampMillisecondVector::from_values(tsvs));
         let fvs = Arc::new(Float64Vector::from_slice(&fvs));
         let svs = Arc::new(StringVector::from_slice(&svs));
         let mut put_data = PutData::default();

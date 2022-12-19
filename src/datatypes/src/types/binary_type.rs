@@ -53,4 +53,8 @@ impl DataType for BinaryType {
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(BinaryVectorBuilder::with_capacity(capacity))
     }
+
+    fn is_timestamp_compatible(&self) -> bool {
+        false
+    }
 }

@@ -22,13 +22,18 @@ use common_error::prelude::*;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::{ScalarVector, ScalarVectorBuilder};
 use datatypes::schema;
+use datatypes::types::TimestampType;
 use datatypes::vectors::{
-    BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, Float32Vector,
-    Float32VectorBuilder, Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder,
-    Int32Vector, Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector,
-    Int8VectorBuilder, StringVector, StringVectorBuilder, TimestampVector, TimestampVectorBuilder,
-    UInt16Vector, UInt16VectorBuilder, UInt32Vector, UInt32VectorBuilder, UInt64Vector,
-    UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder, Vector, VectorRef,
+    BinaryVector, BinaryVectorBuilder, BooleanVector, BooleanVectorBuilder, DateTimeVector,
+    DateTimeVectorBuilder, DateVector, DateVectorBuilder, Float32Vector, Float32VectorBuilder,
+    Float64Vector, Float64VectorBuilder, Int16Vector, Int16VectorBuilder, Int32Vector,
+    Int32VectorBuilder, Int64Vector, Int64VectorBuilder, Int8Vector, Int8VectorBuilder,
+    StringVector, StringVectorBuilder, TimestampMicrosecondVector,
+    TimestampMicrosecondVectorBuilder, TimestampMillisecondVector,
+    TimestampMillisecondVectorBuilder, TimestampNanosecondVector, TimestampNanosecondVectorBuilder,
+    TimestampSecondVector, TimestampSecondVectorBuilder, UInt16Vector, UInt16VectorBuilder,
+    UInt32Vector, UInt32VectorBuilder, UInt64Vector, UInt64VectorBuilder, UInt8Vector,
+    UInt8VectorBuilder, Vector, VectorRef,
 };
 use paste::paste;
 use snafu::OptionExt;
@@ -148,7 +153,12 @@ impl From<&ConcreteDataType> for DataType {
             ConcreteDataType::String(_) => DataType::String,
             ConcreteDataType::Null(_) => DataType::Null,
             ConcreteDataType::Binary(_) => DataType::Binary,
-            ConcreteDataType::Timestamp(_) => DataType::Timestamp,
+            ConcreteDataType::Timestamp(unit) => match unit {
+                TimestampType::Second(_) => DataType::TimestampSecond,
+                TimestampType::Millisecond(_) => DataType::TimestampMillisecond,
+                TimestampType::Microsecond(_) => DataType::TimestampMicrosecond,
+                TimestampType::Nanosecond(_) => DataType::TimestampNanosecond,
+            },
             ConcreteDataType::Date(_)
             | ConcreteDataType::DateTime(_)
             | ConcreteDataType::List(_) => {
@@ -176,7 +186,12 @@ impl From<DataType> for ConcreteDataType {
             DataType::String => ConcreteDataType::string_datatype(),
             DataType::Binary => ConcreteDataType::binary_datatype(),
             DataType::Null => ConcreteDataType::null_datatype(),
-            DataType::Timestamp => ConcreteDataType::timestamp_millis_datatype(),
+            DataType::Date => ConcreteDataType::date_datatype(),
+            DataType::Datetime => ConcreteDataType::datetime_datatype(),
+            DataType::TimestampSecond => ConcreteDataType::timestamp_second_datatype(),
+            DataType::TimestampMillisecond => ConcreteDataType::timestamp_millisecond_datatype(),
+            DataType::TimestampMicrosecond => ConcreteDataType::timestamp_microsecond_datatype(),
+            DataType::TimestampNanosecond => ConcreteDataType::timestamp_nanosecond_datatype(),
         }
     }
 }
@@ -239,7 +254,12 @@ gen_columns!(f64, Float64Vector, v, v);
 gen_columns!(bool, BooleanVector, v, v);
 gen_columns!(binary, BinaryVector, v, v.to_vec());
 gen_columns!(string, StringVector, v, v.to_string());
-gen_columns!(timestamp, TimestampVector, v, v.value());
+gen_columns!(date, DateVector, v, v.val());
+gen_columns!(datetime, DateTimeVector, v, v.val());
+gen_columns!(ts_second, TimestampSecondVector, v, v.into());
+gen_columns!(ts_millisecond, TimestampMillisecondVector, v, v.into());
+gen_columns!(ts_microsecond, TimestampMicrosecondVector, v, v.into());
+gen_columns!(ts_nanosecond, TimestampNanosecondVector, v, v.into());
 
 #[macro_export]
 macro_rules! gen_put_data {
@@ -287,7 +307,27 @@ gen_put_data!(f64, Float64VectorBuilder, v, *v as f64);
 gen_put_data!(bool, BooleanVectorBuilder, v, *v);
 gen_put_data!(binary, BinaryVectorBuilder, v, v.as_slice());
 gen_put_data!(string, StringVectorBuilder, v, v.as_str());
-gen_put_data!(timestamp, TimestampVectorBuilder, v, (*v).into());
+gen_put_data!(date, DateVectorBuilder, v, (*v).into());
+gen_put_data!(datetime, DateTimeVectorBuilder, v, (*v).into());
+gen_put_data!(ts_second, TimestampSecondVectorBuilder, v, (*v).into());
+gen_put_data!(
+    ts_millisecond,
+    TimestampMillisecondVectorBuilder,
+    v,
+    (*v).into()
+);
+gen_put_data!(
+    ts_microsecond,
+    TimestampMicrosecondVectorBuilder,
+    v,
+    (*v).into()
+);
+gen_put_data!(
+    ts_nanosecond,
+    TimestampNanosecondVectorBuilder,
+    v,
+    (*v).into()
+);
 
 pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
     let data_type = vector.data_type();
@@ -305,11 +345,15 @@ pub fn gen_columns(vector: &VectorRef) -> Result<Column> {
         ConcreteDataType::Float64(_) => gen_columns_f64(vector),
         ConcreteDataType::Binary(_) => gen_columns_binary(vector),
         ConcreteDataType::String(_) => gen_columns_string(vector),
-        ConcreteDataType::Timestamp(_) => gen_columns_timestamp(vector),
-        ConcreteDataType::Null(_)
-        | ConcreteDataType::Date(_)
-        | ConcreteDataType::DateTime(_)
-        | ConcreteDataType::List(_) => {
+        ConcreteDataType::Date(_) => gen_columns_date(vector),
+        ConcreteDataType::DateTime(_) => gen_columns_datetime(vector),
+        ConcreteDataType::Timestamp(t) => match t {
+            TimestampType::Second(_) => gen_columns_ts_second(vector),
+            TimestampType::Millisecond(_) => gen_columns_ts_millisecond(vector),
+            TimestampType::Microsecond(_) => gen_columns_ts_microsecond(vector),
+            TimestampType::Nanosecond(_) => gen_columns_ts_nanosecond(vector),
+        },
+        ConcreteDataType::Null(_) | ConcreteDataType::List(_) => {
             // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
             unimplemented!("data type {:?} is not supported", data_type)
         }
@@ -331,11 +375,15 @@ pub fn gen_put_data_vector(data_type: ConcreteDataType, column: Column) -> Resul
         ConcreteDataType::Float64(_) => gen_put_data_f64(column),
         ConcreteDataType::Binary(_) => gen_put_data_binary(column),
         ConcreteDataType::String(_) => gen_put_data_string(column),
-        ConcreteDataType::Timestamp(_) => gen_put_data_timestamp(column),
-        ConcreteDataType::Null(_)
-        | ConcreteDataType::Date(_)
-        | ConcreteDataType::DateTime(_)
-        | ConcreteDataType::List(_) => {
+        ConcreteDataType::Date(_) => gen_put_data_date(column),
+        ConcreteDataType::DateTime(_) => gen_put_data_datetime(column),
+        ConcreteDataType::Timestamp(t) => match t {
+            TimestampType::Second(_) => gen_put_data_ts_second(column),
+            TimestampType::Millisecond(_) => gen_put_data_ts_millisecond(column),
+            TimestampType::Microsecond(_) => gen_put_data_ts_microsecond(column),
+            TimestampType::Nanosecond(_) => gen_put_data_ts_nanosecond(column),
+        },
+        ConcreteDataType::Null(_) | ConcreteDataType::List(_) => {
             // TODO(jiachun): Maybe support some composite types in the future, such as list, struct, etc.
             unimplemented!("data type {:?} is not supported", data_type)
         }

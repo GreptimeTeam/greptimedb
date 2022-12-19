@@ -15,9 +15,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use common_time::Timestamp;
 use datatypes::prelude::*;
-use datatypes::vectors::{Int64Vector, TimestampVector};
+use datatypes::timestamp::TimestampMillisecond;
+use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
 use log_store::fs::log::LocalFileLogStore;
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
@@ -53,7 +53,7 @@ struct AlterTester {
 #[derive(Debug, Clone, PartialEq)]
 struct DataRow {
     key: Option<i64>,
-    ts: Timestamp,
+    ts: TimestampMillisecond,
     v0: Option<i64>,
     v1: Option<i64>,
 }
@@ -71,11 +71,14 @@ impl DataRow {
 
 fn new_put_data(data: &[DataRow]) -> PutData {
     let mut put_data = PutData::with_num_columns(4);
-
-    let keys = Int64Vector::from_iter(data.iter().map(|v| v.key));
-    let timestamps = TimestampVector::from_vec(data.iter().map(|v| v.ts).collect());
-    let values1 = Int64Vector::from_iter(data.iter().map(|kv| kv.v0));
-    let values2 = Int64Vector::from_iter(data.iter().map(|kv| kv.v1));
+    let keys = Int64Vector::from(data.iter().map(|v| v.key).collect::<Vec<_>>());
+    let timestamps = TimestampMillisecondVector::from(
+        data.iter()
+            .map(|v| Some(v.ts.into_native()))
+            .collect::<Vec<_>>(),
+    );
+    let values1 = Int64Vector::from(data.iter().map(|kv| kv.v0).collect::<Vec<_>>());
+    let values2 = Int64Vector::from(data.iter().map(|kv| kv.v1).collect::<Vec<_>>());
 
     put_data.add_key_column("k0", Arc::new(keys)).unwrap();
     put_data
@@ -193,7 +196,7 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<DataRow>) {
         .unwrap();
     let ts_vector = chunk.columns[1]
         .as_any()
-        .downcast_ref::<TimestampVector>()
+        .downcast_ref::<TimestampMillisecondVector>()
         .unwrap();
     let v0_vector = chunk.columns[2]
         .as_any()
@@ -206,7 +209,7 @@ fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<DataRow>) {
     for i in 0..k0_vector.len() {
         dst.push(DataRow::new(
             k0_vector.get_data(i),
-            ts_vector.get_data(i).unwrap().value(),
+            ts_vector.get_data(i).unwrap().into(),
             v0_vector.get_data(i),
             v1_vector.get_data(i),
         ));

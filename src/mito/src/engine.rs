@@ -519,13 +519,14 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
 #[cfg(test)]
 mod tests {
-    use common_query::physical_plan::RuntimeEnv;
+    use common_query::physical_plan::SessionContext;
     use common_recordbatch::util;
-    use datafusion_common::field_util::{FieldExt, SchemaExt};
-    use datatypes::prelude::{ConcreteDataType, ScalarVector};
+    use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder};
     use datatypes::value::Value;
-    use datatypes::vectors::*;
+    use datatypes::vectors::{
+        Float64Vector, Int32Vector, StringVector, TimestampMillisecondVector, VectorRef,
+    };
     use log_store::fs::noop::NoopLogStore;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
@@ -600,30 +601,29 @@ mod tests {
         let (_dir, table_name, table) = setup_table_with_column_default_constraint().await;
 
         let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
-        let names = StringVector::from(vec!["first", "second"]);
-        let tss = TimestampVector::from_vec(vec![1, 2]);
+        let names: VectorRef = Arc::new(StringVector::from(vec!["first", "second"]));
+        let tss: VectorRef = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 2]));
 
-        columns_values.insert("name".to_string(), Arc::new(names.clone()));
-        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
+        columns_values.insert("name".to_string(), names.clone());
+        columns_values.insert("ts".to_string(), tss.clone());
 
         let insert_req = new_insert_request(table_name.to_string(), columns_values);
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
+        let session_ctx = SessionContext::new();
         let stream = table.scan(&None, &[], None).await.unwrap();
-        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
+        let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
 
-        let record = &batches[0].df_recordbatch;
+        let record = &batches[0];
         assert_eq!(record.num_columns(), 3);
-        let columns = record.columns();
-        assert_eq!(3, columns.len());
-        assert_eq!(names.to_arrow_array(), columns[0]);
+        assert_eq!(names, *record.column(0));
         assert_eq!(
-            Int32Vector::from_vec(vec![42, 42]).to_arrow_array(),
-            columns[1]
+            Arc::new(Int32Vector::from_vec(vec![42, 42])) as VectorRef,
+            *record.column(1)
         );
-        assert_eq!(tss.to_arrow_array(), columns[2]);
+        assert_eq!(tss, *record.column(2));
     }
 
     #[tokio::test]
@@ -631,29 +631,28 @@ mod tests {
         let (_dir, table_name, table) = setup_table_with_column_default_constraint().await;
 
         let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
-        let names = StringVector::from(vec!["first", "second"]);
-        let nums = Int32Vector::from(vec![None, Some(66)]);
-        let tss = TimestampVector::from_vec(vec![1, 2]);
+        let names: VectorRef = Arc::new(StringVector::from(vec!["first", "second"]));
+        let nums: VectorRef = Arc::new(Int32Vector::from(vec![None, Some(66)]));
+        let tss: VectorRef = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 2]));
 
-        columns_values.insert("name".to_string(), Arc::new(names.clone()));
-        columns_values.insert("n".to_string(), Arc::new(nums.clone()));
-        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
+        columns_values.insert("name".to_string(), names.clone());
+        columns_values.insert("n".to_string(), nums.clone());
+        columns_values.insert("ts".to_string(), tss.clone());
 
         let insert_req = new_insert_request(table_name.to_string(), columns_values);
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
+        let session_ctx = SessionContext::new();
         let stream = table.scan(&None, &[], None).await.unwrap();
-        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
+        let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
 
-        let record = &batches[0].df_recordbatch;
+        let record = &batches[0];
         assert_eq!(record.num_columns(), 3);
-        let columns = record.columns();
-        assert_eq!(3, columns.len());
-        assert_eq!(names.to_arrow_array(), columns[0]);
-        assert_eq!(nums.to_arrow_array(), columns[1]);
-        assert_eq!(tss.to_arrow_array(), columns[2]);
+        assert_eq!(names, *record.column(0));
+        assert_eq!(nums, *record.column(1));
+        assert_eq!(tss, *record.column(2));
     }
 
     #[test]
@@ -724,73 +723,73 @@ mod tests {
         assert_eq!(0, table.insert(insert_req).await.unwrap());
 
         let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
-        let hosts = StringVector::from(vec!["host1", "host2"]);
-        let cpus = Float64Vector::from_vec(vec![55.5, 66.6]);
-        let memories = Float64Vector::from_vec(vec![1024f64, 4096f64]);
-        let tss = TimestampVector::from_vec(vec![1, 2]);
+        let hosts: VectorRef = Arc::new(StringVector::from(vec!["host1", "host2"]));
+        let cpus: VectorRef = Arc::new(Float64Vector::from_vec(vec![55.5, 66.6]));
+        let memories: VectorRef = Arc::new(Float64Vector::from_vec(vec![1024f64, 4096f64]));
+        let tss: VectorRef = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 2]));
 
-        columns_values.insert("host".to_string(), Arc::new(hosts.clone()));
-        columns_values.insert("cpu".to_string(), Arc::new(cpus.clone()));
-        columns_values.insert("memory".to_string(), Arc::new(memories.clone()));
-        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
+        columns_values.insert("host".to_string(), hosts.clone());
+        columns_values.insert("cpu".to_string(), cpus.clone());
+        columns_values.insert("memory".to_string(), memories.clone());
+        columns_values.insert("ts".to_string(), tss.clone());
 
         let insert_req = new_insert_request("demo".to_string(), columns_values);
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
+        let session_ctx = SessionContext::new();
         let stream = table.scan(&None, &[], None).await.unwrap();
-        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
+        let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
-        assert_eq!(batches[0].df_recordbatch.num_columns(), 4);
+        assert_eq!(batches[0].num_columns(), 4);
 
-        let arrow_schema = batches[0].schema.arrow_schema();
-        assert_eq!(arrow_schema.fields().len(), 4);
+        let batch_schema = &batches[0].schema;
+        assert_eq!(batch_schema.num_columns(), 4);
+        assert_eq!(batch_schema.column_schemas()[0].name, "host");
+        assert_eq!(batch_schema.column_schemas()[1].name, "cpu");
+        assert_eq!(batch_schema.column_schemas()[2].name, "memory");
+        assert_eq!(batch_schema.column_schemas()[3].name, "ts");
 
-        assert_eq!(arrow_schema.field(0).name(), "host");
-        assert_eq!(arrow_schema.field(1).name(), "cpu");
-        assert_eq!(arrow_schema.field(2).name(), "memory");
-        assert_eq!(arrow_schema.field(3).name(), "ts");
-
-        let columns = batches[0].df_recordbatch.columns();
-        assert_eq!(4, columns.len());
-        assert_eq!(hosts.to_arrow_array(), columns[0]);
-        assert_eq!(cpus.to_arrow_array(), columns[1]);
-        assert_eq!(memories.to_arrow_array(), columns[2]);
-        assert_eq!(tss.to_arrow_array(), columns[3]);
+        let batch = &batches[0];
+        assert_eq!(4, batch.num_columns());
+        assert_eq!(hosts, *batch.column(0));
+        assert_eq!(cpus, *batch.column(1));
+        assert_eq!(memories, *batch.column(2));
+        assert_eq!(tss, *batch.column(3));
 
         // Scan with projections: cpu and memory
         let stream = table.scan(&Some(vec![1, 2]), &[], None).await.unwrap();
-        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
+        let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
-        assert_eq!(batches[0].df_recordbatch.num_columns(), 2);
+        assert_eq!(batches[0].num_columns(), 2);
 
-        let arrow_schema = batches[0].schema.arrow_schema();
-        assert_eq!(arrow_schema.fields().len(), 2);
+        let batch_schema = &batches[0].schema;
+        assert_eq!(batch_schema.num_columns(), 2);
 
-        assert_eq!(arrow_schema.field(0).name(), "cpu");
-        assert_eq!(arrow_schema.field(1).name(), "memory");
+        assert_eq!(batch_schema.column_schemas()[0].name, "cpu");
+        assert_eq!(batch_schema.column_schemas()[1].name, "memory");
 
-        let columns = batches[0].df_recordbatch.columns();
-        assert_eq!(2, columns.len());
-        assert_eq!(cpus.to_arrow_array(), columns[0]);
-        assert_eq!(memories.to_arrow_array(), columns[1]);
+        let batch = &batches[0];
+        assert_eq!(2, batch.num_columns());
+        assert_eq!(cpus, *batch.column(0));
+        assert_eq!(memories, *batch.column(1));
 
         // Scan with projections: only ts
         let stream = table.scan(&Some(vec![3]), &[], None).await.unwrap();
-        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
+        let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
-        assert_eq!(batches[0].df_recordbatch.num_columns(), 1);
+        assert_eq!(batches[0].num_columns(), 1);
 
-        let arrow_schema = batches[0].schema.arrow_schema();
-        assert_eq!(arrow_schema.fields().len(), 1);
+        let batch_schema = &batches[0].schema;
+        assert_eq!(batch_schema.num_columns(), 1);
 
-        assert_eq!(arrow_schema.field(0).name(), "ts");
+        assert_eq!(batch_schema.column_schemas()[0].name, "ts");
 
-        let columns = batches[0].df_recordbatch.columns();
-        assert_eq!(1, columns.len());
-        assert_eq!(tss.to_arrow_array(), columns[0]);
+        let record = &batches[0];
+        assert_eq!(1, record.num_columns());
+        assert_eq!(tss, *record.column(0));
     }
 
     #[tokio::test]
@@ -804,28 +803,31 @@ mod tests {
         // Insert more than batch size rows to the table.
         let test_batch_size = default_batch_size * 4;
         let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
-        let hosts = StringVector::from(vec!["host1"; test_batch_size]);
-        let cpus = Float64Vector::from_vec(vec![55.5; test_batch_size]);
-        let memories = Float64Vector::from_vec(vec![1024f64; test_batch_size]);
-        let tss = TimestampVector::from_values((0..test_batch_size).map(|v| v as i64));
+        let hosts: VectorRef = Arc::new(StringVector::from(vec!["host1"; test_batch_size]));
+        let cpus: VectorRef = Arc::new(Float64Vector::from_vec(vec![55.5; test_batch_size]));
+        let memories: VectorRef = Arc::new(Float64Vector::from_vec(vec![1024f64; test_batch_size]));
+        let tss: VectorRef = Arc::new(TimestampMillisecondVector::from_values(
+            (0..test_batch_size).map(|v| v as i64),
+        ));
 
-        columns_values.insert("host".to_string(), Arc::new(hosts));
-        columns_values.insert("cpu".to_string(), Arc::new(cpus));
-        columns_values.insert("memory".to_string(), Arc::new(memories));
-        columns_values.insert("ts".to_string(), Arc::new(tss.clone()));
+        columns_values.insert("host".to_string(), hosts);
+        columns_values.insert("cpu".to_string(), cpus);
+        columns_values.insert("memory".to_string(), memories);
+        columns_values.insert("ts".to_string(), tss.clone());
 
         let insert_req = new_insert_request("demo".to_string(), columns_values);
         assert_eq!(test_batch_size, table.insert(insert_req).await.unwrap());
 
+        let session_ctx = SessionContext::new();
         let stream = table.scan(&None, &[], None).await.unwrap();
-        let stream = stream.execute(0, Arc::new(RuntimeEnv::default())).unwrap();
+        let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         let mut total = 0;
         for batch in batches {
-            assert_eq!(batch.df_recordbatch.num_columns(), 4);
-            let ts = batch.df_recordbatch.column(3);
+            assert_eq!(batch.num_columns(), 4);
+            let ts = batch.column(3);
             let expect = tss.slice(total, ts.len());
-            assert_eq!(expect.to_arrow_array(), *ts);
+            assert_eq!(expect, *ts);
             total += ts.len();
         }
         assert_eq!(test_batch_size, total);

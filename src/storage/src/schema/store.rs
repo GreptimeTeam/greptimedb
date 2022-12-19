@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_error::prelude::*;
-use datatypes::arrow::array::Array;
-use datatypes::arrow::chunk::Chunk as ArrowChunk;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
-use datatypes::schema::{Metadata, Schema, SchemaBuilder, SchemaRef};
+use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::schema::{Schema, SchemaBuilder, SchemaRef};
 use store_api::storage::consts;
 
+use crate::error::NewRecordBatchSnafu;
 use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, Error, Result};
 use crate::read::Batch;
 
@@ -31,7 +32,7 @@ const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
 ///
 /// Used internally, contains all row key columns, internal columns and a sub set of
 /// value columns in a region. The columns are organized in `key, value, internal` order.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct StoreSchema {
     columns: Vec<ColumnMetadata>,
     schema: SchemaRef,
@@ -57,10 +58,16 @@ impl StoreSchema {
         self.schema.arrow_schema()
     }
 
-    pub fn batch_to_arrow_chunk(&self, batch: &Batch) -> ArrowChunk<Arc<dyn Array>> {
-        assert_eq!(self.schema.num_columns(), batch.num_columns());
-
-        ArrowChunk::new(batch.columns().iter().map(|v| v.to_arrow_array()).collect())
+    pub fn batch_to_arrow_record_batch(
+        &self,
+        batch: &Batch,
+    ) -> std::result::Result<RecordBatch, crate::error::Error> {
+        assert_eq!(self.schema.num_columns(), batch.num_columns(),);
+        RecordBatch::try_new(
+            self.schema.arrow_schema().clone(),
+            batch.columns().iter().map(|v| v.to_arrow_array()).collect(),
+        )
+        .context(NewRecordBatchSnafu)
     }
 
     pub(crate) fn contains_column(&self, name: &str) -> bool {
@@ -181,10 +188,10 @@ impl StoreSchema {
     }
 }
 
-impl TryFrom<ArrowSchema> for StoreSchema {
+impl TryFrom<Arc<ArrowSchema>> for StoreSchema {
     type Error = Error;
 
-    fn try_from(arrow_schema: ArrowSchema) -> Result<StoreSchema> {
+    fn try_from(arrow_schema: Arc<ArrowSchema>) -> std::result::Result<Self, Self::Error> {
         let schema = Schema::try_from(arrow_schema).context(metadata::ConvertArrowSchemaSnafu)?;
         // Recover other metadata from schema.
         let row_key_end = parse_index_from_metadata(schema.metadata(), ROW_KEY_END_KEY)?;
@@ -216,7 +223,15 @@ impl TryFrom<ArrowSchema> for StoreSchema {
     }
 }
 
-fn parse_index_from_metadata(metadata: &Metadata, key: &str) -> Result<usize> {
+impl TryFrom<ArrowSchema> for StoreSchema {
+    type Error = Error;
+
+    fn try_from(arrow_schema: ArrowSchema) -> std::result::Result<StoreSchema, Self::Error> {
+        StoreSchema::try_from(Arc::new(arrow_schema))
+    }
+}
+
+fn parse_index_from_metadata(metadata: &HashMap<String, String>, key: &str) -> Result<usize> {
     let value = metadata
         .get(key)
         .context(metadata::MetaNotFoundSnafu { key })?;
@@ -227,20 +242,17 @@ fn parse_index_from_metadata(metadata: &Metadata, key: &str) -> Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use datatypes::arrow::array::Array;
-    use datatypes::arrow::chunk::Chunk as ArrowChunk;
-
     use super::*;
     use crate::read::Batch;
     use crate::schema::tests;
     use crate::test_util::schema_util;
 
-    fn check_chunk_batch(chunk: &ArrowChunk<Arc<dyn Array>>, batch: &Batch) {
-        assert_eq!(5, chunk.columns().len());
-        assert_eq!(3, chunk.len());
+    fn check_chunk_batch(record_batch: &RecordBatch, batch: &Batch) {
+        assert_eq!(5, record_batch.num_columns());
+        assert_eq!(3, record_batch.num_rows());
 
         for i in 0..5 {
-            assert_eq!(chunk[i], batch.column(i).to_arrow_array());
+            assert_eq!(record_batch.column(i), &batch.column(i).to_arrow_array());
         }
     }
 
@@ -280,7 +292,7 @@ mod tests {
         // Test batch and chunk conversion.
         let batch = tests::new_batch();
         // Convert batch to chunk.
-        let chunk = store_schema.batch_to_arrow_chunk(&batch);
+        let chunk = store_schema.batch_to_arrow_record_batch(&batch).unwrap();
         check_chunk_batch(&chunk, &batch);
     }
 }

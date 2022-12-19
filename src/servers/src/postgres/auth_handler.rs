@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use async_trait::async_trait;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
 use pgwire::api::{auth, ClientInfo, PgWireConnectionState};
@@ -28,6 +29,7 @@ use snafu::ResultExt;
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error;
 use crate::error::Result;
+use crate::query_handler::CatalogHandlerRef;
 
 struct PgPwdVerifier {
     user_provider: Option<UserProviderRef>,
@@ -108,14 +110,20 @@ pub struct PgAuthStartupHandler {
     verifier: PgPwdVerifier,
     param_provider: GreptimeDBStartupParameters,
     force_tls: bool,
+    catalog_handler: CatalogHandlerRef,
 }
 
 impl PgAuthStartupHandler {
-    pub fn new(user_provider: Option<UserProviderRef>, force_tls: bool) -> Self {
+    pub fn new(
+        user_provider: Option<UserProviderRef>,
+        force_tls: bool,
+        catalog_handler: CatalogHandlerRef,
+    ) -> Self {
         PgAuthStartupHandler {
             verifier: PgPwdVerifier { user_provider },
             param_provider: GreptimeDBStartupParameters::new(),
             force_tls,
+            catalog_handler,
         }
     }
 }
@@ -134,21 +142,42 @@ impl StartupHandler for PgAuthStartupHandler {
     {
         match message {
             PgWireFrontendMessage::Startup(ref startup) => {
+                // check ssl requirement
                 if !client.is_secure() && self.force_tls {
-                    let error_info = ErrorInfo::new(
-                        "FATAL".to_owned(),
-                        "28000".to_owned(),
-                        "No encryption".to_owned(),
-                    );
-                    let error = ErrorResponse::from(error_info);
-
-                    client
-                        .feed(PgWireBackendMessage::ErrorResponse(error))
-                        .await?;
-                    client.close().await?;
+                    send_error(client, "FATAL", "28000", "No encryption".to_owned()).await?;
                     return Ok(());
                 }
+
                 auth::save_startup_parameters_to_metadata(client, startup);
+
+                // check if db is valid
+                let db_ref = client.metadata().get(super::METADATA_DATABASE);
+                if let Some(db) = db_ref {
+                    if !self
+                        .catalog_handler
+                        .is_valid_schema(DEFAULT_CATALOG_NAME, db)
+                        .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+                    {
+                        send_error(
+                            client,
+                            "FATAL",
+                            "3D000",
+                            format!("Database not found: {}", db),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                } else {
+                    send_error(
+                        client,
+                        "FATAL",
+                        "3D000",
+                        "Database not specified".to_owned(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+
                 if self.verifier.user_provider.is_some() {
                     client.set_state(PgWireConnectionState::AuthenticationInProgress);
                     client
@@ -165,21 +194,31 @@ impl StartupHandler for PgAuthStartupHandler {
                 if let Ok(true) = self.verifier.verify_pwd(pwd.password(), login_info).await {
                     auth::finish_authentication(client, &self.param_provider).await
                 } else {
-                    let error_info = ErrorInfo::new(
-                        "FATAL".to_owned(),
-                        "28P01".to_owned(),
+                    send_error(
+                        client,
+                        "FATAL",
+                        "28P01",
                         "Password authentication failed".to_owned(),
-                    );
-                    let error = ErrorResponse::from(error_info);
-
-                    client
-                        .feed(PgWireBackendMessage::ErrorResponse(error))
-                        .await?;
-                    client.close().await?;
+                    )
+                    .await?;
                 }
             }
             _ => {}
         }
         Ok(())
     }
+}
+
+async fn send_error<C>(client: &mut C, level: &str, code: &str, message: String) -> PgWireResult<()>
+where
+    C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
+    C::Error: Debug,
+    PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+{
+    let error = ErrorResponse::from(ErrorInfo::new(level.to_owned(), code.to_owned(), message));
+    client
+        .feed(PgWireBackendMessage::ErrorResponse(error))
+        .await?;
+    client.close().await?;
+    Ok(())
 }

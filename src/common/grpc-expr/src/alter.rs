@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::alter_expr::Kind;
-use api::v1::{AlterExpr, CreateExpr, DropColumns};
+use api::v1::{AlterExpr, CreateTableExpr, DropColumns};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -29,6 +29,16 @@ use crate::error::{
 
 /// Convert an [`AlterExpr`] to an optional [`AlterTableRequest`]
 pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
+    let catalog_name = if expr.catalog_name.is_empty() {
+        None
+    } else {
+        Some(expr.catalog_name)
+    };
+    let schema_name = if expr.schema_name.is_empty() {
+        None
+    } else {
+        Some(expr.schema_name)
+    };
     match expr.kind {
         Some(Kind::AddColumns(add_columns)) => {
             let add_column_requests = add_columns
@@ -57,8 +67,8 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
             };
 
             let request = AlterTableRequest {
-                catalog_name: expr.catalog_name,
-                schema_name: expr.schema_name,
+                catalog_name,
+                schema_name,
                 table_name: expr.table_name,
                 alter_kind,
             };
@@ -70,8 +80,8 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
             };
 
             let request = AlterTableRequest {
-                catalog_name: expr.catalog_name,
-                schema_name: expr.schema_name,
+                catalog_name,
+                schema_name,
                 table_name: expr.table_name,
                 alter_kind,
             };
@@ -81,7 +91,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
     }
 }
 
-pub fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
+pub fn create_table_schema(expr: &CreateTableExpr) -> Result<SchemaRef> {
     let column_schemas = expr
         .column_defs
         .iter()
@@ -119,7 +129,10 @@ pub fn create_table_schema(expr: &CreateExpr) -> Result<SchemaRef> {
     ))
 }
 
-pub fn create_expr_to_request(table_id: TableId, expr: CreateExpr) -> Result<CreateTableRequest> {
+pub fn create_expr_to_request(
+    table_id: TableId,
+    expr: CreateTableExpr,
+) -> Result<CreateTableRequest> {
     let schema = create_table_schema(&expr)?;
     let primary_key_indices = expr
         .primary_keys
@@ -134,12 +147,19 @@ pub fn create_expr_to_request(table_id: TableId, expr: CreateExpr) -> Result<Cre
         })
         .collect::<Result<Vec<usize>>>()?;
 
-    let catalog_name = expr
-        .catalog_name
-        .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
-    let schema_name = expr
-        .schema_name
-        .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+    let mut catalog_name = expr.catalog_name;
+    if catalog_name.is_empty() {
+        catalog_name = DEFAULT_CATALOG_NAME.to_string();
+    }
+    let mut schema_name = expr.schema_name;
+    if schema_name.is_empty() {
+        schema_name = DEFAULT_SCHEMA_NAME.to_string();
+    }
+    let desc = if expr.desc.is_empty() {
+        None
+    } else {
+        Some(expr.desc)
+    };
 
     let region_ids = if expr.region_ids.is_empty() {
         vec![0]
@@ -152,7 +172,7 @@ pub fn create_expr_to_request(table_id: TableId, expr: CreateExpr) -> Result<Cre
         catalog_name,
         schema_name,
         table_name: expr.table_name,
-        desc: expr.desc,
+        desc,
         schema,
         region_numbers: region_ids,
         primary_key_indices,
@@ -171,8 +191,8 @@ mod tests {
     #[test]
     fn test_alter_expr_to_request() {
         let expr = AlterExpr {
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: "".to_string(),
+            schema_name: "".to_string(),
             table_name: "monitor".to_string(),
 
             kind: Some(Kind::AddColumns(AddColumns {
@@ -181,7 +201,7 @@ mod tests {
                         name: "mem_usage".to_string(),
                         datatype: ColumnDataType::Float64 as i32,
                         is_nullable: false,
-                        default_constraint: None,
+                        default_constraint: vec![],
                     }),
                     is_key: false,
                 }],
@@ -208,8 +228,8 @@ mod tests {
     #[test]
     fn test_drop_column_expr() {
         let expr = AlterExpr {
-            catalog_name: Some("test_catalog".to_string()),
-            schema_name: Some("test_schema".to_string()),
+            catalog_name: "test_catalog".to_string(),
+            schema_name: "test_schema".to_string(),
             table_name: "monitor".to_string(),
 
             kind: Some(Kind::DropColumns(DropColumns {

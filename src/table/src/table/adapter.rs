@@ -23,7 +23,9 @@ use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::datasource::datasource::TableProviderFilterPushDown as DfTableProviderFilterPushDown;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
-use datafusion::logical_plan::Expr as DfExpr;
+use datafusion::execution::context::SessionState;
+use datafusion::prelude::SessionContext;
+use datafusion_expr::expr::Expr as DfExpr;
 use datatypes::schema::{SchemaRef as TableSchemaRef, SchemaRef};
 use snafu::prelude::*;
 
@@ -66,6 +68,7 @@ impl TableProvider for DfTableProviderAdapter {
 
     async fn scan(
         &self,
+        _ctx: &SessionState,
         projection: &Option<Vec<usize>>,
         filters: &[DfExpr],
         limit: Option<usize>,
@@ -135,11 +138,12 @@ impl Table for TableAdapter {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<PhysicalPlanRef> {
+        let ctx = SessionContext::new();
         let filters: Vec<DfExpr> = filters.iter().map(|e| e.df_expr().clone()).collect();
         debug!("TableScan filter size: {}", filters.len());
         let execution_plan = self
             .table_provider
-            .scan(projection, &filters, limit)
+            .scan(&ctx.state(), projection, &filters, limit)
             .await
             .context(error::DatafusionSnafu)?;
         let schema: SchemaRef = Arc::new(
@@ -168,7 +172,6 @@ impl Table for TableAdapter {
 mod tests {
     use datafusion::arrow;
     use datafusion::datasource::empty::EmptyTable;
-    use datafusion_common::field_util::SchemaExt;
 
     use super::*;
     use crate::metadata::TableType::Base;

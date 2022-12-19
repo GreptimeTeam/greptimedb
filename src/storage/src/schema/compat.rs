@@ -14,11 +14,7 @@
 
 //! Utilities for resolving schema compatibility problems.
 
-use std::sync::Arc;
-
-use datatypes::arrow::array::Array;
-use datatypes::arrow::chunk::Chunk;
-use datatypes::arrow::datatypes::Field;
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -230,36 +226,19 @@ impl ReadAdapter {
         self.source_columns_to_batch(source, num_rows)
     }
 
-    /// Returns list of fields need to read from the parquet file.
-    pub fn fields_to_read(&self) -> Vec<Field> {
-        if !self.need_compat() {
-            return self
-                .dest_schema
-                .schema_to_read()
-                .arrow_schema()
-                .fields
-                .clone();
-        }
-
-        self.source_schema
-            .arrow_schema()
-            .fields
+    /// Returns list of fields indices need to read from the parquet file.
+    pub fn fields_to_read(&self) -> Vec<usize> {
+        self.is_source_needed
             .iter()
-            .zip(self.is_source_needed.iter())
-            .filter_map(|(field, is_needed)| {
-                if *is_needed {
-                    Some(field.clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
+            .enumerate()
+            .filter_map(|(idx, needed)| if *needed { Some(idx) } else { None })
+            .collect::<Vec<_>>()
     }
 
-    /// Convert chunk read from the parquet file into [Batch].
+    /// Convert [RecordBatch] read from the parquet file into [Batch].
     ///
-    /// The chunk should have the same schema as [`ReadAdapter::fields_to_read()`].
-    pub fn arrow_chunk_to_batch(&self, chunk: &Chunk<Arc<dyn Array>>) -> Result<Batch> {
+    /// The [RecordBatch] should have the same schema as [`ReadAdapter::fields_to_read()`].
+    pub fn arrow_record_batch_to_batch(&self, record_batch: &RecordBatch) -> Result<Batch> {
         let names = self
             .source_schema
             .schema()
@@ -273,7 +252,8 @@ impl ReadAdapter {
                     None
                 }
             });
-        let source = chunk
+        let source = record_batch
+            .columns()
             .iter()
             .zip(names)
             .map(|(column, name)| {
@@ -281,11 +261,11 @@ impl ReadAdapter {
             })
             .collect::<Result<_>>()?;
 
-        if !self.need_compat() || chunk.is_empty() {
+        if !self.need_compat() || record_batch.num_rows() == 0 {
             return Ok(Batch::new(source));
         }
 
-        let num_rows = chunk.len();
+        let num_rows = record_batch.num_rows();
         self.source_columns_to_batch(source, num_rows)
     }
 
@@ -323,20 +303,17 @@ impl ReadAdapter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use datatypes::data_type::ConcreteDataType;
-    use store_api::storage::{consts, ColumnDescriptorBuilder};
+    use datatypes::schema::Schema;
+    use store_api::storage::ColumnDescriptorBuilder;
 
     use super::*;
     use crate::error::Error;
     use crate::metadata::RegionMetadata;
     use crate::schema::{tests, ProjectedSchema, RegionSchema};
     use crate::test_util::{descriptor_util, schema_util};
-
-    fn check_fields(fields: &[Field], names: &[&str]) {
-        for (field, name) in fields.iter().zip(names) {
-            assert_eq!(&field.name, name);
-        }
-    }
 
     fn call_batch_from_parts(
         adapter: &ReadAdapter,
@@ -363,9 +340,26 @@ mod tests {
     }
 
     fn call_arrow_chunk_to_batch(adapter: &ReadAdapter, batch: &Batch) -> Batch {
+        let columns_schema = adapter
+            .source_schema
+            .columns()
+            .iter()
+            .zip(adapter.is_source_needed.iter())
+            .filter_map(|(field, is_needed)| {
+                if *is_needed {
+                    Some(field.to_column_schema().unwrap())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let arrow_schema = Schema::try_new(columns_schema)
+            .unwrap()
+            .arrow_schema()
+            .clone();
         let arrays = batch.columns().iter().map(|v| v.to_arrow_array()).collect();
-        let chunk = Chunk::new(arrays);
-        adapter.arrow_chunk_to_batch(&chunk).unwrap()
+        let chunk = RecordBatch::try_new(arrow_schema, arrays).unwrap();
+        adapter.arrow_record_batch_to_batch(&chunk).unwrap()
     }
 
     fn check_arrow_chunk_to_batch_without_padding(adapter: &ReadAdapter, batch: &Batch) {
@@ -404,7 +398,6 @@ mod tests {
         // (k0, timestamp, v0, v1) with version 0.
         let region_schema = Arc::new(schema_util::new_region_schema(0, 2));
         let projected_schema = Arc::new(ProjectedSchema::no_projection(region_schema.clone()));
-
         let source_schema = region_schema.store_schema().clone();
         let adapter = ReadAdapter::new(source_schema, projected_schema).unwrap();
 
@@ -414,17 +407,7 @@ mod tests {
         let batch = tests::new_batch_with_num_values(2);
         check_batch_from_parts_without_padding(&adapter, &batch, 2);
 
-        check_fields(
-            &adapter.fields_to_read(),
-            &[
-                "k0",
-                "timestamp",
-                "v0",
-                "v1",
-                consts::SEQUENCE_COLUMN_NAME,
-                consts::OP_TYPE_COLUMN_NAME,
-            ],
-        );
+        assert_eq!(&adapter.fields_to_read(), &[0, 1, 2, 3, 4, 5],);
 
         check_arrow_chunk_to_batch_without_padding(&adapter, &batch);
     }
@@ -447,16 +430,7 @@ mod tests {
         let batch = tests::new_batch_with_num_values(1);
         check_batch_from_parts_without_padding(&adapter, &batch, 1);
 
-        check_fields(
-            &adapter.fields_to_read(),
-            &[
-                "k0",
-                "timestamp",
-                "v0",
-                consts::SEQUENCE_COLUMN_NAME,
-                consts::OP_TYPE_COLUMN_NAME,
-            ],
-        );
+        assert_eq!(&adapter.fields_to_read(), &[0, 1, 2, 4, 5]);
 
         check_arrow_chunk_to_batch_without_padding(&adapter, &batch);
     }
@@ -481,16 +455,7 @@ mod tests {
         let batch = tests::new_batch_with_num_values(1);
         check_batch_from_parts_without_padding(&adapter, &batch, 1);
 
-        check_fields(
-            &adapter.fields_to_read(),
-            &[
-                "k0",
-                "timestamp",
-                "v0",
-                consts::SEQUENCE_COLUMN_NAME,
-                consts::OP_TYPE_COLUMN_NAME,
-            ],
-        );
+        assert_eq!(&adapter.fields_to_read(), &[0, 1, 2, 3, 4],);
 
         check_arrow_chunk_to_batch_without_padding(&adapter, &batch);
     }
@@ -519,16 +484,7 @@ mod tests {
         // v2 is filled by null.
         check_batch_with_null_padding(&batch, &new_batch, &[3]);
 
-        check_fields(
-            &adapter.fields_to_read(),
-            &[
-                "k0",
-                "timestamp",
-                "v0",
-                consts::SEQUENCE_COLUMN_NAME,
-                consts::OP_TYPE_COLUMN_NAME,
-            ],
-        );
+        assert_eq!(&adapter.fields_to_read(), &[0, 1, 2, 4, 5],);
 
         let new_batch = call_arrow_chunk_to_batch(&adapter, &batch);
         check_batch_with_null_padding(&batch, &new_batch, &[3]);
@@ -567,16 +523,7 @@ mod tests {
         // v0 is filled by null.
         check_batch_with_null_padding(&batch, &new_batch, &[2]);
 
-        check_fields(
-            &adapter.fields_to_read(),
-            &[
-                "k0",
-                "timestamp",
-                "v1",
-                consts::SEQUENCE_COLUMN_NAME,
-                consts::OP_TYPE_COLUMN_NAME,
-            ],
-        );
+        assert_eq!(&adapter.fields_to_read(), &[0, 1, 3, 4, 5],);
 
         let new_batch = call_arrow_chunk_to_batch(&adapter, &batch);
         check_batch_with_null_padding(&batch, &new_batch, &[2]);

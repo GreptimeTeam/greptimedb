@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use datafusion::logical_plan::DFSchemaRef;
+use datafusion::common::DFSchemaRef;
 use substrait_proto::protobuf::extensions::simple_extension_declaration::{
     ExtensionFunction, MappingType,
 };

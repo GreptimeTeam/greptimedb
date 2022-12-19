@@ -17,6 +17,7 @@ use std::any::Any;
 use common_error::prelude::*;
 use common_query::logical_plan::Expr;
 use datafusion_common::ScalarValue;
+use datatypes::prelude::Value;
 use store_api::storage::RegionId;
 
 #[derive(Debug, Snafu)]
@@ -386,6 +387,12 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display("Failed to execute statement, source: {}", source))]
+    ExecuteStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("Failed to do vector computation, source: {}", source))]
     VectorComputation {
         #[snafu(backtrace)]
@@ -435,6 +442,17 @@ pub enum Error {
     EncodeSubstraitLogicalPlan {
         #[snafu(backtrace)]
         source: substrait::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to build a vector from values, value: {}, source: {}",
+        value,
+        source
+    ))]
+    BuildVector {
+        value: Value,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to invoke GRPC server, source: {}", source))]
@@ -524,6 +542,7 @@ impl ErrorExt for Error {
             Error::DeserializeInsertBatch { source, .. } => source.status_code(),
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
+            Error::ExecuteStatement { source, .. } => source.status_code(),
             Error::InsertBatchToRequest { source, .. } => source.status_code(),
             Error::CollectRecordbatchStream { source } | Error::CreateRecordbatches { source } => {
                 source.status_code()
@@ -533,6 +552,7 @@ impl ErrorExt for Error {
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
+            Error::BuildVector { source, .. } => source.status_code(),
         }
     }
 
