@@ -185,6 +185,7 @@ impl SelectResultDisplayer<'_> {
                 util::values_to_string(
                     ColumnDataType::from_i32(col.datatype).unwrap(),
                     col.values.clone().unwrap(),
+                    col.null_mask.clone(),
                 )
             })
             .collect::<Vec<_>>();

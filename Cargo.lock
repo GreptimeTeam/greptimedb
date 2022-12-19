@@ -6440,6 +6440,7 @@ dependencies = [
  "async-trait",
  "client",
  "comfy-table 6.1.2",
+ "common-base",
  "sqlness",
  "tokio",
 ]

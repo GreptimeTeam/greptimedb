@@ -7,5 +7,6 @@ edition = "2021"
 async-trait = "0.1"
 client = { path = "../../src/client" }
 comfy-table = "6.1"
+common-base = { path = "../../src/common/base" }
 sqlness = { git = "https://github.com/ceresdb/sqlness.git" }
 tokio = { version = "1.21", features = ["full"] }
