@@ -15,10 +15,6 @@ enum PayloadType {
   WRITE_BATCH_PROTO = 2;
 }
 
-message MutationExtra {
-  MutationType mutation_type = 1;
-}
-
 enum MutationType {
   PUT = 0;
   DELETE = 1;
