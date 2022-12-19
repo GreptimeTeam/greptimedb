@@ -290,6 +290,7 @@ impl<'a> ParserContext<'a> {
             is_primary: false,
         };
 
+        // TIME INDEX option means NOT NULL implicitly.
         column.options = vec![ColumnOptionDef {
             name: None,
             option: NotNull,
@@ -297,7 +298,7 @@ impl<'a> ParserContext<'a> {
         columns.push(column);
         constraints.push(constraint);
 
-        if let Token::Comma = self.parser.peek_token() {
+        if matches!(self.parser.peek_token(), Token::Comma | Token::RParen) {
             return Ok(());
         }
 
