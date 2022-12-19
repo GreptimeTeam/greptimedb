@@ -38,25 +38,6 @@ where
 {
     null_iter: N,
     data_iter: D,
-    position: usize,
-    item_number: usize,
-}
-
-impl<N, B, D, T> NullableColumnIter<N, B, D, T>
-where
-    N: Iterator<Item = B>,
-    B: AsRef<bool>,
-    D: Iterator<Item = T>,
-    T: Display,
-{
-    pub fn new(null_iter: N, data_iter: D, item_number: usize) -> Self {
-        Self {
-            null_iter,
-            data_iter,
-            position: 0,
-            item_number,
-        }
-    }
 }
 
 impl<N, B, D, T> Iterator for NullableColumnIter<N, B, D, T>
@@ -69,22 +50,13 @@ where
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.position += 1;
         // iter the null_mask first
         if let Some(is_null) = self.null_iter.next() {
             if *is_null.as_ref() {
                 Some(NULL_DATA_PLACEHOLDER.to_string())
             } else {
-                if let Some(data) = self.data_iter.next() {
-                    Some(data.to_string())
-                } else if self.position <= self.item_number {
-                    Some(NULL_DATA_PLACEHOLDER.to_string())
-                } else {
-                    None
-                }
+                self.data_iter.next().map(|data| data.to_string())
             }
-        } else if self.position <= self.item_number {
-            Some(NULL_DATA_PLACEHOLDER.to_string())
         } else {
             None
         }
@@ -93,17 +65,28 @@ where
 
 macro_rules! build_nullable_iter {
     ($null_iter:ident, $data_iter:expr, $row_count:ident) => {
-        NullableColumnIter::new($null_iter, $data_iter, $row_count).collect()
+        NullableColumnIter {
+            null_iter: $null_iter,
+            data_iter: $data_iter,
+        }
+        .collect()
     };
 }
 
+/// # Notice
+///
+/// Caller should guarantee the `null_mask` has enough length.
 pub fn values_to_string(
     data_type: ColumnDataType,
     values: Values,
     null_mask: Vec<u8>,
     row_count: usize,
 ) -> Vec<String> {
-    let bit_vec = BitVec::from_vec(null_mask);
+    let mut bit_vec = BitVec::from_vec(null_mask);
+    // Assume the input data is valid.
+    unsafe {
+        bit_vec.set_len(row_count);
+    }
     let null_iter = bit_vec.iter();
     match data_type {
         ColumnDataType::Int64 => {
@@ -266,7 +249,7 @@ mod test {
             i64_values: vec![1, 2, 3, 4, 5, 7, 8, 9],
             ..Default::default()
         };
-        let null_mask = vec![0b00100000, 0b00000010];
+        let null_mask = vec![0b00100000, 0b11111110, 0b0001111];
         let result = values_to_string(data_type, values, null_mask, 20);
         let expected: Vec<String> = [
             "1", "2", "3", "4", "5", "NULL", "7", "8", "9", "NULL", "NULL", "NULL", "NULL", "NULL",
@@ -296,7 +279,6 @@ mod test {
         assert_eq!(result, expected);
     }
 
-    // row_count won't take effect if it's smaller than data's length
     #[test]
     fn test_display_nullable_column_shorter_length() {
         let data_type = ColumnDataType::Int64;
@@ -306,10 +288,7 @@ mod test {
         };
         let null_mask = vec![0b00000000, 0b00000000];
         let result = values_to_string(data_type, values, null_mask, 1);
-        let expected: Vec<String> = ["1", "2", "3", "4", "5", "7", "8", "9"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let expected: Vec<String> = ["1"].into_iter().map(String::from).collect();
 
         assert_eq!(result, expected);
     }
