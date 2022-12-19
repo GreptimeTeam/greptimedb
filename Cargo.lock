@@ -4561,9 +4561,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.6.2"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6f4a1115155e553e527b1b4dd0825b72da8451b935137b7839936f2d95e1c46"
+checksum = "ab6d8c74bed581ab4a5ae0393ae05dc50e6b097d6298bcf97c5c58246b74aee6"
 dependencies = [
  "async-trait",
  "bytes",
