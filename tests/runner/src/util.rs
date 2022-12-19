@@ -38,6 +38,25 @@ where
 {
     null_iter: N,
     data_iter: D,
+    position: usize,
+    item_number: usize,
+}
+
+impl<N, B, D, T> NullableColumnIter<N, B, D, T>
+where
+    N: Iterator<Item = B>,
+    B: AsRef<bool>,
+    D: Iterator<Item = T>,
+    T: Display,
+{
+    pub fn new(null_iter: N, data_iter: D, item_number: usize) -> Self {
+        Self {
+            null_iter,
+            data_iter,
+            position: 0,
+            item_number,
+        }
+    }
 }
 
 impl<N, B, D, T> Iterator for NullableColumnIter<N, B, D, T>
@@ -50,12 +69,22 @@ where
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.position += 1;
+        // iter the null_mask first
         if let Some(is_null) = self.null_iter.next() {
             if *is_null.as_ref() {
                 Some(NULL_DATA_PLACEHOLDER.to_string())
             } else {
-                self.data_iter.next().map(|data| data.to_string())
+                if let Some(data) = self.data_iter.next() {
+                    Some(data.to_string())
+                } else if self.position <= self.item_number {
+                    Some(NULL_DATA_PLACEHOLDER.to_string())
+                } else {
+                    None
+                }
             }
+        } else if self.position <= self.item_number {
+            Some(NULL_DATA_PLACEHOLDER.to_string())
         } else {
             None
         }
@@ -63,12 +92,8 @@ where
 }
 
 macro_rules! build_nullable_iter {
-    ($null_iter:ident, $data_iter:expr) => {
-        NullableColumnIter {
-            null_iter: $null_iter,
-            data_iter: $data_iter,
-        }
-        .collect()
+    ($null_iter:ident, $data_iter:expr, $row_count:ident) => {
+        NullableColumnIter::new($null_iter, $data_iter, $row_count).collect()
     };
 }
 
@@ -76,42 +101,84 @@ pub fn values_to_string(
     data_type: ColumnDataType,
     values: Values,
     null_mask: Vec<u8>,
+    row_count: usize,
 ) -> Vec<String> {
     let bit_vec = BitVec::from_vec(null_mask);
     let null_iter = bit_vec.iter();
     match data_type {
-        ColumnDataType::Int64 => build_nullable_iter!(null_iter, values.i64_values.into_iter()),
-        ColumnDataType::Float64 => build_nullable_iter!(null_iter, values.f64_values.into_iter()),
-        ColumnDataType::String => build_nullable_iter!(null_iter, values.string_values.into_iter()),
-        ColumnDataType::Boolean => build_nullable_iter!(null_iter, values.bool_values.into_iter()),
-        ColumnDataType::Int8 => build_nullable_iter!(null_iter, values.i8_values.into_iter()),
-        ColumnDataType::Int16 => build_nullable_iter!(null_iter, values.i16_values.into_iter()),
-        ColumnDataType::Int32 => build_nullable_iter!(null_iter, values.i32_values.into_iter()),
-        ColumnDataType::Uint8 => build_nullable_iter!(null_iter, values.u8_values.into_iter()),
-        ColumnDataType::Uint16 => build_nullable_iter!(null_iter, values.u16_values.into_iter()),
-        ColumnDataType::Uint32 => build_nullable_iter!(null_iter, values.u32_values.into_iter()),
-        ColumnDataType::Uint64 => build_nullable_iter!(null_iter, values.u64_values.into_iter()),
-        ColumnDataType::Float32 => build_nullable_iter!(null_iter, values.f32_values.into_iter()),
+        ColumnDataType::Int64 => {
+            build_nullable_iter!(null_iter, values.i64_values.into_iter(), row_count)
+        }
+        ColumnDataType::Float64 => {
+            build_nullable_iter!(null_iter, values.f64_values.into_iter(), row_count)
+        }
+        ColumnDataType::String => {
+            build_nullable_iter!(null_iter, values.string_values.into_iter(), row_count)
+        }
+        ColumnDataType::Boolean => {
+            build_nullable_iter!(null_iter, values.bool_values.into_iter(), row_count)
+        }
+        ColumnDataType::Int8 => {
+            build_nullable_iter!(null_iter, values.i8_values.into_iter(), row_count)
+        }
+        ColumnDataType::Int16 => {
+            build_nullable_iter!(null_iter, values.i16_values.into_iter(), row_count)
+        }
+        ColumnDataType::Int32 => {
+            build_nullable_iter!(null_iter, values.i32_values.into_iter(), row_count)
+        }
+        ColumnDataType::Uint8 => {
+            build_nullable_iter!(null_iter, values.u8_values.into_iter(), row_count)
+        }
+        ColumnDataType::Uint16 => {
+            build_nullable_iter!(null_iter, values.u16_values.into_iter(), row_count)
+        }
+        ColumnDataType::Uint32 => {
+            build_nullable_iter!(null_iter, values.u32_values.into_iter(), row_count)
+        }
+        ColumnDataType::Uint64 => {
+            build_nullable_iter!(null_iter, values.u64_values.into_iter(), row_count)
+        }
+        ColumnDataType::Float32 => {
+            build_nullable_iter!(null_iter, values.f32_values.into_iter(), row_count)
+        }
         ColumnDataType::Binary => build_nullable_iter!(
             null_iter,
             values
                 .binary_values
                 .into_iter()
-                .map(|val| format!("{:?}", val))
+                .map(|val| format!("{:?}", val)),
+            row_count
         ),
-        ColumnDataType::Datetime => build_nullable_iter!(null_iter, values.i64_values.into_iter()),
-        ColumnDataType::Date => build_nullable_iter!(null_iter, values.i32_values.into_iter()),
+        ColumnDataType::Datetime => {
+            build_nullable_iter!(null_iter, values.i64_values.into_iter(), row_count)
+        }
+        ColumnDataType::Date => {
+            build_nullable_iter!(null_iter, values.i32_values.into_iter(), row_count)
+        }
         ColumnDataType::TimestampSecond => {
-            build_nullable_iter!(null_iter, values.ts_second_values.into_iter())
+            build_nullable_iter!(null_iter, values.ts_second_values.into_iter(), row_count)
         }
         ColumnDataType::TimestampMillisecond => {
-            build_nullable_iter!(null_iter, values.ts_millisecond_values.into_iter())
+            build_nullable_iter!(
+                null_iter,
+                values.ts_millisecond_values.into_iter(),
+                row_count
+            )
         }
         ColumnDataType::TimestampMicrosecond => {
-            build_nullable_iter!(null_iter, values.ts_microsecond_values.into_iter())
+            build_nullable_iter!(
+                null_iter,
+                values.ts_microsecond_values.into_iter(),
+                row_count
+            )
         }
         ColumnDataType::TimestampNanosecond => {
-            build_nullable_iter!(null_iter, values.ts_nanosecond_values.into_iter())
+            build_nullable_iter!(
+                null_iter,
+                values.ts_nanosecond_values.into_iter(),
+                row_count
+            )
         }
     }
 }
@@ -183,8 +250,63 @@ mod test {
             ..Default::default()
         };
         let null_mask = vec![0b00100000, 0b00000010];
-        let result = values_to_string(data_type, values, null_mask);
+        let result = values_to_string(data_type, values, null_mask, 10);
         let expected: Vec<String> = ["1", "2", "3", "4", "5", "NULL", "7", "8", "9", "NULL"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_display_nullable_column_exceed_length() {
+        let data_type = ColumnDataType::Int64;
+        let values = Values {
+            i64_values: vec![1, 2, 3, 4, 5, 7, 8, 9],
+            ..Default::default()
+        };
+        let null_mask = vec![0b00100000, 0b00000010];
+        let result = values_to_string(data_type, values, null_mask, 20);
+        let expected: Vec<String> = [
+            "1", "2", "3", "4", "5", "NULL", "7", "8", "9", "NULL", "NULL", "NULL", "NULL", "NULL",
+            "NULL", "NULL", "NULL", "NULL", "NULL", "NULL",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_display_nullable_column_no_vacancy() {
+        let data_type = ColumnDataType::Int64;
+        let values = Values {
+            i64_values: vec![1, 2, 3, 4, 5, 7, 8, 9],
+            ..Default::default()
+        };
+        let null_mask = vec![0b00000000, 0b00000000];
+        let result = values_to_string(data_type, values, null_mask, 8);
+        let expected: Vec<String> = ["1", "2", "3", "4", "5", "7", "8", "9"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        assert_eq!(result, expected);
+    }
+
+    // row_count won't take effect if it's smaller than data's length
+    #[test]
+    fn test_display_nullable_column_shorter_length() {
+        let data_type = ColumnDataType::Int64;
+        let values = Values {
+            i64_values: vec![1, 2, 3, 4, 5, 7, 8, 9],
+            ..Default::default()
+        };
+        let null_mask = vec![0b00000000, 0b00000000];
+        let result = values_to_string(data_type, values, null_mask, 1);
+        let expected: Vec<String> = ["1", "2", "3", "4", "5", "7", "8", "9"]
             .into_iter()
             .map(String::from)
             .collect();
