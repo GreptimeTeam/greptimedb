@@ -64,6 +64,12 @@ pub enum Error {
         source: datatypes::arrow::error::ArrowError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to init Recordbatch stream, source: {}", source))]
+    InitRecordbatchStream {
+        source: datafusion_common::DataFusionError,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {
@@ -74,7 +80,8 @@ impl ErrorExt for Error {
             Error::DataTypes { .. }
             | Error::CreateRecordBatches { .. }
             | Error::PollStream { .. }
-            | Error::Format { .. } => StatusCode::Internal,
+            | Error::Format { .. }
+            | Error::InitRecordbatchStream { .. } => StatusCode::Internal,
 
             Error::External { source } => source.status_code(),
 
