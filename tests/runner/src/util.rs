@@ -26,7 +26,7 @@ use tokio::time;
 
 /// Check port every 0.1 second.
 const PORT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
-const NULL_DATA_PLACEHOLDER: &str = "__NULL__";
+const NULL_DATA_PLACEHOLDER: &str = "NULL";
 
 /// Helper struct for iterate over column with null_mask
 struct NullableColumnIter<N, B, D, T>
@@ -184,12 +184,10 @@ mod test {
         };
         let null_mask = vec![0b00100000, 0b00000010];
         let result = values_to_string(data_type, values, null_mask);
-        let expected: Vec<String> = [
-            "1", "2", "3", "4", "5", "__NULL__", "7", "8", "9", "__NULL__",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
+        let expected: Vec<String> = ["1", "2", "3", "4", "5", "NULL", "7", "8", "9", "NULL"]
+            .into_iter()
+            .map(String::from)
+            .collect();
 
         assert_eq!(result, expected);
     }
