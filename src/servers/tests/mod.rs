@@ -23,7 +23,7 @@ use common_query::Output;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::Result;
 use servers::query_handler::{
-    CatalogHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
+    ScriptHandler, ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
 };
 use table::test_util::MemTable;
 
@@ -67,6 +67,10 @@ impl SqlQueryHandler for DummyInstance {
     ) -> Result<Output> {
         unimplemented!()
     }
+
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+        Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
+    }
 }
 
 #[async_trait]
@@ -89,12 +93,6 @@ impl ScriptHandler for DummyInstance {
         let py_script = self.scripts.read().unwrap().get(name).unwrap().clone();
 
         Ok(py_script.execute(EvalContext::default()).await.unwrap())
-    }
-}
-
-impl CatalogHandler for DummyInstance {
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
-        Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
     }
 }
 

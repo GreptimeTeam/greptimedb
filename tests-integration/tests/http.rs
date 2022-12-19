@@ -192,6 +192,34 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert!(body.execution_time_ms().is_some());
     assert!(body.error().unwrap().contains("not found"));
 
+    // test database given
+    let res = client
+        .get("/v1/sql?database=public&sql=select cpu, ts from demo limit 1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    assert!(body.success());
+    assert!(body.execution_time_ms().is_some());
+    let outputs = body.output().unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(
+        outputs[0],
+        serde_json::from_value::<JsonOutput>(json!({
+            "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
+        })).unwrap()
+    );
+
+    // test database not found
+    let res = client
+        .get("/v1/sql?database=notfound&sql=select cpu, ts from demo limit 1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
+    assert!(!body.success());
+
     guard.remove_all().await;
 }
 
