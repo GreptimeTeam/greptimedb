@@ -47,7 +47,7 @@ pub fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGua
         storage: ObjectStoreConfig::File {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
         },
-        mode: Mode::Standalone,
+        mode: Mode::Distributed,
         ..Default::default()
     };
     (
