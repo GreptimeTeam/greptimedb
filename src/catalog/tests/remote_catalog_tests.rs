@@ -26,12 +26,12 @@ mod tests {
     use catalog::remote::{
         KvBackend, KvBackendRef, RemoteCatalogManager, RemoteCatalogProvider, RemoteSchemaProvider,
     };
-    use catalog::{CatalogList, CatalogManager, RegisterTableRequest};
+    use catalog::{CatalogList, CatalogManager, RegisterTableRequest, RenameTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::schema::Schema;
     use futures_util::StreamExt;
     use table::engine::{EngineContext, TableEngineRef};
-    use table::requests::CreateTableRequest;
+    use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest};
 
     use crate::mock::{MockKvBackend, MockTableEngine};
 
@@ -205,6 +205,96 @@ mod tests {
         assert!(catalog_manager.register_table(reg_req).await.unwrap());
         assert_eq!(
             HashSet::from([table_name, "numbers".to_string()]),
+            default_schema
+                .table_names()
+                .unwrap()
+                .into_iter()
+                .collect::<HashSet<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rename_table() {
+        let node_id = 42;
+        let (_, table_engine, catalog_manager) = prepare_components(node_id).await;
+        let default_catalog = catalog_manager
+            .catalog(DEFAULT_CATALOG_NAME)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            vec![DEFAULT_SCHEMA_NAME.to_string()],
+            default_catalog.schema_names().unwrap()
+        );
+
+        let default_schema = default_catalog
+            .schema(DEFAULT_SCHEMA_NAME)
+            .unwrap()
+            .unwrap();
+        assert_eq!(vec!["numbers"], default_schema.table_names().unwrap());
+
+        let catalog_name = DEFAULT_CATALOG_NAME.to_string();
+        let schema_name = DEFAULT_SCHEMA_NAME.to_string();
+        let table_name = "test_table".to_string();
+        let table_id = 1;
+        let table_schema = Arc::new(Schema::new(vec![]));
+        let table = table_engine
+            .create_table(
+                &EngineContext {},
+                CreateTableRequest {
+                    id: table_id,
+                    catalog_name: catalog_name.clone(),
+                    schema_name: schema_name.clone(),
+                    table_name: table_name.clone(),
+                    desc: None,
+                    schema: table_schema.clone(),
+                    region_numbers: vec![0],
+                    primary_key_indices: vec![],
+                    create_if_not_exists: false,
+                    table_options: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let reg_req = RegisterTableRequest {
+            catalog: catalog_name.clone(),
+            schema: schema_name.clone(),
+            table_name: table_name.clone(),
+            table_id,
+            table,
+        };
+        assert!(catalog_manager.register_table(reg_req).await.unwrap());
+        assert_eq!(
+            HashSet::from([table_name.clone(), "numbers".to_string()]),
+            default_schema
+                .table_names()
+                .unwrap()
+                .into_iter()
+                .collect::<HashSet<_>>()
+        );
+        let new_table_name = "demo".to_string();
+        let ctx = EngineContext {};
+        let req = AlterTableRequest {
+            catalog_name: Some(catalog_name.clone()),
+            schema_name: Some(schema_name.clone()),
+            table_name: table_name.clone(),
+            alter_kind: AlterKind::RenameTable { new_table_name: new_table_name.clone() }
+        };
+        let table = table_engine
+            .alter_table(&ctx, req)
+            .await
+            .unwrap();
+
+        let rename_table_req = RenameTableRequest {
+            catalog: catalog_name,
+            schema: schema_name,
+            table_name,
+            new_table_name: new_table_name.clone(),
+            table_id,
+            table
+        };
+        assert!(catalog_manager.rename_table(rename_table_req).await.unwrap());
+        assert_eq!(
+            HashSet::from([new_table_name, "numbers".to_string()]),
             default_schema
                 .table_names()
                 .unwrap()

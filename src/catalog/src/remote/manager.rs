@@ -33,7 +33,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{
     CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu,
-    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
+    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu, TableNotFoundSnafu
 };
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
@@ -433,8 +433,25 @@ impl CatalogManager for RemoteCatalogManager {
         .fail()
     }
 
-    async fn rename_table(&self, _request: RenameTableRequest) -> Result<bool> {
-        todo!()
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
+        let catalog_name = request.catalog;
+        let schema_name = request.schema;
+        let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
+            catalog_name: &catalog_name,
+        })?;
+        let schema_provider = catalog_provider
+            .schema(&schema_name)?
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", &catalog_name, &schema_name),
+            })?;
+        if !schema_provider.table_exist(&request.table_name).unwrap() {
+            return TableNotFoundSnafu {
+                table_info: format!("{}.{}.{}", &catalog_name, &schema_name, &request.table_name),
+            }.fail();
+        }
+        let table = schema_provider.table(&request.table_name)?.unwrap();
+        schema_provider.rename_table(&request.table_name, request.new_table_name, table)?;
+        Ok(true)
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
@@ -765,8 +782,46 @@ impl SchemaProvider for RemoteSchemaProvider {
         prev
     }
 
-    fn rename_table(&self, _name: &str, _new_name: String, _table: TableRef) -> Result<Option<TableRef>> {
-        todo!()
+    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> Result<Option<TableRef>> {
+        let table_name = name.to_string();
+        let table_info = table.table_info();
+        let table_key = self.build_regional_table_key(&table_name).to_string();
+        let new_table_key = self.build_regional_table_key(&new_name).to_string();
+        let table_version = table_info.ident.version;
+        let table_value = TableRegionalValue{
+            version: table_version,
+            regions_ids: table_info.meta.region_numbers.clone(),
+        };
+
+        let backend = self.backend.clone();
+        let mutex = self.mutex.clone();
+        let tables = self.tables.clone();
+        let prev = std::thread::spawn(move || {
+            common_runtime::block_on_read(async move {
+                let _guard = mutex.lock().await;
+                backend.delete(table_key.as_bytes()).await?;
+                backend.set(
+                    new_table_key.as_bytes(),
+                        &table_value.as_bytes().context(InvalidCatalogValueSnafu)?,
+                ).await?;
+
+                debug!(
+                    "Successfully renamed catalog table entry, old key: {}, new key {}, table value: {:?}",
+                    table_key, new_table_key, table_value
+                );
+
+                let prev_tables = tables.load();
+                let mut new_tables = HashMap::with_capacity(prev_tables.len());
+                new_tables.clone_from(&prev_tables);
+                new_tables.remove(&table_name);
+                let prev = new_tables.insert(new_name, table);
+                tables.store(Arc::new(new_tables));
+                Ok(prev)
+            })
+        })
+        .join()
+        .unwrap();
+        prev
     }
 
     /// Checks if table exists in schema provider based on locally opened table map.
