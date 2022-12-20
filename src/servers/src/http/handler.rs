@@ -53,7 +53,7 @@ pub async fn sql(
                 Ok(false) => {
                     return Json(JsonResponse::with_error(
                         format!("Database not found: {}", db),
-                        StatusCode::InvalidArguments,
+                        StatusCode::DatabaseNotFound,
                     ));
                 }
                 Err(e) => {
