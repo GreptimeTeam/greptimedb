@@ -24,6 +24,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 pub type Success = u32;
 pub type Failure = u32;
+type FlightDataRaw = Vec<Vec<u8>>;
 
 #[derive(Default)]
 pub struct ObjectResultBuilder {
@@ -36,6 +37,7 @@ pub struct ObjectResultBuilder {
 pub enum Body {
     Mutate((Success, Failure)),
     Select(SelectResult),
+    FlightDataRaw(FlightDataRaw),
 }
 
 impl ObjectResultBuilder {
@@ -72,6 +74,11 @@ impl ObjectResultBuilder {
         self
     }
 
+    pub fn flight_data(mut self, flight_data: FlightDataRaw) -> Self {
+        self.result = Some(Body::FlightDataRaw(flight_data));
+        self
+    }
+
     pub fn build(self) -> ObjectResult {
         let header = Some(ResultHeader {
             version: self.version,
@@ -89,6 +96,9 @@ impl ObjectResultBuilder {
             Some(Body::Select(select)) => Some(object_result::Result::Select(SelectResultRaw {
                 raw_data: select.into(),
             })),
+            Some(Body::FlightDataRaw(raw_data)) => Some(object_result::Result::FlightData(
+                crate::v1::FlightDataRaw { raw_data },
+            )),
             None => None,
         };
 

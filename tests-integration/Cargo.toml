@@ -12,6 +12,7 @@ catalog = { path = "../src/catalog" }
 client = { path = "../src/client" }
 common-catalog = { path = "../src/common/catalog" }
 common-error = { path = "../src/common/error" }
+common-grpc = { path = "../src/common/grpc" }
 common-runtime = { path = "../src/common/runtime" }
 common-telemetry = { path = "../src/common/telemetry" }
 datanode = { path = "../src/datanode" }

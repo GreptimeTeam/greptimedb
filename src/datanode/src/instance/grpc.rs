@@ -12,31 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::result::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use api::v1::{
-    admin_expr, object_expr, select_expr, AdminExpr, AdminResult, Column, CreateDatabaseExpr,
-    ObjectExpr, ObjectResult, SelectExpr,
+    admin_expr, object_expr, AdminExpr, AdminResult, Column, CreateDatabaseExpr, ObjectExpr,
+    ObjectResult, SelectExpr,
 };
+use arrow_flight::flight_service_server::FlightService;
+use arrow_flight::Ticket;
 use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
+use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
-use common_grpc::select::to_object_result;
+use common_grpc::flight::flight_data_to_object_result;
 use common_grpc_expr::insertion_expr_to_request;
 use common_query::Output;
+use prost::Message;
 use query::plan::LogicalPlan;
 use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler};
-use session::context::QueryContext;
 use snafu::prelude::*;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::CreateDatabaseRequest;
+use tonic::Request;
 
 use crate::error::{
-    CatalogNotFoundSnafu, CatalogSnafu, DecodeLogicalPlanSnafu, EmptyInsertBatchSnafu,
+    self, CatalogNotFoundSnafu, CatalogSnafu, DecodeLogicalPlanSnafu, EmptyInsertBatchSnafu,
     ExecuteSqlSnafu, InsertDataSnafu, InsertSnafu, Result, SchemaNotFoundSnafu, TableNotFoundSnafu,
-    UnsupportedExprSnafu,
 };
 use crate::instance::Instance;
 
@@ -104,23 +105,19 @@ impl Instance {
         }
     }
 
-    async fn handle_select(&self, select_expr: SelectExpr) -> ObjectResult {
-        let result = self.do_handle_select(select_expr).await;
-        to_object_result(result).await
-    }
-
-    async fn do_handle_select(&self, select_expr: SelectExpr) -> Result<Output> {
-        let expr = select_expr.expr;
-        match expr {
-            Some(select_expr::Expr::Sql(sql)) => {
-                self.execute_sql(&sql, Arc::new(QueryContext::new())).await
+    async fn handle_select(&self, select_expr: SelectExpr) -> Result<ObjectResult> {
+        let ticket = Request::new(Ticket {
+            ticket: ObjectExpr {
+                header: None,
+                expr: Some(object_expr::Expr::Select(select_expr)),
             }
-            Some(select_expr::Expr::LogicalPlan(plan)) => self.execute_logical(plan).await,
-            _ => UnsupportedExprSnafu {
-                name: format!("{expr:?}"),
-            }
-            .fail(),
-        }
+            .encode_to_vec(),
+        });
+        // TODO(LFC): Temporarily use old GRPC interface here, will make it been replaced.
+        let response = self.do_get(ticket).await.context(error::FlightGetSnafu)?;
+        flight_data_to_object_result(response)
+            .await
+            .context(error::InvalidFlightDataSnafu)
     }
 
     async fn execute_create_database(
@@ -144,7 +141,7 @@ impl Instance {
         }
     }
 
-    async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
+    pub(crate) async fn execute_logical(&self, plan_bytes: Vec<u8>) -> Result<Output> {
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(plan_bytes.as_slice(), self.catalog_manager.clone())
             .context(DecodeLogicalPlanSnafu)?;
@@ -172,7 +169,13 @@ impl GrpcQueryHandler for Instance {
                 self.handle_insert(catalog_name, schema_name, table_name, insert_batches)
                     .await
             }
-            Some(object_expr::Expr::Select(select_expr)) => self.handle_select(select_expr).await,
+            Some(object_expr::Expr::Select(select_expr)) => self
+                .handle_select(select_expr.clone())
+                .await
+                .map_err(BoxedError::new)
+                .context(servers::error::ExecuteQuerySnafu {
+                    query: format!("{select_expr:?}"),
+                })?,
             other => {
                 return servers::error::NotSupportedSnafu {
                     feat: format!("{other:?}"),

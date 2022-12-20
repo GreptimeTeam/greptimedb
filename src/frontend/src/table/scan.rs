@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use api::v1::InsertExpr;
 use client::{Database, ObjectResult};
+use common_grpc::flight::flight_messages_to_recordbatches;
 use common_query::prelude::Expr;
-use common_query::Output;
-use common_recordbatch::{util, RecordBatches};
+use common_recordbatch::RecordBatches;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
 use meta_client::rpc::TableName;
@@ -28,7 +28,7 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
-use crate::error::{self, Result};
+use crate::error::{self, ConvertFlightMessageSnafu, Result};
 
 #[derive(Clone)]
 pub struct DatanodeInstance {
@@ -58,24 +58,19 @@ impl DatanodeInstance {
             .encode(logical_plan)
             .context(error::EncodeSubstraitLogicalPlanSnafu)?;
 
-        let output = self
+        let result = self
             .db
             .logical_plan(substrait_plan.to_vec())
             .await
-            .and_then(Output::try_from)
-            .context(error::SelectSnafu)?;
-
-        Ok(match output {
-            Output::Stream(stream) => {
-                let schema = stream.schema();
-                let batches = util::collect(stream)
-                    .await
-                    .context(error::CollectRecordbatchStreamSnafu)?;
-                RecordBatches::try_new(schema, batches).context(error::CreateRecordbatchesSnafu)?
+            .context(error::RequestDatanodeSnafu)?;
+        let recordbatches = match result {
+            ObjectResult::FlightData(flight_message) => {
+                flight_messages_to_recordbatches(flight_message)
+                    .context(ConvertFlightMessageSnafu)?
             }
-            Output::RecordBatches(x) => x,
             _ => unreachable!(),
-        })
+        };
+        Ok(recordbatches)
     }
 
     fn build_logical_plan(&self, table_scan: &TableScanPlan) -> Result<LogicalPlan> {

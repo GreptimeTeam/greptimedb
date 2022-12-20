@@ -21,6 +21,7 @@ use api::v1::{
     MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, SelectExpr,
 };
 use common_error::status_code::StatusCode;
+use common_grpc::flight::{raw_flight_data_to_message, FlightMessage};
 use common_grpc_expr::column_to_vector;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
@@ -141,6 +142,7 @@ impl Database {
 #[derive(Debug)]
 pub enum ObjectResult {
     Select(GrpcSelectResult),
+    FlightData(Vec<FlightMessage>),
     Mutate(GrpcMutateResult),
 }
 
@@ -168,6 +170,11 @@ impl TryFrom<api::v1::ObjectResult> for ObjectResult {
                 ObjectResult::Select(result)
             }
             object_result::Result::Mutate(mutate) => ObjectResult::Mutate(mutate),
+            object_result::Result::FlightData(flight_data) => {
+                let flight_messages = raw_flight_data_to_message(flight_data.raw_data)
+                    .context(error::ConvertFlightDataSnafu)?;
+                ObjectResult::FlightData(flight_messages)
+            }
         })
     }
 }
@@ -225,6 +232,7 @@ impl TryFrom<ObjectResult> for Output {
                 }
                 Output::AffectedRows(mutate.success as usize)
             }
+            ObjectResult::FlightData(_) => unreachable!(),
         };
         Ok(output)
     }

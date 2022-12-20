@@ -71,8 +71,8 @@ impl DistTable {
         for join in joins {
             let object_result = join.await.context(error::JoinTaskSnafu)??;
             let result = match object_result {
-                client::ObjectResult::Select(_) => unreachable!(),
-                client::ObjectResult::Mutate(result) => result,
+                ObjectResult::Mutate(result) => result,
+                ObjectResult::Select(_) | ObjectResult::FlightData(_) => unreachable!(),
             };
             success += result.success;
             failure += result.failure;

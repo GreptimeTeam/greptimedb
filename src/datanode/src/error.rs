@@ -160,9 +160,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Unsupported expr type: {}", name))]
-    UnsupportedExpr { name: String },
-
     #[snafu(display("Runtime resource error, source: {}", source))]
     RuntimeResource {
         #[snafu(backtrace)]
@@ -209,12 +206,6 @@ pub enum Error {
     RegisterSchema {
         #[snafu(backtrace)]
         source: catalog::error::Error,
-    },
-
-    #[snafu(display("Failed to decode as physical plan, source: {}", source))]
-    IntoPhysicalPlan {
-        #[snafu(backtrace)]
-        source: common_grpc::Error,
     },
 
     #[snafu(display("Failed to convert alter expr to request: {}", source))]
@@ -301,6 +292,33 @@ pub enum Error {
 
     #[snafu(display("Missing node id option in distributed mode"))]
     MissingMetasrvOpts { backtrace: Backtrace },
+
+    #[snafu(display("Invalid Flight ticket, source: {}", source))]
+    InvalidFlightTicket {
+        source: api::DecodeError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Missing required field: {}", name))]
+    MissingRequiredField { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to poll recordbatch stream, source: {}", source))]
+    PollRecordbatchStream {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("Invalid FlightData, source: {}", source))]
+    InvalidFlightData {
+        #[snafu(backtrace)]
+        source: common_grpc::Error,
+    },
+
+    #[snafu(display("Failed to do Flight get, source: {}", source))]
+    FlightGet {
+        source: tonic::Status,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -328,7 +346,11 @@ impl ErrorExt for Error {
             }
 
             Error::AlterExprToRequest { source, .. }
-            | Error::CreateExprToRequest { source, .. } => source.status_code(),
+            | Error::CreateExprToRequest { source }
+            | Error::InsertData { source } => source.status_code(),
+
+            Error::InvalidFlightData { source } => source.status_code(),
+
             Error::CreateSchema { source, .. }
             | Error::ConvertSchema { source, .. }
             | Error::VectorComputation { source } => source.status_code(),
@@ -351,9 +373,10 @@ impl ErrorExt for Error {
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
             | Error::RegisterSchema { .. }
-            | Error::IntoPhysicalPlan { .. }
-            | Error::UnsupportedExpr { .. }
-            | Error::Catalog { .. } => StatusCode::Internal,
+            | Error::Catalog { .. }
+            | Error::MissingRequiredField { .. }
+            | Error::FlightGet { .. }
+            | Error::InvalidFlightTicket { .. } => StatusCode::Internal,
 
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
@@ -361,13 +384,13 @@ impl ErrorExt for Error {
             Error::OpenStorageEngine { source } => source.status_code(),
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
             Error::MetaClientInit { source, .. } => source.status_code(),
-            Error::InsertData { source, .. } => source.status_code(),
             Error::EmptyInsertBatch => StatusCode::InvalidArguments,
             Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::MissingNodeId { .. } => StatusCode::InvalidArguments,
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::StartLogStore { source, .. } => source.status_code(),
+            Error::PollRecordbatchStream { source } => source.status_code(),
         }
     }
 

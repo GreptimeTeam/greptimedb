@@ -48,6 +48,7 @@ use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
 use crate::sql::SqlHandler;
 
+mod flight;
 mod grpc;
 mod script;
 mod sql;

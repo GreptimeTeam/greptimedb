@@ -142,6 +142,8 @@ impl Display for ResultDisplayer {
                 ObjectResult::Mutate(mutate_result) => {
                     write!(f, "{mutate_result:?}")
                 }
+                // TODO(LFC): Implement it.
+                ObjectResult::FlightData(_) => unimplemented!(),
             },
             Err(e) => write!(f, "Failed to execute, error: {e:?}"),
         }

@@ -34,6 +34,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, ConversionSnafu, Result};
 
+// TODO(LFC): replace with FlightData
 pub async fn to_object_result(output: std::result::Result<Output, impl ErrorExt>) -> ObjectResult {
     let result = match output {
         Ok(Output::AffectedRows(rows)) => Ok(ObjectResultBuilder::new()
@@ -53,7 +54,7 @@ pub async fn to_object_result(output: std::result::Result<Output, impl ErrorExt>
 async fn collect(stream: SendableRecordBatchStream) -> Result<ObjectResult> {
     let recordbatches = RecordBatches::try_collect(stream)
         .await
-        .context(error::CollectRecordBatchesSnafu)?;
+        .context(error::CreateRecordBatchSnafu)?;
     let object_result = build_result(recordbatches)?;
     Ok(object_result)
 }

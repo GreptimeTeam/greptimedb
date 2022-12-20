@@ -716,16 +716,21 @@ impl GrpcAdminHandler for Instance {
 mod tests {
     use std::assert_matches::assert_matches;
     use std::borrow::Cow;
+    use std::iter;
     use std::sync::atomic::AtomicU32;
 
-    use api::v1::codec::SelectResult;
     use api::v1::column::SemanticType;
     use api::v1::{
         admin_expr, admin_result, column, object_expr, object_result, select_expr, Column,
-        ColumnDataType, ColumnDef as GrpcColumnDef, ExprHeader, MutateResult, SelectExpr,
+        ColumnDataType, ColumnDef as GrpcColumnDef, ExprHeader, FlightDataRaw, MutateResult,
+        SelectExpr,
     };
-    use datatypes::schema::ColumnDefaultConstraint;
+    use common_grpc::flight::{raw_flight_data_to_message, FlightMessage};
+    use common_recordbatch::RecordBatch;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
     use datatypes::value::Value;
+    use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
     use session::context::QueryContext;
 
     use super::*;
@@ -864,16 +869,6 @@ mod tests {
             semantic_type: SemanticType::Field as i32,
             datatype: ColumnDataType::Float64 as i32,
         };
-        let expected_disk_col = Column {
-            column_name: "disk_util".to_string(),
-            values: Some(column::Values {
-                f64_values: vec![9.9, 9.9, 9.9, 9.9],
-                ..Default::default()
-            }),
-            semantic_type: SemanticType::Field as i32,
-            datatype: ColumnDataType::Float64 as i32,
-            ..Default::default()
-        };
         let expected_ts_col = Column {
             column_name: "ts".to_string(),
             values: Some(column::Values {
@@ -943,25 +938,69 @@ mod tests {
             .await
             .unwrap();
         match result.result {
-            Some(object_result::Result::Select(select_result)) => {
-                let select_result: SelectResult = (*select_result.raw_data).try_into().unwrap();
+            Some(object_result::Result::FlightData(FlightDataRaw { raw_data })) => {
+                let mut flight_messages = raw_flight_data_to_message(raw_data).unwrap();
+                assert_eq!(flight_messages.len(), 2);
 
-                assert_eq!(4, select_result.row_count);
-                let actual_columns = select_result.columns;
-                assert_eq!(5, actual_columns.len());
+                let expected_schema = Arc::new(Schema::new(vec![
+                    ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+                    ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
+                    ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
+                    ColumnSchema::new("disk_util", ConcreteDataType::float64_datatype(), true)
+                        .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(
+                            9.9f64,
+                        ))))
+                        .unwrap(),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        true,
+                    )
+                    .with_time_index(true),
+                ]));
+                match flight_messages.remove(0) {
+                    FlightMessage::Schema(schema) => {
+                        assert_eq!(schema, expected_schema);
+                    }
+                    _ => unreachable!(),
+                }
 
-                // Respect the order in create table schema
-                let expected_columns = vec![
-                    expected_host_col,
-                    expected_cpu_col,
-                    expected_mem_col,
-                    expected_disk_col,
-                    expected_ts_col,
-                ];
-                expected_columns
-                    .iter()
-                    .zip(actual_columns.iter())
-                    .for_each(|(x, y)| assert_eq!(x, y));
+                match flight_messages.remove(0) {
+                    FlightMessage::Recordbatch(recordbatch) => {
+                        let expect_recordbatch = RecordBatch::new(
+                            expected_schema,
+                            vec![
+                                Arc::new(StringVector::from(vec![
+                                    "fe.host.a",
+                                    "fe.host.b",
+                                    "fe.host.c",
+                                    "fe.host.d",
+                                ])) as _,
+                                Arc::new(Float64Vector::from(vec![
+                                    Some(1.0f64),
+                                    None,
+                                    Some(3.0f64),
+                                    Some(4.0f64),
+                                ])) as _,
+                                Arc::new(Float64Vector::from(vec![
+                                    Some(100f64),
+                                    Some(200f64),
+                                    None,
+                                    Some(400f64),
+                                ])) as _,
+                                Arc::new(Float64Vector::from_vec(
+                                    iter::repeat(9.9f64).take(4).collect(),
+                                )) as _,
+                                Arc::new(TimestampMillisecondVector::from_vec(vec![
+                                    1000i64, 2000, 3000, 4000,
+                                ])) as _,
+                            ],
+                        )
+                        .unwrap();
+                        assert_eq!(recordbatch, expect_recordbatch);
+                    }
+                    _ => unreachable!(),
+                }
             }
             _ => unreachable!(),
         }
