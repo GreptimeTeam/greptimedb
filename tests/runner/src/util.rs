@@ -73,9 +73,6 @@ macro_rules! build_nullable_iter {
     };
 }
 
-/// # Notice
-///
-/// Caller should guarantee the `null_mask` has enough length.
 pub fn values_to_string(
     data_type: ColumnDataType,
     values: Values,
@@ -83,10 +80,7 @@ pub fn values_to_string(
     row_count: usize,
 ) -> Vec<String> {
     let mut bit_vec = BitVec::from_vec(null_mask);
-    // Assume the input data is valid.
-    unsafe {
-        bit_vec.set_len(row_count);
-    }
+    bit_vec.resize(row_count, false);
     let null_iter = bit_vec.iter();
     match data_type {
         ColumnDataType::Int64 => {
