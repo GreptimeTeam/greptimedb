@@ -628,7 +628,6 @@ mod test {
         // select a, row_id from numbers
         let projection = Some(vec![1, 2]);
         let filters = vec![];
-        exec_table_scan(table.clone(), projection, filters, None).await;
         let expected_output = vec![
             "+-----+--------+",
             "| a   | row_id |",
@@ -704,7 +703,6 @@ mod test {
             binary_expr(col("a"), Operator::GtEq, lit(10)),
         )
         .into()];
-        exec_table_scan(table.clone(), projection, filters, None).await;
         let expected_output = vec![
             "+----+--------+",
             "| a  | row_id |",

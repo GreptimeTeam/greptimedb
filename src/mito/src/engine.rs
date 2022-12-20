@@ -332,6 +332,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         )?;
 
         let table_id = request.id;
+        let table_dir = table_dir(schema_name, table_id);
         let mut regions = HashMap::with_capacity(request.region_numbers.len());
 
         for region_number in &request.region_numbers {
@@ -359,7 +360,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 }
             }
 
-            let table_dir = table_dir(schema_name, table_id);
             let opts = CreateOptions {
                 parent_dir: table_dir.clone(),
             };
