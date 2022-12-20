@@ -31,8 +31,8 @@ impl SqlHandler {
         let schema_name = req.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = req.table_name.clone();
         let table_ref = TableReference {
-            catalog: &catalog_name.to_string(),
-            schema: &schema_name.to_string(),
+            catalog: catalog_name,
+            schema: schema_name,
             table: &table_name,
         };
 
@@ -52,23 +52,20 @@ impl SqlHandler {
                 .context(error::AlterTableSnafu {
                     table_name: full_table_name.clone(),
                 })?;
-        match kind {
-            AlterKind::RenameTable { .. } => {
-                // TODO alter table name in catalog manager
-                let rename_table_req = RenameTableRequest {
-                    catalog: table.table_info().catalog_name.clone(),
-                    schema: table.table_info().schema_name.clone(),
-                    table_name,
-                    new_table_name: table.table_info().name.clone(),
-                    table_id: table.table_info().ident.table_id,
-                    table,
-                };
-                self.catalog_manager
-                    .rename_table(rename_table_req)
-                    .await
-                    .context(RenameTableSnafu)?;
-            }
-            _ => {}
+        if let AlterKind::RenameTable { .. } = kind {
+            // TODO alter table name in catalog manager
+            let rename_table_req = RenameTableRequest {
+                catalog: table.table_info().catalog_name.clone(),
+                schema: table.table_info().schema_name.clone(),
+                table_name,
+                new_table_name: table.table_info().name.clone(),
+                table_id: table.table_info().ident.table_id,
+                table,
+            };
+            self.catalog_manager
+                .rename_table(rename_table_req)
+                .await
+                .context(RenameTableSnafu)?;
         }
 
         // Tried in MySQL, it really prints "Affected Rows: 0".

@@ -489,14 +489,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .await
             .context(error::AlterTableSnafu { table_name })?;
 
-        match &req.alter_kind {
-            AlterKind::RenameTable { new_table_name } => {
-                let mut tables = self.tables.write().unwrap();
-                tables.remove(&table_ref.to_string());
-                table_ref.table = new_table_name.as_str();
-                tables.insert(table_ref.to_string(), table.clone());
-            }
-            _ => {}
+        if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
+            let mut tables = self.tables.write().unwrap();
+            tables.remove(&table_ref.to_string());
+            table_ref.table = new_table_name.as_str();
+            tables.insert(table_ref.to_string(), table.clone());
         }
 
         Ok(table)

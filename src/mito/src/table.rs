@@ -221,7 +221,7 @@ impl<R: Region> Table for MitoTable<R> {
                     .builder_with_alter_kind(table_name, &req.alter_kind)?
                     .build()
                     .context(error::BuildTableMetaSnafu { table_name })?;
-                new_info.meta = new_meta.clone();
+                new_info.meta = new_meta;
             }
         };
 
