@@ -151,7 +151,7 @@ impl<'a> RecordBatchRowIterator<'a> {
 }
 
 impl<'a> Iterator for RecordBatchRowIterator<'a> {
-    type Item = Result<Vec<Value>>;
+    type Item = Vec<Value>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.row_cursor == self.rows {
@@ -165,7 +165,7 @@ impl<'a> Iterator for RecordBatchRowIterator<'a> {
             }
 
             self.row_cursor += 1;
-            Some(Ok(row))
+            Some(row)
         }
     }
 }
@@ -256,7 +256,6 @@ mod tests {
             record_batch_iter
                 .next()
                 .unwrap()
-                .unwrap()
                 .into_iter()
                 .collect::<Vec<Value>>()
         );
@@ -265,7 +264,6 @@ mod tests {
             vec![Value::UInt32(2), Value::String("hello".into())],
             record_batch_iter
                 .next()
-                .unwrap()
                 .unwrap()
                 .into_iter()
                 .collect::<Vec<Value>>()
@@ -276,7 +274,6 @@ mod tests {
             record_batch_iter
                 .next()
                 .unwrap()
-                .unwrap()
                 .into_iter()
                 .collect::<Vec<Value>>()
         );
@@ -285,7 +282,6 @@ mod tests {
             vec![Value::UInt32(4), Value::Null],
             record_batch_iter
                 .next()
-                .unwrap()
                 .unwrap()
                 .into_iter()
                 .collect::<Vec<Value>>()

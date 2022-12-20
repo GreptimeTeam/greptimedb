@@ -48,15 +48,9 @@ message InsertExpr {
 message ObjectResult {
   ResultHeader header = 1;
   oneof result {
-    SelectResult select = 2;
-    MutateResult mutate = 3;
-    FlightDataRaw flight_data = 4;
+    MutateResult mutate = 2;
+    FlightDataRaw flight_data = 3;
   }
-}
-
-// TODO(LFC): replace with flight data
-message SelectResult {
-  bytes raw_data = 1;
 }
 
 message FlightDataRaw {

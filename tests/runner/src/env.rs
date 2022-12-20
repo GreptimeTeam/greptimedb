@@ -18,11 +18,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use client::api::v1::codec::SelectResult;
-use client::api::v1::column::SemanticType;
-use client::api::v1::ColumnDataType;
 use client::{Client, Database as DB, Error as ClientError, ObjectResult, Select};
-use comfy_table::{Cell, Table};
+use common_grpc::flight;
 use sqlness::{Database, Environment};
 use tokio::process::{Child, Command};
 
@@ -129,75 +126,20 @@ impl Display for ResultDisplayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.result {
             Ok(result) => match result {
-                ObjectResult::Select(select_result) => {
-                    write!(
-                        f,
-                        "{}",
-                        SelectResultDisplayer {
-                            result: select_result
-                        }
-                        .display()
-                    )
-                }
                 ObjectResult::Mutate(mutate_result) => {
                     write!(f, "{mutate_result:?}")
                 }
-                // TODO(LFC): Implement it.
-                ObjectResult::FlightData(_) => unimplemented!(),
+                ObjectResult::FlightData(messages) => {
+                    let pretty = flight::flight_messages_to_recordbatches(messages.clone())
+                        .map_err(|e| e.to_string())
+                        .and_then(|x| x.pretty_print().map_err(|e| e.to_string()));
+                    match pretty {
+                        Ok(s) => write!(f, "{s}"),
+                        Err(e) => write!(f, "err: {e}"),
+                    }
+                }
             },
             Err(e) => write!(f, "Failed to execute, error: {e:?}"),
         }
-    }
-}
-
-struct SelectResultDisplayer<'a> {
-    result: &'a SelectResult,
-}
-
-impl SelectResultDisplayer<'_> {
-    fn display(&self) -> impl Display {
-        let mut table = Table::new();
-        table.load_preset("||--+-++|    ++++++");
-
-        if self.result.row_count == 0 {
-            return table;
-        }
-
-        let mut headers = vec![];
-        for column in &self.result.columns {
-            headers.push(Cell::new(format!(
-                "{}, #{:?}, #{:?}",
-                column.column_name,
-                SemanticType::from_i32(column.semantic_type).unwrap(),
-                ColumnDataType::from_i32(column.datatype).unwrap()
-            )));
-        }
-        table.set_header(headers);
-
-        let col_count = self.result.columns.len();
-        let row_count = self.result.row_count as usize;
-        let columns = self
-            .result
-            .columns
-            .iter()
-            .map(|col| {
-                util::values_to_string(
-                    ColumnDataType::from_i32(col.datatype).unwrap(),
-                    col.values.clone().unwrap(),
-                    col.null_mask.clone(),
-                    row_count,
-                )
-            })
-            .collect::<Vec<_>>();
-
-        for row_index in 0..row_count {
-            let mut row = Vec::with_capacity(col_count);
-            for col in columns.iter() {
-                row.push(col[row_index].clone());
-            }
-            table.add_row(row);
-        }
-
-        table
     }
 }

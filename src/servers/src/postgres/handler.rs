@@ -109,10 +109,7 @@ where
             Ok(rb) => stream::iter(
                 // collect rows from a single recordbatch into vector to avoid
                 // borrowing it
-                rb.rows()
-                    .map(|row| row.map_err(|e| PgWireError::ApiError(Box::new(e))))
-                    .collect::<Vec<_>>()
-                    .into_iter(),
+                rb.rows().map(Ok).collect::<Vec<_>>().into_iter(),
             )
             .boxed(),
             Err(e) => stream::once(future::err(PgWireError::ApiError(Box::new(e)))).boxed(),

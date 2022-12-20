@@ -14,7 +14,6 @@
 
 use std::any::Any;
 
-use api::serde::DecodeError;
 use common_error::prelude::*;
 
 #[derive(Debug, Snafu)]
@@ -44,9 +43,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Fail to decode select result, source: {}", source))]
-    DecodeSelect { source: DecodeError },
-
     #[snafu(display("Error occurred on the data node, code: {}, msg: {}", code, msg))]
     Datanode { code: u32, msg: String },
 
@@ -65,12 +61,6 @@ pub enum Error {
         source: api::error::Error,
     },
 
-    #[snafu(display("Failed to create RecordBatches, source: {}", source))]
-    CreateRecordBatches {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
-    },
-
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
     IllegalGrpcClientState {
         err_msg: String,
@@ -79,12 +69,6 @@ pub enum Error {
 
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, backtrace: Backtrace },
-
-    #[snafu(display("Failed to convert schema, source: {}", source))]
-    ConvertSchema {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
 
     #[snafu(display(
         "Failed to create gRPC channel, peer address: {}, source: {}",
@@ -95,12 +79,6 @@ pub enum Error {
         addr: String,
         #[snafu(backtrace)]
         source: common_grpc::error::Error,
-    },
-
-    #[snafu(display("Failed to convert column to vector, source: {}", source))]
-    ColumnToVector {
-        #[snafu(backtrace)]
-        source: common_grpc_expr::error::Error,
     },
 }
 
@@ -113,18 +91,14 @@ impl ErrorExt for Error {
             | Error::MissingResult { .. }
             | Error::MissingHeader { .. }
             | Error::TonicStatus { .. }
-            | Error::DecodeSelect { .. }
             | Error::Datanode { .. }
             | Error::MutateFailure { .. }
             | Error::ColumnDataType { .. }
             | Error::MissingField { .. } => StatusCode::Internal,
-            Error::ConvertSchema { source } => source.status_code(),
-            Error::CreateRecordBatches { source } => source.status_code(),
             Error::CreateChannel { source, .. } | Error::ConvertFlightData { source } => {
                 source.status_code()
             }
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
-            Error::ColumnToVector { source, .. } => source.status_code(),
         }
     }
 
