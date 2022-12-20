@@ -7027,6 +7027,7 @@ dependencies = [
  "catalog",
  "client",
  "common-catalog",
+ "common-error",
  "common-runtime",
  "common-telemetry",
  "datanode",

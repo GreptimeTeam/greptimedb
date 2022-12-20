@@ -14,6 +14,7 @@
 
 use axum::http::StatusCode;
 use axum_test_helper::TestClient;
+use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
 use servers::http::handler::HealthResponse;
 use servers::http::{JsonOutput, JsonResponse};
@@ -218,7 +219,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert!(!body.success());
+    assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
     guard.remove_all().await;
 }
