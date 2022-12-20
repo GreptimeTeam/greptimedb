@@ -9,12 +9,12 @@ default = []
 test = []
 
 [dependencies]
-arrow = { version = "26.0" }
-arrow-schema = { version = "26.0", features = ["serde"] }
+arrow = "28.0"
+arrow-schema = { version = "28.0", features = ["serde"] }
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
-datafusion-common = "14.0"
+datafusion-common = "15.0"
 enum_dispatch = "0.3"
 num = "0.4"
 num-traits = "0.2"

@@ -175,4 +175,9 @@ impl DfAccumulator for DfAccumulatorAdaptor {
             .map_err(Error::from)?;
         Ok(scalar_value)
     }
+
+    fn size(&self) -> usize {
+        // TODO(LFC): Implement new "size" method for Accumulator.
+        0
+    }
 }

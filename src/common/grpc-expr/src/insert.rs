@@ -725,7 +725,7 @@ mod tests {
 
         async fn scan(
             &self,
-            _projection: &Option<Vec<usize>>,
+            _projection: Option<&Vec<usize>>,
             _filters: &[Expr],
             _limit: Option<usize>,
         ) -> TableResult<PhysicalPlanRef> {

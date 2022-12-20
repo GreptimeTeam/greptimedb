@@ -12,9 +12,9 @@ common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
-datafusion = "14.0.0"
-datafusion-common = "14.0.0"
-datafusion-expr = "14.0.0"
+datafusion = "15.0"
+datafusion-common = "15.0"
+datafusion-expr = "15.0"
 datatypes = { path = "../datatypes" }
 derive_builder = "0.11"
 futures = "0.3"
@@ -26,7 +26,7 @@ store-api = { path = "../store-api" }
 tokio = { version = "1.18", features = ["full"] }
 
 [dev-dependencies]
-datafusion-expr = "14.0.0"
-parquet = { version = "26", features = ["async"] }
+datafusion-expr = "15.0"
+parquet = { version = "28.0", features = ["async"] }
 tempdir = "0.3"
 tokio-util = { version = "0.7", features = ["compat"] }

@@ -97,7 +97,7 @@ impl Table for DistTable {
 
     async fn scan(
         &self,
-        projection: &Option<Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
     ) -> table::Result<PhysicalPlanRef> {
@@ -121,7 +121,7 @@ impl Table for DistTable {
             partition_execs.push(Arc::new(PartitionExec {
                 table_name: self.table_name.clone(),
                 datanode_instance,
-                projection: projection.clone(),
+                projection: projection.cloned(),
                 filters: filters.to_vec(),
                 limit,
                 batches: Arc::new(RwLock::new(None)),
@@ -385,8 +385,8 @@ impl DistTable {
     }
 }
 
-fn project_schema(table_schema: SchemaRef, projection: &Option<Vec<usize>>) -> SchemaRef {
-    if let Some(projection) = &projection {
+fn project_schema(table_schema: SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
+    if let Some(projection) = projection {
         let columns = table_schema.column_schemas();
         let projected = projection
             .iter()
@@ -864,7 +864,7 @@ mod test {
     ) {
         let expected_output = expected_output.into_iter().join("\n");
         let table_scan = table
-            .scan(&projection, filters.as_slice(), None)
+            .scan(projection.as_ref(), filters.as_slice(), None)
             .await
             .unwrap();
         assert_eq!(

@@ -6,8 +6,8 @@ license = "Apache-2.0"
 
 [dependencies]
 common-error = { path = "../error" }
-datafusion = "14.0.0"
-datafusion-common = "14.0.0"
+datafusion = "15.0"
+datafusion-common = "15.0"
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 paste = "1.0"

@@ -61,7 +61,7 @@ impl Table for SystemCatalogTable {
 
     async fn scan(
         &self,
-        _projection: &Option<Vec<usize>>,
+        _projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> table::Result<PhysicalPlanRef> {
@@ -129,7 +129,7 @@ impl SystemCatalogTable {
         let ctx = SessionContext::new();
         let scan = self
             .table
-            .scan(&full_projection, &[], None)
+            .scan(full_projection, &[], None)
             .await
             .context(error::SystemCatalogTableScanSnafu)?;
         let stream = scan

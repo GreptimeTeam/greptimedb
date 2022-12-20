@@ -15,4 +15,4 @@ itertools = "0.10"
 mito = { path = "../mito" }
 once_cell = "1.10"
 snafu = { version = "0.7", features = ["backtraces"] }
-sqlparser = "0.26"
+sqlparser = "0.27"

@@ -22,9 +22,9 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion = "14.0.0"
-datafusion-common = "14.0.0"
-datafusion-expr = "14.0.0"
+datafusion = "15.0"
+datafusion-common = "15.0"
+datafusion-expr = "15.0"
 datanode = { path = "../datanode" }
 datatypes = { path = "../datatypes" }
 futures = "0.3"

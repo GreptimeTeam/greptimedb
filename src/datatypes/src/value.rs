@@ -544,12 +544,15 @@ impl TryFrom<ScalarValue> for Value {
                 .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
             ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::Time64(_)
             | ScalarValue::IntervalYearMonth(_)
             | ScalarValue::IntervalDayTime(_)
             | ScalarValue::IntervalMonthDayNano(_)
             | ScalarValue::Struct(_, _)
-            | ScalarValue::Dictionary(_, _) => {
+            | ScalarValue::Dictionary(_, _)
+            | ScalarValue::Time32Second(_)
+            | ScalarValue::Time32Millisecond(_)
+            | ScalarValue::Time64Microsecond(_)
+            | ScalarValue::Time64Nanosecond(_) => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: v.get_datatype(),
                 }

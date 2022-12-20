@@ -166,14 +166,14 @@ impl<R: Region> Table for MitoTable<R> {
 
     async fn scan(
         &self,
-        projection: &Option<Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> TableResult<PhysicalPlanRef> {
         let read_ctx = ReadContext::default();
         let snapshot = self.region.snapshot(&read_ctx).map_err(TableError::new)?;
 
-        let projection = self.transform_projection(&self.region, projection.clone())?;
+        let projection = self.transform_projection(&self.region, projection.cloned())?;
         let filters = filters.into();
         let scan_request = ScanRequest {
             projection,

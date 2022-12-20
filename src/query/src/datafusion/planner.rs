@@ -21,6 +21,7 @@ use datafusion::error::Result as DfResult;
 use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::sql::planner::{ContextProvider, SqlToRel};
+use datafusion_common::ScalarValue;
 use datafusion_expr::TableSource;
 use datatypes::arrow::datatypes::DataType;
 use session::context::QueryContextRef;
@@ -125,5 +126,9 @@ impl ContextProvider for DfContextProviderAdapter {
 
     fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
         self.state.get_variable_type(variable_names)
+    }
+
+    fn get_config_option(&self, variable: &str) -> Option<ScalarValue> {
+        self.state.get_config_option(variable)
     }
 }

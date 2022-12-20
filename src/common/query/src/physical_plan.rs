@@ -233,7 +233,7 @@ mod test {
         async fn scan(
             &self,
             _ctx: &SessionState,
-            _projection: &Option<Vec<usize>>,
+            _projection: Option<&Vec<usize>>,
             _filters: &[Expr],
             _limit: Option<usize>,
         ) -> DfResult<Arc<dyn DfPhysicalPlan>> {

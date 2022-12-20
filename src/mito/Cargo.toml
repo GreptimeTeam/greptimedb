@@ -19,8 +19,8 @@ common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion = "14.0.0"
-datafusion-common = "14.0.0"
+datafusion = "15.0"
+datafusion-common = "15.0"
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 log-store = { path = "../log-store" }
