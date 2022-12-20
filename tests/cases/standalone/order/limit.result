@@ -1,0 +1,133 @@
+CREATE TABLE test (a BIGINT time index, b INTEGER);
+
+MutateResult { success: 1, failure: 0 }
+
+INSERT INTO test VALUES (11, 22), (12, 21), (13, 22);
+
+MutateResult { success: 3, failure: 0 }
+
+SELECT a FROM test LIMIT 1;
+
++-----------------------+
+| a, #Timestamp, #Int64 |
++-----------------------+
+| 11                    |
++-----------------------+
+
+SELECT a FROM test LIMIT 1.25;
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT a FROM test LIMIT 1.25, source: Error during planning: Unexpected expression for LIMIT clause" }
+
+SELECT a FROM test LIMIT 2-1;
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT a FROM test LIMIT 2 - 1, source: Error during planning: Unexpected expression for LIMIT clause" }
+
+SELECT a FROM test LIMIT a;
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT a FROM test LIMIT a, source: Error during planning: Unexpected expression for LIMIT clause" }
+
+SELECT a FROM test LIMIT a+1;
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT a FROM test LIMIT a + 1, source: Error during planning: Unexpected expression for LIMIT clause" }
+
+SELECT a FROM test LIMIT SUM(42);
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT a FROM test LIMIT SUM(42), source: Error during planning: Unexpected expression for LIMIT clause" }
+
+SELECT a FROM test LIMIT row_number() OVER ();
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT a FROM test LIMIT row_number() OVER (), source: Error during planning: Unexpected expression for LIMIT clause" }
+
+CREATE TABLE test2 (a STRING, ts BIGINT TIME INDEX);
+
+MutateResult { success: 1, failure: 0 }
+
+INSERT INTO test2 VALUES ('Hello World', 1);
+
+MutateResult { success: 1, failure: 0 }
+
+SELECT * FROM test2 LIMIT 3;
+
++--------------------+------------------------+
+| a, #Field, #String | ts, #Timestamp, #Int64 |
++--------------------+------------------------+
+| Hello World        | 1                      |
++--------------------+------------------------+
+
+select 1 limit date '1992-01-01';
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT 1 LIMIT DATE '1992-01-01', source: Error during planning: Unexpected expression for LIMIT clause" }
+
+CREATE TABLE integers(i BIGINT TIME INDEX);
+
+MutateResult { success: 1, failure: 0 }
+
+INSERT INTO integers VALUES (1), (2), (3), (4), (5);
+
+MutateResult { success: 5, failure: 0 }
+
+SELECT * FROM integers LIMIT 3;
+
++-----------------------+
+| i, #Timestamp, #Int64 |
++-----------------------+
+| 1                     |
+| 2                     |
+| 3                     |
++-----------------------+
+
+SELECT * FROM integers LIMIT 4;
+
++-----------------------+
+| i, #Timestamp, #Int64 |
++-----------------------+
+| 1                     |
+| 2                     |
+| 3                     |
+| 4                     |
++-----------------------+
+
+SELECT * FROM integers as int LIMIT (SELECT MIN(integers.i) FROM integers);
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT * FROM integers AS int LIMIT (SELECT MIN(integers.i) FROM integers), source: Error during planning: Unexpected expression for LIMIT clause" }
+
+SELECT * FROM integers as int OFFSET (SELECT MIN(integers.i) FROM integers);
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT * FROM integers AS int OFFSET (SELECT MIN(integers.i) FROM integers), source: Error during planning: Unexpected expression in OFFSET clause" }
+
+SELECT * FROM integers as int LIMIT (SELECT MAX(integers.i) FROM integers) OFFSET (SELECT MIN(integers.i) FROM integers);
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT * FROM integers AS int LIMIT (SELECT MAX(integers.i) FROM integers) OFFSET (SELECT MIN(integers.i) FROM integers), source: Error during planning: Unexpected expression in OFFSET clause" }
+
+SELECT * FROM integers as int LIMIT (SELECT max(integers.i) FROM integers where i > 5);
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT * FROM integers AS int LIMIT (SELECT max(integers.i) FROM integers WHERE i > 5), source: Error during planning: Unexpected expression for LIMIT clause" }
+
+SELECT * FROM integers as int LIMIT (SELECT max(integers.i) FROM integers where i > 5);
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT * FROM integers AS int LIMIT (SELECT max(integers.i) FROM integers WHERE i > 5), source: Error during planning: Unexpected expression for LIMIT clause" }
+
+SELECT * FROM integers as int LIMIT (SELECT NULL);
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT * FROM integers AS int LIMIT (SELECT NULL), source: Error during planning: Unexpected expression for LIMIT clause" }
+
+SELECT * FROM integers as int LIMIT (SELECT -1);
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT * FROM integers AS int LIMIT (SELECT -1), source: Error during planning: Unexpected expression for LIMIT clause" }
+
+SELECT * FROM integers as int LIMIT (SELECT 'ab');
+
+Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Cannot plan SQL: SELECT * FROM integers AS int LIMIT (SELECT 'ab'), source: Error during planning: Unexpected expression for LIMIT clause" }
+
+DROP TABLE integers;
+
+MutateResult { success: 1, failure: 0 }
+
+DROP TABLE test;
+
+MutateResult { success: 1, failure: 0 }
+
+DROP TABLE test2;
+
+MutateResult { success: 1, failure: 0 }
+
