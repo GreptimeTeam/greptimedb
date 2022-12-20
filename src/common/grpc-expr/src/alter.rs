@@ -87,6 +87,18 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
             };
             Ok(Some(request))
         }
+        Some(Kind::RenameTable(RenameTable { new_table_name })) => {
+            let alter_kind = AlterKind::RenameTable {
+                new_table_name
+            };
+            let req = AlterTableRequest {
+                catalog_name,
+                schema_name,
+                table_name: expr.table_name,
+                alter_kind,
+            };
+            Ok(Some(req))
+        }
         None => Ok(None),
     }
 }

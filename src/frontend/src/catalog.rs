@@ -100,7 +100,7 @@ impl CatalogManager for FrontendCatalogManager {
         unimplemented!()
     }
 
-    async fn rename_table(&self, request: RenameTableRequest) -> catalog_err::Result<bool> {
+    async fn rename_table(&self, _request: RenameTableRequest) -> catalog_err::Result<bool> {
         todo!()
     }
     
@@ -323,7 +323,7 @@ impl SchemaProvider for FrontendSchemaProvider {
         unimplemented!("Frontend schema provider does not support deregister table")
     }
 
-    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> catalog_err::Result<Option<TableRef>> {
+    fn rename_table(&self, _name: &str, _new_name: String, _table: TableRef) -> catalog_err::Result<Option<TableRef>> {
         todo!()
     }
 

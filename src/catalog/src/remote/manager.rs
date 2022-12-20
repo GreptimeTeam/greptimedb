@@ -31,10 +31,7 @@ use table::table::numbers::NumbersTable;
 use table::TableRef;
 use tokio::sync::Mutex;
 
-use crate::error::{
-    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu,
-    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu, TableNotFoundSnafu
-};
+use crate::error::{CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu, OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu, TableNotFoundSnafu, EmptyValueSnafu};
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
     SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
@@ -450,7 +447,27 @@ impl CatalogManager for RemoteCatalogManager {
             }.fail();
         }
         let table = schema_provider.table(&request.table_name)?.unwrap();
-        schema_provider.rename_table(&request.table_name, request.new_table_name, table)?;
+        schema_provider.rename_table(&request.table_name, request.new_table_name.clone(), table)?;
+
+        let mut key = TableGlobalKey {
+            catalog_name: catalog_name.clone(),
+            schema_name: schema_name.clone(),
+            table_name: request.table_name.clone(),
+        };
+
+        match self.backend.get(key.to_string().as_bytes()).await? {
+            None => {
+                return EmptyValueSnafu {}.fail();
+            },
+            Some(r) => {
+                let mut value = TableGlobalValue::from_bytes(&r.1).context(InvalidCatalogValueSnafu)?;
+                value.table_info.name = request.new_table_name.clone();
+                self.backend.delete(key.to_string().as_bytes()).await?;
+                key.table_name = request.new_table_name;
+                let val_bytes = value.as_bytes().context(InvalidCatalogValueSnafu)?;
+                self.backend.set(key.to_string().as_bytes(), &val_bytes).await?;
+            },
+        };
         Ok(true)
     }
 
@@ -811,7 +828,7 @@ impl SchemaProvider for RemoteSchemaProvider {
                 );
 
                 let prev_tables = tables.load();
-                let mut new_tables = HashMap::with_capacity(prev_tables.len());
+                let mut new_tables = HashMap::with_capacity(prev_tables.len()+1);
                 new_tables.clone_from(&prev_tables);
                 new_tables.remove(&table_name);
                 let prev = new_tables.insert(new_name, table);
