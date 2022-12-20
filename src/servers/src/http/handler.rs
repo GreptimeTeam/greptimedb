@@ -47,7 +47,7 @@ pub async fn sql(
     let start = Instant::now();
     let resp = if let Some(sql) = &params.sql {
         let query_ctx = Arc::new(QueryContext::new());
-        if let Some(ref db) = params.database {
+        if let Some(db) = &params.database {
             match sql_handler.is_valid_schema(DEFAULT_CATALOG_NAME, db) {
                 Ok(true) => query_ctx.set_current_schema(db),
                 Ok(false) => {
