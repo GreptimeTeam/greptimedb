@@ -44,7 +44,12 @@ use crate::system::{
     VALUE_INDEX,
 };
 use crate::tables::SystemCatalog;
-use crate::{format_full_table_name, handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef, RenameTableRequest};
+use crate::{
+    format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
+    CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest,
+    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest, SchemaProvider,
+    SchemaProviderRef,
+};
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
 pub struct LocalCatalogManager {
@@ -360,11 +365,7 @@ impl CatalogManager for LocalCatalogManager {
             } else {
                 // table does not exist
                 self.system
-                    .register_table(
-                        catalog_name.clone(),
-                        schema_name.clone(),
-                        request.table_id,
-                    )
+                    .register_table(catalog_name.clone(), schema_name.clone(), request.table_id)
                     .await?;
                 schema.register_table(request.table_name, request.table)?;
                 Ok(true)

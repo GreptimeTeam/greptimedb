@@ -241,7 +241,12 @@ impl SchemaProvider for SchemaProviderAdapter {
             .transpose()
     }
 
-    fn rename_table(&self, _name: &str, _new_name: String, _table: TableRef) -> catalog::error::Result<Option<TableRef>> {
+    fn rename_table(
+        &self,
+        _name: &str,
+        _new_name: String,
+        _table: TableRef,
+    ) -> catalog::error::Result<Option<TableRef>> {
         todo!()
     }
 

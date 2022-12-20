@@ -81,9 +81,7 @@ impl TryFrom<AlterTable> for AlterExpr {
                 })
             }
             AlterTableOperation::RenameTable { new_table_name } => {
-                alter_expr::Kind::RenameTable(api::v1::RenameTable {
-                    new_table_name,
-                })
+                alter_expr::Kind::RenameTable(api::v1::RenameTable { new_table_name })
             }
         };
         let expr = AlterExpr {

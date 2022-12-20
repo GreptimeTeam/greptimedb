@@ -210,10 +210,12 @@ impl<R: Region> Table for MitoTable<R> {
 
         // setup new table info
         match req.alter_kind {
-            AlterKind::RenameTable { new_table_name: ref new_name } => {
+            AlterKind::RenameTable {
+                new_table_name: ref new_name,
+            } => {
                 new_info.name = new_name.clone();
             }
-            AlterKind::AddColumns {..} | AlterKind:: DropColumns{..} => {
+            AlterKind::AddColumns { .. } | AlterKind::DropColumns { .. } => {
                 let table_meta = &table_info.meta;
                 let new_meta = table_meta
                     .builder_with_alter_kind(table_name, &req.alter_kind)?

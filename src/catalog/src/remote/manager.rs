@@ -31,13 +31,21 @@ use table::table::numbers::NumbersTable;
 use table::TableRef;
 use tokio::sync::Mutex;
 
-use crate::error::{CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu, OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu, TableNotFoundSnafu, EmptyValueSnafu};
+use crate::error::{
+    CatalogNotFoundSnafu, CreateTableSnafu, EmptyValueSnafu, InvalidCatalogValueSnafu,
+    InvalidTableSchemaSnafu, OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu,
+    TableNotFoundSnafu, UnimplementedSnafu,
+};
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
     SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue, TableRegionalKey, TableRegionalValue,
 };
 use crate::remote::{Kv, KvBackendRef};
-use crate::{handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef, RenameTableRequest};
+use crate::{
+    handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
+    DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
+    RegisterTableRequest, RenameTableRequest, SchemaProvider, SchemaProviderRef,
+};
 
 /// Catalog manager based on metasrv.
 pub struct RemoteCatalogManager {
@@ -436,15 +444,17 @@ impl CatalogManager for RemoteCatalogManager {
         let catalog_provider = self.catalog(&catalog_name)?.context(CatalogNotFoundSnafu {
             catalog_name: &catalog_name,
         })?;
-        let schema_provider = catalog_provider
-            .schema(&schema_name)?
-            .with_context(|| SchemaNotFoundSnafu {
-                schema_info: format!("{}.{}", &catalog_name, &schema_name),
-            })?;
+        let schema_provider =
+            catalog_provider
+                .schema(&schema_name)?
+                .with_context(|| SchemaNotFoundSnafu {
+                    schema_info: format!("{}.{}", &catalog_name, &schema_name),
+                })?;
         if !schema_provider.table_exist(&request.table_name).unwrap() {
             return TableNotFoundSnafu {
                 table_info: format!("{}.{}.{}", &catalog_name, &schema_name, &request.table_name),
-            }.fail();
+            }
+            .fail();
         }
         let table = schema_provider.table(&request.table_name)?.unwrap();
         schema_provider.rename_table(&request.table_name, request.new_table_name.clone(), table)?;
@@ -458,15 +468,18 @@ impl CatalogManager for RemoteCatalogManager {
         match self.backend.get(key.to_string().as_bytes()).await? {
             None => {
                 return EmptyValueSnafu {}.fail();
-            },
+            }
             Some(r) => {
-                let mut value = TableGlobalValue::from_bytes(&r.1).context(InvalidCatalogValueSnafu)?;
+                let mut value =
+                    TableGlobalValue::from_bytes(&r.1).context(InvalidCatalogValueSnafu)?;
                 value.table_info.name = request.new_table_name.clone();
                 self.backend.delete(key.to_string().as_bytes()).await?;
                 key.table_name = request.new_table_name;
                 let val_bytes = value.as_bytes().context(InvalidCatalogValueSnafu)?;
-                self.backend.set(key.to_string().as_bytes(), &val_bytes).await?;
-            },
+                self.backend
+                    .set(key.to_string().as_bytes(), &val_bytes)
+                    .await?;
+            }
         };
         Ok(true)
     }
@@ -799,13 +812,18 @@ impl SchemaProvider for RemoteSchemaProvider {
         prev
     }
 
-    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> Result<Option<TableRef>> {
+    fn rename_table(
+        &self,
+        name: &str,
+        new_name: String,
+        table: TableRef,
+    ) -> Result<Option<TableRef>> {
         let table_name = name.to_string();
         let table_info = table.table_info();
         let table_key = self.build_regional_table_key(&table_name).to_string();
         let new_table_key = self.build_regional_table_key(&new_name).to_string();
         let table_version = table_info.ident.version;
-        let table_value = TableRegionalValue{
+        let table_value = TableRegionalValue {
             version: table_version,
             regions_ids: table_info.meta.region_numbers.clone(),
         };

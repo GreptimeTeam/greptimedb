@@ -61,7 +61,7 @@ pub struct OpenTableRequest {
 }
 
 /// Alter table request
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct AlterTableRequest {
     pub catalog_name: Option<String>,
     pub schema_name: Option<String>,
@@ -70,13 +70,13 @@ pub struct AlterTableRequest {
 }
 
 /// Add column request
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct AddColumnRequest {
     pub column_schema: ColumnSchema,
     pub is_key: bool,
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum AlterKind {
     AddColumns { columns: Vec<AddColumnRequest> },
     DropColumns { names: Vec<String> },

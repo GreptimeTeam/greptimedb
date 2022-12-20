@@ -277,12 +277,11 @@ mod tests {
             catalog_name: Some(catalog_name.clone()),
             schema_name: Some(schema_name.clone()),
             table_name: table_name.clone(),
-            alter_kind: AlterKind::RenameTable { new_table_name: new_table_name.clone() }
+            alter_kind: AlterKind::RenameTable {
+                new_table_name: new_table_name.clone(),
+            },
         };
-        let table = table_engine
-            .alter_table(&ctx, req)
-            .await
-            .unwrap();
+        let table = table_engine.alter_table(&ctx, req).await.unwrap();
 
         let rename_table_req = RenameTableRequest {
             catalog: catalog_name,
@@ -290,9 +289,12 @@ mod tests {
             table_name,
             new_table_name: new_table_name.clone(),
             table_id,
-            table
+            table,
         };
-        assert!(catalog_manager.rename_table(rename_table_req).await.unwrap());
+        assert!(catalog_manager
+            .rename_table(rename_table_req)
+            .await
+            .unwrap());
         assert_eq!(
             HashSet::from([new_table_name, "numbers".to_string()]),
             default_schema

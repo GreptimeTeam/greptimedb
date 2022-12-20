@@ -40,7 +40,10 @@ use table::{Table, TableRef};
 
 use crate::error::{Error, InsertCatalogRecordSnafu};
 use crate::system::{build_schema_insert_request, build_table_insert_request, SystemCatalogTable};
-use crate::{CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef, format_full_table_name_by_id};
+use crate::{
+    format_full_table_name_by_id, CatalogListRef, CatalogProvider, SchemaProvider,
+    SchemaProviderRef,
+};
 
 /// Tables holds all tables created by user.
 pub struct Tables {
@@ -235,7 +238,12 @@ impl SchemaProvider for InformationSchema {
         panic!("System catalog & schema does not support deregister table")
     }
 
-    fn rename_table(&self, _name: &str, _new_name: String, _table: TableRef) -> crate::error::Result<Option<TableRef>> {
+    fn rename_table(
+        &self,
+        _name: &str,
+        _new_name: String,
+        _table: TableRef,
+    ) -> crate::error::Result<Option<TableRef>> {
         panic!("System catalog & schema does not support rename table")
     }
 

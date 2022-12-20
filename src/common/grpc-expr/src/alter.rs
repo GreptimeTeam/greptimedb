@@ -88,9 +88,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
             Ok(Some(request))
         }
         Some(Kind::RenameTable(RenameTable { new_table_name })) => {
-            let alter_kind = AlterKind::RenameTable {
-                new_table_name
-            };
+            let alter_kind = AlterKind::RenameTable { new_table_name };
             let req = AlterTableRequest {
                 catalog_name,
                 schema_name,

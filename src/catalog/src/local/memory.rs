@@ -25,9 +25,15 @@ use table::metadata::TableId;
 use table::table::TableIdProvider;
 use table::TableRef;
 
-use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, TableNotFoundSnafu};
+use crate::error::{
+    CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, TableNotFoundSnafu,
+};
 use crate::schema::SchemaProvider;
-use crate::{CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest, SchemaProviderRef};
+use crate::{
+    CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
+    SchemaProviderRef,
+};
 
 /// Simple in-memory list of catalogs
 pub struct MemoryCatalogManager {
@@ -289,7 +295,12 @@ impl SchemaProvider for MemorySchemaProvider {
         }
     }
 
-    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> Result<Option<TableRef>> {
+    fn rename_table(
+        &self,
+        name: &str,
+        new_name: String,
+        table: TableRef,
+    ) -> Result<Option<TableRef>> {
         let mut tables = self.tables.write().unwrap();
         if let Some(existing) = tables.get(name) {
             // if table with the same name but different table id exists, then it's a fatal bug
@@ -304,7 +315,10 @@ impl SchemaProvider for MemorySchemaProvider {
             tables.remove(name);
             Ok(tables.insert(new_name, table))
         } else {
-            TableNotFoundSnafu { table_info: name.to_string() }.fail()?
+            TableNotFoundSnafu {
+                table_info: name.to_string(),
+            }
+            .fail()?
         }
     }
 

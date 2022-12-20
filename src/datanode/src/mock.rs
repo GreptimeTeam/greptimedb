@@ -14,23 +14,23 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use snafu::ResultExt;
-use catalog::CatalogManagerRef;
 
 use catalog::remote::MetaKvBackend;
+use catalog::CatalogManagerRef;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_srv::mocks::MockInfo;
 use mito::config::EngineConfig as TableEngineConfig;
 use query::QueryEngineFactory;
 use servers::Mode;
+use snafu::ResultExt;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::metadata::TableId;
 use table::table::TableIdProvider;
 
 use crate::datanode::DatanodeOptions;
-use crate::error::{Result, CatalogSnafu};
+use crate::error::{CatalogSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::{create_local_file_log_store, new_object_store, DefaultEngine, Instance};
 use crate::script::ScriptExecutor;

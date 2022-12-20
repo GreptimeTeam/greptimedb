@@ -41,7 +41,12 @@ pub trait SchemaProvider: Sync + Send {
 
     /// If supported by the implementation, renames an existing table from this schema and returns it.
     /// If no table of that name exists, returns "Table not found" error.
-    fn rename_table(&self, name: &str, new_name: String, table: TableRef) -> Result<Option<TableRef>>;
+    fn rename_table(
+        &self,
+        name: &str,
+        new_name: String,
+        table: TableRef,
+    ) -> Result<Option<TableRef>>;
 
     /// If supported by the implementation, checks the table exist in the schema provider or not.
     /// If no matched table in the schema provider, return false.

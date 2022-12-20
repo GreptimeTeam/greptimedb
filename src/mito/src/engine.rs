@@ -29,7 +29,9 @@ use store_api::storage::{
 };
 use table::engine::{EngineContext, TableEngine, TableReference};
 use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
-use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::requests::{
+    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+};
 use table::table::TableRef;
 use table::{Result as TableResult, Table};
 use tokio::sync::Mutex;

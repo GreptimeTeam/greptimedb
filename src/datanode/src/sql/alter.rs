@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use catalog::RenameTableRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::prelude::*;
-use catalog::RenameTableRequest;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
 use sql::statements::column_def_to_schema;
 use table::engine::{EngineContext, TableReference};
@@ -45,12 +45,13 @@ impl SqlHandler {
             }
         );
         let kind = req.alter_kind.clone();
-        let table = self.table_engine
-            .alter_table(&ctx, req)
-            .await
-            .context(error::AlterTableSnafu {
-                table_name: full_table_name.clone(),
-            })?;
+        let table =
+            self.table_engine
+                .alter_table(&ctx, req)
+                .await
+                .context(error::AlterTableSnafu {
+                    table_name: full_table_name.clone(),
+                })?;
         match kind {
             AlterKind::RenameTable { .. } => {
                 // TODO alter table name in catalog manager
@@ -62,7 +63,8 @@ impl SqlHandler {
                     table_id: table.table_info().ident.table_id,
                     table,
                 };
-                self.catalog_manager.rename_table(rename_table_req)
+                self.catalog_manager
+                    .rename_table(rename_table_req)
                     .await
                     .context(RenameTableSnafu)?;
             }
@@ -83,7 +85,7 @@ impl SqlHandler {
                 return error::InvalidSqlSnafu {
                     msg: format!("unsupported table constraint {table_constraint}"),
                 }
-                    .fail();
+                .fail();
             }
             AlterTableOperation::AddColumn { column_def } => AlterKind::AddColumns {
                 columns: vec![AddColumnRequest {
@@ -98,7 +100,7 @@ impl SqlHandler {
             },
             AlterTableOperation::RenameTable { new_table_name } => AlterKind::RenameTable {
                 new_table_name: new_table_name.clone(),
-            }
+            },
         };
         Ok(AlterTableRequest {
             catalog_name: Some(table_ref.catalog.to_string()),

@@ -26,15 +26,17 @@ use common_telemetry::logging::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::StringVector;
+use mito::error;
 use serde::Serializer;
 use snafu::OptionExt;
 use table::engine::{EngineContext, TableEngine, TableReference};
 use table::metadata::TableId;
-use table::requests::{AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::requests::{
+    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+};
 use table::test_util::MemTable;
 use table::TableRef;
 use tokio::sync::RwLock;
-use mito::error;
 
 #[derive(Default)]
 pub struct MockKvBackend {
@@ -192,12 +194,15 @@ impl TableEngine for MockTableEngine {
         match &request.alter_kind {
             AlterKind::RenameTable { new_table_name } => {
                 let mut tables = self.tables.write().await;
-                let table = tables.remove(&table_name).context(error::TableNotFoundSnafu { table_name: table_name.clone() })?;
+                let table = tables
+                    .remove(&table_name)
+                    .context(error::TableNotFoundSnafu {
+                        table_name: table_name.clone(),
+                    })?;
                 tables.insert(new_table_name.clone(), table.clone());
                 Ok(table)
-            },
-            _ => Ok(self.tables.read().await.get(&table_name).unwrap().clone())
-
+            }
+            _ => Ok(self.tables.read().await.get(&table_name).unwrap().clone()),
         }
     }
 

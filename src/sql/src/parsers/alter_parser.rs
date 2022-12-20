@@ -60,7 +60,8 @@ impl<'a> ParserContext<'a> {
                     "expect table name to be <schema>.<table> or <table>, actual: {}",
                     new_table_name_obj
                 ))),
-            }.unwrap();
+            }
+            .unwrap();
             AlterTableOperation::RenameTable { new_table_name }
         } else {
             return Err(ParserError::ParserError(format!(
