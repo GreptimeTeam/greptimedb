@@ -188,6 +188,7 @@ pub(crate) const MAX_BATCH_SIZE: usize = 1_000_000;
 ///
 /// We serialize this struct to the WAL instead of the whole `WriteBatch` to avoid
 /// storing unnecessary information.
+#[derive(Debug, PartialEq)]
 pub struct Payload {
     /// Schema of the payload.
     ///
@@ -213,7 +214,7 @@ impl Payload {
 }
 
 /// A write operation to the region.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Mutation {
     /// Type of the mutation.
     pub op_type: OpType,
@@ -238,7 +239,7 @@ impl WriteRequest for WriteBatch {
 
         let record_batch = self.process_put_data(data)?;
 
-        self.add_row_index(record_batch.num_rows());
+        self.add_row_index(record_batch.num_rows())?;
         self.payload.mutations.push(Mutation {
             op_type: OpType::Put,
             record_batch,
@@ -693,251 +694,167 @@ mod tests {
     use std::iter;
     use std::sync::Arc;
 
+    use common_error::prelude::*;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::vectors::{
         BooleanVector, ConstantVector, Int32Vector, Int64Vector, TimestampMillisecondVector,
         UInt64Vector,
     };
+    use store_api::storage::consts;
 
     use super::*;
     use crate::test_util::write_batch_util;
 
     #[test]
-    fn test_put_data_basic() {
-        let mut put_data = PutData::new();
-        assert!(put_data.is_empty());
+    fn test_name_to_vector_basic() {
+        let columns = NameToVector::new(HashMap::new()).unwrap();
+        assert!(columns.is_empty());
 
-        let vector1 = Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4, 5]));
-        let vector2 = Arc::new(UInt64Vector::from_slice(&[0, 2, 4, 6, 8]));
+        let vector1 = Arc::new(Int32Vector::from_slice(&[1, 2, 3, 4, 5])) as VectorRef;
+        let vector2 = Arc::new(UInt64Vector::from_slice(&[0, 2, 4, 6, 8])) as VectorRef;
 
-        put_data.add_key_column("k1", vector1.clone()).unwrap();
-        put_data.add_version_column(vector2).unwrap();
-        put_data.add_value_column("v1", vector1).unwrap();
+        let mut put_data = HashMap::with_capacity(3);
+        put_data.insert("k1".to_string(), vector1.clone());
+        put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), vector2);
+        put_data.insert("v1".to_string(), vector1);
 
-        assert_eq!(5, put_data.num_rows());
-        assert!(!put_data.is_empty());
-
-        assert!(put_data.column_by_name("no such column").is_none());
-        assert!(put_data.column_by_name("k1").is_some());
-        assert!(put_data.column_by_name("v1").is_some());
-        assert!(put_data
-            .column_by_name(consts::VERSION_COLUMN_NAME)
-            .is_some());
+        let columns = NameToVector::new(put_data).unwrap();
+        assert_eq!(5, columns.num_rows());
+        assert!(!columns.is_empty());
     }
 
     #[test]
-    fn test_put_data_empty_vector() {
-        let mut put_data = PutData::with_num_columns(1);
-        assert!(put_data.is_empty());
+    fn test_name_to_vector_empty_vector() {
+        let vector1 = Arc::new(Int32Vector::from_slice(&[])) as VectorRef;
+        let mut put_data = HashMap::new();
+        put_data.insert("k1".to_string(), vector1);
 
-        let vector1 = Arc::new(Int32Vector::from_slice(&[]));
-        put_data.add_key_column("k1", vector1).unwrap();
-
-        assert_eq!(0, put_data.num_rows());
-        assert!(put_data.is_empty());
+        let columns = NameToVector::new(put_data).unwrap();
+        assert_eq!(0, columns.num_rows());
+        assert!(columns.is_empty());
     }
 
     #[test]
     fn test_write_batch_put() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-        let boolv = Arc::new(BooleanVector::from(vec![true, false, true]));
-        let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 0]));
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0, 0])) as VectorRef;
 
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", intv.clone()).unwrap();
-        put_data.add_version_column(intv).unwrap();
-        put_data.add_value_column("v1", boolv).unwrap();
-        put_data.add_key_column("ts", tsv).unwrap();
+        let mut put_data = HashMap::with_capacity(4);
+        put_data.insert("k1".to_string(), intv.clone());
+        put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
+        put_data.insert("v1".to_string(), boolv);
+        put_data.insert("ts".to_string(), tsv);
 
         let mut batch = new_test_batch();
-        assert!(batch.is_empty());
+        assert!(batch.payload().is_empty());
         batch.put(put_data).unwrap();
-        assert!(!batch.is_empty());
+        assert!(!batch.payload().is_empty());
 
-        let mut iter = batch.iter();
-        let Mutation::Put(put_data) = iter.next().unwrap();
-        assert_eq!(3, put_data.num_rows());
+        let mutation = &batch.payload().mutations[0];
+        assert_eq!(3, mutation.record_batch.num_rows());
     }
 
     fn check_err(err: Error, msg: &str) {
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
         assert!(err.backtrace_opt().is_some());
-        assert!(err.to_string().contains(msg));
+        assert!(
+            err.to_string().contains(msg),
+            "<{}> does not contain {}",
+            err,
+            msg
+        );
     }
 
     #[test]
     fn test_write_batch_too_large() {
         let boolv = Arc::new(BooleanVector::from_iterator(
             iter::repeat(true).take(MAX_BATCH_SIZE + 1),
-        ));
+        )) as VectorRef;
 
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", boolv).unwrap();
+        let mut put_data = HashMap::new();
+        put_data.insert("k1".to_string(), boolv);
 
         let mut batch =
             write_batch_util::new_write_batch(&[("k1", LogicalTypeId::Boolean, false)], None);
-        let err = batch.put(put_data).err().unwrap();
+        let err = batch.put(put_data).unwrap_err();
         check_err(err, "Request is too large");
     }
 
     #[test]
-    fn test_put_data_duplicate() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", intv.clone()).unwrap();
-        let err = put_data.add_key_column("k1", intv).err().unwrap();
-        check_err(err, "Duplicate column k1");
-    }
-
-    #[test]
     fn test_put_data_different_len() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-        let boolv = Arc::new(BooleanVector::from(vec![true, false]));
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0])) as VectorRef;
+        let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
 
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", intv).unwrap();
-        let err = put_data.add_value_column("v1", boolv).err().unwrap();
-        check_err(err, "Length of column v1 not equals");
+        let mut put_data = HashMap::new();
+        put_data.insert("k1".to_string(), intv.clone());
+        put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
+        put_data.insert("v1".to_string(), boolv.clone());
+        put_data.insert("ts".to_string(), tsv);
+
+        let mut batch = new_test_batch();
+        let err = batch.put(put_data).unwrap_err();
+        check_err(err, "not equals to other columns");
     }
 
     #[test]
     fn test_put_type_mismatch() {
-        let boolv = Arc::new(BooleanVector::from(vec![true, false, true]));
-        let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
+        let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
+        let tsv = Arc::new(Int64Vector::from_slice(&[0, 0, 0])) as VectorRef;
 
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", boolv).unwrap();
-        put_data.add_key_column("ts", tsv).unwrap();
+        let mut put_data = HashMap::new();
+        put_data.insert("k1".to_string(), boolv);
+        put_data.insert("ts".to_string(), tsv);
 
         let mut batch = new_test_batch();
-        let err = batch.put(put_data).err().unwrap();
+        let err = batch.put(put_data).unwrap_err();
         check_err(err, "Type of column k1 does not match");
     }
 
     #[test]
     fn test_put_type_has_null() {
-        let intv = Arc::new(UInt64Vector::from(vec![Some(1), None, Some(3)]));
-        let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
+        let intv = Arc::new(UInt64Vector::from(vec![Some(1), None, Some(3)])) as VectorRef;
+        let tsv = Arc::new(Int64Vector::from_slice(&[0, 0, 0])) as VectorRef;
 
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", intv).unwrap();
-        put_data.add_key_column("ts", tsv).unwrap();
+        let mut put_data = HashMap::new();
+        put_data.insert("k1".to_string(), intv);
+        put_data.insert("ts".to_string(), tsv);
 
         let mut batch = new_test_batch();
-        let err = batch.put(put_data).err().unwrap();
+        let err = batch.put(put_data).unwrap_err();
         check_err(err, "Column k1 is not null");
     }
 
     #[test]
     fn test_put_missing_column() {
-        let boolv = Arc::new(BooleanVector::from(vec![true, false, true]));
-        let tsv = Arc::new(Int64Vector::from_vec(vec![0, 0, 0]));
+        let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
+        let tsv = Arc::new(Int64Vector::from_slice(&[0, 0, 0])) as VectorRef;
 
-        let mut put_data = PutData::new();
-        put_data.add_key_column("v1", boolv).unwrap();
-        put_data.add_key_column("ts", tsv).unwrap();
+        let mut put_data = HashMap::new();
+        put_data.insert("v1".to_string(), boolv);
+        put_data.insert("ts".to_string(), tsv);
+
         let mut batch = new_test_batch();
-        let err = batch.put(put_data).err().unwrap();
+        let err = batch.put(put_data).unwrap_err();
         check_err(err, "Missing column k1");
     }
 
     #[test]
     fn test_put_unknown_column() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-        let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 0]));
-        let boolv = Arc::new(BooleanVector::from(vec![true, false, true]));
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0, 0])) as VectorRef;
+        let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
 
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", intv.clone()).unwrap();
-        put_data.add_version_column(intv).unwrap();
-        put_data.add_value_column("v1", boolv.clone()).unwrap();
-        put_data.add_key_column("ts", tsv).unwrap();
-        put_data.add_value_column("v2", boolv).unwrap();
+        let mut put_data = HashMap::new();
+        put_data.insert("k1".to_string(), intv.clone());
+        put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
+        put_data.insert("v1".to_string(), boolv.clone());
+        put_data.insert("ts".to_string(), tsv);
+        put_data.insert("v2".to_string(), boolv);
+
         let mut batch = new_test_batch();
-        let err = batch.put(put_data).err().unwrap();
+        let err = batch.put(put_data).unwrap_err();
         check_err(err, "Unknown column v2");
-    }
-
-    #[test]
-    fn test_align_timestamp() {
-        let duration_millis = 20;
-        let ts = [-21, -20, -19, -1, 0, 5, 15, 19, 20, 21];
-        let res = ts.map(|t| align_timestamp(t, duration_millis));
-        assert_eq!(res, [-40, -20, -20, -20, 0, 0, 0, 0, 20, 20].map(Some));
-    }
-
-    #[test]
-    fn test_align_timestamp_overflow() {
-        assert_eq!(Some(i64::MIN), align_timestamp(i64::MIN, 1));
-        assert_eq!(Some(-9223372036854775808), align_timestamp(i64::MIN, 2));
-        assert_eq!(
-            Some(((i64::MIN + 20) / 20 - 1) * 20),
-            align_timestamp(i64::MIN + 20, 20)
-        );
-        assert_eq!(None, align_timestamp(i64::MAX - (i64::MAX % 23), 23));
-        assert_eq!(
-            Some(9223372036854775780),
-            align_timestamp(i64::MAX / 20 * 20 - 1, 20)
-        );
-    }
-
-    #[test]
-    fn test_write_batch_time_range() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3, 4, 5, 6]));
-        let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![
-            -21, -20, -1, 0, 1, 20,
-        ]));
-        let boolv = Arc::new(BooleanVector::from(vec![
-            true, false, true, false, false, false,
-        ]));
-
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", intv.clone()).unwrap();
-        put_data.add_version_column(intv).unwrap();
-        put_data.add_value_column("v1", boolv).unwrap();
-        put_data.add_key_column("ts", tsv).unwrap();
-
-        let mut batch = new_test_batch();
-        batch.put(put_data).unwrap();
-
-        let duration_millis = 20i64;
-        let ranges = batch
-            .time_ranges(Duration::from_millis(duration_millis as u64))
-            .unwrap();
-        assert_eq!(
-            [-40, -20, 0, 20].map(|v| RangeMillis::new(v, v + duration_millis).unwrap()),
-            ranges.as_slice()
-        )
-    }
-
-    #[test]
-    fn test_write_batch_time_range_const_vector() {
-        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3, 4, 5, 6]));
-        let tsv = Arc::new(ConstantVector::new(
-            Arc::new(TimestampMillisecondVector::from_vec(vec![20])),
-            6,
-        ));
-        let boolv = Arc::new(BooleanVector::from(vec![
-            true, false, true, false, false, false,
-        ]));
-
-        let mut put_data = PutData::new();
-        put_data.add_key_column("k1", intv.clone()).unwrap();
-        put_data.add_version_column(intv).unwrap();
-        put_data.add_value_column("v1", boolv).unwrap();
-        put_data.add_key_column("ts", tsv).unwrap();
-
-        let mut batch = new_test_batch();
-        batch.put(put_data).unwrap();
-
-        let duration_millis = 20i64;
-        let ranges = batch
-            .time_ranges(Duration::from_millis(duration_millis as u64))
-            .unwrap();
-        assert_eq!(
-            [20].map(|v| RangeMillis::new(v, v + duration_millis).unwrap()),
-            ranges.as_slice()
-        )
     }
 }

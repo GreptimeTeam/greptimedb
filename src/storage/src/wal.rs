@@ -285,7 +285,7 @@ mod tests {
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
         let wal = Wal::new(0, Arc::new(log_store));
         let header = WalHeader::with_last_manifest_version(111);
-        let (seq_num, _) = wal.write_to_wal(3, header, Payload::None).await?;
+        let (seq_num, _) = wal.write_to_wal(3, header, None).await?;
 
         assert_eq!(3, seq_num);
 

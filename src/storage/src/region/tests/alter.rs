@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use datatypes::prelude::*;
 use datatypes::timestamp::TimestampMillisecond;
-use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
+use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use log_store::fs::log::LocalFileLogStore;
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
-    ColumnDescriptorBuilder, ColumnId, PutOperation, Region, RegionMeta, ScanRequest, SchemaRef,
-    Snapshot, WriteRequest, WriteResponse,
+    ColumnDescriptorBuilder, ColumnId, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot,
+    WriteRequest, WriteResponse,
 };
 use tempdir::TempDir;
 
@@ -31,7 +31,6 @@ use crate::region::{OpenOptions, RawRegionMetadata, RegionImpl, RegionMetadata};
 use crate::test_util;
 use crate::test_util::config_util;
 use crate::test_util::descriptor_util::RegionDescBuilder;
-use crate::write_batch::PutData;
 
 const REGION_NAME: &str = "region-alter-0";
 
@@ -69,8 +68,8 @@ impl DataRow {
     }
 }
 
-fn new_put_data(data: &[DataRow]) -> PutData {
-    let mut put_data = PutData::with_num_columns(4);
+fn new_put_data(data: &[DataRow]) -> HashMap<String, VectorRef> {
+    let mut put_data = HashMap::with_capacity(4);
     let keys = Int64Vector::from(data.iter().map(|v| v.key).collect::<Vec<_>>());
     let timestamps = TimestampMillisecondVector::from(
         data.iter()
@@ -80,13 +79,14 @@ fn new_put_data(data: &[DataRow]) -> PutData {
     let values1 = Int64Vector::from(data.iter().map(|kv| kv.v0).collect::<Vec<_>>());
     let values2 = Int64Vector::from(data.iter().map(|kv| kv.v1).collect::<Vec<_>>());
 
-    put_data.add_key_column("k0", Arc::new(keys)).unwrap();
-    put_data
-        .add_key_column(test_util::TIMESTAMP_NAME, Arc::new(timestamps))
-        .unwrap();
+    put_data.insert("k0".to_string(), Arc::new(keys) as VectorRef);
+    put_data.insert(
+        test_util::TIMESTAMP_NAME.to_string(),
+        Arc::new(timestamps) as VectorRef,
+    );
 
-    put_data.add_value_column("v0", Arc::new(values1)).unwrap();
-    put_data.add_value_column("v1", Arc::new(values2)).unwrap();
+    put_data.insert("v0".to_string(), Arc::new(values1) as VectorRef);
+    put_data.insert("v1".to_string(), Arc::new(values2) as VectorRef);
 
     put_data
 }

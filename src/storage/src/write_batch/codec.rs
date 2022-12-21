@@ -254,10 +254,11 @@ impl Decoder for PayloadDecoder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use datatypes::vectors::{BooleanVector, TimestampMillisecondVector, UInt64Vector};
-    use store_api::storage::PutOperation;
+    use datatypes::vectors::{BooleanVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
+    use store_api::storage::consts;
 
     use super::*;
     use crate::{proto, write_batch};
@@ -265,20 +266,21 @@ mod tests {
     fn gen_new_batch_and_types() -> (WriteBatch, Vec<i32>) {
         let mut batch = write_batch::new_test_batch();
         for i in 0..10 {
-            let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-            let boolv = Arc::new(BooleanVector::from(vec![Some(true), Some(false), None]));
-            let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![i, i, i]));
+            let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+            let boolv =
+                Arc::new(BooleanVector::from(vec![Some(true), Some(false), None])) as VectorRef;
+            let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![i, i, i])) as VectorRef;
 
-            let mut put_data = PutData::new();
-            put_data.add_key_column("k1", intv.clone()).unwrap();
-            put_data.add_version_column(intv).unwrap();
-            put_data.add_value_column("v1", boolv).unwrap();
-            put_data.add_key_column("ts", tsv).unwrap();
+            let mut put_data = HashMap::new();
+            put_data.insert("k1".to_string(), intv.clone());
+            put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
+            put_data.insert("v1".to_string(), boolv);
+            put_data.insert("ts".to_string(), tsv);
 
             batch.put(put_data).unwrap();
         }
 
-        let types = proto::wal::gen_mutation_types(&batch);
+        let types = proto::wal::gen_mutation_types(batch.payload());
 
         (batch, types)
     }
@@ -289,30 +291,13 @@ mod tests {
 
         let encoder = PayloadEncoder::new();
         let mut dst = vec![];
-        let result = encoder.encode(&batch, &mut dst);
+        let result = encoder.encode(batch.payload(), &mut dst);
         assert!(result.is_ok());
 
         let decoder = PayloadDecoder::new(mutation_types);
         let result = decoder.decode(&dst);
-        let batch2 = result?;
-        assert_eq!(batch.num_rows, batch2.num_rows);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_codec_protobuf() -> Result<()> {
-        let (batch, mutation_types) = gen_new_batch_and_types();
-
-        let encoder = WriteBatchProtobufEncoder {};
-        let mut dst = vec![];
-        let result = encoder.encode(&batch, &mut dst);
-        assert!(result.is_ok());
-
-        let decoder = WriteBatchProtobufDecoder::new(mutation_types);
-        let result = decoder.decode(&dst);
-        let batch2 = result?;
-        assert_eq!(batch.num_rows, batch2.num_rows);
+        let payload = result?;
+        assert_eq!(*batch.payload(), payload);
 
         Ok(())
     }
@@ -320,18 +305,18 @@ mod tests {
     fn gen_new_batch_and_types_with_none_column() -> (WriteBatch, Vec<i32>) {
         let mut batch = write_batch::new_test_batch();
         for _ in 0..10 {
-            let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3]));
-            let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 0]));
+            let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+            let tsv = Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 0])) as VectorRef;
 
-            let mut put_data = PutData::new();
-            put_data.add_key_column("k1", intv.clone()).unwrap();
-            put_data.add_version_column(intv).unwrap();
-            put_data.add_key_column("ts", tsv).unwrap();
+            let mut put_data = HashMap::with_capacity(3);
+            put_data.insert("k1".to_string(), intv.clone());
+            put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
+            put_data.insert("ts".to_string(), tsv);
 
             batch.put(put_data).unwrap();
         }
 
-        let types = proto::wal::gen_mutation_types(&batch);
+        let types = proto::wal::gen_mutation_types(batch.payload());
 
         (batch, types)
     }
@@ -342,29 +327,13 @@ mod tests {
 
         let encoder = PayloadEncoder::new();
         let mut dst = vec![];
-        let result = encoder.encode(&batch, &mut dst);
+        let result = encoder.encode(batch.payload(), &mut dst);
         assert!(result.is_ok());
 
         let decoder = PayloadDecoder::new(mutation_types);
         let result = decoder.decode(&dst);
-        let batch2 = result?;
-        assert_eq!(batch.num_rows, batch2.num_rows);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_codec_with_none_column_protobuf() -> Result<()> {
-        let (batch, mutation_types) = gen_new_batch_and_types_with_none_column();
-
-        let encoder = WriteBatchProtobufEncoder {};
-        let mut dst = vec![];
-        encoder.encode(&batch, &mut dst).unwrap();
-
-        let decoder = WriteBatchProtobufDecoder::new(mutation_types);
-        let result = decoder.decode(&dst);
-        let batch2 = result?;
-        assert_eq!(batch.num_rows, batch2.num_rows);
+        let payload = result?;
+        assert_eq!(*batch.payload(), payload);
 
         Ok(())
     }

@@ -78,7 +78,8 @@ impl CompatWrite for Mutation {
             }
         }
 
-        self.record_batch = RecordBatch::new(self.record_batch.schema.clone(), columns)
+        // Using dest schema to build RecordBatch.
+        self.record_batch = RecordBatch::new(dest_schema.clone(), columns)
             .context(error::CreateRecordBatchSnafu)?;
 
         Ok(())
@@ -97,12 +98,13 @@ fn column_not_in_schema(schema: &SchemaRef, column_schemas: &[ColumnSchema]) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
-    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
-    use store_api::storage::{PutOperation, WriteRequest};
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
+    use store_api::storage::WriteRequest;
 
     use super::*;
     use crate::error::Error;
@@ -137,23 +139,31 @@ mod tests {
         Arc::new(schema)
     }
 
-    fn new_put_data() -> PutData {
-        let mut put_data = PutData::new();
-        let k0 = Arc::new(Int32Vector::from_slice(&[1, 2, 3]));
-        let ts = Arc::new(TimestampMillisecondVector::from_values([11, 12, 13]));
+    fn new_put_data() -> HashMap<String, VectorRef> {
+        let mut put_data = HashMap::new();
+        let k0 = Arc::new(Int32Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let ts = Arc::new(TimestampMillisecondVector::from_values([11, 12, 13])) as VectorRef;
 
-        put_data.add_key_column("k0", k0).unwrap();
-        put_data.add_key_column("ts", ts).unwrap();
+        put_data.insert("k0".to_string(), k0);
+        put_data.insert("ts".to_string(), ts);
 
         put_data
     }
 
     #[test]
-    fn test_put_data_compat_write() {
+    fn test_mutation_compat_write() {
         let mut put_data = new_put_data();
+        let schema_old = new_test_schema(None);
+        // Mutation doesn't check schema version, so we don't have to bump the version here.
         let schema = new_test_schema(Some(Some(ColumnDefaultConstraint::null_value())));
-        put_data.compat_write(&schema).unwrap();
-        let v0 = put_data.column_by_name("v0").unwrap();
+        // Use WriteBatch to build a payload and its mutation.
+        let mut batch = WriteBatch::new(schema_old);
+        batch.put(put_data).unwrap();
+
+        let mutation = &mut batch.payload.mutations[0];
+        mutation.compat_write(&schema).unwrap();
+
+        let v0 = mutation.record_batch.column_by_name("v0").unwrap();
         assert!(v0.only_null());
     }
 
@@ -172,8 +182,9 @@ mod tests {
         );
         batch.compat_write(&schema_new).unwrap();
         assert_eq!(schema_new, *batch.schema());
-        let Mutation::Put(put_data) = batch.iter().next().unwrap();
-        put_data.column_by_name("v0").unwrap();
+
+        let mutation = &batch.payload().mutations[0];
+        mutation.record_batch.column_by_name("v0").unwrap();
     }
 
     #[test]

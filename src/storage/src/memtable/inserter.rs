@@ -122,13 +122,14 @@ struct SliceIndex {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use common_time::timestamp::Timestamp;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::value::Value;
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
-    use store_api::storage::{PutOperation, WriteRequest};
+    use store_api::storage::WriteRequest;
 
     use super::*;
     use crate::memtable::{DefaultMemtableBuilder, IterContext, MemtableBuilder};
@@ -159,11 +160,11 @@ mod tests {
     }
 
     fn put_batch(batch: &mut WriteBatch, data: &[(i64, Option<i64>)]) {
-        let mut put_data = PutData::with_num_columns(2);
+        let mut put_data = HashMap::with_capacity(2);
         let ts = TimestampMillisecondVector::from_values(data.iter().map(|v| v.0));
-        put_data.add_key_column("ts", Arc::new(ts)).unwrap();
+        put_data.insert("ts".to_string(), Arc::new(ts) as VectorRef);
         let value = Int64Vector::from(data.iter().map(|v| v.1).collect::<Vec<_>>());
-        put_data.add_value_column("value", Arc::new(value)).unwrap();
+        put_data.insert("value".to_string(), Arc::new(value) as VectorRef);
 
         batch.put(put_data).unwrap();
     }
@@ -219,7 +220,9 @@ mod tests {
             ],
         );
 
-        inserter.insert_memtable(&batch, &mutable_memtable).unwrap();
+        inserter
+            .insert_memtable(batch.payload(), &mutable_memtable)
+            .unwrap();
         check_memtable_content(
             &mutable_memtable,
             sequence,
