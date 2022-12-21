@@ -43,6 +43,7 @@ use datanode::instance::InstanceRef as DnInstanceRef;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
+use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
 use servers::query_handler::{
     CatalogHandler, GrpcAdminHandler, GrpcAdminHandlerRef, GrpcQueryHandler, GrpcQueryHandlerRef,
     InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
@@ -463,6 +464,10 @@ impl Instance {
     pub fn set_plugins(&mut self, map: Arc<AnyMap2>) {
         self.plugins = map;
     }
+
+    pub fn plugins(&self) -> Arc<AnyMap2> {
+        self.plugins.clone()
+    }
 }
 
 #[async_trait]
@@ -575,15 +580,27 @@ impl SqlQueryHandler for Instance {
         query: &str,
         query_ctx: QueryContextRef,
     ) -> Vec<server_error::Result<Output>> {
-        match parse_stmt(query)
+        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef>();
+        let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
+            Ok(q) => q,
+            Err(e) => return vec![Err(e)],
+        };
+
+        match parse_stmt(query.as_ref())
             .map_err(BoxedError::new)
             .context(server_error::ExecuteQuerySnafu { query })
         {
             Ok(stmts) => {
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
-                    match self.query_statement(stmt, query_ctx.clone()).await {
-                        Ok(output) => results.push(Ok(output)),
+                    match query_interceptor.post_parsing(stmt, query_ctx.clone()) {
+                        Ok(stmt) => match self.query_statement(stmt, query_ctx.clone()).await {
+                            Ok(output) => results.push(Ok(output)),
+                            Err(e) => {
+                                results.push(Err(e));
+                                break;
+                            }
+                        },
                         Err(e) => {
                             results.push(Err(e));
                             break;
@@ -603,6 +620,9 @@ impl SqlQueryHandler for Instance {
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef>();
+        let stmt = query_interceptor.post_parsing(stmt, query_ctx.clone())?;
+
         self.query_statement(stmt, query_ctx).await
     }
 }

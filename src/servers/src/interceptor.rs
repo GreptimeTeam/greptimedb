@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use common_query::Output;
 use query::plan::LogicalPlan;
@@ -51,5 +52,46 @@ pub trait SqlQueryInterceptor {
     /// output if needed.
     fn post_execute(&self, output: Output, _query_ctx: QueryContextRef) -> Result<Output> {
         Ok(output)
+    }
+}
+
+pub type SqlQueryInterceptorRef = Arc<dyn SqlQueryInterceptor + Send + Sync + 'static>;
+
+impl SqlQueryInterceptor for Option<&SqlQueryInterceptorRef> {
+    fn pre_parsing<'a>(&self, query: &'a str, query_ctx: QueryContextRef) -> Result<Cow<'a, str>> {
+        if let Some(this) = self {
+            this.pre_parsing(query, query_ctx)
+        } else {
+            Ok(Cow::Borrowed(query))
+        }
+    }
+
+    fn post_parsing(&self, statement: Statement, query_ctx: QueryContextRef) -> Result<Statement> {
+        if let Some(this) = self {
+            this.post_parsing(statement, query_ctx)
+        } else {
+            Ok(statement)
+        }
+    }
+
+    fn pre_execute(
+        &self,
+        statement: Statement,
+        plan: Option<&LogicalPlan>,
+        query_ctx: QueryContextRef,
+    ) -> Result<()> {
+        if let Some(this) = self {
+            this.pre_execute(statement, plan, query_ctx)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn post_execute(&self, output: Output, query_ctx: QueryContextRef) -> Result<Output> {
+        if let Some(this) = self {
+            this.post_execute(output, query_ctx)
+        } else {
+            Ok(output)
+        }
     }
 }
