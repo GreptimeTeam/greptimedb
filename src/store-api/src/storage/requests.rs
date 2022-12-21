@@ -31,12 +31,6 @@ pub trait WriteRequest: Send {
     ///
     /// `data` is the columnar format of the data to put.
     fn put(&mut self, data: HashMap<String, VectorRef>) -> Result<(), Self::Error>;
-
-    // // TODO(yingwen): Remove this method.
-    // /// Returns all possible time ranges that contain the timestamp in this batch.
-    // ///
-    // /// Each time range is aligned to given `duration`.
-    // fn time_ranges(&self, duration: Duration) -> Result<Vec<RangeMillis>, Self::Error>;
 }
 
 #[derive(Default)]
