@@ -70,6 +70,7 @@ pub struct Mutation {
 }
 
 /// Implementation of [WriteRequest].
+#[derive(Debug)]
 pub struct WriteBatch {
     payload: Payload,
     row_index: usize,

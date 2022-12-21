@@ -91,12 +91,7 @@ impl<S: LogStore> Region for RegionImpl<S> {
     }
 
     fn write_request(&self) -> Self::WriteRequest {
-        let metadata = self.in_memory_metadata();
-        WriteBatch::new(metadata.schema().clone())
-
-        // let metadata = self.inner.version_control().metadata();
-        // let store_schema = metadata.schema().store_schema();
-        // WriteBatch::new(store_schema.clone())
+        WriteBatch::new(self.in_memory_metadata().schema().clone())
     }
 
     async fn alter(&self, request: AlterRequest) -> Result<()> {

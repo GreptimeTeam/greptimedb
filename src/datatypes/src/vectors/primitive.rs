@@ -96,12 +96,6 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
         }
     }
 
-    pub fn from_value(value: T::Native, count: usize) -> Self {
-        Self {
-            array: PrimitiveArray::from_value(value, count),
-        }
-    }
-
     pub(crate) fn as_arrow(&self) -> &PrimitiveArray<T::ArrowPrimitive> {
         &self.array
     }
@@ -441,15 +435,8 @@ mod tests {
 
     #[test]
     fn test_from_slice() {
-        let v = Int32Vector::from_slice(&[1, 2, 3, 4]);
+        let v = Int32Vector::from_slice(vec![1, 2, 3, 4]);
         check_vec(v);
-    }
-
-    #[test]
-    fn test_from_value() {
-        let v = Int32Vector::from_value(12, 5);
-        let expect = Int32Vector::from_slice(&[12, 12, 12, 12, 12]);
-        assert_eq!(expect, v);
     }
 
     #[test]

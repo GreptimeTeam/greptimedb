@@ -146,11 +146,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    // #[snafu(display("Invalid timestamp in write batch, source: {}", source))]
-    // InvalidTimestamp {
-    //     #[snafu(backtrace)]
-    //     source: crate::write_batch::Error,
-    // },
     #[snafu(display("Task already cancelled"))]
     Cancelled { backtrace: Backtrace },
 

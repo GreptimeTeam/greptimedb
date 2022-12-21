@@ -201,18 +201,6 @@ impl<S: LogStore> Wal<S> {
 
                 Ok((seq_num, header, Some(payload)))
             }
-            // Some(PayloadType::WriteBatchProto) => {
-            //     let mutation_types = std::mem::take(&mut header.mutation_types);
-            //     let decoder = WriteBatchProtobufDecoder::new(mutation_types);
-            //     let write_batch = decoder
-            //         .decode(&input[data_pos..])
-            //         .map_err(BoxedError::new)
-            //         .context(error::ReadWalSnafu {
-            //             region_id: self.region_id(),
-            //         })?;
-
-            //     Ok((seq_num, header, Some(write_batch)))
-            // }
             None => error::WalDataCorruptedSnafu {
                 region_id: self.region_id(),
                 message: format!("invalid payload type={}", header.payload_type),
