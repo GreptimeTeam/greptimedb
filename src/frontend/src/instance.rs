@@ -108,7 +108,8 @@ pub struct Instance {
     grpc_query_handler: GrpcQueryHandlerRef,
     grpc_admin_handler: GrpcAdminHandlerRef,
 
-    // plugins
+    /// plugins: this map holds extensions to customize query or auth
+    /// behaviours.
     plugins: Arc<AnyMap2>,
 }
 
