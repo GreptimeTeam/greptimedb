@@ -56,6 +56,10 @@ impl SqlQueryHandler for DummyInstance {
     ) -> Result<Output> {
         unimplemented!()
     }
+
+    fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
+        Ok(true)
+    }
 }
 
 fn make_test_app(tx: mpsc::Sender<String>) -> Router {

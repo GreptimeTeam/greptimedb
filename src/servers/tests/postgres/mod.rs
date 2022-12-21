@@ -55,7 +55,6 @@ fn create_postgres_server(
     };
 
     Ok(Box::new(PostgresServer::new(
-        instance.clone(),
         instance,
         tls,
         io_runtime,

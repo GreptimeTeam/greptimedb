@@ -19,6 +19,7 @@ use std::time::Instant;
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::Extension;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::status_code::StatusCode;
 use common_telemetry::metric;
 use schemars::JsonSchema;
@@ -46,8 +47,22 @@ pub async fn sql(
     let start = Instant::now();
     let resp = if let Some(sql) = &params.sql {
         let query_ctx = Arc::new(QueryContext::new());
-        if let Some(db) = params.database {
-            query_ctx.set_current_schema(db.as_ref());
+        if let Some(db) = &params.database {
+            match sql_handler.is_valid_schema(DEFAULT_CATALOG_NAME, db) {
+                Ok(true) => query_ctx.set_current_schema(db),
+                Ok(false) => {
+                    return Json(JsonResponse::with_error(
+                        format!("Database not found: {}", db),
+                        StatusCode::DatabaseNotFound,
+                    ));
+                }
+                Err(e) => {
+                    return Json(JsonResponse::with_error(
+                        format!("Error checking database: {}, {}", db, e),
+                        StatusCode::Internal,
+                    ));
+                }
+            }
         }
 
         JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await

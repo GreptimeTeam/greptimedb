@@ -554,6 +554,10 @@ mod test {
         ) -> Result<Output> {
             unimplemented!()
         }
+
+        fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
+            Ok(true)
+        }
     }
 
     fn timeout() -> TimeoutLayer {
