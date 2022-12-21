@@ -427,6 +427,6 @@ mod tests {
 
         let mut batch = new_test_batch();
         let err = batch.put(put_data).unwrap_err();
-        check_err(err, "Unknown column v2");
+        assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
     }
 }
