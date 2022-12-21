@@ -16,8 +16,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog::remote::MetaKvBackend;
+use catalog::helper::{CatalogKey, CatalogValue};
+use catalog::remote::{KvBackend, MetaKvBackend};
 use client::Client;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_grpc::channel_manager::ChannelManager;
 use common_runtime::Builder as RuntimeBuilder;
 use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
@@ -204,6 +206,18 @@ pub(crate) async fn create_dist_instance() -> (DistInstance, HashMap<u64, Arc<Da
     let meta_backend = Arc::new(MetaKvBackend {
         client: meta_client.clone(),
     });
+
+    let default_catalog_key = CatalogKey {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+    }
+    .to_string();
+    meta_backend
+        .set(
+            default_catalog_key.as_bytes(),
+            &CatalogValue {}.as_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
     let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
     let catalog_manager = Arc::new(FrontendCatalogManager::new(
         meta_backend,

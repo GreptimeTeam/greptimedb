@@ -130,6 +130,10 @@ impl DistInstance {
                 "Creating table {:?} on Datanode {:?} with regions {:?}",
                 create_table, datanode, create_expr_for_region.region_ids,
             );
+            let create_database_expr = CreateDatabaseExpr {
+                database_name: create_table.schema_name.clone(),
+            };
+            let _ = client.create_database(create_database_expr).await;
 
             client
                 .create(create_expr_for_region)
@@ -668,7 +672,7 @@ ENGINE=mito",
                     "+---------------------+",
                     "| Schemas             |",
                     "+---------------------+",
-                    "| public              |",
+                    // "| public              |",
                     "| test_show_databases |",
                     "+---------------------+",
                 ]
@@ -679,7 +683,7 @@ ENGINE=mito",
                     "| Schemas             |",
                     "+---------------------+",
                     "| test_show_databases |",
-                    "| public              |",
+                    // "| public              |",
                     "+---------------------+",
                 ]
                 .into_iter()
