@@ -57,8 +57,7 @@ impl<'a> ParserContext<'a> {
                 [table] => Ok(table.value.clone()),
                 [_schema, table] => Ok(table.value.clone()),
                 _ => Err(ParserError::ParserError(format!(
-                    "expect table name to be <schema>.<table> or <table>, actual: {}",
-                    new_table_name_obj
+                    "expect table name to be <schema>.<table> or <table>, actual: {new_table_name_obj}"
                 ))),
             }
             .unwrap();

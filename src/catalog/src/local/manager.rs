@@ -400,7 +400,7 @@ impl CatalogManager for LocalCatalogManager {
         let schema = catalog
             .schema(schema_name)?
             .with_context(|| SchemaNotFoundSnafu {
-                schema_info: format!("{}.{}", catalog_name, schema_name),
+                schema_info: format!("{catalog_name}.{schema_name}"),
             })?;
 
         schema.rename_table(&request.table_name, request.new_table_name, request.table)?;
