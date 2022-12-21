@@ -132,7 +132,7 @@ impl WriteBatch {
                 }
                 None => {
                     // If column is not provided, fills it by default value.
-                    let col = new_column_with_default_value(&column_schema, num_rows)?;
+                    let col = new_column_with_default_value(column_schema, num_rows)?;
                     columns.push(col);
                 }
             }
