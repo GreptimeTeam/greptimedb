@@ -105,7 +105,7 @@ async fn test_shutdown_opentsdb_server_concurrently() -> Result<()> {
             match stream {
                 Ok(stream) => {
                     let mut connection = Connection::new(stream);
-                    let result = connection.write_line(format!("put {} 1 1", i)).await;
+                    let result = connection.write_line(format!("put {i} 1 1")).await;
                     i += 1;
 
                     if i > 4 {
@@ -116,7 +116,7 @@ async fn test_shutdown_opentsdb_server_concurrently() -> Result<()> {
                     if let Err(e) = result {
                         match e {
                             Error::InternalIo { .. } => return,
-                            _ => panic!("Not IO error, err is {}", e),
+                            _ => panic!("Not IO error, err is {e}"),
                         }
                     }
 
@@ -170,13 +170,13 @@ async fn test_opentsdb_connection_shutdown() -> Result<()> {
     let mut i = 2;
     loop {
         // The connection may not be unwritable after shutdown immediately.
-        let result = connection.write_line(format!("put {} 1 1", i)).await;
+        let result = connection.write_line(format!("put {i} 1 1")).await;
         i += 1;
         if result.is_err() {
             if let Err(e) = result {
                 match e {
                     Error::InternalIo { .. } => break,
-                    _ => panic!("Not IO error, err is {}", e),
+                    _ => panic!("Not IO error, err is {e}"),
                 }
             }
         }
@@ -250,10 +250,7 @@ async fn test_query_concurrently() -> Result<()> {
             let stream = TcpStream::connect(addr).await.unwrap();
             let mut connection = Connection::new(stream);
             for i in 0..expect_executed_queries_per_worker {
-                connection
-                    .write_line(format!("put {} 1 1", i))
-                    .await
-                    .unwrap();
+                connection.write_line(format!("put {i} 1 1")).await.unwrap();
 
                 let should_recreate_conn = rand.gen_range(0..100) == 1;
                 if should_recreate_conn {

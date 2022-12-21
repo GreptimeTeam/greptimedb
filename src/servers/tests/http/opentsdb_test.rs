@@ -202,13 +202,12 @@ async fn test_opentsdb_debug_put() {
 fn create_data_point(metric: &str) -> String {
     format!(
         r#"{{
-                "metric": "{}",
+                "metric": "{metric}",
                 "timestamp": 1000,
                 "value": 1,
                 "tags": {{
                     "host": "web01"
                 }}
             }}"#,
-        metric
     )
 }

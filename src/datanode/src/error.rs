@@ -155,7 +155,7 @@ pub enum Error {
 
     #[snafu(display("Failed to init backend, config: {:#?}, source: {}", config, source))]
     InitBackend {
-        config: ObjectStoreConfig,
+        config: Box<ObjectStoreConfig>,
         source: object_store::Error,
         backtrace: Backtrace,
     },

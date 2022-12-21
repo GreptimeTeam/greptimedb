@@ -161,12 +161,7 @@ mod tests {
 
                 assert_eq!(4, vec.len());
                 for i in 0..4 {
-                    assert_eq!(
-                        i == 0 || i == 3,
-                        vec.get_data(i).unwrap(),
-                        "failed at {}",
-                        i
-                    )
+                    assert_eq!(i == 0 || i == 3, vec.get_data(i).unwrap(), "Failed at {i}")
                 }
             }
             _ => unreachable!(),

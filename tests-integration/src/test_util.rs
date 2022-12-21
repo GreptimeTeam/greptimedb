@@ -106,7 +106,7 @@ fn get_test_store_config(
             (config, Some(TempDirGuard::S3(TempFolder::new(&store, "/"))))
         }
         StorageType::File => {
-            let data_tmp_dir = TempDir::new(&format!("gt_data_{}", name)).unwrap();
+            let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
 
             (
                 ObjectStoreConfig::File {
@@ -142,7 +142,7 @@ pub fn create_tmp_dir_and_datanode_opts(
     store_type: StorageType,
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{}", name)).unwrap();
+    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
 
     let (storage, data_tmp_dir) = get_test_store_config(&store_type, name);
 

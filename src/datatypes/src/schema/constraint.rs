@@ -57,8 +57,8 @@ impl TryFrom<ColumnDefaultConstraint> for Vec<u8> {
 impl Display for ColumnDefaultConstraint {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ColumnDefaultConstraint::Function(expr) => write!(f, "{}", expr),
-            ColumnDefaultConstraint::Value(v) => write!(f, "{}", v),
+            ColumnDefaultConstraint::Function(expr) => write!(f, "{expr}"),
+            ColumnDefaultConstraint::Value(v) => write!(f, "{v}"),
         }
     }
 }
@@ -172,10 +172,7 @@ fn create_current_timestamp_vector(
             std::iter::repeat(util::current_time_millis()).take(num_rows),
         ))),
         _ => error::DefaultValueTypeSnafu {
-            reason: format!(
-                "Not support to assign current timestamp to {:?} type",
-                data_type
-            ),
+            reason: format!("Not support to assign current timestamp to {data_type:?} type",),
         }
         .fail(),
     }
@@ -301,6 +298,6 @@ mod tests {
         let err = constraint
             .create_default_vector(&data_type, false, 4)
             .unwrap_err();
-        assert!(matches!(err, Error::DefaultValueType { .. }), "{:?}", err);
+        assert!(matches!(err, Error::DefaultValueType { .. }), "{err:?}");
     }
 }

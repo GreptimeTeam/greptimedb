@@ -365,7 +365,7 @@ pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
         return vector.get_slice(0, 0);
     }
 
-    let mut builder = PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap() as usize);
+    let mut builder = PrimitiveVectorBuilder::<T>::with_capacity(*offsets.last().unwrap());
 
     let mut previous_offset = 0;
 

@@ -96,7 +96,7 @@ impl SqlHandler {
         result
     }
 
-    pub(crate) fn get_table<'a>(&self, table_ref: &'a TableReference) -> Result<TableRef> {
+    pub(crate) fn get_table(&self, table_ref: &TableReference) -> Result<TableRef> {
         self.table_engine
             .get_table(&EngineContext::default(), table_ref)
             .with_context(|_| GetTableSnafu {

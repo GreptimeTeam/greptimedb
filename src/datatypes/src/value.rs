@@ -70,31 +70,31 @@ impl Display for Value {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Null => write!(f, "{}", self.data_type().name()),
-            Value::Boolean(v) => write!(f, "{}", v),
-            Value::UInt8(v) => write!(f, "{}", v),
-            Value::UInt16(v) => write!(f, "{}", v),
-            Value::UInt32(v) => write!(f, "{}", v),
-            Value::UInt64(v) => write!(f, "{}", v),
-            Value::Int8(v) => write!(f, "{}", v),
-            Value::Int16(v) => write!(f, "{}", v),
-            Value::Int32(v) => write!(f, "{}", v),
-            Value::Int64(v) => write!(f, "{}", v),
-            Value::Float32(v) => write!(f, "{}", v),
-            Value::Float64(v) => write!(f, "{}", v),
+            Value::Boolean(v) => write!(f, "{v}"),
+            Value::UInt8(v) => write!(f, "{v}"),
+            Value::UInt16(v) => write!(f, "{v}"),
+            Value::UInt32(v) => write!(f, "{v}"),
+            Value::UInt64(v) => write!(f, "{v}"),
+            Value::Int8(v) => write!(f, "{v}"),
+            Value::Int16(v) => write!(f, "{v}"),
+            Value::Int32(v) => write!(f, "{v}"),
+            Value::Int64(v) => write!(f, "{v}"),
+            Value::Float32(v) => write!(f, "{v}"),
+            Value::Float64(v) => write!(f, "{v}"),
             Value::String(v) => write!(f, "{}", v.as_utf8()),
             Value::Binary(v) => {
                 let hex = v
                     .iter()
-                    .map(|b| format!("{:02x}", b))
+                    .map(|b| format!("{b:02x}"))
                     .collect::<Vec<String>>()
                     .join("");
-                write!(f, "{}", hex)
+                write!(f, "{hex}")
             }
-            Value::Date(v) => write!(f, "{}", v),
-            Value::DateTime(v) => write!(f, "{}", v),
+            Value::Date(v) => write!(f, "{v}"),
+            Value::DateTime(v) => write!(f, "{v}"),
             Value::Timestamp(v) => write!(f, "{}", v.to_iso8601_string()),
             Value::List(v) => {
-                let default = Box::new(vec![]);
+                let default = Box::<Vec<Value>>::default();
                 let items = v.items().as_ref().unwrap_or(&default);
                 let items = items
                     .iter()
@@ -146,7 +146,7 @@ impl Value {
             Value::Null => Ok(None),
             Value::List(v) => Ok(Some(v)),
             other => error::CastTypeSnafu {
-                msg: format!("Failed to cast {:?} to list value", other),
+                msg: format!("Failed to cast {other:?} to list value"),
             }
             .fail(),
         }
@@ -214,8 +214,7 @@ impl Value {
             output_type_id == value_type_id || self.is_null(),
             error::ToScalarValueSnafu {
                 reason: format!(
-                    "expect value to return output_type {:?}, actual: {:?}",
-                    output_type_id, value_type_id,
+                    "expect value to return output_type {output_type_id:?}, actual: {value_type_id:?}",
                 ),
             }
         );
@@ -1345,7 +1344,7 @@ mod tests {
         );
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::new(vec![])),
+                Some(Box::default()),
                 ConcreteDataType::timestamp_second_datatype(),
             ))
             .to_string(),
@@ -1353,7 +1352,7 @@ mod tests {
         );
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::new(vec![])),
+                Some(Box::default()),
                 ConcreteDataType::timestamp_millisecond_datatype(),
             ))
             .to_string(),
@@ -1361,7 +1360,7 @@ mod tests {
         );
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::new(vec![])),
+                Some(Box::default()),
                 ConcreteDataType::timestamp_microsecond_datatype(),
             ))
             .to_string(),
@@ -1369,7 +1368,7 @@ mod tests {
         );
         assert_eq!(
             Value::List(ListValue::new(
-                Some(Box::new(vec![])),
+                Some(Box::default()),
                 ConcreteDataType::timestamp_nanosecond_datatype(),
             ))
             .to_string(),

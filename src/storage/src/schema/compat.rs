@@ -567,8 +567,7 @@ mod tests {
         let err = is_source_column_compatible(&source, &dest).unwrap_err();
         assert!(
             matches!(err, Error::CompatRead { .. }),
-            "{:?} is not CompatRead",
-            err
+            "{err:?} is not CompatRead",
         );
     }
 
@@ -606,8 +605,7 @@ mod tests {
         let err = is_source_column_compatible(&source, &dest).unwrap_err();
         assert!(
             matches!(err, Error::CompatRead { .. }),
-            "{:?} is not CompatRead",
-            err
+            "{err:?} is not CompatRead",
         );
     }
 }

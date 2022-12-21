@@ -61,7 +61,7 @@ impl SqlHandler {
         let alter_kind = match alter_table.alter_operation() {
             AlterTableOperation::AddConstraint(table_constraint) => {
                 return error::InvalidSqlSnafu {
-                    msg: format!("unsupported table constraint {}", table_constraint),
+                    msg: format!("unsupported table constraint {table_constraint}"),
                 }
                 .fail()
             }

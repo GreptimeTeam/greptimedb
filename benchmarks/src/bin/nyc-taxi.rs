@@ -15,7 +15,6 @@
 //! Use the taxi trip records from New York City dataset to bench. You can download the dataset from
 //! [here](https://www1.nyc.gov/site/tlc/about/tlc-trip-record-data.page).
 
-#![feature(once_cell)]
 #![allow(clippy::print_stdout)]
 
 use std::collections::HashMap;
@@ -94,7 +93,7 @@ async fn write_data(
         .unwrap();
     let progress_bar = mpb.add(ProgressBar::new(row_num as _));
     progress_bar.set_style(pb_style);
-    progress_bar.set_message(format!("{:?}", path));
+    progress_bar.set_message(format!("{path:?}"));
 
     let mut total_rpc_elapsed_ms = 0;
 
@@ -115,10 +114,7 @@ async fn write_data(
         progress_bar.inc(row_count as _);
     }
 
-    progress_bar.finish_with_message(format!(
-        "file {:?} done in {}ms",
-        path, total_rpc_elapsed_ms
-    ));
+    progress_bar.finish_with_message(format!("file {path:?} done in {total_rpc_elapsed_ms}ms",));
     total_rpc_elapsed_ms
 }
 
@@ -355,12 +351,12 @@ fn query_set() -> HashMap<String, String> {
 
     ret.insert(
         "count_all".to_string(),
-        format!("SELECT COUNT(*) FROM {};", TABLE_NAME),
+        format!("SELECT COUNT(*) FROM {TABLE_NAME};"),
     );
 
     ret.insert(
         "fare_amt_by_passenger".to_string(),
-        format!("SELECT passenger_count, MIN(fare_amount), MAX(fare_amount), SUM(fare_amount) FROM {} GROUP BY passenger_count",TABLE_NAME)
+        format!("SELECT passenger_count, MIN(fare_amount), MAX(fare_amount), SUM(fare_amount) FROM {TABLE_NAME} GROUP BY passenger_count")
     );
 
     ret
@@ -373,7 +369,7 @@ async fn do_write(args: &Args, client: &Client) {
     let mut write_jobs = JoinSet::new();
 
     let create_table_result = admin.create(create_table_expr()).await;
-    println!("Create table result: {:?}", create_table_result);
+    println!("Create table result: {create_table_result:?}");
 
     let progress_bar_style = ProgressStyle::with_template(
         "[{elapsed_precise}] {bar:60.cyan/blue} {pos:>7}/{len:7} {msg}",
@@ -406,7 +402,7 @@ async fn do_write(args: &Args, client: &Client) {
 
 async fn do_query(num_iter: usize, db: &Database) {
     for (query_name, query) in query_set() {
-        println!("Running query: {}", query);
+        println!("Running query: {query}");
         for i in 0..num_iter {
             let now = Instant::now();
             let _res = db.select(Select::Sql(query.clone())).await.unwrap();

@@ -167,7 +167,7 @@ impl MutableVector for NullVectorBuilder {
         ensure!(
             value.is_null(),
             error::CastTypeSnafu {
-                msg: format!("Failed to cast value ref {:?} to null", value),
+                msg: format!("Failed to cast value ref {value:?} to null"),
             }
         );
 
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn test_debug_null_vector() {
         let array = NullVector::new(1024 * 1024);
-        assert_eq!(format!("{:?}", array), "NullVector(1048576)");
+        assert_eq!(format!("{array:?}"), "NullVector(1048576)");
     }
 
     #[test]

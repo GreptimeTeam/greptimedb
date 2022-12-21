@@ -205,7 +205,7 @@ impl Helper {
             | ScalarValue::Time64Microsecond(_)
             | ScalarValue::Time64Nanosecond(_) => {
                 return error::ConversionSnafu {
-                    from: format!("Unsupported scalar value: {}", value),
+                    from: format!("Unsupported scalar value: {value}"),
                 }
                 .fail()
             }

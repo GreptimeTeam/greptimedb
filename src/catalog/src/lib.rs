@@ -157,7 +157,7 @@ pub struct RegisterSchemaRequest {
 
 /// Formats table fully-qualified name
 pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {
-    format!("{}.{}.{}", catalog, schema, table)
+    format!("{catalog}.{schema}.{table}")
 }
 
 pub trait CatalogProviderFactory {
@@ -187,8 +187,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
                 .await
                 .with_context(|_| CreateTableSnafu {
                     table_info: format!(
-                        "{}.{}.{}, id: {}",
-                        catalog_name, schema_name, table_name, table_id,
+                        "{catalog_name}.{schema_name}.{table_name}, id: {table_id}",
                     ),
                 })?;
             manager
@@ -200,7 +199,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
                     table: table.clone(),
                 })
                 .await?;
-            info!("Created and registered system table: {}", table_name);
+            info!("Created and registered system table: {table_name}");
             table
         };
         if let Some(hook) = req.open_hook {

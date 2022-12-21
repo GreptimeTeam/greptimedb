@@ -76,8 +76,7 @@ async fn execute_scipy_stats_norm_cdf<'a>(
     engine: Arc<dyn QueryEngine>,
 ) -> RecordResult<Vec<RecordBatch>> {
     let sql = format!(
-        "select SCIPYSTATSNORMCDF({},2.0) as scipy_stats_norm_cdf from {}",
-        column_name, table_name
+        "select SCIPYSTATSNORMCDF({column_name},2.0) as scipy_stats_norm_cdf from {table_name}",
     );
     let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))

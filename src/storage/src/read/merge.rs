@@ -644,10 +644,10 @@ mod tests {
         assert_eq!(left, right);
 
         // Check Debug is implemented.
-        let output = format!("{:?}", left);
+        let output = format!("{left:?}");
         assert!(output.contains("cursor"));
         assert!(output.contains("pos: 1"));
-        let output = format!("{:?}", right);
+        let output = format!("{right:?}");
         assert!(output.contains("cursor"));
         let output = format!("{:?}", left.first_row());
         assert!(output.contains("pos: 1"));

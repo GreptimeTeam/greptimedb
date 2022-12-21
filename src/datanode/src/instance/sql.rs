@@ -187,8 +187,7 @@ fn table_idents_to_full_name(
         )),
         _ => error::InvalidSqlSnafu {
             msg: format!(
-                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {}",
-                obj_name
+                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
             ),
         }.fail(),
     }

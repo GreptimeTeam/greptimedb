@@ -193,7 +193,7 @@ fn type_translate(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::DateTime(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::List(_) => error::InternalSnafu {
-            err_msg: format!("not implemented for column datatype {:?}", origin),
+            err_msg: format!("not implemented for column datatype {origin:?}"),
         }
         .fail(),
     }
@@ -336,7 +336,7 @@ mod test {
 
         let err = encode_value(
             &Value::List(ListValue::new(
-                Some(Box::new(vec![])),
+                Some(Box::default()),
                 ConcreteDataType::int8_datatype(),
             )),
             &mut builder,
@@ -344,7 +344,7 @@ mod test {
         .unwrap_err();
         match err {
             PgWireError::ApiError(e) => {
-                assert!(format!("{}", e).contains("Internal error:"));
+                assert!(format!("{e}").contains("Internal error:"));
             }
             _ => {
                 unreachable!()

@@ -487,12 +487,11 @@ async fn test_insert_with_default_value_for_type(type_name: &str) {
     let create_sql = format!(
         r#"create table test_table(
         host string,
-        ts {} DEFAULT CURRENT_TIMESTAMP,
+        ts {type_name} DEFAULT CURRENT_TIMESTAMP,
         cpu double default 0,
         TIME INDEX (ts),
         PRIMARY KEY(host)
     ) engine=mito with(regions=1);"#,
-        type_name
     );
     let output = execute_sql(&instance, &create_sql).await;
     assert!(matches!(output, Output::AffectedRows(1)));

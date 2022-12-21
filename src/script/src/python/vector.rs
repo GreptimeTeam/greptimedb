@@ -59,28 +59,26 @@ fn emit_cast_error(
     dst_ty: &ArrowDataType,
 ) -> PyBaseExceptionRef {
     vm.new_type_error(format!(
-        "Can't cast source operand of type {:?} into target type of {:?}",
-        src_ty, dst_ty
+        "Can't cast source operand of type {src_ty:?} into target type of {dst_ty:?}",
     ))
 }
 
 /// Performs `val - arr`.
 fn arrow_rsub(arr: &dyn Array, val: &dyn Array, vm: &VirtualMachine) -> PyResult<ArrayRef> {
-    arithmetic::subtract_dyn(val, arr).map_err(|e| vm.new_type_error(format!("rsub error: {}", e)))
+    arithmetic::subtract_dyn(val, arr).map_err(|e| vm.new_type_error(format!("rsub error: {e}")))
 }
 
 /// Performs `val / arr`
 fn arrow_rtruediv(arr: &dyn Array, val: &dyn Array, vm: &VirtualMachine) -> PyResult<ArrayRef> {
-    arithmetic::divide_dyn(val, arr)
-        .map_err(|e| vm.new_type_error(format!("rtruediv error: {}", e)))
+    arithmetic::divide_dyn(val, arr).map_err(|e| vm.new_type_error(format!("rtruediv error: {e}")))
 }
 
 /// Performs `val / arr`, but cast to i64.
 fn arrow_rfloordiv(arr: &dyn Array, val: &dyn Array, vm: &VirtualMachine) -> PyResult<ArrayRef> {
     let array = arithmetic::divide_dyn(val, arr)
-        .map_err(|e| vm.new_type_error(format!("rtruediv divide error: {}", e)))?;
+        .map_err(|e| vm.new_type_error(format!("rtruediv divide error: {e}")))?;
     compute::cast(&array, &ArrowDataType::Int64)
-        .map_err(|e| vm.new_type_error(format!("rtruediv cast error: {}", e)))
+        .map_err(|e| vm.new_type_error(format!("rtruediv cast error: {e}")))
 }
 
 fn wrap_result<F>(f: F) -> impl Fn(&dyn Array, &dyn Array, &VirtualMachine) -> PyResult<ArrayRef>
@@ -88,7 +86,7 @@ where
     F: Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef>,
 {
     move |left, right, vm| {
-        f(left, right).map_err(|e| vm.new_type_error(format!("arithmetic error {}", e)))
+        f(left, right).map_err(|e| vm.new_type_error(format!("arithmetic error {e}")))
     }
 }
 
@@ -154,8 +152,7 @@ impl PyVector {
                     v
                 } else {
                     return Err(vm.new_type_error(format!(
-                        "Can't cast pyobject {:?} into concrete type {:?}",
-                        obj, datatype
+                        "Can't cast pyobject {obj:?} into concrete type {datatype:?}",
                     )));
                 };
                 // Safety: `pyobj_try_to_typed_val()` has checked the data type.
@@ -262,8 +259,7 @@ impl PyVector {
         Ok(Helper::try_into_vector(result.clone())
             .map_err(|e| {
                 vm.new_type_error(format!(
-                    "Can't cast result into vector, result: {:?}, err: {:?}",
-                    result, e
+                    "Can't cast result into vector, result: {result:?}, err: {e:?}",
                 ))
             })?
             .into())
@@ -305,13 +301,12 @@ impl PyVector {
         let right = cast(right, &target_type, vm)?;
 
         let result = op(left.as_ref(), right.as_ref())
-            .map_err(|e| vm.new_type_error(format!("Can't compute op, error: {}", e)))?;
+            .map_err(|e| vm.new_type_error(format!("Can't compute op, error: {e}")))?;
 
         Ok(Helper::try_into_vector(result.clone())
             .map_err(|e| {
                 vm.new_type_error(format!(
-                    "Can't cast result into vector, result: {:?}, err: {:?}",
-                    result, e
+                    "Can't cast result into vector, result: {result:?}, err: {e:?}",
                 ))
             })?
             .into())
@@ -549,8 +544,7 @@ impl PyVector {
                     res.map_err(|err| vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
                 let ret = Helper::try_into_vector(res.clone()).map_err(|e| {
                     vm.new_type_error(format!(
-                        "Can't cast result into vector, result: {:?}, err: {:?}",
-                        res, e
+                        "Can't cast result into vector, result: {res:?}, err: {e:?}",
                     ))
                 })?;
                 Ok(ret.into())
@@ -580,7 +574,7 @@ impl PyVector {
             let res = compute::filter(self.to_arrow_array().as_ref(), mask)
                 .map_err(|err| vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
             let ret = Helper::try_into_vector(res.clone()).map_err(|e| {
-                vm.new_type_error(format!("Can't cast result into vector, err: {:?}", e))
+                vm.new_type_error(format!("Can't cast result into vector, err: {e:?}"))
             })?;
             Ok(Self::from(ret).into_pyobject(vm))
         } else {
@@ -683,7 +677,7 @@ fn get_arrow_scalar_op(
 
     move |a: &dyn Array, b: &dyn Array, vm| -> PyResult<ArrayRef> {
         let array =
-            op_bool_arr(a, b).map_err(|e| vm.new_type_error(format!("scalar op error: {}", e)))?;
+            op_bool_arr(a, b).map_err(|e| vm.new_type_error(format!("scalar op error: {e}")))?;
         Ok(Arc::new(array))
     }
 }
@@ -932,7 +926,7 @@ fn get_concrete_type(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Concret
     } else if is_instance::<PyStr>(obj, vm) {
         Ok(ConcreteDataType::string_datatype())
     } else {
-        Err(vm.new_type_error(format!("Unsupported pyobject type: {:?}", obj)))
+        Err(vm.new_type_error(format!("Unsupported pyobject type: {obj:?}")))
     }
 }
 
@@ -1205,7 +1199,7 @@ pub mod tests {
                     }
                 }
             } else {
-                panic!("{code}: {:?}", result)
+                panic!("{code}: {result:?}")
             }
         }
     }

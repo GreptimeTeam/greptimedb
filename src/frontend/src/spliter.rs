@@ -66,7 +66,7 @@ impl WriteSpliter {
             {
                 Ok(region_id) => region_id,
                 Err(e) => {
-                    let reason = format!("{:?}", e);
+                    let reason = format!("{e:?}");
                     return FindRegionSnafu { reason }.fail();
                 }
             };

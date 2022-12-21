@@ -33,48 +33,38 @@ const ALPHANUMERICS_NAME_PATTERN: &str = "[a-zA-Z_][a-zA-Z0-9_]*";
 
 lazy_static! {
     static ref CATALOG_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-({})$",
-        CATALOG_KEY_PREFIX, ALPHANUMERICS_NAME_PATTERN
+        "^{CATALOG_KEY_PREFIX}-({ALPHANUMERICS_NAME_PATTERN})$"
     ))
     .unwrap();
 }
 
 lazy_static! {
     static ref SCHEMA_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-({})-({})$",
-        SCHEMA_KEY_PREFIX, ALPHANUMERICS_NAME_PATTERN, ALPHANUMERICS_NAME_PATTERN
+        "^{SCHEMA_KEY_PREFIX}-({ALPHANUMERICS_NAME_PATTERN})-({ALPHANUMERICS_NAME_PATTERN})$"
     ))
     .unwrap();
 }
 
 lazy_static! {
     static ref TABLE_GLOBAL_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-({})-({})-({})$",
-        TABLE_GLOBAL_KEY_PREFIX,
-        ALPHANUMERICS_NAME_PATTERN,
-        ALPHANUMERICS_NAME_PATTERN,
-        ALPHANUMERICS_NAME_PATTERN
+        "^{TABLE_GLOBAL_KEY_PREFIX}-({ALPHANUMERICS_NAME_PATTERN})-({ALPHANUMERICS_NAME_PATTERN})-({ALPHANUMERICS_NAME_PATTERN})$"
     ))
     .unwrap();
 }
 
 lazy_static! {
     static ref TABLE_REGIONAL_KEY_PATTERN: Regex = Regex::new(&format!(
-        "^{}-({})-({})-({})-([0-9]+)$",
-        TABLE_REGIONAL_KEY_PREFIX,
-        ALPHANUMERICS_NAME_PATTERN,
-        ALPHANUMERICS_NAME_PATTERN,
-        ALPHANUMERICS_NAME_PATTERN
+        "^{TABLE_REGIONAL_KEY_PREFIX}-({ALPHANUMERICS_NAME_PATTERN})-({ALPHANUMERICS_NAME_PATTERN})-({ALPHANUMERICS_NAME_PATTERN})-([0-9]+)$"
     ))
     .unwrap();
 }
 
 pub fn build_catalog_prefix() -> String {
-    format!("{}-", CATALOG_KEY_PREFIX)
+    format!("{CATALOG_KEY_PREFIX}-")
 }
 
 pub fn build_schema_prefix(catalog_name: impl AsRef<str>) -> String {
-    format!("{}-{}-", SCHEMA_KEY_PREFIX, catalog_name.as_ref())
+    format!("{SCHEMA_KEY_PREFIX}-{}-", catalog_name.as_ref())
 }
 
 pub fn build_table_global_prefix(
@@ -82,8 +72,7 @@ pub fn build_table_global_prefix(
     schema_name: impl AsRef<str>,
 ) -> String {
     format!(
-        "{}-{}-{}-",
-        TABLE_GLOBAL_KEY_PREFIX,
+        "{TABLE_GLOBAL_KEY_PREFIX}-{}-{}-",
         catalog_name.as_ref(),
         schema_name.as_ref()
     )
@@ -378,7 +367,7 @@ mod tests {
             table_info,
         };
         let serialized = serde_json::to_string(&value).unwrap();
-        let deserialized = TableGlobalValue::parse(&serialized).unwrap();
+        let deserialized = TableGlobalValue::parse(serialized).unwrap();
         assert_eq!(value, deserialized);
     }
 }

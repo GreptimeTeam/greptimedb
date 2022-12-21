@@ -136,7 +136,7 @@ impl Stream for NumbersStream {
         let numbers: Vec<u32> = (0..self.limit).collect();
         let batch = DfRecordBatch::try_new(
             self.schema.arrow_schema().clone(),
-            vec![Arc::new(UInt32Array::from_slice(&numbers))],
+            vec![Arc::new(UInt32Array::from_slice(numbers))],
         )
         .unwrap();
 

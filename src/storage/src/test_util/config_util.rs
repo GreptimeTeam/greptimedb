@@ -28,7 +28,7 @@ use crate::region::StoreConfig;
 use crate::sst::FsAccessLayer;
 
 fn log_store_dir(store_dir: &str) -> String {
-    format!("{}/logstore", store_dir)
+    format!("{store_dir}/logstore")
 }
 
 /// Create a new StoreConfig for test.

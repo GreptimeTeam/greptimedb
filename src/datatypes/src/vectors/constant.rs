@@ -203,7 +203,7 @@ mod tests {
         let a = Int32Vector::from_slice(vec![1]);
         let c = ConstantVector::new(Arc::new(a), 10);
 
-        let s = format!("{:?}", c);
+        let s = format!("{c:?}");
         assert_eq!(s, "ConstantVector([Int32(1); 10])");
     }
 

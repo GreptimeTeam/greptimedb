@@ -61,7 +61,7 @@ pub(crate) fn to_df_expr(
         | RexType::Cast(_)
         | RexType::Subquery(_)
         | RexType::Enum(_) => UnsupportedExprSnafu {
-            name: format!("substrait expression {:?}", expr_rex_type),
+            name: format!("substrait expression {expr_rex_type:?}"),
         }
         .fail()?,
     }
@@ -109,7 +109,7 @@ pub fn convert_scalar_function(
     let fn_name = ctx
         .find_scalar_fn(anchor)
         .with_context(|| InvalidParametersSnafu {
-            reason: format!("Unregistered scalar function reference: {}", anchor),
+            reason: format!("Unregistered scalar function reference: {anchor}"),
         })?;
 
     // convenient util
@@ -435,7 +435,7 @@ pub fn convert_scalar_function(
         // skip Wildcard, unimplemented.
         // end other direct expr
         _ => UnsupportedExprSnafu {
-            name: format!("scalar function {}", fn_name),
+            name: format!("scalar function {fn_name}"),
         }
         .fail()?,
     };
@@ -595,8 +595,8 @@ pub fn convert_column(column: &Column, schema: &Schema) -> Result<FieldReference
         schema
             .column_index_by_name(column_name)
             .with_context(|| MissingFieldSnafu {
-                field: format!("{:?}", column),
-                plan: format!("schema: {:?}", schema),
+                field: format!("{column:?}"),
+                plan: format!("schema: {schema:?}"),
             })?;
 
     Ok(FieldReference {

@@ -81,7 +81,7 @@ pub async fn get_numbers_from_table<'s, T>(
 where
     T: WrapperType,
 {
-    let sql = format!("SELECT {} FROM {}", column_name, table_name);
+    let sql = format!("SELECT {column_name} FROM {table_name}");
     let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();

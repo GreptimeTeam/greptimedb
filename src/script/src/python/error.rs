@@ -221,7 +221,7 @@ pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
         Error::PyRuntime { msg, .. } => (msg.clone(), None),
         Error::PyParse { source, .. } => (source.error.to_string(), Some(source.location)),
         Error::PyCompile { source, .. } => (source.error.to_string(), Some(source.location)),
-        _ => (format!("Unknown error: {:?}", err), None),
+        _ => (format!("Unknown error: {err:?}"), None),
     }
 }
 

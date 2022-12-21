@@ -40,7 +40,7 @@ impl Services {
     pub async fn try_new(instance: InstanceRef, opts: &DatanodeOptions) -> Result<Self> {
         let grpc_runtime = Arc::new(
             RuntimeBuilder::default()
-                .worker_threads(opts.rpc_runtime_size as usize)
+                .worker_threads(opts.rpc_runtime_size)
                 .thread_name("grpc-io-handlers")
                 .build()
                 .context(RuntimeResourceSnafu)?,
@@ -54,7 +54,7 @@ impl Services {
             Mode::Distributed => {
                 let mysql_io_runtime = Arc::new(
                     RuntimeBuilder::default()
-                        .worker_threads(opts.mysql_runtime_size as usize)
+                        .worker_threads(opts.mysql_runtime_size)
                         .thread_name("mysql-io-handlers")
                         .build()
                         .context(RuntimeResourceSnafu)?,

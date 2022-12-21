@@ -51,7 +51,7 @@ impl Instance {
             .await
             .map_err(BoxedError::new)
             .with_context(|_| server_error::ExecuteQuerySnafu {
-                query: format!("{:?}", data_point),
+                query: format!("{data_point:?}"),
             })?;
         Ok(())
     }

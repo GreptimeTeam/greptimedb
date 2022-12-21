@@ -241,12 +241,12 @@ impl DistInstance {
             .schema(schema_name)
             .context(CatalogSnafu)?
             .context(SchemaNotFoundSnafu {
-                schema_info: format!("{}.{}", catalog_name, schema_name),
+                schema_info: format!("{catalog_name}.{schema_name}"),
             })?
             .table(table_name)
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu {
-                table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+                table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
             })?;
 
         let dist_table = table
@@ -392,7 +392,7 @@ impl GrpcAdminHandler for DistInstance {
         }
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu {
-            query: format!("{:?}", query),
+            query: format!("{query:?}"),
         })
     }
 }

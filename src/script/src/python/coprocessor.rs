@@ -185,9 +185,9 @@ fn try_into_columns(
     col_len: usize,
 ) -> Result<Vec<VectorRef>> {
     if is_instance::<PyTuple>(obj, vm) {
-        let tuple = obj.payload::<PyTuple>().with_context(|| {
-            ret_other_error_with(format!("can't cast obj {:?} to PyTuple)", obj))
-        })?;
+        let tuple = obj
+            .payload::<PyTuple>()
+            .with_context(|| ret_other_error_with(format!("can't cast obj {obj:?} to PyTuple)")))?;
         let cols = tuple
             .iter()
             .map(|obj| py_vec_obj_to_array(obj, vm, col_len))
@@ -206,7 +206,7 @@ fn select_from_rb(rb: &RecordBatch, fetch_names: &[String]) -> Result<Vec<PyVect
         .iter()
         .map(|name| {
             let vector = rb.column_by_name(name).with_context(|| OtherSnafu {
-                reason: format!("Can't find field name {}", name),
+                reason: format!("Can't find field name {name}"),
             })?;
             Ok(PyVector::from(vector.clone()))
         })
@@ -227,7 +227,7 @@ fn check_args_anno_real_type(
         ensure!(
             anno_ty
                 .to_owned()
-                .map(|v| v.datatype == None // like a vector[_]
+                .map(|v| v.datatype.is_none() // like a vector[_]
                      || v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
                 .unwrap_or(true),
             OtherSnafu {

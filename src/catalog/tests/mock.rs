@@ -189,10 +189,10 @@ impl TableEngine for MockTableEngine {
         unimplemented!()
     }
 
-    fn get_table<'a>(
+    fn get_table(
         &self,
         _ctx: &EngineContext,
-        table_ref: &'a TableReference,
+        table_ref: &TableReference,
     ) -> table::Result<Option<TableRef>> {
         futures::executor::block_on(async {
             Ok(self
@@ -204,7 +204,7 @@ impl TableEngine for MockTableEngine {
         })
     }
 
-    fn table_exists<'a>(&self, _ctx: &EngineContext, table_ref: &'a TableReference) -> bool {
+    fn table_exists(&self, _ctx: &EngineContext, table_ref: &TableReference) -> bool {
         futures::executor::block_on(async {
             self.tables
                 .read()

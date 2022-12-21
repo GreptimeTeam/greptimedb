@@ -79,7 +79,7 @@ impl BatchHandler {
         // 1. prevent the execution from being cancelled unexpected by tonic runtime.
         // 2. avoid the handler blocks the gRPC runtime because `exec_admin_request` may block
         // the caller thread.
-        let _ = self.runtime.spawn(async move {
+        self.runtime.spawn(async move {
             let result = future.await;
 
             // Ignore send result. Usually an error indicates the rx is dropped (request timeouted).

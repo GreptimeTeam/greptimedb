@@ -44,7 +44,7 @@ impl TableRoutes {
             .await
             .map_err(|e| {
                 error::GetCacheSnafu {
-                    err_msg: format!("{:?}", e),
+                    err_msg: format!("{e:?}"),
                 }
                 .build()
             })

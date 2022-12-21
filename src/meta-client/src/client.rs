@@ -326,7 +326,7 @@ mod tests {
         async fn gen_data(&self) {
             for i in 0..10 {
                 let req = PutRequest::new()
-                    .with_key(self.key(&format!("key-{}", i)))
+                    .with_key(self.key(&format!("key-{i}")))
                     .with_value(format!("{}-{}", "value", i).into_bytes())
                     .with_prev_kv();
                 let res = self.client.put(req).await;
@@ -547,7 +547,7 @@ mod tests {
         let kvs = res.unwrap().take_kvs();
         assert_eq!(10, kvs.len());
         for (i, mut kv) in kvs.into_iter().enumerate() {
-            assert_eq!(tc.key(&format!("key-{}", i)), kv.take_key());
+            assert_eq!(tc.key(&format!("key-{i}")), kv.take_key());
             assert_eq!(format!("{}-{}", "value", i).into_bytes(), kv.take_value());
         }
     }

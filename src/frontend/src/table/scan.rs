@@ -82,7 +82,7 @@ impl DatanodeInstance {
         let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
 
         let mut builder = LogicalPlanBuilder::scan_with_filters(
-            &table_scan.table_name.to_string(),
+            table_scan.table_name.to_string(),
             Arc::new(DefaultTableSource::new(table_provider)),
             table_scan.projection.clone(),
             table_scan

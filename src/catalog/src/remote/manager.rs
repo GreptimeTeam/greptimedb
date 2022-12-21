@@ -331,10 +331,7 @@ impl RemoteCatalogManager {
             .open_table(&context, request)
             .await
             .with_context(|_| OpenTableSnafu {
-                table_info: format!(
-                    "{}.{}.{}, id:{}",
-                    catalog_name, schema_name, table_name, table_id
-                ),
+                table_info: format!("{catalog_name}.{schema_name}.{table_name}, id:{table_id}"),
             })? {
             Some(table) => {
                 info!(
@@ -355,7 +352,7 @@ impl RemoteCatalogManager {
                     .clone()
                     .try_into()
                     .context(InvalidTableSchemaSnafu {
-                        table_info: format!("{}.{}.{}", catalog_name, schema_name, table_name,),
+                        table_info: format!("{catalog_name}.{schema_name}.{table_name}"),
                         schema: meta.schema.clone(),
                     })?;
                 let req = CreateTableRequest {
@@ -477,7 +474,7 @@ impl CatalogManager for RemoteCatalogManager {
         let schema = catalog
             .schema(schema_name)?
             .with_context(|| SchemaNotFoundSnafu {
-                schema_info: format!("{}.{}", catalog_name, schema_name),
+                schema_info: format!("{catalog_name}.{schema_name}"),
             })?;
         schema.table(table_name)
     }
