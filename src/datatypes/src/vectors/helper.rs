@@ -195,12 +195,15 @@ impl Helper {
                 ConstantVector::new(Arc::new(TimestampNanosecondVector::from(vec![v])), length)
             }
             ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::Time64(_)
             | ScalarValue::IntervalYearMonth(_)
             | ScalarValue::IntervalDayTime(_)
             | ScalarValue::IntervalMonthDayNano(_)
             | ScalarValue::Struct(_, _)
-            | ScalarValue::Dictionary(_, _) => {
+            | ScalarValue::Dictionary(_, _)
+            | ScalarValue::Time32Second(_)
+            | ScalarValue::Time32Millisecond(_)
+            | ScalarValue::Time64Microsecond(_)
+            | ScalarValue::Time64Nanosecond(_) => {
                 return error::ConversionSnafu {
                     from: format!("Unsupported scalar value: {}", value),
                 }

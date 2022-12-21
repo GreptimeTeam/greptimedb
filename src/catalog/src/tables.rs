@@ -77,7 +77,7 @@ impl Table for Tables {
 
     async fn scan(
         &self,
-        _projection: &Option<Vec<usize>>,
+        _projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> table::error::Result<PhysicalPlanRef> {
@@ -370,7 +370,7 @@ mod tests {
             .unwrap();
 
         let tables = Tables::new(catalog_list, "test_engine".to_string());
-        let tables_stream = tables.scan(&None, &[], None).await.unwrap();
+        let tables_stream = tables.scan(None, &[], None).await.unwrap();
         let session_ctx = SessionContext::new();
         let mut tables_stream = tables_stream.execute(0, session_ctx.task_ctx()).unwrap();
 

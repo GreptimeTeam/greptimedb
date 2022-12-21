@@ -71,7 +71,7 @@ impl Table for EmptyTable {
 
     async fn scan(
         &self,
-        _projection: &Option<Vec<usize>>,
+        _projection: Option<&Vec<usize>>,
         _filters: &[common_query::prelude::Expr],
         _limit: Option<usize>,
     ) -> Result<PhysicalPlanRef> {

@@ -27,6 +27,7 @@ use datafusion::execution::context::{SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion_common::ScalarValue;
 use datafusion_expr::{LogicalPlan as DfLogicalPlan, TableSource};
 use datafusion_optimizer::optimizer::{Optimizer, OptimizerConfig};
 use datafusion_sql::planner::ContextProvider;
@@ -142,6 +143,11 @@ impl QueryEngineState {
     pub(crate) fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
         let state = self.df_context.state.read();
         state.get_variable_type(variable_names)
+    }
+
+    pub(crate) fn get_config_option(&self, variable: &str) -> Option<ScalarValue> {
+        let state = self.df_context.state.read();
+        state.get_config_option(variable)
     }
 
     pub(crate) fn optimize(&self, plan: &DfLogicalPlan) -> DfResult<DfLogicalPlan> {

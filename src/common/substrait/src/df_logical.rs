@@ -19,7 +19,7 @@ use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
-use datafusion::common::ToDFSchema;
+use datafusion::common::{DFField, DFSchema};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_plan::project_schema;
 use datafusion_expr::{Filter, LogicalPlan, TableScan, TableSource};
@@ -262,10 +262,20 @@ impl DFLogicalSubstraitConvertor {
         };
 
         // Calculate the projected schema
-        let projected_schema = project_schema(&stored_schema, projection.as_ref())
-            .context(DFInternalSnafu)?
-            .to_dfschema_ref()
-            .context(DFInternalSnafu)?;
+        let qualified = &format!("{}.{}.{}", catalog_name, schema_name, table_name);
+        let projected_schema = Arc::new(
+            project_schema(&stored_schema, projection.as_ref())
+                .and_then(|x| {
+                    DFSchema::new_with_metadata(
+                        x.fields()
+                            .iter()
+                            .map(|f| DFField::from_qualified(qualified, f.clone()))
+                            .collect(),
+                        x.metadata().clone(),
+                    )
+                })
+                .context(DFInternalSnafu)?,
+        );
 
         ctx.set_df_schema(projected_schema.clone());
 

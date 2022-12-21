@@ -300,7 +300,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
-        SqlDataType::Custom(obj_name) => match &obj_name.0[..] {
+        SqlDataType::Custom(obj_name, _) => match &obj_name.0[..] {
             [type_name] => {
                 if type_name
                     .value
@@ -319,7 +319,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             }
             .fail(),
         },
-        SqlDataType::Timestamp(_) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
+        SqlDataType::Timestamp(_, _) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -373,11 +373,11 @@ mod tests {
         check_type(SqlDataType::Boolean, ConcreteDataType::boolean_datatype());
         check_type(SqlDataType::Date, ConcreteDataType::date_datatype());
         check_type(
-            SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")])),
+            SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")]), vec![]),
             ConcreteDataType::datetime_datatype(),
         );
         check_type(
-            SqlDataType::Timestamp(TimezoneInfo::None),
+            SqlDataType::Timestamp(None, TimezoneInfo::None),
             ConcreteDataType::timestamp_millisecond_datatype(),
         );
     }
