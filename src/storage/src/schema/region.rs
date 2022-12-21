@@ -122,6 +122,11 @@ impl RegionSchema {
     }
 
     #[inline]
+    pub(crate) fn value_indices(&self) -> impl Iterator<Item = usize> {
+        self.store_schema.value_indices()
+    }
+
+    #[inline]
     pub(crate) fn column_metadata(&self, idx: usize) -> &ColumnMetadata {
         self.columns.column_metadata(idx)
     }

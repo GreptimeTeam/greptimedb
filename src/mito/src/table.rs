@@ -35,8 +35,8 @@ use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ChunkReader, PutOperation, ReadContext, Region,
-    RegionMeta, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, ChunkReader, ReadContext, Region, RegionMeta,
+    ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error::{Error as TableError, MissingColumnSnafu, Result as TableResult};
 use table::metadata::{
@@ -86,66 +86,67 @@ impl<R: Region> Table for MitoTable<R> {
 
         let mut write_request = self.region.write_request();
 
-        let mut put_op = write_request.put_op();
-        let mut columns_values = request.columns_values;
-
-        let table_info = self.table_info();
-        let schema = self.schema();
-        let key_columns = table_info.meta.row_key_column_names();
-        let value_columns = table_info.meta.value_column_names();
+        let columns_values = request.columns_values;
         // columns_values is not empty, it's safe to unwrap
         let rows_num = columns_values.values().next().unwrap().len();
 
-        // Add row key columns
-        for name in key_columns {
-            let column_schema = schema
-                .column_schema_by_name(name)
-                .expect("column schema not found");
+        // let table_info = self.table_info();
+        // let schema = self.schema();
+        // let key_columns = table_info.meta.row_key_column_names();
+        // let value_columns = table_info.meta.value_column_names();
+        // // columns_values is not empty, it's safe to unwrap
+        // let rows_num = columns_values.values().next().unwrap().len();
 
-            let vector = match columns_values.remove(name) {
-                Some(v) => v,
-                None => Self::try_get_column_default_constraint_vector(column_schema, rows_num)?,
-            };
+        // // Add row key columns
+        // for name in key_columns {
+        //     let column_schema = schema
+        //         .column_schema_by_name(name)
+        //         .expect("column schema not found");
 
-            put_op
-                .add_key_column(name, vector)
-                .map_err(TableError::new)?;
-        }
+        //     let vector = match columns_values.remove(name) {
+        //         Some(v) => v,
+        //         None => Self::try_get_column_default_constraint_vector(column_schema, rows_num)?,
+        //     };
 
-        // Add value columns
-        for name in value_columns {
-            let column_schema = schema
-                .column_schema_by_name(name)
-                .expect("column schema not found");
+        //     put_op
+        //         .add_key_column(name, vector)
+        //         .map_err(TableError::new)?;
+        // }
 
-            let vector = match columns_values.remove(name) {
-                Some(v) => v,
-                None => Self::try_get_column_default_constraint_vector(column_schema, rows_num)?,
-            };
-            put_op
-                .add_value_column(name, vector)
-                .map_err(TableError::new)?;
-        }
+        // // Add value columns
+        // for name in value_columns {
+        //     let column_schema = schema
+        //         .column_schema_by_name(name)
+        //         .expect("column schema not found");
 
-        ensure!(
-            columns_values.is_empty(),
-            ColumnsNotExistSnafu {
-                table_name: &table_info.name,
-                column_names: columns_values
-                    .keys()
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>(),
-            }
-        );
+        //     let vector = match columns_values.remove(name) {
+        //         Some(v) => v,
+        //         None => Self::try_get_column_default_constraint_vector(column_schema, rows_num)?,
+        //     };
+        //     put_op
+        //         .add_value_column(name, vector)
+        //         .map_err(TableError::new)?;
+        // }
 
-        logging::trace!(
-            "Insert into table {} with put_op: {:?}",
-            table_info.name,
-            put_op
-        );
+        // ensure!(
+        //     columns_values.is_empty(),
+        //     ColumnsNotExistSnafu {
+        //         table_name: &table_info.name,
+        //         column_names: columns_values
+        //             .keys()
+        //             .into_iter()
+        //             .map(|s| s.to_string())
+        //             .collect::<Vec<_>>(),
+        //     }
+        // );
 
-        write_request.put(put_op).map_err(TableError::new)?;
+        // logging::trace!(
+        //     "Insert into table {} with put_op: {:?}",
+        //     table_info.name,
+        //     put_op
+        // );
+
+        write_request.put(columns_values).map_err(TableError::new)?;
 
         let _resp = self
             .region
@@ -375,20 +376,20 @@ impl<R: Region> MitoTable<R> {
         Ok(MitoTable::new(table_info, region, manifest))
     }
 
-    fn try_get_column_default_constraint_vector(
-        column_schema: &ColumnSchema,
-        rows_num: usize,
-    ) -> TableResult<VectorRef> {
-        // TODO(dennis): when we support altering schema, we should check the schemas difference between table and region
-        let vector = column_schema
-            .create_default_vector(rows_num)
-            .context(UnsupportedDefaultConstraintSnafu)?
-            .context(MissingColumnSnafu {
-                name: &column_schema.name,
-            })?;
+    // fn try_get_column_default_constraint_vector(
+    //     column_schema: &ColumnSchema,
+    //     rows_num: usize,
+    // ) -> TableResult<VectorRef> {
+    //     // TODO(dennis): when we support altering schema, we should check the schemas difference between table and region
+    //     let vector = column_schema
+    //         .create_default_vector(rows_num)
+    //         .context(UnsupportedDefaultConstraintSnafu)?
+    //         .context(MissingColumnSnafu {
+    //             name: &column_schema.name,
+    //         })?;
 
-        Ok(vector)
-    }
+    //     Ok(vector)
+    // }
 
     pub async fn open(
         table_name: &str,

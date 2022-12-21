@@ -19,7 +19,7 @@ use store_api::storage::{ColumnDescriptor, OpType, SequenceNumber};
 use super::MemtableRef;
 use crate::error::{self, Result};
 use crate::memtable::KeyValues;
-use crate::write_batch::{Mutation, PutData, WriteBatch};
+use crate::write_batch::{Mutation, Payload, WriteBatch};
 
 /// Wraps logic of inserting key/values in [WriteBatch] to [Memtable].
 pub struct Inserter {
@@ -38,20 +38,20 @@ impl Inserter {
     }
 
     // TODO(yingwen): Can we take the WriteBatch?
-    /// Insert write batch into memtable.
+    /// Insert write batch payload into memtable.
     ///
     /// Won't do schema validation if not configured. Caller (mostly the [`RegionWriter`]) should ensure the
-    /// schemas of `memtable` are consistent with `batch`'s.
-    pub fn insert_memtable(&mut self, batch: &WriteBatch, memtable: &MemtableRef) -> Result<()> {
-        if batch.is_empty() {
+    /// schemas of `memtable` are consistent with `payload`'s.
+    pub fn insert_memtable(&mut self, payload: &Payload, memtable: &MemtableRef) -> Result<()> {
+        if payload.is_empty() {
             return Ok(());
         }
 
         // This function only makes effect in debug mode.
-        validate_input_and_memtable_schemas(batch, memtable);
+        validate_input_and_memtable_schemas(payload, memtable);
 
         // Enough to hold all key or value columns.
-        let total_column_num = batch.schema().num_columns();
+        let total_column_num = payload.schema.num_columns();
         // Reusable KeyValues buffer.
         let mut kvs = KeyValues {
             sequence: self.sequence,
@@ -61,12 +61,8 @@ impl Inserter {
             values: Vec::with_capacity(total_column_num),
         };
 
-        for mutation in batch {
-            match mutation {
-                Mutation::Put(put_data) => {
-                    self.write_one_mutation(put_data, memtable, &mut kvs)?;
-                }
-            }
+        for mutation in &payload.mutations {
+            self.write_one_mutation(mutation, memtable, &mut kvs)?;
         }
 
         Ok(())
@@ -74,21 +70,22 @@ impl Inserter {
 
     fn write_one_mutation(
         &mut self,
-        put_data: &PutData,
+        mutation: &Mutation,
         memtable: &MemtableRef,
         kvs: &mut KeyValues,
     ) -> Result<()> {
         let schema = memtable.schema();
-        let num_rows = put_data.num_rows();
+        let num_rows = mutation.record_batch.num_rows();
 
-        kvs.reset(OpType::Put, self.index_in_batch);
+        kvs.reset(mutation.op_type, self.index_in_batch);
 
-        for key_col in schema.row_key_columns() {
-            clone_put_data_column_to(put_data, &key_col.desc, &mut kvs.keys)?;
+        for key_idx in schema.row_key_indices() {
+            kvs.keys.push(mutation.record_batch.column(key_idx).clone());
         }
 
-        for value_col in schema.value_columns() {
-            clone_put_data_column_to(put_data, &value_col.desc, &mut kvs.values)?;
+        for value_idx in schema.value_indices() {
+            kvs.values
+                .push(mutation.record_batch.column(value_idx).clone());
         }
 
         memtable.write(kvs)?;
@@ -99,28 +96,18 @@ impl Inserter {
     }
 }
 
-fn validate_input_and_memtable_schemas(batch: &WriteBatch, memtable: &MemtableRef) {
+fn validate_input_and_memtable_schemas(payload: &Payload, memtable: &MemtableRef) {
     if cfg!(debug_assertions) {
-        let batch_schema = batch.schema();
+        let payload_schema = &payload.schema;
         let memtable_schema = memtable.schema();
         let user_schema = memtable_schema.user_schema();
-        debug_assert_eq!(batch_schema.version(), user_schema.version());
+        debug_assert_eq!(payload_schema.version(), user_schema.version());
         // Only validate column schemas.
-        debug_assert_eq!(batch_schema.column_schemas(), user_schema.column_schemas());
+        debug_assert_eq!(
+            payload_schema.column_schemas(),
+            user_schema.column_schemas()
+        );
     }
-}
-
-fn clone_put_data_column_to(
-    put_data: &PutData,
-    desc: &ColumnDescriptor,
-    target: &mut Vec<VectorRef>,
-) -> Result<()> {
-    let vector = put_data
-        .column_by_name(&desc.name)
-        .context(error::BatchMissingColumnSnafu { column: &desc.name })?;
-    target.push(vector.clone());
-
-    Ok(())
 }
 
 /// Holds `start` and `end` indexes to get a slice `[start, end)` from the vector whose

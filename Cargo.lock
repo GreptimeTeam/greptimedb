@@ -6797,6 +6797,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-query",
+ "common-recordbatch",
  "common-runtime",
  "common-telemetry",
  "common-time",

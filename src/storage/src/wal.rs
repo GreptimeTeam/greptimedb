@@ -26,11 +26,8 @@ use store_api::storage::{RegionId, SequenceNumber};
 use crate::codec::{Decoder, Encoder};
 use crate::error::{self, Error, MarkWalStableSnafu, Result};
 use crate::proto::wal::{self, PayloadType, WalHeader};
-use crate::write_batch::codec::{
-    WriteBatchArrowDecoder, WriteBatchArrowEncoder, WriteBatchProtobufDecoder,
-    WriteBatchProtobufEncoder,
-};
-use crate::write_batch::WriteBatch;
+use crate::write_batch::codec::{PayloadDecoder, PayloadEncoder};
+use crate::write_batch::{Payload, WriteBatch};
 
 #[derive(Debug)]
 pub struct Wal<S: LogStore> {
@@ -39,9 +36,8 @@ pub struct Wal<S: LogStore> {
     store: Arc<S>,
 }
 
-pub type WriteBatchStream<'a> = Pin<
-    Box<dyn Stream<Item = Result<(SequenceNumber, WalHeader, Option<WriteBatch>)>> + Send + 'a>,
->;
+pub type PayloadStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<(SequenceNumber, WalHeader, Option<Payload>)>> + Send + 'a>>;
 
 // Wal should be cheap to clone, so avoid holding things like String, Vec.
 impl<S: LogStore> Clone for Wal<S> {
@@ -85,12 +81,12 @@ impl<S: LogStore> Wal<S> {
     ///
     /// ```text
     /// |                                                                          |
-    /// |-------------------------->    Header Len   <-----------------------------|          Arrow/Protobuf/... encoded
+    /// |-------------------------->    Header Len   <-----------------------------|          Arrow IPC format
     /// |                                                                          |
     /// v                                                                          v
     /// +---------------------+----------------------------------------------------+--------------+-------------+--------------+
     /// |                     |                       Header                       |              |             |              |
-    /// | Header Len(varint)  |  (last_manifest_version + mutation_types + ...)   | Data Chunk0  | Data Chunk1 |     ...      |
+    /// | Header Len(varint)  |  (last_manifest_version + mutation_types + ...)    |  Payload 0   |  Payload 1  |     ...      |
     /// |                     |                                                    |              |             |              |
     /// +---------------------+----------------------------------------------------+--------------+-------------+--------------+
     /// ```
@@ -99,35 +95,27 @@ impl<S: LogStore> Wal<S> {
         &self,
         seq: SequenceNumber,
         mut header: WalHeader,
-        payload: Payload<'_>,
+        payload: Option<&Payload>,
     ) -> Result<(u64, usize)> {
-        header.payload_type = payload.payload_type();
-        if let Payload::WriteBatchArrow(batch) = payload {
-            header.mutation_types = wal::gen_mutation_types(batch);
+        if let Some(p) = payload {
+            header.payload_type = PayloadType::WriteBatchArrow.into();
+            header.mutation_types = wal::gen_mutation_types(p);
+        } else {
+            header.payload_type = PayloadType::None.into();
         }
 
         let mut buf = vec![];
 
-        // header
+        // Encode header
         let wal_header_encoder = WalHeaderEncoder {};
         wal_header_encoder.encode(&header, &mut buf)?;
 
-        if let Payload::WriteBatchArrow(batch) = payload {
-            // entry
-            let encoder = WriteBatchArrowEncoder::new();
+        // Encode payload
+        if let Some(p) = payload {
+            let encoder = PayloadEncoder::new();
             // TODO(jiachun): provide some way to compute data size before encode, so we can preallocate an exactly sized buf.
             encoder
-                .encode(batch, &mut buf)
-                .map_err(BoxedError::new)
-                .context(error::WriteWalSnafu {
-                    region_id: self.region_id(),
-                })?;
-        } else if let Payload::WriteBatchProto(batch) = payload {
-            // entry
-            let encoder = WriteBatchProtobufEncoder {};
-            // TODO(jiachun): provide some way to compute data size before encode, so we can preallocate an exactly sized buf.
-            encoder
-                .encode(batch, &mut buf)
+                .encode(p, &mut buf)
                 .map_err(BoxedError::new)
                 .context(error::WriteWalSnafu {
                     region_id: self.region_id(),
@@ -138,7 +126,7 @@ impl<S: LogStore> Wal<S> {
         self.write(seq, &buf).await
     }
 
-    pub async fn read_from_wal(&self, start_seq: SequenceNumber) -> Result<WriteBatchStream<'_>> {
+    pub async fn read_from_wal(&self, start_seq: SequenceNumber) -> Result<PayloadStream<'_>> {
         let stream = self
             .store
             .read(&self.namespace, start_seq)
@@ -180,7 +168,7 @@ impl<S: LogStore> Wal<S> {
     fn decode_entry<E: Entry>(
         &self,
         entry: E,
-    ) -> Result<(SequenceNumber, WalHeader, Option<WriteBatch>)> {
+    ) -> Result<(SequenceNumber, WalHeader, Option<Payload>)> {
         let seq_num = entry.id();
         let input = entry.data();
 
@@ -203,50 +191,33 @@ impl<S: LogStore> Wal<S> {
             Some(PayloadType::None) => Ok((seq_num, header, None)),
             Some(PayloadType::WriteBatchArrow) => {
                 let mutation_types = std::mem::take(&mut header.mutation_types);
-                let decoder = WriteBatchArrowDecoder::new(mutation_types);
-                let write_batch = decoder
+                let decoder = PayloadDecoder::new(mutation_types);
+                let payload = decoder
                     .decode(&input[data_pos..])
                     .map_err(BoxedError::new)
                     .context(error::ReadWalSnafu {
                         region_id: self.region_id(),
                     })?;
 
-                Ok((seq_num, header, Some(write_batch)))
+                Ok((seq_num, header, Some(payload)))
             }
-            Some(PayloadType::WriteBatchProto) => {
-                let mutation_types = std::mem::take(&mut header.mutation_types);
-                let decoder = WriteBatchProtobufDecoder::new(mutation_types);
-                let write_batch = decoder
-                    .decode(&input[data_pos..])
-                    .map_err(BoxedError::new)
-                    .context(error::ReadWalSnafu {
-                        region_id: self.region_id(),
-                    })?;
+            // Some(PayloadType::WriteBatchProto) => {
+            //     let mutation_types = std::mem::take(&mut header.mutation_types);
+            //     let decoder = WriteBatchProtobufDecoder::new(mutation_types);
+            //     let write_batch = decoder
+            //         .decode(&input[data_pos..])
+            //         .map_err(BoxedError::new)
+            //         .context(error::ReadWalSnafu {
+            //             region_id: self.region_id(),
+            //         })?;
 
-                Ok((seq_num, header, Some(write_batch)))
-            }
-            _ => error::WalDataCorruptedSnafu {
+            //     Ok((seq_num, header, Some(write_batch)))
+            // }
+            None => error::WalDataCorruptedSnafu {
                 region_id: self.region_id(),
                 message: format!("invalid payload type={}", header.payload_type),
             }
             .fail(),
-        }
-    }
-}
-
-pub enum Payload<'a> {
-    None, // only header
-    WriteBatchArrow(&'a WriteBatch),
-    #[allow(dead_code)]
-    WriteBatchProto(&'a WriteBatch),
-}
-
-impl<'a> Payload<'a> {
-    pub fn payload_type(&self) -> i32 {
-        match self {
-            Payload::None => PayloadType::None.into(),
-            Payload::WriteBatchArrow(_) => PayloadType::WriteBatchArrow.into(),
-            Payload::WriteBatchProto(_) => PayloadType::WriteBatchProto.into(),
         }
     }
 }

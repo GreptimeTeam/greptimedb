@@ -219,10 +219,10 @@ impl MockRegionInner {
 
         let mut memtable = self.memtable.write().unwrap();
 
-        for Mutation::Put(put) in request.iter() {
+        for mutation in &request.payload().mutations {
             for ColumnSchema { name, .. } in metadata.user_schema().column_schemas() {
                 let column = memtable.get_mut(name).unwrap();
-                if let Some(data) = put.column_by_name(name) {
+                if let Some(data) = mutation.record_batch.column_by_name(name) {
                     (0..data.len()).for_each(|i| column.push(data.get(i)));
                 }
             }

@@ -12,20 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_recordbatch::RecordBatch;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, Result};
 use crate::schema::compat::CompatWrite;
-use crate::write_batch::{Mutation, PutData, WriteBatch};
+use crate::write_batch::{self, Mutation, WriteBatch};
 
 impl CompatWrite for WriteBatch {
     fn compat_write(&mut self, dest_schema: &SchemaRef) -> Result<()> {
-        let (data_version, schema_version) = (dest_schema.version(), self.schema.version());
+        let (data_version, schema_version) = (dest_schema.version(), self.schema().version());
         // Fast path, nothing to do if schema version of the write batch is equal to version
         // of destination.
         if data_version == schema_version {
-            debug_assert_eq!(dest_schema.column_schemas(), self.schema.column_schemas());
+            debug_assert_eq!(dest_schema.column_schemas(), self.schema().column_schemas());
 
             return Ok(());
         }
@@ -39,7 +40,7 @@ impl CompatWrite for WriteBatch {
         );
 
         // For columns not in schema, returns error instead of discarding the column silently.
-        let column_not_in = column_not_in_schema(dest_schema, self.schema.column_schemas());
+        let column_not_in = column_not_in_schema(dest_schema, self.schema().column_schemas());
         ensure!(
             column_not_in.is_none(),
             error::NotInSchemaToCompatSnafu {
@@ -48,36 +49,37 @@ impl CompatWrite for WriteBatch {
             }
         );
 
-        for m in &mut self.mutations {
-            match m {
-                Mutation::Put(put_data) => {
-                    put_data.compat_write(dest_schema)?;
-                }
-            }
+        for mutation in &mut self.payload.mutations {
+            mutation.compat_write(dest_schema)?;
         }
 
         // Change schema to `dest_schema`.
-        self.schema = dest_schema.clone();
+        self.payload.schema = dest_schema.clone();
 
         Ok(())
     }
 }
 
-impl CompatWrite for PutData {
+impl CompatWrite for Mutation {
     fn compat_write(&mut self, dest_schema: &SchemaRef) -> Result<()> {
-        if self.is_empty() {
+        if self.record_batch.num_rows() == 0 {
             return Ok(());
         }
 
+        let num_rows = self.record_batch.num_rows();
+        let mut columns = Vec::with_capacity(dest_schema.num_columns());
         for column_schema in dest_schema.column_schemas() {
-            if self.column_by_name(&column_schema.name).is_none() {
+            if let Some(vector) = self.record_batch.column_by_name(&column_schema.name) {
+                columns.push(vector.clone());
+            } else {
                 // We need to fill the column by null or its default value.
-                self.add_default_by_name(column_schema)
-                    .context(error::AddDefaultSnafu {
-                        column: &column_schema.name,
-                    })?;
+                let vector = write_batch::new_column_with_default_value(column_schema, num_rows)?;
+                columns.push(vector);
             }
         }
+
+        self.record_batch = RecordBatch::new(self.record_batch.schema.clone(), columns)
+            .context(error::CreateRecordBatchSnafu)?;
 
         Ok(())
     }

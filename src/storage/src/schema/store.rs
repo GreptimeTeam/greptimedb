@@ -18,7 +18,7 @@ use std::sync::Arc;
 use common_error::prelude::*;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::schema::{Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use store_api::storage::consts;
 
 use crate::error::NewRecordBatchSnafu;
@@ -152,6 +152,11 @@ impl StoreSchema {
     }
 
     #[inline]
+    pub(crate) fn value_indices(&self) -> impl Iterator<Item = usize> {
+        self.row_key_end..self.user_column_end
+    }
+
+    #[inline]
     pub(crate) fn column_name(&self, idx: usize) -> &str {
         &self.schema.column_schemas()[idx].name
     }
@@ -185,6 +190,16 @@ impl StoreSchema {
     #[inline]
     pub(crate) fn columns(&self) -> &[ColumnMetadata] {
         &self.columns
+    }
+
+    #[inline]
+    pub(crate) fn user_column_schemas(&self) -> &[ColumnSchema] {
+        &self.schema.column_schemas()[..self.user_column_end]
+    }
+
+    #[inline]
+    pub(crate) fn column_schemas(&self) -> &[ColumnSchema] {
+        self.schema.column_schemas()
     }
 }
 

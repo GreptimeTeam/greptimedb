@@ -12,10 +12,9 @@ message WalHeader {
 enum PayloadType {
   NONE = 0;
   WRITE_BATCH_ARROW = 1;
-  WRITE_BATCH_PROTO = 2;
 }
 
 enum MutationType {
-  PUT = 0;
-  DELETE = 1;
+  DELETE = 0;
+  PUT = 1;
 }

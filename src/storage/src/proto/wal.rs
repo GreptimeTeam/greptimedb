@@ -15,13 +15,16 @@
 #![allow(clippy::all)]
 tonic::include_proto!("greptime.storage.wal.v1");
 
-use crate::write_batch::{Mutation, WriteBatch};
+use store_api::storage::OpType;
 
-pub fn gen_mutation_types(write_batch: &WriteBatch) -> Vec<i32> {
-    write_batch
+use crate::write_batch::{Mutation, Payload};
+
+pub fn gen_mutation_types(payload: &Payload) -> Vec<i32> {
+    payload
+        .mutations
         .iter()
-        .map(|m| match m {
-            Mutation::Put(_) => MutationType::Put.into(),
+        .map(|m| match m.op_type {
+            OpType::Put => MutationType::Put.into(),
         })
         .collect::<Vec<_>>()
 }

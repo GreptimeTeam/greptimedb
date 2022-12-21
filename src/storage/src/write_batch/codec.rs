@@ -15,270 +15,242 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
+use common_recordbatch::RecordBatch;
 use datatypes::arrow::ipc::reader::StreamReader;
 use datatypes::arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::vectors::Helper;
 use prost::Message;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::WriteRequest;
+use store_api::storage::{OpType, WriteRequest};
 
 use crate::codec::{Decoder, Encoder};
+use crate::error::{self, Error, Result};
 use crate::proto::wal::MutationType;
 use crate::proto::write_batch::{self, gen_columns, gen_put_data_vector};
-use crate::write_batch::{
-    DataCorruptedSnafu, DecodeArrowSnafu, DecodeProtobufSnafu, DecodeVectorSnafu, EncodeArrowSnafu,
-    EncodeProtobufSnafu, Error as WriteBatchError, FromProtobufSnafu, MissingColumnSnafu, Mutation,
-    ParseSchemaSnafu, PutData, Result, ToProtobufSnafu, WriteBatch,
-};
+use crate::schema::StoreSchema;
+use crate::write_batch::{Mutation, Payload, WriteBatch};
 
-// TODO(jiachun): We can make a comparison with protobuf, including performance, storage cost,
-// CPU consumption, etc
 #[derive(Default)]
-pub struct WriteBatchArrowEncoder {}
+pub struct PayloadEncoder {}
 
-impl WriteBatchArrowEncoder {
+impl PayloadEncoder {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl Encoder for WriteBatchArrowEncoder {
-    type Item = WriteBatch;
-    type Error = WriteBatchError;
+impl Encoder for PayloadEncoder {
+    type Item = Payload;
+    type Error = Error;
 
-    fn encode(&self, item: &WriteBatch, dst: &mut Vec<u8>) -> Result<()> {
-        let item_schema = item.schema();
-        let arrow_schema = item_schema.arrow_schema();
+    fn encode(&self, item: &Payload, dst: &mut Vec<u8>) -> Result<()> {
+        let arrow_schema = item.schema.arrow_schema();
 
         let opts = IpcWriteOptions::default();
         let mut writer = StreamWriter::try_new_with_options(dst, arrow_schema, opts)
-            .context(EncodeArrowSnafu)?;
+            .context(error::EncodeArrowSnafu)?;
 
-        for mutation in item.iter() {
-            let rb = match mutation {
-                Mutation::Put(put) => {
-                    let arrays = item_schema
-                        .column_schemas()
-                        .iter()
-                        .map(|column_schema| {
-                            let vector = put.column_by_name(&column_schema.name).context(
-                                MissingColumnSnafu {
-                                    name: &column_schema.name,
-                                },
-                            )?;
-                            Ok(vector.to_arrow_array())
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-
-                    RecordBatch::try_new(arrow_schema.clone(), arrays).context(EncodeArrowSnafu)?
-                }
-            };
-            writer.write(&rb).context(EncodeArrowSnafu)?;
+        for mutation in &item.mutations {
+            let rb = mutation.record_batch.df_record_batch();
+            writer.write(rb).context(error::EncodeArrowSnafu)?;
         }
-        writer.finish().context(EncodeArrowSnafu)?;
+        writer.finish().context(error::EncodeArrowSnafu)?;
+
         Ok(())
     }
 }
 
-pub struct WriteBatchArrowDecoder {
+pub struct PayloadDecoder {
     mutation_types: Vec<i32>,
 }
 
-impl WriteBatchArrowDecoder {
+impl PayloadDecoder {
     pub fn new(mutation_types: Vec<i32>) -> Self {
         Self { mutation_types }
     }
 }
 
-impl Decoder for WriteBatchArrowDecoder {
-    type Item = WriteBatch;
-    type Error = WriteBatchError;
+impl Decoder for PayloadDecoder {
+    type Item = Payload;
+    type Error = Error;
 
-    fn decode(&self, src: &[u8]) -> Result<WriteBatch> {
+    fn decode(&self, src: &[u8]) -> Result<Payload> {
         let reader = Cursor::new(src);
-        let mut reader = StreamReader::try_new(reader, None).context(DecodeArrowSnafu)?;
+        let mut reader = StreamReader::try_new(reader, None).context(error::DecodeArrowSnafu)?;
         let arrow_schema = reader.schema();
-        let mut chunks = Vec::with_capacity(self.mutation_types.len());
 
-        for maybe_record_batch in reader.by_ref() {
-            let record_batch = maybe_record_batch.context(DecodeArrowSnafu)?;
-            chunks.push(record_batch);
+        // We could let the decoder takes a schema as input if possible, then we don't
+        // need to rebuild the schema here.
+        let schema = Arc::new(Schema::try_from(arrow_schema).context(error::ParseSchemaSnafu)?);
+        let mut mutations = Vec::with_capacity(self.mutation_types.len());
+
+        for (record_batch, mutation_type) in reader.by_ref().zip(self.mutation_types.iter()) {
+            let record_batch = record_batch.context(error::DecodeArrowSnafu)?;
+            let record_batch = RecordBatch::try_from_df_record_batch(schema.clone(), record_batch)
+                .context(error::CreateRecordBatchSnafu)?;
+            let op_type = match MutationType::from_i32(*mutation_type) {
+                Some(MutationType::Put) => OpType::Put,
+                Some(MutationType::Delete) => {
+                    unimplemented!("delete mutation is not implemented")
+                }
+                None => {
+                    return error::BatchCorruptedSnafu {
+                        message: format!("Unexpceted mutation type: {}", mutation_type),
+                    }
+                    .fail()
+                }
+            };
+            mutations.push(Mutation {
+                op_type,
+                record_batch,
+            });
         }
 
         // check if exactly finished
         ensure!(
             reader.is_finished(),
-            DataCorruptedSnafu {
+            error::BatchCorruptedSnafu {
                 message: "Impossible, the num of data chunks is different than expected."
             }
         );
 
         ensure!(
-            chunks.len() == self.mutation_types.len(),
-            DataCorruptedSnafu {
+            mutations.len() == self.mutation_types.len(),
+            error::BatchCorruptedSnafu {
                 message: format!(
                     "expected {} mutations, but got {}",
                     self.mutation_types.len(),
-                    chunks.len()
+                    mutations.len()
                 )
             }
         );
 
-        let schema = Arc::new(Schema::try_from(arrow_schema).context(ParseSchemaSnafu)?);
-        let mut write_batch = WriteBatch::new(schema.clone());
-
-        for (mutation_type, record_batch) in self.mutation_types.iter().zip(chunks.into_iter()) {
-            match MutationType::from_i32(*mutation_type) {
-                Some(MutationType::Put) => {
-                    let mut put_data = PutData::with_num_columns(schema.num_columns());
-                    for (column_schema, array) in schema
-                        .column_schemas()
-                        .iter()
-                        .zip(record_batch.columns().iter())
-                    {
-                        let vector = Helper::try_into_vector(array).context(DecodeVectorSnafu)?;
-                        put_data.add_column_by_name(&column_schema.name, vector)?;
-                    }
-
-                    write_batch.put(put_data)?;
-                }
-                Some(MutationType::Delete) => {
-                    unimplemented!("delete mutation is not implemented")
-                }
-                _ => {
-                    return DataCorruptedSnafu {
-                        message: format!("Unexpected mutation type: {mutation_type}"),
-                    }
-                    .fail()
-                }
-            }
-        }
-        Ok(write_batch)
+        Ok(Payload { schema, mutations })
     }
 }
 
-pub struct WriteBatchProtobufEncoder {}
+// TODO(yingwen): Remove protobuf encoder/decoder.
+// pub struct WriteBatchProtobufEncoder {}
 
-impl Encoder for WriteBatchProtobufEncoder {
-    type Item = WriteBatch;
-    type Error = WriteBatchError;
+// impl Encoder for WriteBatchProtobufEncoder {
+//     type Item = WriteBatch;
+//     type Error = WriteBatchError;
 
-    fn encode(&self, item: &WriteBatch, dst: &mut Vec<u8>) -> Result<()> {
-        let schema = item.schema().into();
+//     fn encode(&self, item: &WriteBatch, dst: &mut Vec<u8>) -> Result<()> {
+//         let schema = item.schema().into();
 
-        let mutations = item
-            .iter()
-            .map(|mtn| match mtn {
-                Mutation::Put(put_data) => item
-                    .schema()
-                    .column_schemas()
-                    .iter()
-                    .map(|cs| {
-                        let vector = put_data
-                            .column_by_name(&cs.name)
-                            .context(MissingColumnSnafu { name: &cs.name })?;
-                        gen_columns(vector).context(ToProtobufSnafu)
-                    })
-                    .collect::<Result<Vec<_>>>(),
-            })
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .map(|columns| write_batch::Mutation {
-                mutation: Some(write_batch::mutation::Mutation::Put(write_batch::Put {
-                    columns,
-                })),
-            })
-            .collect();
+//         let mutations = item
+//             .iter()
+//             .map(|mtn| match mtn {
+//                 Mutation::Put(put_data) => item
+//                     .schema()
+//                     .column_schemas()
+//                     .iter()
+//                     .map(|cs| {
+//                         let vector = put_data
+//                             .column_by_name(&cs.name)
+//                             .context(MissingColumnSnafu { name: &cs.name })?;
+//                         gen_columns(vector).context(ToProtobufSnafu)
+//                     })
+//                     .collect::<Result<Vec<_>>>(),
+//             })
+//             .collect::<Result<Vec<_>>>()?
+//             .into_iter()
+//             .map(|columns| write_batch::Mutation {
+//                 mutation: Some(write_batch::mutation::Mutation::Put(write_batch::Put {
+//                     columns,
+//                 })),
+//             })
+//             .collect();
 
-        let write_batch = write_batch::WriteBatch {
-            schema: Some(schema),
-            mutations,
-        };
+//         let write_batch = write_batch::WriteBatch {
+//             schema: Some(schema),
+//             mutations,
+//         };
 
-        write_batch.encode(dst).context(EncodeProtobufSnafu)
-    }
-}
+//         write_batch.encode(dst).context(EncodeProtobufSnafu)
+//     }
+// }
 
-pub struct WriteBatchProtobufDecoder {
-    mutation_types: Vec<i32>,
-}
+// pub struct WriteBatchProtobufDecoder {
+//     mutation_types: Vec<i32>,
+// }
 
-impl WriteBatchProtobufDecoder {
-    #[allow(dead_code)]
-    pub fn new(mutation_types: Vec<i32>) -> Self {
-        Self { mutation_types }
-    }
-}
+// impl WriteBatchProtobufDecoder {
+//     #[allow(dead_code)]
+//     pub fn new(mutation_types: Vec<i32>) -> Self {
+//         Self { mutation_types }
+//     }
+// }
 
-impl Decoder for WriteBatchProtobufDecoder {
-    type Item = WriteBatch;
-    type Error = WriteBatchError;
+// impl Decoder for WriteBatchProtobufDecoder {
+//     type Item = WriteBatch;
+//     type Error = WriteBatchError;
 
-    fn decode(&self, src: &[u8]) -> Result<WriteBatch> {
-        let write_batch = write_batch::WriteBatch::decode(src).context(DecodeProtobufSnafu)?;
+//     fn decode(&self, src: &[u8]) -> Result<WriteBatch> {
+//         let write_batch = write_batch::WriteBatch::decode(src).context(DecodeProtobufSnafu)?;
 
-        let schema = write_batch.schema.context(DataCorruptedSnafu {
-            message: "schema required",
-        })?;
+//         let schema = write_batch.schema.context(DataCorruptedSnafu {
+//             message: "schema required",
+//         })?;
 
-        let schema = SchemaRef::try_from(schema).context(FromProtobufSnafu {})?;
+//         let schema = SchemaRef::try_from(schema).context(FromProtobufSnafu {})?;
 
-        ensure!(
-            write_batch.mutations.len() == self.mutation_types.len(),
-            DataCorruptedSnafu {
-                message: &format!(
-                    "expected {} mutations, but got {}",
-                    self.mutation_types.len(),
-                    write_batch.mutations.len()
-                )
-            }
-        );
+//         ensure!(
+//             write_batch.mutations.len() == self.mutation_types.len(),
+//             DataCorruptedSnafu {
+//                 message: &format!(
+//                     "expected {} mutations, but got {}",
+//                     self.mutation_types.len(),
+//                     write_batch.mutations.len()
+//                 )
+//             }
+//         );
 
-        let mutations = write_batch
-            .mutations
-            .into_iter()
-            .map(|mtn| match mtn.mutation {
-                Some(write_batch::mutation::Mutation::Put(put)) => {
-                    let mut put_data = PutData::with_num_columns(put.columns.len());
+//         let mutations = write_batch
+//             .mutations
+//             .into_iter()
+//             .map(|mtn| match mtn.mutation {
+//                 Some(write_batch::mutation::Mutation::Put(put)) => {
+//                     let mut put_data = PutData::with_num_columns(put.columns.len());
 
-                    let res = schema
-                        .column_schemas()
-                        .iter()
-                        .map(|column| (column.name.clone(), column.data_type.clone()))
-                        .zip(put.columns.into_iter())
-                        .map(|((name, data_type), column)| {
-                            gen_put_data_vector(data_type, column)
-                                .map(|vector| (name, vector))
-                                .context(FromProtobufSnafu)
-                        })
-                        .collect::<Result<Vec<_>>>()?
-                        .into_iter()
-                        .map(|(name, vector)| put_data.add_column_by_name(&name, vector))
-                        .collect::<Result<Vec<_>>>();
+//                     let res = schema
+//                         .column_schemas()
+//                         .iter()
+//                         .map(|column| (column.name.clone(), column.data_type.clone()))
+//                         .zip(put.columns.into_iter())
+//                         .map(|((name, data_type), column)| {
+//                             gen_put_data_vector(data_type, column)
+//                                 .map(|vector| (name, vector))
+//                                 .context(FromProtobufSnafu)
+//                         })
+//                         .collect::<Result<Vec<_>>>()?
+//                         .into_iter()
+//                         .map(|(name, vector)| put_data.add_column_by_name(&name, vector))
+//                         .collect::<Result<Vec<_>>>();
 
-                    res.map(|_| Mutation::Put(put_data))
-                }
-                Some(write_batch::mutation::Mutation::Delete(_)) => todo!(),
-                _ => DataCorruptedSnafu {
-                    message: "invalid mutation type",
-                }
-                .fail(),
-            })
-            .collect::<Result<Vec<_>>>()?;
+//                     res.map(|_| Mutation::Put(put_data))
+//                 }
+//                 Some(write_batch::mutation::Mutation::Delete(_)) => todo!(),
+//                 _ => DataCorruptedSnafu {
+//                     message: "invalid mutation type",
+//                 }
+//                 .fail(),
+//             })
+//             .collect::<Result<Vec<_>>>()?;
 
-        let mut write_batch = WriteBatch::new(schema);
+//         let mut write_batch = WriteBatch::new(schema);
 
-        mutations
-            .into_iter()
-            .try_for_each(|mutation| match mutation {
-                Mutation::Put(put_data) => write_batch.put(put_data),
-            })?;
+//         mutations
+//             .into_iter()
+//             .try_for_each(|mutation| match mutation {
+//                 Mutation::Put(put_data) => write_batch.put(put_data),
+//             })?;
 
-        Ok(write_batch)
-    }
-}
+//         Ok(write_batch)
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -315,12 +287,12 @@ mod tests {
     fn test_codec_arrow() -> Result<()> {
         let (batch, mutation_types) = gen_new_batch_and_types();
 
-        let encoder = WriteBatchArrowEncoder::new();
+        let encoder = PayloadEncoder::new();
         let mut dst = vec![];
         let result = encoder.encode(&batch, &mut dst);
         assert!(result.is_ok());
 
-        let decoder = WriteBatchArrowDecoder::new(mutation_types);
+        let decoder = PayloadDecoder::new(mutation_types);
         let result = decoder.decode(&dst);
         let batch2 = result?;
         assert_eq!(batch.num_rows, batch2.num_rows);
@@ -368,12 +340,12 @@ mod tests {
     fn test_codec_with_none_column_arrow() -> Result<()> {
         let (batch, mutation_types) = gen_new_batch_and_types_with_none_column();
 
-        let encoder = WriteBatchArrowEncoder::new();
+        let encoder = PayloadEncoder::new();
         let mut dst = vec![];
         let result = encoder.encode(&batch, &mut dst);
         assert!(result.is_ok());
 
-        let decoder = WriteBatchArrowDecoder::new(mutation_types);
+        let decoder = PayloadDecoder::new(mutation_types);
         let result = decoder.decode(&dst);
         let batch2 = result?;
         assert_eq!(batch.num_rows, batch2.num_rows);
