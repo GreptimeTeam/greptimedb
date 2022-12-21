@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anymap::AnyMap;
+use std::sync::Arc;
+
 use clap::Parser;
 use common_telemetry::info;
 use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
@@ -25,6 +26,7 @@ use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
+use frontend::AnyMap2;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -150,7 +152,7 @@ impl StartCommand {
     async fn run(self) -> Result<()> {
         let enable_memory_catalog = self.enable_memory_catalog;
         let config_file = self.config_file.clone();
-        let plugins = load_frontend_plugins(&self.user_provider)?;
+        let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
         let fe_opts = FrontendOptions::try_from(self)?;
         let dn_opts: DatanodeOptions = {
             let mut opts: StandaloneOptions = if let Some(path) = config_file {
@@ -187,11 +189,12 @@ impl StartCommand {
 /// Build frontend instance in standalone mode
 async fn build_frontend(
     fe_opts: FrontendOptions,
-    plugins: AnyMap,
+    plugins: Arc<AnyMap2>,
     datanode_instance: InstanceRef,
 ) -> Result<Frontend<FeInstance>> {
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());
     frontend_instance.set_script_handler(datanode_instance);
+    frontend_instance.set_plugins(plugins.clone());
     Ok(Frontend::new(fe_opts, frontend_instance, plugins))
 }
 

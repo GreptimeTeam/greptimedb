@@ -69,6 +69,7 @@ use crate::frontend::FrontendOptions;
 use crate::sql::insert_to_request;
 use crate::table::insert::insert_request_to_insert_batch;
 use crate::table::route::TableRoutes;
+use crate::AnyMap2;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -106,6 +107,9 @@ pub struct Instance {
     sql_handler: SqlQueryHandlerRef,
     grpc_query_handler: GrpcQueryHandlerRef,
     grpc_admin_handler: GrpcAdminHandlerRef,
+
+    // plugins
+    plugins: Arc<AnyMap2>,
 }
 
 impl Instance {
@@ -136,6 +140,7 @@ impl Instance {
             sql_handler: dist_instance_ref.clone(),
             grpc_query_handler: dist_instance_ref.clone(),
             grpc_admin_handler: dist_instance_ref,
+            plugins: Default::default(),
         })
     }
 
@@ -179,6 +184,7 @@ impl Instance {
             sql_handler: dn_instance.clone(),
             grpc_query_handler: dn_instance.clone(),
             grpc_admin_handler: dn_instance,
+            plugins: Default::default(),
         }
     }
 
@@ -451,6 +457,10 @@ impl Instance {
         query_ctx.set_current_schema(&db);
 
         Ok(Output::RecordBatches(RecordBatches::empty()))
+    }
+
+    pub fn set_plugins(&mut self, map: Arc<AnyMap2>) {
+        self.plugins = map;
     }
 }
 

@@ -14,6 +14,8 @@
 
 #![feature(assert_matches)]
 
+pub type AnyMap2 = anymap::Map<dyn core::any::Any + Send + Sync>;
+
 mod catalog;
 mod datanode;
 pub mod error;

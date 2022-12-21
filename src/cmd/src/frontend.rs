@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anymap::AnyMap;
+use std::sync::Arc;
+
 use clap::Parser;
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
@@ -21,6 +22,7 @@ use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
+use frontend::AnyMap2;
 use meta_client::MetaClientOpts;
 use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
@@ -86,21 +88,21 @@ pub struct StartCommand {
 
 impl StartCommand {
     async fn run(self) -> Result<()> {
-        let plugins = load_frontend_plugins(&self.user_provider)?;
+        let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
         let opts: FrontendOptions = self.try_into()?;
-        let mut frontend = Frontend::new(
-            opts.clone(),
-            Instance::try_new_distributed(&opts)
-                .await
-                .context(error::StartFrontendSnafu)?,
-            plugins,
-        );
+
+        let mut instance = Instance::try_new_distributed(&opts)
+            .await
+            .context(error::StartFrontendSnafu)?;
+        instance.set_plugins(plugins.clone());
+
+        let mut frontend = Frontend::new(opts.clone(), instance, plugins);
         frontend.start().await.context(error::StartFrontendSnafu)
     }
 }
 
-pub fn load_frontend_plugins(user_provider: &Option<String>) -> Result<AnyMap> {
-    let mut plugins = AnyMap::new();
+pub fn load_frontend_plugins(user_provider: &Option<String>) -> Result<AnyMap2> {
+    let mut plugins = AnyMap2::new();
 
     if let Some(provider) = user_provider {
         let provider = auth::user_provider_from_option(provider).context(IllegalAuthConfigSnafu)?;
