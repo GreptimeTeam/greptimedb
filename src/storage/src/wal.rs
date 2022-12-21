@@ -27,7 +27,7 @@ use crate::codec::{Decoder, Encoder};
 use crate::error::{self, Error, MarkWalStableSnafu, Result};
 use crate::proto::wal::{self, PayloadType, WalHeader};
 use crate::write_batch::codec::{PayloadDecoder, PayloadEncoder};
-use crate::write_batch::{Payload, WriteBatch};
+use crate::write_batch::Payload;
 
 #[derive(Debug)]
 pub struct Wal<S: LogStore> {

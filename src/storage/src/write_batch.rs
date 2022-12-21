@@ -15,174 +15,21 @@
 pub mod codec;
 mod compat;
 
-use std::any::Any;
-use std::collections::{BTreeSet, HashMap};
-use std::slice;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
 
 use common_recordbatch::RecordBatch;
-use common_time::timestamp_millis::BucketAligned;
-use common_time::RangeMillis;
-use datatypes::arrow::error::ArrowError;
-use datatypes::data_type::ConcreteDataType;
-use datatypes::prelude::{ScalarVector, Value};
 use datatypes::schema::{ColumnSchema, SchemaRef};
-use datatypes::vectors::{
-    Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector, VectorRef,
-};
-use prost::{DecodeError, EncodeError};
+use datatypes::vectors::VectorRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::{consts, OpType, WriteRequest};
+use store_api::storage::{OpType, WriteRequest};
 
-use crate::error::{self, Error, Result};
-use crate::proto;
-use crate::schema::StoreSchemaRef;
-
-// // TODO(yingwen): Remove unused errors.
-// #[derive(Debug, Snafu)]
-// pub enum Error {
-//     // #[snafu(display("Duplicate column {} in same request", name))]
-//     // DuplicateColumn { name: String, backtrace: Backtrace },
-
-//     #[snafu(display("Missing column {} in request", name))]
-//     MissingColumn { name: String, backtrace: Backtrace },
-
-//     #[snafu(display(
-//         "Type of column {} does not match type in schema, expect {:?}, given {:?}",
-//         name,
-//         expect,
-//         given
-//     ))]
-//     TypeMismatch {
-//         name: String,
-//         expect: ConcreteDataType,
-//         given: ConcreteDataType,
-//         backtrace: Backtrace,
-//     },
-
-//     #[snafu(display("Column {} is not null but input has null", name))]
-//     HasNull { name: String, backtrace: Backtrace },
-
-//     #[snafu(display("Unknown column {}", name))]
-//     UnknownColumn { name: String, backtrace: Backtrace },
-
-//     #[snafu(display(
-//         "Length of column {} not equals to other columns, expect {}, given {}",
-//         name,
-//         expect,
-//         given
-//     ))]
-//     LenNotEquals {
-//         name: String,
-//         expect: usize,
-//         given: usize,
-//         backtrace: Backtrace,
-//     },
-
-//     #[snafu(display(
-//         "Request is too large, max is {}, current is {}",
-//         MAX_BATCH_SIZE,
-//         num_rows
-//     ))]
-//     RequestTooLarge {
-//         num_rows: usize,
-//         backtrace: Backtrace,
-//     },
-
-//     #[snafu(display("Cannot align timestamp: {}", ts))]
-//     TimestampOverflow { ts: i64 },
-
-//     #[snafu(display("Failed to encode, source: {}", source))]
-//     EncodeArrow {
-//         backtrace: Backtrace,
-//         source: ArrowError,
-//     },
-
-//     #[snafu(display("Failed to decode, source: {}", source))]
-//     DecodeArrow {
-//         backtrace: Backtrace,
-//         source: ArrowError,
-//     },
-
-//     #[snafu(display("Failed to encode into protobuf, source: {}", source))]
-//     EncodeProtobuf {
-//         backtrace: Backtrace,
-//         source: EncodeError,
-//     },
-
-//     #[snafu(display("Failed to decode from protobuf, source: {}", source))]
-//     DecodeProtobuf {
-//         backtrace: Backtrace,
-//         source: DecodeError,
-//     },
-
-//     #[snafu(display("Failed to parse schema, source: {}", source))]
-//     ParseSchema {
-//         backtrace: Backtrace,
-//         source: datatypes::error::Error,
-//     },
-
-//     #[snafu(display("Failed to decode, corrupted data {}", message))]
-//     DataCorrupted {
-//         message: String,
-//         backtrace: Backtrace,
-//     },
-
-//     #[snafu(display("Failed to decode vector, source {}", source))]
-//     DecodeVector {
-//         backtrace: Backtrace,
-//         source: datatypes::error::Error,
-//     },
-
-//     #[snafu(display("Failed to convert into protobuf struct, source {}", source))]
-//     ToProtobuf {
-//         source: proto::write_batch::Error,
-//         backtrace: Backtrace,
-//     },
-
-//     #[snafu(display("Failed to convert from protobuf struct, source {}", source))]
-//     FromProtobuf {
-//         source: proto::write_batch::Error,
-//         backtrace: Backtrace,
-//     },
-
-//     #[snafu(display(
-//         "Failed to create default value for column {}, source: {}",
-//         name,
-//         source
-//     ))]
-//     CreateDefault {
-//         name: String,
-//         #[snafu(backtrace)]
-//         source: datatypes::error::Error,
-//     },
-
-//     #[snafu(display("Failed to create record batch for write batch, source:{}", source))]
-//     CreateRecordBatch {
-//         #[snafu(backtrace)]
-//         source: common_recordbatch::error::Error,
-//     },
-// }
-
-// pub type Result<T> = std::result::Result<T, Error>;
+use crate::error::{
+    BatchMissingColumnSnafu, CreateDefaultSnafu, CreateRecordBatchSnafu, Error, HasNullSnafu,
+    LenNotEqualsSnafu, RequestTooLargeSnafu, Result, TypeMismatchSnafu, UnknownColumnSnafu,
+};
 
 /// Max number of updates of a write batch.
 pub(crate) const MAX_BATCH_SIZE: usize = 1_000_000;
-
-// impl ErrorExt for Error {
-//     fn status_code(&self) -> StatusCode {
-//         StatusCode::InvalidArguments
-//     }
-
-//     fn backtrace_opt(&self) -> Option<&Backtrace> {
-//         ErrorCompat::backtrace(self)
-//     }
-
-//     fn as_any(&self) -> &dyn Any {
-//         self
-//     }
-// }
 
 /// Data of [WriteBatch].
 ///
@@ -247,98 +94,7 @@ impl WriteRequest for WriteBatch {
 
         Ok(())
     }
-
-    // fn put(&mut self, mut data: PutData) -> Result<()> {
-    //     if data.is_empty() {
-    //         return Ok(());
-    //     }
-
-    //     self.preprocess_put_data(&mut data)?;
-
-    //     self.add_num_rows(data.num_rows())?;
-    //     self.mutations.push(Mutation::Put(data));
-
-    //     Ok(())
-    // }
-
-    // /// Aligns timestamps in write batch specified by schema to durations.
-    // ///
-    // /// A negative timestamp means "before Unix epoch".
-    // /// Valid timestamp range is `[i64::MIN + duration, i64::MAX-(i64::MAX%duration))`.
-    // fn time_ranges(&self, duration: Duration) -> Result<Vec<RangeMillis>> {
-    //     let ts_col_name = match self.schema.timestamp_column() {
-    //         None => {
-    //             // write batch does not have a timestamp column
-    //             return Ok(Vec::new());
-    //         }
-    //         Some(ts_col) => &ts_col.name,
-    //     };
-    //     let durations_millis = duration.as_millis() as i64;
-    //     let mut aligned_timestamps: BTreeSet<i64> = BTreeSet::new();
-    //     for m in &self.mutations {
-    //         match m {
-    //             Mutation::Put(put_data) => {
-    //                 let column = put_data
-    //                     .column_by_name(ts_col_name)
-    //                     .unwrap_or_else(|| panic!("Cannot find column by name: {}", ts_col_name));
-    //                 if column.is_const() {
-    //                     let ts = match column.get(0) {
-    //                         Value::Timestamp(ts) => ts,
-    //                         _ => unreachable!(),
-    //                     };
-    //                     let aligned = align_timestamp(ts.value(), durations_millis)
-    //                         .context(TimestampOverflowSnafu { ts: ts.value() })?;
-
-    //                     aligned_timestamps.insert(aligned);
-    //                 } else {
-    //                     match column.data_type() {
-    //                         ConcreteDataType::Timestamp(_) => {
-    //                             let ts_vector = column
-    //                                 .as_any()
-    //                                 .downcast_ref::<TimestampMillisecondVector>()
-    //                                 .unwrap();
-    //                             for ts in ts_vector.iter_data().flatten() {
-    //                                 let aligned = align_timestamp(ts.into(), durations_millis)
-    //                                     .context(TimestampOverflowSnafu { ts: i64::from(ts) })?;
-    //                                 aligned_timestamps.insert(aligned);
-    //                             }
-    //                         }
-    //                         ConcreteDataType::Int64(_) => {
-    //                             let ts_vector =
-    //                                 column.as_any().downcast_ref::<Int64Vector>().unwrap();
-    //                             for ts in ts_vector.iter_data().flatten() {
-    //                                 let aligned = align_timestamp(ts, durations_millis)
-    //                                     .context(TimestampOverflowSnafu { ts })?;
-    //                                 aligned_timestamps.insert(aligned);
-    //                             }
-    //                         }
-    //                         _ => unreachable!(),
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    //     let ranges = aligned_timestamps
-    //         .iter()
-    //         .map(|t| RangeMillis::new(*t, *t + durations_millis).unwrap())
-    //         .collect::<Vec<_>>();
-
-    //     Ok(ranges)
-    // }
 }
-
-// /// Aligns timestamp to nearest time interval.
-// /// Negative ts means a timestamp before Unix epoch.
-// /// If arithmetic overflows, this function returns None.
-// /// So timestamp within `[i64::MIN, i64::MIN + duration)` or
-// /// `[i64::MAX-(i64::MAX%duration), i64::MAX]` is not a valid input.
-// fn align_timestamp(ts: i64, duration: i64) -> Option<i64> {
-//     let aligned = ts.align_by_bucket(duration)?.as_i64();
-//     // Also ensure end timestamp won't overflow.
-//     aligned.checked_add(duration)?;
-//     Some(aligned)
-// }
 
 // WriteBatch pub methods.
 impl WriteBatch {
@@ -360,143 +116,7 @@ impl WriteBatch {
     }
 }
 
-// /// Enum to wrap different operations.
-// pub enum Mutation {
-//     Put(PutData),
-// }
-
-// #[derive(Default, Debug)]
-// pub struct PutData {
-//     columns: HashMap<String, VectorRef>,
-// }
-
-// impl PutData {
-//     pub(crate) fn new() -> PutData {
-//         PutData::default()
-//     }
-
-//     pub(crate) fn with_num_columns(num_columns: usize) -> PutData {
-//         PutData {
-//             columns: HashMap::with_capacity(num_columns),
-//         }
-//     }
-
-//     fn add_column_by_name(&mut self, name: &str, vector: VectorRef) -> Result<()> {
-//         ensure!(
-//             !self.columns.contains_key(name),
-//             DuplicateColumnSnafu { name }
-//         );
-
-//         if let Some(col) = self.columns.values().next() {
-//             ensure!(
-//                 col.len() == vector.len(),
-//                 LenNotEqualsSnafu {
-//                     name,
-//                     expect: col.len(),
-//                     given: vector.len(),
-//                 }
-//             );
-//         }
-
-//         self.columns.insert(name.to_string(), vector);
-
-//         Ok(())
-//     }
-
-//     /// Add columns by its default value.
-//     fn add_default_by_name(&mut self, column_schema: &ColumnSchema) -> Result<()> {
-//         let num_rows = self.num_rows();
-
-//         // If column is not provided, fills it by default value.
-//         let vector = column_schema
-//             .create_default_vector(num_rows)
-//             .context(CreateDefaultSnafu {
-//                 name: &column_schema.name,
-//             })?
-//             .context(MissingColumnSnafu {
-//                 name: &column_schema.name,
-//             })?;
-
-//         validate_column(column_schema, &vector)?;
-
-//         self.add_column_by_name(&column_schema.name, vector)
-//     }
-// }
-
-// impl PutOperation for PutData {
-//     type Error = Error;
-
-//     fn add_key_column(&mut self, name: &str, vector: VectorRef) -> Result<()> {
-//         self.add_column_by_name(name, vector)
-//     }
-
-//     fn add_version_column(&mut self, vector: VectorRef) -> Result<()> {
-//         self.add_column_by_name(consts::VERSION_COLUMN_NAME, vector)
-//     }
-
-//     fn add_value_column(&mut self, name: &str, vector: VectorRef) -> Result<()> {
-//         self.add_column_by_name(name, vector)
-//     }
-// }
-
-// // PutData pub methods.
-// impl PutData {
-//     pub fn column_by_name(&self, name: &str) -> Option<&VectorRef> {
-//         self.columns.get(name)
-//     }
-
-//     /// Returns number of columns in data.
-//     pub fn num_columns(&self) -> usize {
-//         self.columns.len()
-//     }
-
-//     /// Returns number of rows in data.
-//     pub fn num_rows(&self) -> usize {
-//         self.columns
-//             .values()
-//             .next()
-//             .map(|col| col.len())
-//             .unwrap_or(0)
-//     }
-
-//     /// Returns true if no rows in data.
-//     ///
-//     /// `PutData` with empty column will also be considered as empty.
-//     pub fn is_empty(&self) -> bool {
-//         self.num_rows() == 0
-//     }
-
-//     /// Returns slice of [PutData] in range `[start, end)`.
-//     ///
-//     /// # Panics
-//     /// Panics if `start > end`.
-//     pub fn slice(&self, start: usize, end: usize) -> PutData {
-//         assert!(start <= end);
-
-//         let columns = self
-//             .columns
-//             .iter()
-//             .map(|(k, v)| (k.clone(), v.slice(start, end - start)))
-//             .collect();
-
-//         PutData { columns }
-//     }
-// }
-
 impl WriteBatch {
-    // /// Create [WriteBatch] with `schema` and `mutations`.
-    // ///
-    // /// This method won't validating the schema and is designed for the wal decoder
-    // /// to assemble the batch from raw parts.
-    // fn with_mutations(schema: SchemaRef, mutations: Vec<Mutation>) -> WriteBatch {
-    //     let row_index = mutations.iter().map(|m| m.record_batch.num_rows()).sum();
-    //     WriteBatch {
-    //         schema,
-    //         mutations,
-    //         row_index,
-    //     }
-    // }
-
     /// Validate `data` and converting it into a [RecordBatch].
     ///
     /// This will fill missing columns by schema's default values.
@@ -523,58 +143,18 @@ impl WriteBatch {
         for name in data.0.keys() {
             ensure!(
                 self.schema().contains_column(name),
-                error::UnknownColumnSnafu { name }
+                UnknownColumnSnafu { name }
             );
         }
 
-        RecordBatch::new(self.schema().clone(), columns).context(error::CreateRecordBatchSnafu)
+        RecordBatch::new(self.schema().clone(), columns).context(CreateRecordBatchSnafu)
     }
-
-    // /// Initialize internal columns and push into `columns`.
-    // ///
-    // /// Since the actual sequence isn't available during constructing the write batch, so we use
-    // /// the row indices in this batch to filled the sequence column.
-    // fn push_internal_columns(&self, op_type: OpType, num_rows: usize, columns: &mut Vec<VectorRef>) {
-    //     // Use row index as sequence during this phase.
-    //     let sequences = UInt64Vector::from_values((self.row_index..self.row_index + num_rows).map(|v| v as u64));
-    //     let op_types = UInt8Vector::from_value(op_type.as_u8(), num_rows);
-
-    //     debug_assert_eq!(self.schema.sequence_index(), columns.len());
-    //     columns.push(Arc::new(sequences));
-    //     debug_assert_eq!(self.schema.op_type_index(), columns.len());
-    //     columns.push(Arc::new(op_types));
-    // }
-
-    // /// Validate [PutData] and fill missing columns by default value.
-    // fn preprocess_put_data(&self, data: &mut PutData) -> Result<()> {
-    //     for column_schema in self.schema.column_schemas() {
-    //         match data.column_by_name(&column_schema.name) {
-    //             Some(col) => {
-    //                 validate_column(column_schema, col)?;
-    //             }
-    //             None => {
-    //                 // If column is not provided, fills it by default value.
-    //                 data.add_default_by_name(column_schema)?;
-    //             }
-    //         }
-    //     }
-
-    //     // Check all columns in data also exists in schema.
-    //     for name in data.columns.keys() {
-    //         ensure!(
-    //             self.schema.contains_column(name).is_some(),
-    //             UnknownColumnSnafu { name }
-    //         );
-    //     }
-
-    //     Ok(())
-    // }
 
     fn add_row_index(&mut self, len: usize) -> Result<()> {
         let num_rows = self.row_index + len;
         ensure!(
             num_rows <= MAX_BATCH_SIZE,
-            error::RequestTooLargeSnafu { num_rows }
+            RequestTooLargeSnafu { num_rows }
         );
         self.row_index = num_rows;
         Ok(())
@@ -594,7 +174,7 @@ fn validate_column(column_schema: &ColumnSchema, col: &VectorRef) -> Result<()> 
         // check data type directly.
         ensure!(
             col.data_type() == column_schema.data_type,
-            error::TypeMismatchSnafu {
+            TypeMismatchSnafu {
                 name: &column_schema.name,
                 expect: column_schema.data_type.clone(),
                 given: col.data_type(),
@@ -604,7 +184,7 @@ fn validate_column(column_schema: &ColumnSchema, col: &VectorRef) -> Result<()> 
 
     ensure!(
         column_schema.is_nullable() || col.null_count() == 0,
-        error::HasNullSnafu {
+        HasNullSnafu {
             name: &column_schema.name,
         }
     );
@@ -622,10 +202,10 @@ pub(crate) fn new_column_with_default_value(
     // If column is not provided, fills it by default value.
     let vector = column_schema
         .create_default_vector(num_rows)
-        .context(error::CreateDefaultSnafu {
+        .context(CreateDefaultSnafu {
             name: &column_schema.name,
         })?
-        .context(error::BatchMissingColumnSnafu {
+        .context(BatchMissingColumnSnafu {
             column: &column_schema.name,
         })?;
 
@@ -643,7 +223,7 @@ impl NameToVector {
         for (name, vector) in &data {
             ensure!(
                 num_rows == vector.len(),
-                error::LenNotEqualsSnafu {
+                LenNotEqualsSnafu {
                     name,
                     expect: num_rows,
                     given: vector.len(),
@@ -663,18 +243,10 @@ impl NameToVector {
     }
 }
 
-// impl<'a> IntoIterator for &'a WriteBatch {
-//     type Item = &'a Mutation;
-//     type IntoIter = slice::Iter<'a, Mutation>;
-
-//     fn into_iter(self) -> slice::Iter<'a, Mutation> {
-//         self.iter()
-//     }
-// }
-
 #[cfg(test)]
 pub(crate) fn new_test_batch() -> WriteBatch {
     use datatypes::type_id::LogicalTypeId;
+    use store_api::storage::consts;
 
     use crate::test_util::write_batch_util;
 
@@ -695,10 +267,10 @@ mod tests {
     use std::sync::Arc;
 
     use common_error::prelude::*;
+    use datatypes::prelude::ScalarVector;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::vectors::{
-        BooleanVector, ConstantVector, Int32Vector, Int64Vector, TimestampMillisecondVector,
-        UInt64Vector,
+        BooleanVector, Int32Vector, Int64Vector, TimestampMillisecondVector, UInt64Vector,
     };
     use store_api::storage::consts;
 

@@ -17,7 +17,7 @@ tonic::include_proto!("greptime.storage.wal.v1");
 
 use store_api::storage::OpType;
 
-use crate::write_batch::{Mutation, Payload};
+use crate::write_batch::Payload;
 
 pub fn gen_mutation_types(payload: &Payload) -> Vec<i32> {
     payload

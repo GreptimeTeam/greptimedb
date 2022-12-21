@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_mutation_compat_write() {
-        let mut put_data = new_put_data();
+        let put_data = new_put_data();
         let schema_old = new_test_schema(None);
         // Mutation doesn't check schema version, so we don't have to bump the version here.
         let schema = new_test_schema(Some(Some(ColumnDefaultConstraint::null_value())));

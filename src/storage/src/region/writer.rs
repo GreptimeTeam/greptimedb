@@ -36,7 +36,7 @@ use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControl, VersionControlRef, VersionEdit};
 use crate::wal::Wal;
-use crate::write_batch::{Payload, WriteBatch};
+use crate::write_batch::WriteBatch;
 
 pub type RegionWriterRef = Arc<RegionWriter>;
 

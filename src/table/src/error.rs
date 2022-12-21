@@ -39,9 +39,6 @@ pub enum InnerError {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Missing column when insert, column: {}", name))]
-    MissingColumn { name: String, backtrace: Backtrace },
-
     #[snafu(display("Poll stream failed, source: {}", source))]
     PollStream {
         source: ArrowError,
@@ -119,9 +116,9 @@ impl ErrorExt for InnerError {
             | InnerError::PollStream { .. }
             | InnerError::SchemaConversion { .. }
             | InnerError::TableProjection { .. } => StatusCode::EngineExecuteQuery,
-            InnerError::MissingColumn { .. }
-            | InnerError::RemoveColumnInIndex { .. }
-            | InnerError::BuildColumnDescriptor { .. } => StatusCode::InvalidArguments,
+            InnerError::RemoveColumnInIndex { .. } | InnerError::BuildColumnDescriptor { .. } => {
+                StatusCode::InvalidArguments
+            }
             InnerError::TablesRecordBatch { .. } => StatusCode::Unexpected,
             InnerError::ColumnExists { .. } => StatusCode::TableColumnExists,
             InnerError::SchemaBuild { source, .. } => source.status_code(),
@@ -166,12 +163,16 @@ mod tests {
         Err(DataFusionError::NotImplemented("table test".to_string())).context(DatafusionSnafu)?
     }
 
-    fn throw_missing_column_inner() -> std::result::Result<(), InnerError> {
-        MissingColumnSnafu { name: "test" }.fail()
+    fn throw_column_exists_inner() -> std::result::Result<(), InnerError> {
+        ColumnExistsSnafu {
+            column_name: "col",
+            table_name: "test",
+        }
+        .fail()
     }
 
     fn throw_missing_column() -> Result<()> {
-        Ok(throw_missing_column_inner()?)
+        Ok(throw_column_exists_inner()?)
     }
 
     fn throw_arrow() -> Result<()> {
@@ -186,7 +187,7 @@ mod tests {
 
         let err = throw_missing_column().err().unwrap();
         assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert_eq!(StatusCode::TableColumnExists, err.status_code());
 
         let err = throw_arrow().err().unwrap();
         assert!(err.backtrace_opt().is_some());
@@ -195,15 +196,15 @@ mod tests {
 
     #[test]
     fn test_into_record_batch_error() {
-        let err = throw_missing_column_inner().err().unwrap();
+        let err = throw_column_exists_inner().err().unwrap();
         let err: RecordBatchError = err.into();
         assert!(err.backtrace_opt().is_some());
-        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert_eq!(StatusCode::TableColumnExists, err.status_code());
     }
 
     #[test]
     fn test_into_df_error() {
-        let err = throw_missing_column_inner().err().unwrap();
+        let err = throw_column_exists_inner().err().unwrap();
         let err: DataFusionError = err.into();
         assert!(matches!(err, DataFusionError::External(_)));
     }

@@ -153,13 +153,6 @@ pub enum Error {
         table_name: String,
     },
 
-    #[snafu(display("Columns {} not exist in table {}", column_names.join(","), table_name))]
-    ColumnsNotExist {
-        backtrace: Backtrace,
-        column_names: Vec<String>,
-        table_name: String,
-    },
-
     #[snafu(display("Failed to alter table {}, source: {}", table_name, source))]
     AlterTable {
         table_name: String,
@@ -174,12 +167,6 @@ pub enum Error {
     ProjectedColumnNotFound {
         backtrace: Backtrace,
         column_qualified_name: String,
-    },
-
-    #[snafu(display("Unsupported column default constraint, source: {}", source))]
-    UnsupportedDefaultConstraint {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
     },
 
     #[snafu(display(
@@ -219,10 +206,7 @@ impl ErrorExt for Error {
             | ProjectedColumnNotFound { .. }
             | InvalidPrimaryKey { .. }
             | MissingTimestampIndex { .. }
-            | UnsupportedDefaultConstraint { .. }
             | TableNotFound { .. } => StatusCode::InvalidArguments,
-
-            ColumnsNotExist { .. } => StatusCode::TableColumnNotFound,
 
             TableInfoNotFound { .. } | ConvertRaw { .. } => StatusCode::Unexpected,
 

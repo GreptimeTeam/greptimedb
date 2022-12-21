@@ -12,14 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datatypes::vectors::VectorRef;
-use snafu::OptionExt;
-use store_api::storage::{ColumnDescriptor, OpType, SequenceNumber};
+use store_api::storage::{OpType, SequenceNumber};
 
 use super::MemtableRef;
-use crate::error::{self, Result};
+use crate::error::Result;
 use crate::memtable::KeyValues;
-use crate::write_batch::{Mutation, Payload, WriteBatch};
+use crate::write_batch::{Mutation, Payload};
 
 /// Wraps logic of inserting key/values in [WriteBatch] to [Memtable].
 pub struct Inserter {
@@ -128,7 +126,7 @@ mod tests {
     use common_time::timestamp::Timestamp;
     use datatypes::type_id::LogicalTypeId;
     use datatypes::value::Value;
-    use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
+    use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
     use store_api::storage::WriteRequest;
 
     use super::*;
@@ -137,6 +135,7 @@ mod tests {
     use crate::schema::RegionSchemaRef;
     use crate::test_util::descriptor_util::RegionDescBuilder;
     use crate::test_util::write_batch_util;
+    use crate::write_batch::WriteBatch;
 
     fn new_test_write_batch() -> WriteBatch {
         write_batch_util::new_write_batch(

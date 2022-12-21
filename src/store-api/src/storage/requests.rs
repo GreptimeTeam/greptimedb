@@ -13,11 +13,9 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use common_error::ext::ErrorExt;
 use common_query::logical_plan::Expr;
-use common_time::RangeMillis;
 use datatypes::vectors::VectorRef;
 
 use crate::storage::{ColumnDescriptor, RegionDescriptor, SequenceNumber};

@@ -17,7 +17,6 @@ use std::io::Error as IoError;
 use std::str::Utf8Error;
 
 use common_error::prelude::*;
-use datatypes::arrow;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use serde_json::error::Error as JsonError;
@@ -457,7 +456,6 @@ impl ErrorExt for Error {
             | NotInSchemaToCompat { .. }
             | WriteToOldVersion { .. }
             | IllegalTimestampColumnType { .. }
-            | UnknownColumn { .. }
             | CreateRecordBatch { .. }
             | RequestTooLarge { .. }
             | TypeMismatch { .. }
@@ -502,6 +500,8 @@ impl ErrorExt for Error {
             | ReadParquetIo { .. }
             | InvalidRegionState { .. }
             | ReadWal { .. } => StatusCode::StorageUnavailable,
+
+            UnknownColumn { .. } => StatusCode::TableColumnNotFound,
 
             InvalidAlterRequest { source, .. }
             | InvalidRegionDesc { source, .. }

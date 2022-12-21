@@ -24,7 +24,7 @@ use common_telemetry::logging;
 use datatypes::prelude::{DataType, Value, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema};
 use storage::metadata::{RegionMetaImpl, RegionMetadata};
-use storage::write_batch::{Mutation, WriteBatch};
+use storage::write_batch::WriteBatch;
 use store_api::storage::{
     AlterRequest, Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse,
     OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, RegionMeta, ScanRequest,
