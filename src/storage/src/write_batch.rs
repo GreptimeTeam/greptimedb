@@ -333,9 +333,7 @@ mod tests {
         assert!(err.backtrace_opt().is_some());
         assert!(
             err.to_string().contains(msg),
-            "<{}> does not contain {}",
-            err,
-            msg
+            "<{err}> does not contain {msg}",
         );
     }
 

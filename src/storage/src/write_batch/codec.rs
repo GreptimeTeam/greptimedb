@@ -95,7 +95,7 @@ impl Decoder for PayloadDecoder {
                 }
                 None => {
                     return BatchCorruptedSnafu {
-                        message: format!("Unexpceted mutation type: {}", mutation_type),
+                        message: format!("Unexpceted mutation type: {mutation_type}"),
                     }
                     .fail()
                 }
