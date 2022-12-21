@@ -143,7 +143,7 @@ impl SqlHandler {
                             )?;
                         } else {
                             return error::InvalidSqlSnafu {
-                                msg: format!("Cannot recognize named UNIQUE constraint: {}", name),
+                                msg: format!("Cannot recognize named UNIQUE constraint: {name}"),
                             }
                             .fail();
                         }
@@ -158,8 +158,7 @@ impl SqlHandler {
                     } else {
                         return error::InvalidSqlSnafu {
                             msg: format!(
-                                "Unrecognized non-primary unnamed UNIQUE constraint: {:?}",
-                                name
+                                "Unrecognized non-primary unnamed UNIQUE constraint: {name:?}",
                             ),
                         }
                         .fail();
@@ -167,7 +166,7 @@ impl SqlHandler {
                 }
                 _ => {
                     return ConstraintNotSupportedSnafu {
-                        constraint: format!("{:?}", c),
+                        constraint: format!("{c:?}"),
                     }
                     .fail();
                 }

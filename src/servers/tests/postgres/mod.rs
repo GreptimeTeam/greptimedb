@@ -162,8 +162,7 @@ async fn test_query_pg_concurrently() -> Result<()> {
                 let result: u32 = unwrap_results(
                     client
                         .simple_query(&format!(
-                            "SELECT uint32s FROM numbers WHERE uint32s = {}",
-                            expected
+                            "SELECT uint32s FROM numbers WHERE uint32s = {expected}"
                         ))
                         .await
                         .unwrap()
@@ -284,14 +283,10 @@ async fn create_secure_connection(
 ) -> std::result::Result<Client, PgError> {
     let url = if with_pwd {
         format!(
-            "sslmode=require host=127.0.0.1 port={} user=test_user password=test_pwd connect_timeout=2, dbname={}",
-            port, DEFAULT_SCHEMA_NAME
+            "sslmode=require host=127.0.0.1 port={port} user=test_user password=test_pwd connect_timeout=2, dbname={DEFAULT_SCHEMA_NAME}",
         )
     } else {
-        format!(
-            "host=127.0.0.1 port={} connect_timeout=2 dbname={}",
-            port, DEFAULT_SCHEMA_NAME
-        )
+        format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
     };
 
     let mut config = rustls::ClientConfig::builder()
@@ -315,14 +310,10 @@ async fn create_plain_connection(
 ) -> std::result::Result<Client, PgError> {
     let url = if with_pwd {
         format!(
-            "host=127.0.0.1 port={} user=test_user password=test_pwd connect_timeout=2 dbname={}",
-            port, DEFAULT_SCHEMA_NAME
+            "host=127.0.0.1 port={port} user=test_user password=test_pwd connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}",
         )
     } else {
-        format!(
-            "host=127.0.0.1 port={} connect_timeout=2 dbname={}",
-            port, DEFAULT_SCHEMA_NAME
-        )
+        format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
     };
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     tokio::spawn(conn);
@@ -333,17 +324,14 @@ async fn create_connection_with_given_db(
     port: u16,
     db: &str,
 ) -> std::result::Result<Client, PgError> {
-    let url = format!(
-        "host=127.0.0.1 port={} connect_timeout=2 dbname={}",
-        port, db
-    );
+    let url = format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={db}");
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     tokio::spawn(conn);
     Ok(client)
 }
 
 async fn create_connection_without_db(port: u16) -> std::result::Result<Client, PgError> {
-    let url = format!("host=127.0.0.1 port={} connect_timeout=2", port);
+    let url = format!("host=127.0.0.1 port={port} connect_timeout=2");
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     tokio::spawn(conn);
     Ok(client)
@@ -351,7 +339,7 @@ async fn create_connection_without_db(port: u16) -> std::result::Result<Client, 
 
 fn resolve_result(resp: &SimpleQueryMessage, col_index: usize) -> Option<&str> {
     match resp {
-        &SimpleQueryMessage::Row(ref r) => r.get(col_index),
+        SimpleQueryMessage::Row(r) => r.get(col_index),
         _ => None,
     }
 }

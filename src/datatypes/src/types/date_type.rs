@@ -83,7 +83,7 @@ impl LogicalPrimitiveType for DateType {
             ValueRef::Null => Ok(None),
             ValueRef::Date(v) => Ok(Some(v)),
             other => error::CastTypeSnafu {
-                msg: format!("Failed to cast value {:?} to Date", other,),
+                msg: format!("Failed to cast value {other:?} to Date"),
             }
             .fail(),
         }

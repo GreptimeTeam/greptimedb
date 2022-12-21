@@ -164,7 +164,7 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
     let tgv = get_table_global_value(&ctx.kv_store, &tgk)
         .await?
         .with_context(|| error::TableNotFoundSnafu {
-            name: format!("{}", tgk),
+            name: format!("{tgk}"),
         })?;
     let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
     let (_, trv) = remove_table_route_value(&ctx.kv_store, &trk).await?;
@@ -272,11 +272,11 @@ async fn get_table_global_value(
     kv_store: &KvStoreRef,
     key: &TableGlobalKey,
 ) -> Result<Option<TableGlobalValue>> {
-    let tg_key = format!("{}", key).into_bytes();
+    let tg_key = format!("{key}").into_bytes();
     let tv = get_from_store(kv_store, tg_key).await?;
     match tv {
         Some(tv) => {
-            let tv = TableGlobalValue::from_bytes(&tv).context(error::InvalidCatalogValueSnafu)?;
+            let tv = TableGlobalValue::from_bytes(tv).context(error::InvalidCatalogValueSnafu)?;
             Ok(Some(tv))
         }
         None => Ok(None),

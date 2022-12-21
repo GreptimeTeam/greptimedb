@@ -106,7 +106,7 @@ pub fn create_table_schema(expr: &CreateTableExpr) -> Result<SchemaRef> {
             .iter()
             .any(|column| column.name == expr.time_index),
         MissingTimestampColumnSnafu {
-            msg: format!("CreateExpr: {:?}", expr)
+            msg: format!("CreateExpr: {expr:?}")
         }
     );
 

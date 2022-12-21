@@ -85,7 +85,7 @@ where
     let expected_value = numbers.iter().map(|&n| n.as_()).collect::<Vec<f64>>();
 
     let expected_value: inc_stats::Percentiles<f64> = expected_value.iter().cloned().collect();
-    let expected_value = expected_value.percentile(&0.5).unwrap();
+    let expected_value = expected_value.percentile(0.5).unwrap();
     assert_eq!(value, expected_value.into());
     Ok(())
 }
@@ -95,10 +95,7 @@ async fn execute_percentile<'a>(
     table_name: &'a str,
     engine: Arc<dyn QueryEngine>,
 ) -> RecordResult<Vec<RecordBatch>> {
-    let sql = format!(
-        "select PERCENTILE({},50.0) as percentile from {}",
-        column_name, table_name
-    );
+    let sql = format!("select PERCENTILE({column_name},50.0) as percentile from {table_name}");
     let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();

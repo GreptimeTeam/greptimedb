@@ -217,10 +217,7 @@ where
         Arc::new(|| Arc::new(MySumAccumulatorCreator::default())),
     )));
 
-    let sql = format!(
-        "select MY_SUM({}) as my_sum from {}",
-        column_name, table_name
-    );
+    let sql = format!("select MY_SUM({column_name}) as my_sum from {table_name}");
     let plan = engine.sql_to_plan(&sql, Arc::new(QueryContext::new()))?;
 
     let output = engine.execute(&plan).await?;

@@ -52,13 +52,13 @@ pub async fn sql(
                 Ok(true) => query_ctx.set_current_schema(db),
                 Ok(false) => {
                     return Json(JsonResponse::with_error(
-                        format!("Database not found: {}", db),
+                        format!("Database not found: {db}"),
                         StatusCode::DatabaseNotFound,
                     ));
                 }
                 Err(e) => {
                     return Json(JsonResponse::with_error(
-                        format!("Error checking database: {}, {}", db, e),
+                        format!("Error checking database: {db}, {e}"),
                         StatusCode::Internal,
                     ));
                 }

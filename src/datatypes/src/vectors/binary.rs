@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_serialize_binary_vector_to_json() {
-        let vector = BinaryVector::from(BinaryArray::from_iter_values(&[
+        let vector = BinaryVector::from(BinaryArray::from_iter_values([
             vec![1, 2, 3],
             vec![1, 2, 3],
         ]));
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_from_arrow_array() {
-        let arrow_array = BinaryArray::from_iter_values(&[vec![1, 2, 3], vec![1, 2, 3]]);
+        let arrow_array = BinaryArray::from_iter_values([vec![1, 2, 3], vec![1, 2, 3]]);
         let original = BinaryArray::from(arrow_array.data().clone());
         let vector = BinaryVector::from(arrow_array);
         assert_eq!(original, vector.array);

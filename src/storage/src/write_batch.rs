@@ -215,7 +215,7 @@ impl WriteRequest for WriteBatch {
                 Mutation::Put(put_data) => {
                     let column = put_data
                         .column_by_name(ts_col_name)
-                        .unwrap_or_else(|| panic!("Cannot find column by name: {}", ts_col_name));
+                        .unwrap_or_else(|| panic!("Cannot find column by name: {ts_col_name}"));
                     if column.is_const() {
                         let ts = match column.get(0) {
                             Value::Timestamp(ts) => ts,

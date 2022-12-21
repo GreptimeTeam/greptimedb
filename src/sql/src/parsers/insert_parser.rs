@@ -65,6 +65,6 @@ mod tests {
     pub fn test_parse_invalid_insert() {
         let sql = r"INSERT INTO table_1 VALUES ("; // intentionally a bad sql
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
-        assert!(result.is_err(), "result is: {:?}", result);
+        assert!(result.is_err(), "result is: {result:?}");
     }
 }

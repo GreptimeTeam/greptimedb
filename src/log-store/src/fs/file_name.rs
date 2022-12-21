@@ -97,13 +97,13 @@ mod tests {
     #[test]
     pub fn test_padding_file_name() {
         let id = u64::MIN;
-        assert_eq!("00000000000000000000", format!("{:020}", id));
+        assert_eq!("00000000000000000000", format!("{id:020}"));
         let id = 123u64;
-        assert_eq!("00000000000000000123", format!("{:020}", id));
+        assert_eq!("00000000000000000123", format!("{id:020}"));
         let id = 123123123123u64;
-        assert_eq!("00000000123123123123", format!("{:020}", id));
+        assert_eq!("00000000123123123123", format!("{id:020}"));
         let id = u64::MAX;
-        assert_eq!(u64::MAX.to_string(), format!("{:020}", id));
+        assert_eq!(u64::MAX.to_string(), format!("{id:020}"));
     }
 
     #[test]

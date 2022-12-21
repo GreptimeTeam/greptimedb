@@ -211,10 +211,7 @@ impl TableMeta {
 
         let mut builder = SchemaBuilder::try_from(columns)
             .with_context(|_| error::SchemaBuildSnafu {
-                msg: format!(
-                    "Failed to convert column schemas into schema for table {}",
-                    table_name
-                ),
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
             })?
             // Also bump the schema version.
             .version(table_schema.version() + 1);
@@ -222,10 +219,7 @@ impl TableMeta {
             builder = builder.add_metadata(k, v);
         }
         let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
-            msg: format!(
-                "Table {} cannot add new columns {:?}",
-                table_name, column_names
-            ),
+            msg: format!("Table {table_name} cannot add new columns {column_names:?}"),
         })?;
 
         // value_indices would be generated automatically.
@@ -288,10 +282,7 @@ impl TableMeta {
 
         let mut builder = SchemaBuilder::try_from_columns(columns)
             .with_context(|_| error::SchemaBuildSnafu {
-                msg: format!(
-                    "Failed to convert column schemas into schema for table {}",
-                    table_name
-                ),
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
             })?
             // Also bump the schema version.
             .version(table_schema.version() + 1);
@@ -299,10 +290,7 @@ impl TableMeta {
             builder = builder.add_metadata(k, v);
         }
         let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
-            msg: format!(
-                "Table {} cannot add remove columns {:?}",
-                table_name, column_names
-            ),
+            msg: format!("Table {table_name} cannot add remove columns {column_names:?}"),
         })?;
 
         // Rebuild the indices of primary key columns.

@@ -40,7 +40,7 @@ pub fn format_py_error(excep: PyBaseExceptionRef, vm: &VirtualMachine) -> error:
     let mut msg = String::new();
     if let Err(e) = vm.write_exception(&mut msg, &excep) {
         return error::Error::PyRuntime {
-            msg: format!("Failed to write exception msg, err: {}", e),
+            msg: format!("Failed to write exception msg, err: {e}"),
             backtrace: Backtrace::generate(),
         };
     }
@@ -59,9 +59,9 @@ pub fn py_vec_obj_to_array(
 ) -> Result<VectorRef, error::Error> {
     // It's ugly, but we can't find a better way right now.
     if is_instance::<PyVector>(obj, vm) {
-        let pyv = obj.payload::<PyVector>().with_context(|| {
-            ret_other_error_with(format!("can't cast obj {:?} to PyVector", obj))
-        })?;
+        let pyv = obj
+            .payload::<PyVector>()
+            .with_context(|| ret_other_error_with(format!("can't cast obj {obj:?} to PyVector")))?;
         Ok(pyv.as_vector_ref())
     } else if is_instance::<PyInt>(obj, vm) {
         let val = obj
@@ -110,6 +110,6 @@ pub fn py_vec_obj_to_array(
             _ => unreachable!(),
         }
     } else {
-        ret_other_error_with(format!("Expect a vector or a constant, found {:?}", obj)).fail()
+        ret_other_error_with(format!("Expect a vector or a constant, found {obj:?}")).fail()
     }
 }

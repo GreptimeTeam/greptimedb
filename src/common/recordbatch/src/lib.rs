@@ -231,8 +231,7 @@ mod tests {
         assert_eq!(
             result.unwrap_err().to_string(),
             format!(
-                "Failed to create RecordBatches, reason: expect RecordBatch schema equals {:?}, actual: {:?}",
-                schema1, schema2
+                "Failed to create RecordBatches, reason: expect RecordBatch schema equals {schema1:?}, actual: {schema2:?}",
             )
         );
 

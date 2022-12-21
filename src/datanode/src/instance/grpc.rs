@@ -117,7 +117,7 @@ impl Instance {
             }
             Some(select_expr::Expr::LogicalPlan(plan)) => self.execute_logical(plan).await,
             _ => UnsupportedExprSnafu {
-                name: format!("{:?}", expr),
+                name: format!("{expr:?}"),
             }
             .fail(),
         }
@@ -175,7 +175,7 @@ impl GrpcQueryHandler for Instance {
             Some(object_expr::Expr::Select(select_expr)) => self.handle_select(select_expr).await,
             other => {
                 return servers::error::NotSupportedSnafu {
-                    feat: format!("{:?}", other),
+                    feat: format!("{other:?}"),
                 }
                 .fail();
             }
@@ -200,7 +200,7 @@ impl GrpcAdminHandler for Instance {
             }
             other => {
                 return servers::error::NotSupportedSnafu {
-                    feat: format!("{:?}", other),
+                    feat: format!("{other:?}"),
                 }
                 .fail();
             }

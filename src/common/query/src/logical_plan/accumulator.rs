@@ -131,7 +131,7 @@ impl DfAccumulator for DfAccumulatorAdaptor {
         let state_types = self.creator.state_types()?;
         if state_values.len() != state_types.len() {
             return error::BadAccumulatorImplSnafu {
-                err_msg: format!("Accumulator {:?} returned state values size do not match its state types size.", self),
+                err_msg: format!("Accumulator {self:?} returned state values size do not match its state types size."),
             }
             .fail()?;
         }

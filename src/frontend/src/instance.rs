@@ -643,7 +643,7 @@ impl GrpcQueryHandler for Instance {
                     .await
                     .map_err(BoxedError::new)
                     .with_context(|_| server_error::ExecuteQuerySnafu {
-                        query: format!("{:?}", insert_expr),
+                        query: format!("{insert_expr:?}"),
                     })?;
                 let object_result = match output {
                     Output::AffectedRows(rows) => ObjectResultBuilder::default()

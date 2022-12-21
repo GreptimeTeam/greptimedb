@@ -78,7 +78,7 @@ async fn execute_mean<'a>(
     table_name: &'a str,
     engine: Arc<dyn QueryEngine>,
 ) -> RecordResult<Vec<RecordBatch>> {
-    let sql = format!("select MEAN({}) as mean from {}", column_name, table_name);
+    let sql = format!("select MEAN({column_name}) as mean from {table_name}");
     let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();

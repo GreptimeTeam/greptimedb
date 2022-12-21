@@ -59,8 +59,8 @@ pub(crate) async fn create_frontend_instance(test_name: &str) -> (Arc<Instance>,
 }
 
 fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{}", name)).unwrap();
-    let data_tmp_dir = TempDir::new(&format!("gt_data_{}", name)).unwrap();
+    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
+    let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
     let opts = DatanodeOptions {
         wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
         storage: ObjectStoreConfig::File {
@@ -138,8 +138,8 @@ async fn create_dist_datanode_instance(
     meta_srv: MockInfo,
 ) -> Arc<DatanodeInstance> {
     let current = common_time::util::current_time_millis();
-    let wal_tmp_dir = TempDir::new_in("/tmp", &format!("dist_datanode-wal-{}", current)).unwrap();
-    let data_tmp_dir = TempDir::new_in("/tmp", &format!("dist_datanode-data-{}", current)).unwrap();
+    let wal_tmp_dir = TempDir::new_in("/tmp", &format!("dist_datanode-wal-{current}")).unwrap();
+    let data_tmp_dir = TempDir::new_in("/tmp", &format!("dist_datanode-data-{current}")).unwrap();
     let opts = DatanodeOptions {
         node_id: Some(datanode_id),
         wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),

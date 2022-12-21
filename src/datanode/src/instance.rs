@@ -233,7 +233,7 @@ pub(crate) async fn new_fs_object_store(data_dir: &str) -> Result<ObjectStore> {
         .context(error::CreateDirSnafu { dir: &data_dir })?;
     info!("The file storage directory is: {}", &data_dir);
 
-    let atomic_write_dir = format!("{}/.tmp/", data_dir);
+    let atomic_write_dir = format!("{data_dir}/.tmp/");
 
     let accessor = FsBuilder::default()
         .root(&data_dir)

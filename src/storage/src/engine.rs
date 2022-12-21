@@ -95,14 +95,14 @@ impl<S: LogStore> EngineImpl<S> {
 /// parent_dir is resolved in function `region_store_config` to ensure it's ended with '/'.
 #[inline]
 pub fn region_sst_dir(parent_dir: &str, region_name: &str) -> String {
-    format!("{}{}/", parent_dir, region_name)
+    format!("{parent_dir}{region_name}/")
 }
 
 /// Generate region manifest path,
 /// parent_dir is resolved in function `region_store_config` to ensure it's ended with '/'.
 #[inline]
 pub fn region_manifest_dir(parent_dir: &str, region_name: &str) -> String {
-    format!("{}{}/manifest/", parent_dir, region_name)
+    format!("{parent_dir}{region_name}/manifest/")
 }
 
 /// A slot for region in the engine.

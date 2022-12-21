@@ -221,8 +221,7 @@ impl TryFrom<StartCommand> for FrontendOptions {
             if addr == datanode_grpc_addr {
                 return IllegalConfigSnafu {
                     msg: format!(
-                        "gRPC listen address conflicts with datanode reserved gRPC addr: {}",
-                        datanode_grpc_addr
+                        "gRPC listen address conflicts with datanode reserved gRPC addr: {datanode_grpc_addr}",
                     ),
                 }
                 .fail();

@@ -162,7 +162,7 @@ impl StartupHandler for PgAuthStartupHandler {
                             client,
                             "FATAL",
                             "3D000",
-                            format!("Database not found: {}", db),
+                            format!("Database not found: {db}"),
                         )
                         .await?;
                         return Ok(());

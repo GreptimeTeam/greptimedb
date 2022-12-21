@@ -56,7 +56,7 @@ use crate::manifest::TableManifest;
 
 #[inline]
 fn table_manifest_dir(table_dir: &str) -> String {
-    format!("{}/manifest/", table_dir)
+    format!("{table_dir}/manifest/")
 }
 
 /// [Table] implementation.
@@ -284,7 +284,7 @@ impl Stream for ChunkStream {
 
 #[inline]
 fn column_qualified_name(table_name: &str, region_name: &str, column_name: &str) -> String {
-    format!("{}.{}.{}", table_name, region_name, column_name)
+    format!("{table_name}.{region_name}.{column_name}")
 }
 
 impl<R: Region> MitoTable<R> {

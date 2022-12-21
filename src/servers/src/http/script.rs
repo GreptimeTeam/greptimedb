@@ -62,7 +62,7 @@ pub async fn scripts(
 
         let body = match script_handler.insert_script(name.unwrap(), &script).await {
             Ok(()) => JsonResponse::with_output(None),
-            Err(e) => json_err!(format!("Insert script error: {}", e), e.status_code()),
+            Err(e) => json_err!(format!("Insert script error: {e}"), e.status_code()),
         };
 
         Json(body)

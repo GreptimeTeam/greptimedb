@@ -99,7 +99,7 @@ fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
         "_" => Ok(None),
         // note the different between "_" and _
         _ => fail_parse_error!(
-            format!("Unknown datatype: {ty} at {:?}", loc),
+            format!("Unknown datatype: {ty} at {loc:?}"),
             Some(loc.to_owned())
         ),
     }
@@ -209,10 +209,7 @@ fn check_annotation_ret_slice(sub: &ast::Expr<()>) -> Result<&ast::Expr<()>> {
             ensure!(
                 id == "vector",
                 ret_parse_error(
-                    format!(
-                        "Wrong type annotation, expect `vector[...]`, found `{}`",
-                        id
-                    ),
+                    format!("Wrong type annotation, expect `vector[...]`, found `{id}`"),
                     Some(value.location)
                 )
             );

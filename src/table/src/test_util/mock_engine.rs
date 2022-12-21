@@ -85,15 +85,11 @@ impl TableEngine for MockTableEngine {
         unimplemented!()
     }
 
-    fn get_table<'a>(
-        &self,
-        _ctx: &EngineContext,
-        _ref: &'a TableReference,
-    ) -> Result<Option<TableRef>> {
+    fn get_table(&self, _ctx: &EngineContext, _ref: &TableReference) -> Result<Option<TableRef>> {
         unimplemented!()
     }
 
-    fn table_exists<'a>(&self, _ctx: &EngineContext, _name: &'a TableReference) -> bool {
+    fn table_exists(&self, _ctx: &EngineContext, _name: &TableReference) -> bool {
         unimplemented!()
     }
 

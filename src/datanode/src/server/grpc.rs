@@ -202,8 +202,7 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Missing timestamp column"),
-            "actual: {}",
-            err_msg
+            "actual: {err_msg}",
         );
     }
 

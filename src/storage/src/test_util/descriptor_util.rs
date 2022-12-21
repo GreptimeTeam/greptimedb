@@ -129,7 +129,7 @@ pub fn desc_with_value_columns(region_name: &str, num_value_columns: usize) -> R
     let mut builder =
         RegionDescBuilder::new(region_name).push_key_column(("k0", LogicalTypeId::Int64, false));
     for i in 0..num_value_columns {
-        let name = format!("v{}", i);
+        let name = format!("v{i}");
         builder = builder.push_value_column((&name, LogicalTypeId::Int64, true));
     }
     builder.build()

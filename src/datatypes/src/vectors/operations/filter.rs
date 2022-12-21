@@ -45,11 +45,11 @@ mod tests {
     };
 
     fn check_filter_primitive(expect: &[i32], input: &[i32], filter: &[bool]) {
-        let v = Int32Vector::from_slice(&input);
+        let v = Int32Vector::from_slice(input);
         let filter = BooleanVector::from_slice(filter);
         let out = v.filter(&filter).unwrap();
 
-        let expect: VectorRef = Arc::new(Int32Vector::from_slice(&expect));
+        let expect: VectorRef = Arc::new(Int32Vector::from_slice(expect));
         assert_eq!(expect, out);
     }
 

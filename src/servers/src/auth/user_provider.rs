@@ -245,7 +245,7 @@ admin=654321",
             assert!(lw.flush().is_ok());
         }
 
-        let param = format!("file:{}", file_path);
+        let param = format!("file:{file_path}");
         let provider = StaticUserProvider::try_from(param.as_str()).unwrap();
         test_auth(&provider, "root", "123456").await;
         test_auth(&provider, "admin", "654321").await;

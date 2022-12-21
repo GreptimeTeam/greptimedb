@@ -157,10 +157,7 @@ impl From<ListArray> for ListVector {
     fn from(array: ListArray) -> Self {
         let item_type = ConcreteDataType::from_arrow_type(match array.data_type() {
             ArrowDataType::List(field) => field.data_type(),
-            other => panic!(
-                "Try to create ListVector from an arrow array with type {:?}",
-                other
-            ),
+            other => panic!("Try to create ListVector from an arrow array with type {other:?}"),
         });
         Self { array, item_type }
     }

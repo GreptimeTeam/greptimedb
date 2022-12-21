@@ -131,7 +131,7 @@ mod tests {
 
         assert!(ErrorCompat::backtrace(&err).is_some());
 
-        let msg = format!("{:?}", err);
+        let msg = format!("{err:?}");
         assert!(msg.contains("\nBacktrace:\n"));
         let fmt_msg = format!("{:?}", DebugFormat::new(&err));
         assert_eq!(msg, fmt_msg);
@@ -151,7 +151,7 @@ mod tests {
         assert!(err.as_any().downcast_ref::<MockError>().is_some());
         assert!(err.source().is_some());
 
-        let msg = format!("{:?}", err);
+        let msg = format!("{err:?}");
         assert!(msg.contains("\nBacktrace:\n"));
         assert!(msg.contains("Caused by"));
 

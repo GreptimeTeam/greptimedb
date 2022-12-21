@@ -236,7 +236,7 @@ impl DFLogicalSubstraitConvertor {
             .map_err(BoxedError::new)
             .context(InternalSnafu)?
             .context(TableNotFoundSnafu {
-                name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+                name: format!("{catalog_name}.{schema_name}.{table_name}"),
             })?;
         let adapter = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(table_ref),
@@ -271,7 +271,7 @@ impl DFLogicalSubstraitConvertor {
 
         // TODO(ruihang): Support limit(fetch)
         Ok(LogicalPlan::TableScan(TableScan {
-            table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+            table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
             source: adapter,
             projection,
             projected_schema,
@@ -387,8 +387,7 @@ impl DFLogicalSubstraitConvertor {
             | LogicalPlan::Analyze(_)
             | LogicalPlan::Extension(_) => InvalidParametersSnafu {
                 reason: format!(
-                    "Trying to convert DDL/DML plan to substrait proto, plan: {:?}",
-                    plan
+                    "Trying to convert DDL/DML plan to substrait proto, plan: {plan:?}",
                 ),
             }
             .fail()?,
@@ -562,7 +561,7 @@ mod test {
         let proto = convertor.encode(plan.clone()).unwrap();
         let tripped_plan = convertor.decode(proto, catalog).unwrap();
 
-        assert_eq!(format!("{:?}", plan), format!("{:?}", tripped_plan));
+        assert_eq!(format!("{plan:?}"), format!("{tripped_plan:?}"));
     }
 
     #[tokio::test]
@@ -596,8 +595,7 @@ mod test {
 
         let table_scan_plan = LogicalPlan::TableScan(TableScan {
             table_name: format!(
-                "{}.{}.{}",
-                DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, DEFAULT_TABLE_NAME
+                "{DEFAULT_CATALOG_NAME}.{DEFAULT_SCHEMA_NAME}.{DEFAULT_TABLE_NAME}",
             ),
             source: adapter,
             projection: Some(projection),

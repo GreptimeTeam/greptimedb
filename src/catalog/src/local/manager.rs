@@ -338,7 +338,7 @@ impl CatalogManager for LocalCatalogManager {
         let schema = catalog
             .schema(schema_name)?
             .with_context(|| SchemaNotFoundSnafu {
-                schema_info: format!("{}.{}", catalog_name, schema_name),
+                schema_info: format!("{catalog_name}.{schema_name}"),
             })?;
 
         {
@@ -452,7 +452,7 @@ impl CatalogManager for LocalCatalogManager {
         let schema = catalog
             .schema(schema_name)?
             .with_context(|| SchemaNotFoundSnafu {
-                schema_info: format!("{}.{}", catalog_name, schema_name),
+                schema_info: format!("{catalog_name}.{schema_name}"),
             })?;
         schema.table(table_name)
     }

@@ -145,7 +145,7 @@ impl Buffer for ChunkList {
                 }
                 left -= actual;
             } else {
-                panic!("Advance step [{}] exceeds max readable bytes", by);
+                panic!("Advance step [{by}] exceeds max readable bytes");
             }
         }
     }

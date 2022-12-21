@@ -28,7 +28,7 @@ pub fn set_panic_hook() {
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic| {
         let backtrace = Backtrace::new();
-        let backtrace = format!("{:?}", backtrace);
+        let backtrace = format!("{backtrace:?}");
         if let Some(location) = panic.location() {
             tracing::error!(
                 message = %panic,

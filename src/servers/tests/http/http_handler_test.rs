@@ -60,7 +60,7 @@ async fn test_sql_output_rows() {
         axum::Extension(UserInfo::default()),
     )
     .await;
-    assert!(json.success(), "{:?}", json);
+    assert!(json.success(), "{json:?}");
     assert!(json.error().is_none());
     match &json.output().expect("assertion failed")[0] {
         JsonOutput::Records(records) => {
@@ -103,7 +103,7 @@ def test(n):
         body,
     )
     .await;
-    assert!(!json.success(), "{:?}", json);
+    assert!(!json.success(), "{json:?}");
     assert_eq!(json.error().unwrap(), "Invalid argument: invalid name");
 
     let body = RawBody(Body::from(script));
@@ -117,7 +117,7 @@ def test(n):
         body,
     )
     .await;
-    assert!(json.success(), "{:?}", json);
+    assert!(json.success(), "{json:?}");
     assert!(json.error().is_none());
     assert!(json.output().is_none());
 }

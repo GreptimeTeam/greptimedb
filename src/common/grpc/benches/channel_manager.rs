@@ -26,7 +26,7 @@ async fn do_bench_channel_manager() {
         let join = tokio::spawn(async move {
             for _ in 0..10000 {
                 let idx = rand::random::<usize>() % 100;
-                let ret = m_clone.get(format!("{}", idx));
+                let ret = m_clone.get(format!("{idx}"));
                 assert!(ret.is_ok());
             }
         });

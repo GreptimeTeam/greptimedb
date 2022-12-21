@@ -124,7 +124,7 @@ pub fn values_to_string(
             values
                 .binary_values
                 .into_iter()
-                .map(|val| format!("{:?}", val)),
+                .map(|val| format!("{val:?}")),
             row_count
         ),
         ColumnDataType::Datetime => {

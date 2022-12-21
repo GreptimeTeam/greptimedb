@@ -139,7 +139,7 @@ mod tests {
         map.insert(false, 2);
 
         let result = serde_json::to_string(&map).context(SerializeSnafu);
-        assert!(result.is_err(), "serialize result is: {:?}", result);
+        assert!(result.is_err(), "serialize result is: {result:?}");
         let err = serde_json::to_string(&map)
             .context(SerializeSnafu)
             .err()

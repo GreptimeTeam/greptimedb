@@ -202,7 +202,7 @@ impl Helper {
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::ConversionSnafu {
-                    from: format!("Unsupported scalar value: {}", value),
+                    from: format!("Unsupported scalar value: {value}"),
                 }
                 .fail()
             }

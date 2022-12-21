@@ -117,10 +117,7 @@ pub fn compile_script(name: &str, deco_args: &DecoratorArgs, script: &str) -> Re
         // It's safe to unwrap loc, it is always exists.
         stmts.push(gen_call(name, deco_args, &loc.unwrap()));
     } else {
-        return fail_parse_error!(
-            format!("Expect statement in script, found: {:?}", top),
-            None,
-        );
+        return fail_parse_error!(format!("Expect statement in script, found: {top:?}"), None);
     }
     // use `compile::Mode::BlockExpr` so it return the result of statement
     compile_top(

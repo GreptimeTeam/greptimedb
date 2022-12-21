@@ -149,7 +149,7 @@ impl Decoder for WriteBatchArrowDecoder {
                 }
                 _ => {
                     return DataCorruptedSnafu {
-                        message: format!("Unexpceted mutation type: {}", mutation_type),
+                        message: format!("Unexpected mutation type: {mutation_type}"),
                     }
                     .fail()
                 }
