@@ -79,7 +79,7 @@ impl SqlHandler {
             AlterTableOperation::RenameTable { .. } => {
                 // TODO update proto to support alter table name
                 return error::InvalidSqlSnafu {
-                    msg: format!("rename table not unsupported yet"),
+                    msg: "rename table not unsupported yet".to_string(),
                 }
                 .fail();
             }
