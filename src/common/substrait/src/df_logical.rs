@@ -262,7 +262,7 @@ impl DFLogicalSubstraitConvertor {
         };
 
         // Calculate the projected schema
-        let qualified = &format!("{}.{}.{}", catalog_name, schema_name, table_name);
+        let qualified = &format!("{catalog_name}.{schema_name}.{table_name}");
         let projected_schema = Arc::new(
             project_schema(&stored_schema, projection.as_ref())
                 .and_then(|x| {
