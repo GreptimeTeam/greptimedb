@@ -25,7 +25,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::codec::{Decoder, Encoder};
 use crate::error::{self, Error, MarkWalStableSnafu, Result};
-use crate::proto::wal::{self, PayloadType, WalHeader};
+use crate::proto::wal::{self, WalHeader};
 use crate::write_batch::codec::{PayloadDecoder, PayloadEncoder};
 use crate::write_batch::Payload;
 
@@ -98,10 +98,7 @@ impl<S: LogStore> Wal<S> {
         payload: Option<&Payload>,
     ) -> Result<(u64, usize)> {
         if let Some(p) = payload {
-            header.payload_type = PayloadType::WriteBatchArrow.into();
             header.mutation_types = wal::gen_mutation_types(p);
-        } else {
-            header.payload_type = PayloadType::None.into();
         }
 
         let mut buf = vec![];
@@ -173,7 +170,7 @@ impl<S: LogStore> Wal<S> {
         let input = entry.data();
 
         let wal_header_decoder = WalHeaderDecoder {};
-        let (data_pos, mut header) = wal_header_decoder.decode(input)?;
+        let (data_pos, header) = wal_header_decoder.decode(input)?;
 
         ensure!(
             data_pos <= input.len(),
@@ -187,26 +184,19 @@ impl<S: LogStore> Wal<S> {
             }
         );
 
-        match PayloadType::from_i32(header.payload_type) {
-            Some(PayloadType::None) => Ok((seq_num, header, None)),
-            Some(PayloadType::WriteBatchArrow) => {
-                let mutation_types = std::mem::take(&mut header.mutation_types);
-                let decoder = PayloadDecoder::new(mutation_types);
-                let payload = decoder
-                    .decode(&input[data_pos..])
-                    .map_err(BoxedError::new)
-                    .context(error::ReadWalSnafu {
-                        region_id: self.region_id(),
-                    })?;
-
-                Ok((seq_num, header, Some(payload)))
-            }
-            None => error::WalDataCorruptedSnafu {
-                region_id: self.region_id(),
-                message: format!("invalid payload type={}", header.payload_type),
-            }
-            .fail(),
+        if header.mutation_types.is_empty() {
+            return Ok((seq_num, header, None));
         }
+
+        let decoder = PayloadDecoder::new(&header.mutation_types);
+        let payload = decoder
+            .decode(&input[data_pos..])
+            .map_err(BoxedError::new)
+            .context(error::ReadWalSnafu {
+                region_id: self.region_id(),
+            })?;
+
+        Ok((seq_num, header, Some(payload)))
     }
 }
 
@@ -294,7 +284,6 @@ mod tests {
     #[test]
     pub fn test_wal_header_codec() {
         let wal_header = WalHeader {
-            payload_type: 1,
             last_manifest_version: 99999999,
             mutation_types: vec![],
         };

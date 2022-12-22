@@ -3,15 +3,9 @@ syntax = "proto3";
 package greptime.storage.wal.v1;
 
 message WalHeader {
-  PayloadType payload_type = 1;
-  uint64 last_manifest_version = 2;
+  uint64 last_manifest_version = 1;
   // Type of each mutation in payload, now only arrow payload uses this field.
-  repeated MutationType mutation_types = 3;
-}
-
-enum PayloadType {
-  NONE = 0;
-  WRITE_BATCH_ARROW = 1;
+  repeated MutationType mutation_types = 2;
 }
 
 enum MutationType {

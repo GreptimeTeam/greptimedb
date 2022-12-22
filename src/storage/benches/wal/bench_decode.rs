@@ -39,7 +39,7 @@ fn encode_arrow(batch: &WriteBatch, dst: &mut Vec<u8>) {
 }
 
 fn decode_arrow(dst: &[u8], mutation_types: &[i32]) {
-    let decoder = codec::PayloadDecoder::new(mutation_types.to_vec());
+    let decoder = codec::PayloadDecoder::new(mutation_types);
     let result = decoder.decode(dst);
     assert!(result.is_ok());
 }

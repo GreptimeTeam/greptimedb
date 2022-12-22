@@ -60,17 +60,17 @@ impl Encoder for PayloadEncoder {
     }
 }
 
-pub struct PayloadDecoder {
-    mutation_types: Vec<i32>,
+pub struct PayloadDecoder<'a> {
+    mutation_types: &'a [i32],
 }
 
-impl PayloadDecoder {
-    pub fn new(mutation_types: Vec<i32>) -> Self {
+impl<'a> PayloadDecoder<'a> {
+    pub fn new(mutation_types: &'a [i32]) -> Self {
         Self { mutation_types }
     }
 }
 
-impl Decoder for PayloadDecoder {
+impl<'a> Decoder for PayloadDecoder<'a> {
     type Item = Payload;
     type Error = Error;
 
@@ -84,15 +84,15 @@ impl Decoder for PayloadDecoder {
         let schema = Arc::new(Schema::try_from(arrow_schema).context(ParseSchemaSnafu)?);
         let mut mutations = Vec::with_capacity(self.mutation_types.len());
 
-        for (record_batch, mutation_type) in reader.by_ref().zip(self.mutation_types.iter()) {
+        for (record_batch, mutation_type) in reader.by_ref().zip(self.mutation_types) {
             let record_batch = record_batch.context(DecodeArrowSnafu)?;
             let record_batch = RecordBatch::try_from_df_record_batch(schema.clone(), record_batch)
                 .context(CreateRecordBatchSnafu)?;
             let op_type = match MutationType::from_i32(*mutation_type) {
-                Some(MutationType::Put) => OpType::Put,
                 Some(MutationType::Delete) => {
                     unimplemented!("delete mutation is not implemented")
                 }
+                Some(MutationType::Put) => OpType::Put,
                 None => {
                     return BatchCorruptedSnafu {
                         message: format!("Unexpceted mutation type: {mutation_type}"),
@@ -172,7 +172,7 @@ mod tests {
         let result = encoder.encode(batch.payload(), &mut dst);
         assert!(result.is_ok());
 
-        let decoder = PayloadDecoder::new(mutation_types);
+        let decoder = PayloadDecoder::new(&mutation_types);
         let result = decoder.decode(&dst);
         let payload = result?;
         assert_eq!(*batch.payload(), payload);
@@ -208,7 +208,7 @@ mod tests {
         let result = encoder.encode(batch.payload(), &mut dst);
         assert!(result.is_ok());
 
-        let decoder = PayloadDecoder::new(mutation_types);
+        let decoder = PayloadDecoder::new(&mutation_types);
         let result = decoder.decode(&dst);
         let payload = result?;
         assert_eq!(*batch.payload(), payload);
