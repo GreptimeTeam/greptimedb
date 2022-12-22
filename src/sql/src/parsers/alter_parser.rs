@@ -64,7 +64,7 @@ impl<'a> ParserContext<'a> {
             AlterTableOperation::RenameTable { new_table_name }
         } else {
             return Err(ParserError::ParserError(format!(
-                "expect keyword ADD or DROP after ALTER TABLE, found {}",
+                "expect keyword ADD or DROP or RENAME after ALTER TABLE, found {}",
                 parser.peek_token()
             )));
         };
@@ -134,6 +134,37 @@ mod tests {
                 match alter_operation {
                     AlterTableOperation::DropColumn { name } => {
                         assert_eq!("a", name.value);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_rename_table() {
+        let sql = "ALTER TABLE test_table table_t";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap_err();
+        assert!(result
+            .to_string()
+            .contains("expect keyword ADD or DROP or RENAME after ALTER TABLE"));
+
+        let sql = "ALTER TABLE test_table RENAME table_t";
+        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, result.len());
+
+        let statement = result.remove(0);
+        assert_matches!(statement, Statement::Alter { .. });
+        match statement {
+            Statement::Alter(alter_table) => {
+                assert_eq!("test_table", alter_table.table_name().0[0].value);
+
+                let alter_operation = alter_table.alter_operation();
+                assert_matches!(alter_operation, AlterTableOperation::RenameTable { .. });
+                match alter_operation {
+                    AlterTableOperation::RenameTable { new_table_name } => {
+                        assert_eq!("table_t", new_table_name);
                     }
                     _ => unreachable!(),
                 }
