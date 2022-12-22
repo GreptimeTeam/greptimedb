@@ -34,16 +34,24 @@ use datatypes::arrow::datatypes::DataType;
 pub struct TypeConversionRule;
 
 impl OptimizerRule for TypeConversionRule {
-    fn optimize(&self, plan: &LogicalPlan, _config: &mut OptimizerConfig) -> Result<LogicalPlan> {
+    fn try_optimize(
+        &self,
+        plan: &LogicalPlan,
+        _config: &dyn OptimizerConfig,
+    ) -> Result<Option<LogicalPlan>> {
         let mut converter = TypeConverter {
             schemas: plan.all_schemas(),
         };
 
         match plan {
-            LogicalPlan::Filter(filter) => Ok(LogicalPlan::Filter(Filter::try_new(
-                filter.predicate().clone().rewrite(&mut converter)?,
-                Arc::new(self.optimize(filter.input(), _config)?),
-            )?)),
+            LogicalPlan::Filter(filter) => {
+                let rewritten = filter.predicate().clone().rewrite(&mut converter)?;
+                let Some(plan) = self.try_optimize(filter.input(), _config)? else { return Ok(None) };
+                Ok(Some(LogicalPlan::Filter(Filter::try_new(
+                    rewritten,
+                    Arc::new(plan),
+                )?)))
+            }
             LogicalPlan::TableScan(TableScan {
                 table_name,
                 source,
@@ -57,14 +65,14 @@ impl OptimizerRule for TypeConversionRule {
                     .into_iter()
                     .map(|e| e.rewrite(&mut converter))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(LogicalPlan::TableScan(TableScan {
+                Ok(Some(LogicalPlan::TableScan(TableScan {
                     table_name: table_name.clone(),
                     source: source.clone(),
                     projection: projection.clone(),
                     projected_schema: projected_schema.clone(),
                     filters: rewrite_filters,
                     fetch: *fetch,
-                }))
+                })))
             }
             LogicalPlan::Projection { .. }
             | LogicalPlan::Window { .. }
@@ -86,10 +94,11 @@ impl OptimizerRule for TypeConversionRule {
             | LogicalPlan::SetVariable { .. }
             | LogicalPlan::Analyze { .. } => {
                 let inputs = plan.inputs();
-                let new_inputs = inputs
-                    .iter()
-                    .map(|plan| self.optimize(plan, _config))
-                    .collect::<Result<Vec<_>>>()?;
+                let mut new_inputs = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    let Some(plan) = self.try_optimize(input, _config)? else { return Ok(None) };
+                    new_inputs.push(plan);
+                }
 
                 let expr = plan
                     .expressions()
@@ -97,7 +106,7 @@ impl OptimizerRule for TypeConversionRule {
                     .map(|e| e.rewrite(&mut converter))
                     .collect::<Result<Vec<_>>>()?;
 
-                datafusion_expr::utils::from_plan(plan, &expr, &new_inputs)
+                datafusion_expr::utils::from_plan(plan, &expr, &new_inputs).map(Some)
             }
 
             LogicalPlan::Subquery { .. }
@@ -105,7 +114,8 @@ impl OptimizerRule for TypeConversionRule {
             | LogicalPlan::CreateView { .. }
             | LogicalPlan::CreateCatalogSchema { .. }
             | LogicalPlan::CreateCatalog { .. }
-            | LogicalPlan::EmptyRelation { .. } => Ok(plan.clone()),
+            | LogicalPlan::EmptyRelation(_)
+            | LogicalPlan::Prepare(_) => Ok(Some(plan.clone())),
         }
     }
 

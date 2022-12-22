@@ -1,8 +1,8 @@
 [package]
 name = "datanode"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [features]
 default = ["python"]
@@ -25,7 +25,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion = "15.0"
+datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 hyper = { version = "0.14", features = ["full"] }
@@ -57,5 +57,5 @@ tower-http = { version = "0.3", features = ["full"] }
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 client = { path = "../client" }
 common-query = { path = "../common/query" }
-datafusion-common = "15.0"
+datafusion-common.workspace = true
 tempdir = "0.3"

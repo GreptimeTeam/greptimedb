@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_query::logical_plan::create_aggregate_function;
@@ -20,7 +19,7 @@ use datafusion::catalog::TableReference;
 use datafusion::error::Result as DfResult;
 use datafusion::physical_plan::udaf::AggregateUDF;
 use datafusion::physical_plan::udf::ScalarUDF;
-use datafusion::sql::planner::{ContextProvider, SqlToRel};
+use datafusion::sql::planner::{ContextProvider, PlannerContext, SqlToRel};
 use datafusion_common::ScalarValue;
 use datafusion_expr::TableSource;
 use datatypes::arrow::datatypes::DataType;
@@ -53,7 +52,7 @@ impl<'a, S: ContextProvider + Send + Sync> DfPlanner<'a, S> {
         let sql = query.inner.to_string();
         let result = self
             .sql_to_rel
-            .query_to_plan(query.inner, &mut HashMap::new())
+            .query_to_plan(query.inner, &mut PlannerContext::default())
             .context(error::PlanSqlSnafu { sql })?;
 
         Ok(LogicalPlan::DfPlan(result))

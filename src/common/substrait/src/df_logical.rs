@@ -395,7 +395,8 @@ impl DFLogicalSubstraitConvertor {
             | LogicalPlan::Values(_)
             | LogicalPlan::Explain(_)
             | LogicalPlan::Analyze(_)
-            | LogicalPlan::Extension(_) => InvalidParametersSnafu {
+            | LogicalPlan::Extension(_)
+            | LogicalPlan::Prepare(_) => InvalidParametersSnafu {
                 reason: format!(
                     "Trying to convert DDL/DML plan to substrait proto, plan: {plan:?}",
                 ),

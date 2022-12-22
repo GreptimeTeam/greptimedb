@@ -29,7 +29,7 @@ use datafusion::physical_plan::udf::ScalarUDF;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{LogicalPlan as DfLogicalPlan, TableSource};
-use datafusion_optimizer::optimizer::{Optimizer, OptimizerConfig};
+use datafusion_optimizer::optimizer::Optimizer;
 use datafusion_sql::planner::ContextProvider;
 use datatypes::arrow::datatypes::DataType;
 
@@ -59,7 +59,7 @@ impl QueryEngineState {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new()
             .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
-        let mut optimizer = Optimizer::new(&OptimizerConfig::new());
+        let mut optimizer = Optimizer::new();
         // Apply the type conversion rule first.
         optimizer.rules.insert(0, Arc::new(TypeConversionRule {}));
 
@@ -79,15 +79,7 @@ impl QueryEngineState {
     /// Register a udf function
     // TODO(dennis): manage UDFs by ourself.
     pub fn register_udf(&self, udf: ScalarUdf) {
-        // `SessionContext` has a `register_udf()` method, which requires `&mut self`, this is
-        // a workaround.
-        // TODO(yingwen): Use `SessionContext::register_udf()` once it taks `&self`.
-        // It's implemented in https://github.com/apache/arrow-datafusion/pull/4612
-        self.df_context
-            .state
-            .write()
-            .scalar_functions
-            .insert(udf.name.clone(), Arc::new(udf.into_df_udf()));
+        self.df_context.register_udf(udf.into_df_udf());
     }
 
     pub fn aggregate_function(&self, function_name: &str) -> Option<AggregateFunctionMetaRef> {
@@ -122,32 +114,28 @@ impl QueryEngineState {
         schema: Option<&str>,
         name: TableReference,
     ) -> DfResult<Arc<dyn TableSource>> {
-        let state = self.df_context.state.read();
-        match name {
-            TableReference::Bare { table } if schema.is_some() => {
-                state.get_table_provider(TableReference::Partial {
-                    // unwrap safety: checked in this match's arm
-                    schema: schema.unwrap(),
-                    table,
-                })
+        let name = if let Some(schema) = schema {
+            if let TableReference::Bare { table } = name {
+                TableReference::Partial { schema, table }
+            } else {
+                name
             }
-            _ => state.get_table_provider(name),
-        }
+        } else {
+            name
+        };
+        self.df_context.state().get_table_provider(name)
     }
 
     pub(crate) fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
-        let state = self.df_context.state.read();
-        state.get_function_meta(name)
+        self.df_context.state().get_function_meta(name)
     }
 
     pub(crate) fn get_variable_type(&self, variable_names: &[String]) -> Option<DataType> {
-        let state = self.df_context.state.read();
-        state.get_variable_type(variable_names)
+        self.df_context.state().get_variable_type(variable_names)
     }
 
     pub(crate) fn get_config_option(&self, variable: &str) -> Option<ScalarValue> {
-        let state = self.df_context.state.read();
-        state.get_config_option(variable)
+        self.df_context.state().get_config_option(variable)
     }
 
     pub(crate) fn optimize(&self, plan: &DfLogicalPlan) -> DfResult<DfLogicalPlan> {
@@ -165,7 +153,7 @@ impl QueryEngineState {
         &self,
         mut plan: Arc<dyn ExecutionPlan>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let state = self.df_context.state.read();
+        let state = self.df_context.state();
         let config = &state.config;
         for optimizer in &state.physical_optimizers {
             plan = optimizer.optimize(plan, config)?;

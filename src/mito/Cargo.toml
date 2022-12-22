@@ -1,8 +1,8 @@
 [package]
 name = "mito"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [features]
 default = []
@@ -19,8 +19,8 @@ common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion = "15.0"
-datafusion-common = "15.0"
+datafusion.workspace = true
+datafusion-common.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 log-store = { path = "../log-store" }
