@@ -45,7 +45,7 @@ pub struct Payload {
 }
 
 impl Payload {
-    /// Create a new payload with given `schema`.
+    /// Creates a new payload with given `schema`.
     fn new(schema: SchemaRef) -> Payload {
         Payload {
             schema,
@@ -118,9 +118,9 @@ impl WriteBatch {
 }
 
 impl WriteBatch {
-    /// Validate `data` and converting it into a [RecordBatch].
+    /// Validates `data` and converts it into a [RecordBatch].
     ///
-    /// This will fill missing columns by schema's default values.
+    /// It fills missing columns by schema's default values.
     fn process_put_data(&self, data: NameToVector) -> Result<RecordBatch> {
         let num_rows = data.num_rows();
         let mut columns = Vec::with_capacity(self.schema().num_columns());
@@ -167,7 +167,7 @@ fn first_vector_len(data: &HashMap<String, VectorRef>) -> usize {
     data.values().next().map(|col| col.len()).unwrap_or(0)
 }
 
-/// Check whether `col` matches given `column_schema`.
+/// Checks whether `col` matches given `column_schema`.
 fn validate_column(column_schema: &ColumnSchema, col: &VectorRef) -> Result<()> {
     if !col.data_type().is_null() {
         // This allow us to use NullVector for columns that only have null value.
@@ -193,7 +193,7 @@ fn validate_column(column_schema: &ColumnSchema, col: &VectorRef) -> Result<()> 
     Ok(())
 }
 
-/// Create a new column and fill it by default value.
+/// Creates a new column and fills it by default value.
 ///
 /// `num_rows` MUST be greater than 0. This function will also validate the schema.
 pub(crate) fn new_column_with_default_value(
@@ -216,6 +216,8 @@ pub(crate) fn new_column_with_default_value(
 }
 
 /// Vectors in [NameToVector] have same length.
+///
+/// MUST construct it via [`NameToVector::new()`] to ensure the vector lengths are validated.
 struct NameToVector(HashMap<String, VectorRef>);
 
 impl NameToVector {
