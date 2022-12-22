@@ -50,7 +50,7 @@ pub enum AlterTableOperation {
     /// `DROP COLUMN <name>`
     DropColumn { name: Ident },
     /// `RENAME <new_table_name>`
-    RenameTable { new_table_name: ObjectName },
+    RenameTable { new_table_name: String },
 }
 
 /// Convert `AlterTable` statement to `AlterExpr` for gRPC
