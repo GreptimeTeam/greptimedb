@@ -23,7 +23,7 @@ pub struct NoopInterceptor;
 
 impl SqlQueryInterceptor for NoopInterceptor {
     fn pre_parsing<'a>(&self, query: &'a str, _query_ctx: QueryContextRef) -> Result<Cow<'a, str>> {
-        let modified_query = format!("{};", query);
+        let modified_query = format!("{query};");
         Ok(Cow::Owned(modified_query))
     }
 }
