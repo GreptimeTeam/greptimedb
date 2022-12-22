@@ -34,6 +34,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
       - name: Install toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -48,6 +51,7 @@ jobs:
       - name: Collect coverage data
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
         env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1
           CARGO_INCREMENTAL: 0
           GT_S3_BUCKET: ${{ secrets.S3_BUCKET }}
