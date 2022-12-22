@@ -713,6 +713,8 @@ impl CatalogHandler for Instance {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::borrow::Cow;
+    use std::sync::atomic::AtomicU32;
 
     use api::v1::codec::SelectResult;
     use api::v1::column::SemanticType;
@@ -1010,6 +1012,154 @@ mod tests {
             table_options: Default::default(),
             table_id: None,
             region_ids: vec![0],
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_sql_interceptor_plugin() {
+        #[derive(Default)]
+        struct AssertionHook {
+            pub(crate) c: AtomicU32,
+        }
+
+        impl SqlQueryInterceptor for AssertionHook {
+            fn pre_parsing<'a>(
+                &self,
+                query: &'a str,
+                _query_ctx: QueryContextRef,
+            ) -> server_error::Result<std::borrow::Cow<'a, str>> {
+                self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                assert!(query.starts_with("CREATE TABLE demo"));
+                Ok(Cow::Borrowed(query))
+            }
+
+            fn post_parsing(
+                &self,
+                statement: Statement,
+                _query_ctx: QueryContextRef,
+            ) -> server_error::Result<Statement> {
+                self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                assert!(matches!(statement, Statement::CreateTable(_)));
+                Ok(statement)
+            }
+
+            fn post_execute(
+                &self,
+                mut output: Output,
+                _query_ctx: QueryContextRef,
+            ) -> server_error::Result<Output> {
+                self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                match &mut output {
+                    Output::AffectedRows(rows) => {
+                        assert_eq!(*rows, 1);
+                        *rows = 10;
+                    }
+                    _ => unreachable!(),
+                }
+                // update output result
+                Ok(output)
+            }
+        }
+
+        let query_ctx = Arc::new(QueryContext::new());
+        let (mut instance, _guard) = tests::create_frontend_instance("test_hook").await;
+
+        let mut plugins = AnyMap2::new();
+        let counter_hook = Arc::new(AssertionHook::default());
+        plugins.insert::<SqlQueryInterceptorRef>(counter_hook.clone());
+        Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
+
+        let sql = r#"CREATE TABLE demo(
+                            host STRING,
+                            ts TIMESTAMP,
+                            cpu DOUBLE NULL,
+                            memory DOUBLE NULL,
+                            disk_util DOUBLE DEFAULT 9.9,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito with(regions=1);"#;
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+
+        // assert that the hook is called 3 times
+        assert_eq!(3, counter_hook.c.load(std::sync::atomic::Ordering::Relaxed));
+        match output {
+            Output::AffectedRows(rows) => assert_eq!(rows, 10),
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_disable_db_operation_plugin() {
+        #[derive(Default)]
+        struct DisableDBOpHook;
+
+        impl SqlQueryInterceptor for DisableDBOpHook {
+            fn post_parsing(
+                &self,
+                statement: Statement,
+                _query_ctx: QueryContextRef,
+            ) -> server_error::Result<Statement> {
+                match statement {
+                    Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {
+                        return Err(server_error::Error::NotSupported {
+                            feat: "Database operations".to_owned(),
+                        })
+                    }
+                    _ => {}
+                }
+
+                Ok(statement)
+            }
+        }
+
+        let query_ctx = Arc::new(QueryContext::new());
+        let (mut instance, _guard) = tests::create_frontend_instance("test_db_hook").await;
+
+        let mut plugins = AnyMap2::new();
+        let hook = Arc::new(DisableDBOpHook::default());
+        plugins.insert::<SqlQueryInterceptorRef>(hook.clone());
+        Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
+
+        let sql = r#"CREATE TABLE demo(
+                            host STRING,
+                            ts TIMESTAMP,
+                            cpu DOUBLE NULL,
+                            memory DOUBLE NULL,
+                            disk_util DOUBLE DEFAULT 9.9,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito with(regions=1);"#;
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+
+        match output {
+            Output::AffectedRows(rows) => assert_eq!(rows, 1),
+            _ => unreachable!(),
+        }
+
+        let sql = r#"CREATE DATABASE tomcat"#;
+        if let Err(e) = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .remove(0)
+        {
+            assert!(matches!(e, server_error::Error::NotSupported { .. }));
+        } else {
+            unreachable!();
+        }
+
+        let sql = r#"SHOW DATABASES"#;
+        if let Err(e) = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .remove(0)
+        {
+            assert!(matches!(e, server_error::Error::NotSupported { .. }));
+        } else {
+            unreachable!();
         }
     }
 }
