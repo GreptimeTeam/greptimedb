@@ -595,7 +595,11 @@ impl SqlQueryHandler for Instance {
                 for stmt in stmts {
                     match query_interceptor.post_parsing(stmt, query_ctx.clone()) {
                         Ok(stmt) => match self.query_statement(stmt, query_ctx.clone()).await {
-                            Ok(output) => results.push(Ok(output)),
+                            Ok(output) => {
+                                let output_result =
+                                    query_interceptor.post_execute(output, query_ctx.clone());
+                                results.push(output_result);
+                            }
                             Err(e) => {
                                 results.push(Err(e));
                                 break;
@@ -623,7 +627,9 @@ impl SqlQueryHandler for Instance {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef>();
         let stmt = query_interceptor.post_parsing(stmt, query_ctx.clone())?;
 
-        self.query_statement(stmt, query_ctx).await
+        self.query_statement(stmt, query_ctx.clone())
+            .await
+            .and_then(|output| query_interceptor.post_execute(output, query_ctx.clone()))
     }
 }
 

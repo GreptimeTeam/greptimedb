@@ -38,7 +38,9 @@ pub trait SqlQueryInterceptor {
         Ok(statement)
     }
 
-    /// Called before sql is actually executed.
+    /// Called before sql is actually executed. This hook is not called at the moment.
+    /// TODO(sunng87): figure out at which stage we can call this hook after Arrow
+    /// Flight adoption
     fn pre_execute(
         &self,
         _statement: Statement,
