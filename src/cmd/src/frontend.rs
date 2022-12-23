@@ -99,6 +99,10 @@ impl StartCommand {
         let mut frontend = Frontend::new(opts, instance, plugins);
         frontend.start().await.context(error::StartFrontendSnafu)
     }
+
+    pub fn user_provider(&self) -> Option<&String> {
+        self.user_provider.as_ref()
+    }
 }
 
 pub fn load_frontend_plugins(user_provider: &Option<String>) -> Result<Plugins> {

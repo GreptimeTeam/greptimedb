@@ -108,6 +108,12 @@ pub enum Error {
     #[snafu(display("Encounter IO error, source: {}", source))]
     IOErr { source: std::io::Error },
 
+    #[snafu(display("Encounter system error, msg: {}", msg))]
+    SystemErr { msg: String },
+
+    #[snafu(display("Rpc call return failed, {}: {}", code, msg))]
+    RpcResultErr { code: u32, msg: String },
+
     #[snafu(display("User not found, username: {}", username))]
     UserNotFound { username: String },
 
@@ -126,6 +132,8 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidConfig { .. } => StatusCode::InvalidArguments,
             Error::IOErr { .. } => StatusCode::Internal,
+            Error::SystemErr { .. } => StatusCode::Internal,
+            Error::RpcResultErr { .. } => StatusCode::Internal,
 
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
             Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,

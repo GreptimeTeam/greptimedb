@@ -123,6 +123,7 @@ impl UserProvider for StaticUserProvider {
                     }
                     Password::MysqlNativePassword(auth_data, salt) => {
                         auth_mysql(auth_data, salt, username.to_string(), save_pwd)
+                            .map(|_| UserInfo::new(username))
                     }
                     Password::PgMD5(_, _) => UnsupportedPasswordTypeSnafu {
                         password_type: "pg_md5",
@@ -134,12 +135,12 @@ impl UserProvider for StaticUserProvider {
     }
 }
 
-fn auth_mysql(
+pub fn auth_mysql(
     auth_data: HashedPassword,
     salt: Salt,
     username: String,
     save_pwd: &[u8],
-) -> Result<UserInfo, Error> {
+) -> Result<bool, Error> {
     // ref: https://github.com/mysql/mysql-server/blob/a246bad76b9271cb4333634e954040a970222e0a/sql/auth/password.cc#L62
     let hash_stage_2 = double_sha1(save_pwd);
     let tmp = sha1_two(salt, &hash_stage_2);
@@ -150,7 +151,7 @@ fn auth_mysql(
     }
     let candidate_stage_2 = sha1_one(&xor_result);
     if candidate_stage_2 == hash_stage_2 {
-        Ok(UserInfo::new(username))
+        Ok(true)
     } else {
         UserPasswordMismatchSnafu { username }.fail()
     }
