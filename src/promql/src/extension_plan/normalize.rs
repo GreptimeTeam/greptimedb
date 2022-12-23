@@ -149,7 +149,7 @@ impl SeriesNormalizeStream {
         let ts_column = input
             .column(ts_column_idx)
             .as_any()
-            .downcast_ref::<Arc<PrimitiveArray<TimestampMillisecondType>>>()
+            .downcast_ref::<PrimitiveArray<TimestampMillisecondType>>()
             .unwrap();
 
         // bias the timestamp column by offset
@@ -185,5 +185,105 @@ impl Stream for SeriesNormalizeStream {
             }
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use datafusion::arrow::array::Float64Array;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::from_slice::FromSlice;
+    use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::prelude::SessionContext;
+    use datatypes::arrow::array::TimestampMillisecondArray;
+    use datatypes::arrow_array::StringArray;
+
+    use super::*;
+
+    fn prepare_test_data() -> MemoryExec {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIMESTAMP_COLUMN_NAME,
+                TimestampMillisecondType::DATA_TYPE,
+                true,
+            ),
+            Field::new("value", DataType::Float64, true),
+            Field::new("path", DataType::Utf8, true),
+        ]));
+        let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice(&[
+            60_000, 120_000, 0, 30_000, 90_000,
+        ])) as _;
+        let value_column =
+            Arc::new(Float64Array::from_slice(&[0.0, 1.0, 10.0, 100.0, 1000.0])) as _;
+        let path_column = Arc::new(StringArray::from_slice(&[
+            "foo", "foo", "foo", "foo", "foo",
+        ])) as _;
+        let data = RecordBatch::try_new(
+            schema.clone(),
+            vec![timestamp_column, value_column, path_column],
+        )
+        .unwrap();
+
+        MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_sort_record_batch() {
+        let memory_exec = Arc::new(prepare_test_data());
+        let normalize_exec = Arc::new(SeriesNormalizeExec {
+            offset: 0,
+            input: memory_exec,
+        });
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())
+            .await
+            .unwrap();
+        let result_literal = datatypes::arrow::util::pretty::pretty_format_batches(&result)
+            .unwrap()
+            .to_string();
+
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1970-01-01T00:00:00 | 10    | foo  |\
+            \n| 1970-01-01T00:00:30 | 100   | foo  |\
+            \n| 1970-01-01T00:01:00 | 0     | foo  |\
+            \n| 1970-01-01T00:01:30 | 1000  | foo  |\
+            \n| 1970-01-01T00:02:00 | 1     | foo  |\
+            \n+---------------------+-------+------+",
+        );
+
+        assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn test_offset_record_batch() {
+        let memory_exec = Arc::new(prepare_test_data());
+        let normalize_exec = Arc::new(SeriesNormalizeExec {
+            offset: 1_000, // offset 1s
+            input: memory_exec,
+        });
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())
+            .await
+            .unwrap();
+        let result_literal = datatypes::arrow::util::pretty::pretty_format_batches(&result)
+            .unwrap()
+            .to_string();
+
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1969-12-31T23:59:59 | 10    | foo  |\
+            \n| 1970-01-01T00:00:29 | 100   | foo  |\
+            \n| 1970-01-01T00:00:59 | 0     | foo  |\
+            \n| 1970-01-01T00:01:29 | 1000  | foo  |\
+            \n| 1970-01-01T00:01:59 | 1     | foo  |\
+            \n+---------------------+-------+------+",
+        );
+
+        assert_eq!(result_literal, expected);
     }
 }

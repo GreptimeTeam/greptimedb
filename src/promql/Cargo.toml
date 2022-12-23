@@ -11,3 +11,6 @@ datatypes = { path = "../datatypes" }
 futures = "0.3"
 promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "71d8a90" }
 snafu = { version = "0.7", features = ["backtraces"] }
+
+[dev-dependencies]
+tokio = { version = "1.23", features = ["full"] }
