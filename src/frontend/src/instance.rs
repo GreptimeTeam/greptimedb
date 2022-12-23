@@ -589,22 +589,17 @@ impl SqlQueryHandler for Instance {
         match parse_stmt(query.as_ref())
             .map_err(BoxedError::new)
             .context(server_error::ExecuteQuerySnafu { query })
+            .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
             Ok(stmts) => {
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
-                    match query_interceptor.post_parsing(stmt, query_ctx.clone()) {
-                        Ok(stmt) => match self.query_statement(stmt, query_ctx.clone()).await {
-                            Ok(output) => {
-                                let output_result =
-                                    query_interceptor.post_execute(output, query_ctx.clone());
-                                results.push(output_result);
-                            }
-                            Err(e) => {
-                                results.push(Err(e));
-                                break;
-                            }
-                        },
+                    match self.query_statement(stmt, query_ctx.clone()).await {
+                        Ok(output) => {
+                            let output_result =
+                                query_interceptor.post_execute(output, query_ctx.clone());
+                            results.push(output_result);
+                        }
                         Err(e) => {
                             results.push(Err(e));
                             break;
@@ -625,7 +620,6 @@ impl SqlQueryHandler for Instance {
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef>();
-        let stmt = query_interceptor.post_parsing(stmt, query_ctx.clone())?;
 
         self.query_statement(stmt, query_ctx.clone())
             .await
@@ -1035,12 +1029,12 @@ mod tests {
 
             fn post_parsing(
                 &self,
-                statement: Statement,
+                statements: Vec<Statement>,
                 _query_ctx: QueryContextRef,
-            ) -> server_error::Result<Statement> {
+            ) -> server_error::Result<Vec<Statement>> {
                 self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                assert!(matches!(statement, Statement::CreateTable(_)));
-                Ok(statement)
+                assert!(matches!(statements[0], Statement::CreateTable(_)));
+                Ok(statements)
             }
 
             fn post_execute(
@@ -1052,11 +1046,11 @@ mod tests {
                 match &mut output {
                     Output::AffectedRows(rows) => {
                         assert_eq!(*rows, 1);
+                        // update output result
                         *rows = 10;
                     }
                     _ => unreachable!(),
                 }
-                // update output result
                 Ok(output)
             }
         }
@@ -1099,19 +1093,21 @@ mod tests {
         impl SqlQueryInterceptor for DisableDBOpHook {
             fn post_parsing(
                 &self,
-                statement: Statement,
+                statements: Vec<Statement>,
                 _query_ctx: QueryContextRef,
-            ) -> server_error::Result<Statement> {
-                match statement {
-                    Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {
-                        return Err(server_error::Error::NotSupported {
-                            feat: "Database operations".to_owned(),
-                        })
+            ) -> server_error::Result<Vec<Statement>> {
+                for s in &statements {
+                    match s {
+                        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {
+                            return Err(server_error::Error::NotSupported {
+                                feat: "Database operations".to_owned(),
+                            })
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
 
-                Ok(statement)
+                Ok(statements)
             }
         }
 
@@ -1152,7 +1148,7 @@ mod tests {
             unreachable!();
         }
 
-        let sql = r#"SHOW DATABASES"#;
+        let sql = r#"SELECT 1; SHOW DATABASES"#;
         if let Err(e) = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .remove(0)

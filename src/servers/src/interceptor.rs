@@ -34,8 +34,12 @@ pub trait SqlQueryInterceptor {
     /// Called after sql is parsed into statements. This interceptor is called
     /// on each statement and the implementation can alter the statement or
     /// abort execution by raising an error.
-    fn post_parsing(&self, statement: Statement, _query_ctx: QueryContextRef) -> Result<Statement> {
-        Ok(statement)
+    fn post_parsing(
+        &self,
+        statements: Vec<Statement>,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Vec<Statement>> {
+        Ok(statements)
     }
 
     /// Called before sql is actually executed. This hook is not called at the moment.
@@ -43,7 +47,7 @@ pub trait SqlQueryInterceptor {
     /// Flight adoption
     fn pre_execute(
         &self,
-        _statement: Statement,
+        _statement: &Statement,
         _plan: Option<&LogicalPlan>,
         _query_ctx: QueryContextRef,
     ) -> Result<()> {
@@ -68,17 +72,21 @@ impl SqlQueryInterceptor for Option<&SqlQueryInterceptorRef> {
         }
     }
 
-    fn post_parsing(&self, statement: Statement, query_ctx: QueryContextRef) -> Result<Statement> {
+    fn post_parsing(
+        &self,
+        statements: Vec<Statement>,
+        query_ctx: QueryContextRef,
+    ) -> Result<Vec<Statement>> {
         if let Some(this) = self {
-            this.post_parsing(statement, query_ctx)
+            this.post_parsing(statements, query_ctx)
         } else {
-            Ok(statement)
+            Ok(statements)
         }
     }
 
     fn pre_execute(
         &self,
-        statement: Statement,
+        statement: &Statement,
         plan: Option<&LogicalPlan>,
         query_ctx: QueryContextRef,
     ) -> Result<()> {
