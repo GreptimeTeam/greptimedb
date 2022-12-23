@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use anymap::AnyMap;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
 use servers::auth::UserProviderRef;
@@ -31,6 +30,7 @@ use crate::opentsdb::OpentsdbOptions;
 use crate::postgres::PostgresOptions;
 use crate::prometheus::PrometheusOptions;
 use crate::server::Services;
+use crate::Plugins;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrontendOptions {
@@ -67,11 +67,11 @@ where
 {
     opts: FrontendOptions,
     instance: Option<T>,
-    plugins: AnyMap,
+    plugins: Arc<Plugins>,
 }
 
 impl<T: FrontendInstance> Frontend<T> {
-    pub fn new(opts: FrontendOptions, instance: T, plugins: AnyMap) -> Self {
+    pub fn new(opts: FrontendOptions, instance: T, plugins: Arc<Plugins>) -> Self {
         Self {
             opts,
             instance: Some(instance),
@@ -90,6 +90,7 @@ impl<T: FrontendInstance> Frontend<T> {
 
         let instance = Arc::new(instance);
 
+        // TODO(sunng87): merge this into instance
         let provider = self.plugins.get::<UserProviderRef>().cloned();
 
         Services::start(&self.opts, instance, provider).await

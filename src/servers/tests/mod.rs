@@ -33,6 +33,7 @@ use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
 use session::context::QueryContextRef;
 
+mod interceptor;
 mod opentsdb;
 mod postgres;
 
