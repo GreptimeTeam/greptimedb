@@ -236,7 +236,7 @@ fn parse_index_from_metadata(metadata: &HashMap<String, String>, key: &str) -> R
         .get(key)
         .context(metadata::MetaNotFoundSnafu { key })?;
     value.parse().with_context(|_| metadata::ParseMetaIntSnafu {
-        key_value: format!("{}={}", key, value),
+        key_value: format!("{key}={value}"),
     })
 }
 

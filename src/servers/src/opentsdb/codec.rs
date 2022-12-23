@@ -48,7 +48,7 @@ impl DataPoint {
         // OpenTSDB command is case sensitive, verified in real OpenTSDB.
         if cmd != "put" {
             return error::InvalidQuerySnafu {
-                reason: format!("unknown command {}.", cmd),
+                reason: format!("unknown command {cmd}."),
             }
             .fail();
         }
@@ -89,7 +89,7 @@ impl DataPoint {
             let tag = token.split('=').collect::<Vec<&str>>();
             if tag.len() != 2 || tag[0].is_empty() || tag[1].is_empty() {
                 return error::InvalidQuerySnafu {
-                    reason: format!("put: invalid tag: {}", token),
+                    reason: format!("put: invalid tag: {token}"),
                 }
                 .fail();
             }
@@ -97,7 +97,7 @@ impl DataPoint {
             let tagv = tag[1].to_string();
             if tags.iter().any(|(t, _)| t == &tagk) {
                 return error::InvalidQuerySnafu {
-                    reason: format!("put: illegal argument: duplicate tag: {}", tagk),
+                    reason: format!("put: illegal argument: duplicate tag: {tagk}"),
                 }
                 .fail();
             }

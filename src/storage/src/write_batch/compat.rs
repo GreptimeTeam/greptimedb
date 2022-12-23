@@ -188,8 +188,7 @@ mod tests {
         let err = batch.compat_write(&schema_old).unwrap_err();
         assert!(
             matches!(err, Error::WriteToOldVersion { .. }),
-            "err {} is not WriteToOldVersion",
-            err
+            "err {err} is not WriteToOldVersion",
         );
     }
 
@@ -209,8 +208,7 @@ mod tests {
         let err = batch.compat_write(&schema_no_column).unwrap_err();
         assert!(
             matches!(err, Error::NotInSchemaToCompat { .. }),
-            "err {} is not NotInSchemaToCompat",
-            err
+            "err {err} is not NotInSchemaToCompat",
         );
     }
 }

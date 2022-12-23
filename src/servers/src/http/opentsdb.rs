@@ -214,7 +214,7 @@ mod test {
         assert_eq!(data_points.len(), 1);
         assert_eq!(data_points[0], data_point1);
 
-        let body = Body::from(format!("[{},{}]", raw_data_point1, raw_data_point2));
+        let body = Body::from(format!("[{raw_data_point1},{raw_data_point2}]"));
         let data_points = parse_data_points(body).await.unwrap();
         assert_eq!(data_points.len(), 2);
         assert_eq!(data_points[0], data_point1);

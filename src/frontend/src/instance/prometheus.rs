@@ -54,8 +54,7 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
         .find(|t| is_supported(**t))
         .with_context(|| error::NotSupportedSnafu {
             feat: format!(
-                "server does not support any of the requested response types: {:?}",
-                accepted_response_types
+                "server does not support any of the requested response types: {accepted_response_types:?}",
             ),
         })?;
 
@@ -131,7 +130,7 @@ impl PrometheusProtocolHandler for Instance {
                     .await
                     .map_err(BoxedError::new)
                     .with_context(|_| error::ExecuteInsertSnafu {
-                        msg: format!("{:?}", request),
+                        msg: format!("{request:?}"),
                     })?;
             }
             Mode::Distributed => {
@@ -139,7 +138,7 @@ impl PrometheusProtocolHandler for Instance {
                     .await
                     .map_err(BoxedError::new)
                     .with_context(|_| error::ExecuteInsertSnafu {
-                        msg: format!("{:?}", request),
+                        msg: format!("{request:?}"),
                     })?;
             }
         }

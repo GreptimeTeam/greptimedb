@@ -263,8 +263,7 @@ mod tests {
         let regex = Regex::new(r"^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}.parquet$").unwrap();
         assert!(
             regex.is_match(&file_name),
-            "illegal sst file name: {}",
-            file_name
+            "Illegal sst file name: {file_name}",
         );
     }
 }

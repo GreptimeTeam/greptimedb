@@ -56,6 +56,10 @@ impl SqlQueryHandler for DummyInstance {
     ) -> Result<Output> {
         unimplemented!()
     }
+
+    fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
+        Ok(true)
+    }
 }
 
 fn make_test_app(tx: mpsc::Sender<String>) -> Router {
@@ -198,13 +202,12 @@ async fn test_opentsdb_debug_put() {
 fn create_data_point(metric: &str) -> String {
     format!(
         r#"{{
-                "metric": "{}",
+                "metric": "{metric}",
                 "timestamp": 1000,
                 "value": 1,
                 "tags": {{
                     "host": "web01"
                 }}
             }}"#,
-        metric
     )
 }

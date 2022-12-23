@@ -153,7 +153,7 @@ fn run_ron_testcases() {
             } => {
                 let rb = create_sample_recordbatch();
                 let res = coprocessor::exec_coprocessor(&testcase.code, &rb);
-                assert!(res.is_err(), "{:#?}\nExpect Err(...), actual Ok(...)", res);
+                assert!(res.is_err(), "{res:#?}\nExpect Err(...), actual Ok(...)");
                 if let Err(res) = res {
                     error!(
                         "{}",

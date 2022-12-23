@@ -34,11 +34,7 @@ use datatypes::arrow::datatypes::DataType;
 pub struct TypeConversionRule;
 
 impl OptimizerRule for TypeConversionRule {
-    fn optimize(
-        &self,
-        plan: &LogicalPlan,
-        optimizer_config: &mut OptimizerConfig,
-    ) -> Result<LogicalPlan> {
+    fn optimize(&self, plan: &LogicalPlan, _config: &mut OptimizerConfig) -> Result<LogicalPlan> {
         let mut converter = TypeConverter {
             schemas: plan.all_schemas(),
         };
@@ -46,7 +42,7 @@ impl OptimizerRule for TypeConversionRule {
         match plan {
             LogicalPlan::Filter(filter) => Ok(LogicalPlan::Filter(Filter::try_new(
                 filter.predicate().clone().rewrite(&mut converter)?,
-                Arc::new(self.optimize(filter.input(), optimizer_config)?),
+                Arc::new(self.optimize(filter.input(), _config)?),
             )?)),
             LogicalPlan::TableScan(TableScan {
                 table_name,
@@ -92,7 +88,7 @@ impl OptimizerRule for TypeConversionRule {
                 let inputs = plan.inputs();
                 let new_inputs = inputs
                     .iter()
-                    .map(|plan| self.optimize(plan, optimizer_config))
+                    .map(|plan| self.optimize(plan, _config))
                     .collect::<Result<Vec<_>>>()?;
 
                 let expr = plan
@@ -175,8 +171,7 @@ impl<'a> TypeConverter<'a> {
                 let casted_right = Self::cast_scalar_value(value, left_type)?;
                 if casted_right.is_null() {
                     return Err(DataFusionError::Plan(format!(
-                        "column:{:?} value:{:?} is invalid",
-                        col, value
+                        "column:{col:?} value:{value:?} is invalid",
                     )));
                 }
                 if reverse {

@@ -87,7 +87,7 @@ pub fn to_concrete_type(ty: &SType) -> Result<(ConcreteDataType, bool)> {
         | Kind::List(_)
         | Kind::Map(_)
         | Kind::UserDefinedTypeReference(_) => UnsupportedSubstraitTypeSnafu {
-            ty: format!("{:?}", kind),
+            ty: format!("{kind:?}"),
         }
         .fail(),
     }
@@ -154,7 +154,7 @@ pub(crate) fn scalar_value_as_literal_type(v: &ScalarValue) -> Result<LiteralTyp
             // TODO(LFC): Implement other conversions: ScalarValue => LiteralType
             _ => {
                 return error::UnsupportedExprSnafu {
-                    name: format!("{:?}", v),
+                    name: format!("{v:?}"),
                 }
                 .fail()
             }
@@ -177,7 +177,7 @@ pub(crate) fn literal_type_to_scalar_value(t: LiteralType) -> Result<ScalarValue
             // TODO(LFC): Implement other conversions: Kind => ScalarValue
             _ => {
                 return error::UnsupportedSubstraitTypeSnafu {
-                    ty: format!("{:?}", kind),
+                    ty: format!("{kind:?}"),
                 }
                 .fail()
             }
@@ -194,7 +194,7 @@ pub(crate) fn literal_type_to_scalar_value(t: LiteralType) -> Result<ScalarValue
         // TODO(LFC): Implement other conversions: LiteralType => ScalarValue
         _ => {
             return error::UnsupportedSubstraitTypeSnafu {
-                ty: format!("{:?}", t),
+                ty: format!("{t:?}"),
             }
             .fail()
         }

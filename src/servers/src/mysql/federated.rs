@@ -55,7 +55,7 @@ static SHOW_SQL_MODE_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'sql_mode'(.*))").unwrap());
 
 static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
-    RegexSet::new(&[
+    RegexSet::new([
         // Txn.
         "(?i)^(ROLLBACK(.*))",
         "(?i)^(COMMIT(.*))",

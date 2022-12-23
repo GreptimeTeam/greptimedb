@@ -322,8 +322,7 @@ impl<'a> ParserContext<'a> {
     // Report unexpected token
     pub(crate) fn expected<T>(&self, expected: &str, found: Token) -> Result<T> {
         Err(ParserError::ParserError(format!(
-            "Expected {}, found: {}",
-            expected, found
+            "Expected {expected}, found: {found}",
         )))
         .context(SyntaxSnafu { sql: self.sql })
     }

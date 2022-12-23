@@ -65,8 +65,7 @@ pub fn table_idents_to_full_name(obj_name: &ObjectName) -> Result<(String, Strin
         )),
         _ => error::InvalidSqlSnafu {
             msg: format!(
-                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {}",
-                obj_name
+                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
             ),
         }
         .fail(),
@@ -94,7 +93,7 @@ fn parse_string_to_value(
                 Ok(Value::Date(date))
             } else {
                 ParseSqlValueSnafu {
-                    msg: format!("Failed to parse {} to Date value", s),
+                    msg: format!("Failed to parse {s} to Date value"),
                 }
                 .fail()
             }
@@ -104,7 +103,7 @@ fn parse_string_to_value(
                 Ok(Value::DateTime(datetime))
             } else {
                 ParseSqlValueSnafu {
-                    msg: format!("Failed to parse {} to DateTime value", s),
+                    msg: format!("Failed to parse {s} to DateTime value"),
                 }
                 .fail()
             }
@@ -117,7 +116,7 @@ fn parse_string_to_value(
                 )))
             } else {
                 ParseSqlValueSnafu {
-                    msg: format!("Failed to parse {} to Timestamp value", s),
+                    msg: format!("Failed to parse {s} to Timestamp value"),
                 }
                 .fail()
             }
@@ -172,7 +171,7 @@ where
     match n.parse::<R>() {
         Ok(n) => Ok(n),
         Err(e) => ParseSqlValueSnafu {
-            msg: format!("Fail to parse number {}, {:?}", n, e),
+            msg: format!("Fail to parse number {n}, {e:?}"),
         }
         .fail(),
     }
@@ -220,7 +219,7 @@ fn parse_column_default_constraint(
             }
             ColumnOption::Default(Expr::Function(func)) => {
                 // Always use lowercase for function expression
-                ColumnDefaultConstraint::Function(format!("{}", func).to_lowercase())
+                ColumnDefaultConstraint::Function(format!("{func}").to_lowercase())
             }
             ColumnOption::Default(expr) => {
                 return UnsupportedDefaultValueSnafu {
@@ -300,7 +299,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
-        SqlDataType::Custom(obj_name) => match &obj_name.0[..] {
+        SqlDataType::Custom(obj_name, _) => match &obj_name.0[..] {
             [type_name] => {
                 if type_name
                     .value
@@ -319,7 +318,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             }
             .fail(),
         },
-        SqlDataType::Timestamp(_) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
+        SqlDataType::Timestamp(_, _) => Ok(ConcreteDataType::timestamp_millisecond_datatype()),
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -373,11 +372,11 @@ mod tests {
         check_type(SqlDataType::Boolean, ConcreteDataType::boolean_datatype());
         check_type(SqlDataType::Date, ConcreteDataType::date_datatype());
         check_type(
-            SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")])),
+            SqlDataType::Custom(ObjectName(vec![Ident::new("datetime")]), vec![]),
             ConcreteDataType::datetime_datatype(),
         );
         check_type(
-            SqlDataType::Timestamp(TimezoneInfo::None),
+            SqlDataType::Timestamp(None, TimezoneInfo::None),
             ConcreteDataType::timestamp_millisecond_datatype(),
         );
     }
@@ -391,7 +390,7 @@ mod tests {
         assert_eq!(Value::Int32(999), v);
 
         let v = sql_number_to_value(&ConcreteDataType::string_datatype(), "999");
-        assert!(v.is_err(), "parse value error is: {:?}", v);
+        assert!(v.is_err(), "parse value error is: {v:?}");
     }
 
     #[test]
@@ -417,18 +416,17 @@ mod tests {
         let sql_val = SqlValue::Number("3.0".to_string(), false);
         let v = sql_value_to_value("a", &ConcreteDataType::boolean_datatype(), &sql_val);
         assert!(v.is_err());
-        assert!(format!("{:?}", v)
+        assert!(format!("{v:?}")
             .contains("Fail to parse number 3.0, invalid column type: Boolean(BooleanType)"));
 
         let sql_val = SqlValue::Boolean(true);
         let v = sql_value_to_value("a", &ConcreteDataType::float64_datatype(), &sql_val);
         assert!(v.is_err());
         assert!(
-            format!("{:?}", v).contains(
+            format!("{v:?}").contains(
                 "column_name: \"a\", expect: Float64(Float64Type), actual: Boolean(BooleanType)"
             ),
-            "v is {:?}",
-            v
+            "v is {v:?}",
         );
     }
 

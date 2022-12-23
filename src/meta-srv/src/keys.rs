@@ -31,7 +31,7 @@ pub(crate) const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
 lazy_static! {
     static ref DATANODE_KEY_PATTERN: Regex =
-        Regex::new(&format!("^{}-([0-9]+)-([0-9]+)$", DN_LEASE_PREFIX)).unwrap();
+        Regex::new(&format!("^{DN_LEASE_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
 }
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LeaseKey {
@@ -52,10 +52,10 @@ impl FromStr for LeaseKey {
         let cluster_id = caps[1].to_string();
         let node_id = caps[2].to_string();
         let cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
-            err_msg: format!("invalid cluster_id: {}", cluster_id),
+            err_msg: format!("invalid cluster_id: {cluster_id}"),
         })?;
         let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
-            err_msg: format!("invalid node_id: {}", node_id),
+            err_msg: format!("invalid node_id: {node_id}"),
         })?;
 
         Ok(Self {
@@ -118,7 +118,7 @@ impl TryFrom<LeaseValue> for Vec<u8> {
     fn try_from(dn_value: LeaseValue) -> Result<Self> {
         Ok(serde_json::to_string(&dn_value)
             .context(error::SerializeToJsonSnafu {
-                input: format!("{:?}", dn_value),
+                input: format!("{dn_value:?}"),
             })?
             .into_bytes())
     }

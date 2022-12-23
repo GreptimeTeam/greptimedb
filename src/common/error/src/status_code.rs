@@ -51,6 +51,7 @@ pub enum StatusCode {
     TableNotFound = 4001,
     TableColumnNotFound = 4002,
     TableColumnExists = 4003,
+    DatabaseNotFound = 4004,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
@@ -86,7 +87,7 @@ impl StatusCode {
 impl fmt::Display for StatusCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // The current debug format is suitable to display.
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -95,7 +96,7 @@ mod tests {
     use super::*;
 
     fn assert_status_code_display(code: StatusCode, msg: &str) {
-        let code_msg = format!("{}", code);
+        let code_msg = format!("{code}");
         assert_eq!(msg, code_msg);
     }
 

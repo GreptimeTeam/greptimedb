@@ -140,7 +140,7 @@ impl Table for MemTable {
 
     async fn scan(
         &self,
-        projection: &Option<Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<PhysicalPlanRef> {
@@ -211,7 +211,7 @@ mod test {
         let ctx = SessionContext::new();
         let table = build_testing_table();
 
-        let scan_stream = table.scan(&Some(vec![1]), &[], None).await.unwrap();
+        let scan_stream = table.scan(Some(&vec![1]), &[], None).await.unwrap();
         let scan_stream = scan_stream.execute(0, ctx.task_ctx()).unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());
@@ -232,7 +232,7 @@ mod test {
         let ctx = SessionContext::new();
         let table = build_testing_table();
 
-        let scan_stream = table.scan(&None, &[], Some(2)).await.unwrap();
+        let scan_stream = table.scan(None, &[], Some(2)).await.unwrap();
         let scan_stream = scan_stream.execute(0, ctx.task_ctx()).unwrap();
         let recordbatch = util::collect(scan_stream).await.unwrap();
         assert_eq!(1, recordbatch.len());

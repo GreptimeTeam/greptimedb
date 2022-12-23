@@ -72,20 +72,20 @@ fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Result<Vec<Vec<Value>>> {
                 {
                     if let Expr::Value(Value::Number(s, b)) = &**expr {
                         match op {
-                            UnaryOperator::Minus => Value::Number(format!("-{}", s), *b),
+                            UnaryOperator::Minus => Value::Number(format!("-{s}"), *b),
                             UnaryOperator::Plus => Value::Number(s.to_string(), *b),
                             _ => unreachable!(),
                         }
                     } else {
                         return error::ParseSqlValueSnafu {
-                            msg: format!("{:?}", expr),
+                            msg: format!("{expr:?}"),
                         }
                         .fail();
                     }
                 }
                 _ => {
                     return error::ParseSqlValueSnafu {
-                        msg: format!("{:?}", expr),
+                        msg: format!("{expr:?}"),
                     }
                     .fail()
                 }
@@ -103,8 +103,7 @@ impl TryFrom<Statement> for Insert {
         match value {
             Statement::Insert { .. } => Ok(Insert { inner: value }),
             unexp => Err(ParserError::ParserError(format!(
-                "Not expected to be {}",
-                unexp
+                "Not expected to be {unexp}"
             ))),
         }
     }

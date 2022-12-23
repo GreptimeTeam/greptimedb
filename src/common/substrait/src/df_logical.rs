@@ -19,7 +19,7 @@ use catalog::CatalogManagerRef;
 use common_error::prelude::BoxedError;
 use common_telemetry::debug;
 use datafusion::arrow::datatypes::SchemaRef as ArrowSchemaRef;
-use datafusion::common::ToDFSchema;
+use datafusion::common::{DFField, DFSchema};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_plan::project_schema;
 use datafusion_expr::{Filter, LogicalPlan, TableScan, TableSource};
@@ -236,7 +236,7 @@ impl DFLogicalSubstraitConvertor {
             .map_err(BoxedError::new)
             .context(InternalSnafu)?
             .context(TableNotFoundSnafu {
-                name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+                name: format!("{catalog_name}.{schema_name}.{table_name}"),
             })?;
         let adapter = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(table_ref),
@@ -262,16 +262,26 @@ impl DFLogicalSubstraitConvertor {
         };
 
         // Calculate the projected schema
-        let projected_schema = project_schema(&stored_schema, projection.as_ref())
-            .context(DFInternalSnafu)?
-            .to_dfschema_ref()
-            .context(DFInternalSnafu)?;
+        let qualified = &format!("{catalog_name}.{schema_name}.{table_name}");
+        let projected_schema = Arc::new(
+            project_schema(&stored_schema, projection.as_ref())
+                .and_then(|x| {
+                    DFSchema::new_with_metadata(
+                        x.fields()
+                            .iter()
+                            .map(|f| DFField::from_qualified(qualified, f.clone()))
+                            .collect(),
+                        x.metadata().clone(),
+                    )
+                })
+                .context(DFInternalSnafu)?,
+        );
 
         ctx.set_df_schema(projected_schema.clone());
 
         // TODO(ruihang): Support limit(fetch)
         Ok(LogicalPlan::TableScan(TableScan {
-            table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+            table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
             source: adapter,
             projection,
             projected_schema,
@@ -387,8 +397,7 @@ impl DFLogicalSubstraitConvertor {
             | LogicalPlan::Analyze(_)
             | LogicalPlan::Extension(_) => InvalidParametersSnafu {
                 reason: format!(
-                    "Trying to convert DDL/DML plan to substrait proto, plan: {:?}",
-                    plan
+                    "Trying to convert DDL/DML plan to substrait proto, plan: {plan:?}",
                 ),
             }
             .fail()?,
@@ -562,7 +571,7 @@ mod test {
         let proto = convertor.encode(plan.clone()).unwrap();
         let tripped_plan = convertor.decode(proto, catalog).unwrap();
 
-        assert_eq!(format!("{:?}", plan), format!("{:?}", tripped_plan));
+        assert_eq!(format!("{plan:?}"), format!("{tripped_plan:?}"));
     }
 
     #[tokio::test]
@@ -596,8 +605,7 @@ mod test {
 
         let table_scan_plan = LogicalPlan::TableScan(TableScan {
             table_name: format!(
-                "{}.{}.{}",
-                DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, DEFAULT_TABLE_NAME
+                "{DEFAULT_CATALOG_NAME}.{DEFAULT_SCHEMA_NAME}.{DEFAULT_TABLE_NAME}",
             ),
             source: adapter,
             projection: Some(projection),

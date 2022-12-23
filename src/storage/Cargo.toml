@@ -21,7 +21,7 @@ futures = "0.3"
 futures-util = "0.3"
 lazy_static = "1.4"
 object-store = { path = "../object-store" }
-parquet = { version = "26", features = ["async"] }
+parquet = { version = "28.0", features = ["async"] }
 paste = "1.0"
 planus = "0.2"
 prost = "0.11"

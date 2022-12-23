@@ -266,8 +266,7 @@ async fn test_query_concurrently() -> Result<()> {
                 let expected: u32 = rand.gen_range(0..100);
                 let result: u32 = connection
                     .query_first(format!(
-                        "SELECT uint32s FROM numbers WHERE uint32s = {}",
-                        expected
+                        "SELECT uint32s FROM numbers WHERE uint32s = {expected}"
                     ))
                     .await
                     .unwrap()

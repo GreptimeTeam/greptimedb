@@ -88,7 +88,7 @@ fn convert_scalar_to_py_obj_and_back() {
         let col = try_into_columnar_value(list_obj, vm);
         if let Err(err) = col {
             let reason = format_py_error(err, vm);
-            assert!(format!("{}", reason).contains(
+            assert!(format!("{reason}").contains(
                 "TypeError: All elements in a list should be same type to cast to Datafusion list!"
             ));
         }
@@ -353,7 +353,7 @@ fn run_builtin_fn_testcases() {
                         },
                         Err(err) => {
                             if !err_res.contains(&err){
-                                panic!("Error message not containing, expect {err_res}, found {}", err)
+                                panic!("Error message not containing, expect {err_res}, found {err}")
                             }
                         }
                     }

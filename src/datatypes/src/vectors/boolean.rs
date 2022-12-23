@@ -296,7 +296,7 @@ mod tests {
         let vec = BooleanVector::from(input.clone());
         assert_eq!(4, vec.len());
         for (i, v) in input.into_iter().enumerate() {
-            assert_eq!(Some(v), vec.get_data(i), "failed at {}", i)
+            assert_eq!(Some(v), vec.get_data(i), "Failed at {i}")
         }
     }
 
@@ -306,7 +306,7 @@ mod tests {
         let vec = input.iter().collect::<BooleanVector>();
         assert_eq!(4, vec.len());
         for (i, v) in input.into_iter().enumerate() {
-            assert_eq!(v, vec.get_data(i), "failed at {}", i)
+            assert_eq!(v, vec.get_data(i), "Failed at {i}")
         }
     }
 
@@ -316,7 +316,7 @@ mod tests {
         let vec = BooleanVector::from(input.clone());
         assert_eq!(4, vec.len());
         for (i, v) in input.into_iter().enumerate() {
-            assert_eq!(v, vec.get_data(i), "failed at {}", i)
+            assert_eq!(v, vec.get_data(i), "failed at {i}")
         }
     }
 

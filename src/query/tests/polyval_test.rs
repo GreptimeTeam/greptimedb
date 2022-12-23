@@ -78,10 +78,7 @@ async fn execute_polyval<'a>(
     table_name: &'a str,
     engine: Arc<dyn QueryEngine>,
 ) -> RecordResult<Vec<RecordBatch>> {
-    let sql = format!(
-        "select POLYVAL({}, 0) as polyval from {}",
-        column_name, table_name
-    );
+    let sql = format!("select POLYVAL({column_name}, 0) as polyval from {table_name}");
     let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();

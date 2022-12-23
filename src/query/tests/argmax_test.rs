@@ -82,10 +82,7 @@ async fn execute_argmax<'a>(
     table_name: &'a str,
     engine: Arc<dyn QueryEngine>,
 ) -> RecordResult<Vec<RecordBatch>> {
-    let sql = format!(
-        "select ARGMAX({}) as argmax from {}",
-        column_name, table_name
-    );
+    let sql = format!("select ARGMAX({column_name}) as argmax from {table_name}");
     let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();

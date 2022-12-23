@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(iterator_try_reduce)]
 pub mod engine;
 pub mod error;
 #[cfg(feature = "python")]

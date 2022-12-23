@@ -23,7 +23,7 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
-use catalog::CatalogList;
+use catalog::{CatalogList, CatalogManager};
 use chrono::DateTime;
 use client::admin::{admin_result_to_output, Admin};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -241,12 +241,12 @@ impl DistInstance {
             .schema(schema_name)
             .context(CatalogSnafu)?
             .context(SchemaNotFoundSnafu {
-                schema_info: format!("{}.{}", catalog_name, schema_name),
+                schema_info: format!("{catalog_name}.{schema_name}"),
             })?
             .table(table_name)
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu {
-                table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+                table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
             })?;
 
         let dist_table = table
@@ -357,6 +357,13 @@ impl SqlQueryHandler for DistInstance {
             .map_err(BoxedError::new)
             .context(server_error::ExecuteStatementSnafu)
     }
+
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
+        self.catalog_manager
+            .schema(catalog, schema)
+            .map(|s| s.is_some())
+            .context(server_error::CatalogSnafu)
+    }
 }
 
 #[async_trait]
@@ -385,7 +392,7 @@ impl GrpcAdminHandler for DistInstance {
         }
         .map_err(BoxedError::new)
         .context(server_error::ExecuteQuerySnafu {
-            query: format!("{:?}", query),
+            query: format!("{query:?}"),
         })
     }
 }

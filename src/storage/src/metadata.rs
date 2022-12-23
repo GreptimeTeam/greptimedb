@@ -450,7 +450,7 @@ where
 {
     if let Some(value) = metadata.get(key) {
         return value.parse().with_context(|_| ParseMetaIntSnafu {
-            key_value: format!("{}={}", key, value),
+            key_value: format!("{key}={value}"),
         });
     }
     // No such key in metadata.

@@ -69,7 +69,7 @@ impl TableProvider for DfTableProviderAdapter {
     async fn scan(
         &self,
         _ctx: &SessionState,
-        projection: &Option<Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         filters: &[DfExpr],
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn DfPhysicalPlan>> {
@@ -134,7 +134,7 @@ impl Table for TableAdapter {
 
     async fn scan(
         &self,
-        projection: &Option<Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<PhysicalPlanRef> {

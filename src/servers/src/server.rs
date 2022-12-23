@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::{error, info};
 use futures::future::{AbortHandle, AbortRegistration, Abortable};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -64,12 +64,12 @@ impl AcceptTask {
                         name, error
                     );
                 } else {
-                    info!("{} server is shutdown.", name);
+                    info!("{name} server is shutdown.");
                 }
                 Ok(())
             }
             None => error::InternalSnafu {
-                err_msg: format!("{} server is not started.", name),
+                err_msg: format!("{name} server is not started."),
             }
             .fail()?,
         }
@@ -86,32 +86,31 @@ impl AcceptTask {
                     tokio::net::TcpListener::bind(addr)
                         .await
                         .context(error::TokioIoSnafu {
-                            err_msg: format!("{} failed to bind addr {}", name, addr),
+                            err_msg: format!("{name} failed to bind addr {addr}"),
                         })?;
                 // get actually bond addr in case input addr use port 0
                 let addr = listener.local_addr()?;
-                info!("{} server started at {}", name, addr);
+                info!("{name} server started at {addr}");
 
                 let stream = TcpListenerStream::new(listener);
                 let stream = Abortable::new(stream, registration);
                 Ok((stream, addr))
             }
             None => error::InternalSnafu {
-                err_msg: format!("{} server has been started.", name),
+                err_msg: format!("{name} server has been started."),
             }
             .fail()?,
         }
     }
 
     fn start_with(&mut self, join_handle: JoinHandle<()>, name: &str) -> Result<()> {
-        if self.join_handle.is_some() {
-            return error::InternalSnafu {
-                err_msg: format!("{} server has been started.", name),
+        ensure!(
+            self.join_handle.is_none(),
+            error::InternalSnafu {
+                err_msg: format!("{name} server has been started."),
             }
-            .fail();
-        }
-        let _ = self.join_handle.insert(join_handle);
-
+        );
+        self.join_handle.get_or_insert(join_handle);
         Ok(())
     }
 }

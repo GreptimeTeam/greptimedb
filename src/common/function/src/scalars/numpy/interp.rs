@@ -343,7 +343,7 @@ mod tests {
             Arc::new(Int64Vector::from_vec(fp.clone())),
         ];
         let vector = interp(&args).unwrap();
-        assert!(matches!(vector.get(0), Value::Float64(v) if v==x[0] as f64));
+        assert!(matches!(vector.get(0), Value::Float64(v) if v == x[0]));
 
         // x=None output:Null
         let input = vec![None, Some(0.0), Some(0.3)];

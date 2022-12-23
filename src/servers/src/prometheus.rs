@@ -63,8 +63,7 @@ pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
     let mut conditions: Vec<String> = Vec::with_capacity(label_matches.len());
 
     conditions.push(format!(
-        "{}>={} AND {}<={}",
-        TIMESTAMP_COLUMN_NAME, start_timestamp_ms, TIMESTAMP_COLUMN_NAME, end_timestamp_ms,
+        "{TIMESTAMP_COLUMN_NAME}>={start_timestamp_ms} AND {TIMESTAMP_COLUMN_NAME}<={end_timestamp_ms}",
     ));
 
     for m in label_matches {
@@ -82,18 +81,18 @@ pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
 
         match m_type {
             MatcherType::Eq => {
-                conditions.push(format!("{}='{}'", name, value));
+                conditions.push(format!("{name}='{value}'"));
             }
             MatcherType::Neq => {
-                conditions.push(format!("{}!='{}'", name, value));
+                conditions.push(format!("{name}!='{value}'"));
             }
             // Case sensitive regexp match
             MatcherType::Re => {
-                conditions.push(format!("{}~'{}'", name, value));
+                conditions.push(format!("{name}~'{value}'"));
             }
             // Case sensitive regexp not match
             MatcherType::Nre => {
-                conditions.push(format!("{}!~'{}'", name, value));
+                conditions.push(format!("{name}!~'{value}'"));
             }
         }
     }
@@ -103,8 +102,7 @@ pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
     Ok((
         table_name.to_string(),
         format!(
-            "select * from {}.{} where {} order by {}",
-            db, table_name, conditions, TIMESTAMP_COLUMN_NAME,
+            "select * from {db}.{table_name} where {conditions} order by {TIMESTAMP_COLUMN_NAME}",
         ),
     ))
 }

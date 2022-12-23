@@ -93,8 +93,7 @@ impl LocalFileLogStore {
         Arc::get_mut(active_file)
             .with_context(|| InternalSnafu {
                 msg: format!(
-                    "Concurrent modification on log store {} start is not allowed",
-                    active_file_name
+                    "Concurrent modification on log store {active_file_name} start is not allowed"
                 ),
             })?
             .start()
@@ -143,9 +142,9 @@ impl LocalFileLogStore {
             let file = LogFile::open(path, config).await?;
             info!("Load log store file {}: {:?}", start_id, file);
             if map.contains_key(&start_id) {
-                error!("Log file with start entry id: {} already exists", start_id);
+                error!("Log file with start entry id: {start_id} already exists");
                 return DuplicateFileSnafu {
-                    msg: format!("File with start id: {} duplicates on start", start_id),
+                    msg: format!("File with start id: {start_id} duplicates on start"),
                 }
                 .fail();
             }

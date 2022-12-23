@@ -96,7 +96,7 @@ impl SqlHandler {
         result
     }
 
-    pub(crate) fn get_table<'a>(&self, table_ref: &'a TableReference) -> Result<TableRef> {
+    pub(crate) fn get_table(&self, table_ref: &TableReference) -> Result<TableRef> {
         self.table_engine
             .get_table(&EngineContext::default(), table_ref)
             .with_context(|_| GetTableSnafu {
@@ -176,7 +176,7 @@ mod tests {
 
         async fn scan(
             &self,
-            _projection: &Option<Vec<usize>>,
+            _projection: Option<&Vec<usize>>,
             _filters: &[Expr],
             _limit: Option<usize>,
         ) -> TableResult<PhysicalPlanRef> {

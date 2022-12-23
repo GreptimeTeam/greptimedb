@@ -154,7 +154,7 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
             collect_values!(values.i32_values, |v| ValueRef::from(*v))
         }
         ColumnDataType::Int64 => {
-            collect_values!(values.i64_values, |v| ValueRef::from(*v as i64))
+            collect_values!(values.i64_values, |v| ValueRef::from(*v))
         }
         ColumnDataType::Uint8 => {
             collect_values!(values.u8_values, |v| ValueRef::from(*v as u8))
@@ -166,7 +166,7 @@ fn collect_column_values(column_datatype: ColumnDataType, values: &Values) -> Ve
             collect_values!(values.u32_values, |v| ValueRef::from(*v))
         }
         ColumnDataType::Uint64 => {
-            collect_values!(values.u64_values, |v| ValueRef::from(*v as u64))
+            collect_values!(values.u64_values, |v| ValueRef::from(*v))
         }
         ColumnDataType::Float32 => collect_values!(values.f32_values, |v| ValueRef::from(*v)),
         ColumnDataType::Float64 => collect_values!(values.f64_values, |v| ValueRef::from(*v)),
@@ -725,7 +725,7 @@ mod tests {
 
         async fn scan(
             &self,
-            _projection: &Option<Vec<usize>>,
+            _projection: Option<&Vec<usize>>,
             _filters: &[Expr],
             _limit: Option<usize>,
         ) -> TableResult<PhysicalPlanRef> {

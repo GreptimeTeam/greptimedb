@@ -82,10 +82,7 @@ async fn execute_argmin<'a>(
     table_name: &'a str,
     engine: Arc<dyn QueryEngine>,
 ) -> RecordResult<Vec<RecordBatch>> {
-    let sql = format!(
-        "select argmin({}) as argmin from {}",
-        column_name, table_name
-    );
+    let sql = format!("select argmin({column_name}) as argmin from {table_name}");
     let plan = engine
         .sql_to_plan(&sql, Arc::new(QueryContext::new()))
         .unwrap();

@@ -41,7 +41,7 @@ impl Environment for Env {
         match mode {
             "standalone" => Self::start_standalone().await,
             "distributed" => Self::start_distributed().await,
-            _ => panic!("Unexpected mode: {}", mode),
+            _ => panic!("Unexpected mode: {mode}"),
         }
     }
 
@@ -75,7 +75,7 @@ impl Env {
             .write(true)
             .truncate(true)
             .open(SERVER_LOG_FILE)
-            .unwrap_or_else(|_| panic!("Cannot open log file at {}", SERVER_LOG_FILE));
+            .unwrap_or_else(|_| panic!("Cannot open log file at {SERVER_LOG_FILE}"));
         // Start the DB
         let server_process = Command::new("./greptime")
             .current_dir(util::get_binary_dir("debug"))
@@ -88,10 +88,7 @@ impl Env {
         if !is_up {
             panic!("Server doesn't up in 10 seconds, quit.")
         }
-        println!(
-            "Started, going to test. Log will be write to {}",
-            SERVER_LOG_FILE
-        );
+        println!("Started, going to test. Log will be write to {SERVER_LOG_FILE}");
 
         let client = Client::with_urls(vec![SERVER_ADDR]);
         let db = DB::new("greptime", client.clone());
@@ -143,10 +140,10 @@ impl Display for ResultDisplayer {
                     )
                 }
                 ObjectResult::Mutate(mutate_result) => {
-                    write!(f, "{:?}", mutate_result)
+                    write!(f, "{mutate_result:?}")
                 }
             },
-            Err(e) => write!(f, "Failed to execute, error: {:?}", e),
+            Err(e) => write!(f, "Failed to execute, error: {e:?}"),
         }
     }
 }

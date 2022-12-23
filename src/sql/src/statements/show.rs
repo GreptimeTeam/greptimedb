@@ -28,8 +28,8 @@ impl fmt::Display for ShowKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ShowKind::All => write!(f, "ALL"),
-            ShowKind::Like(ident) => write!(f, "LIKE {}", ident),
-            ShowKind::Where(expr) => write!(f, "WHERE {}", expr),
+            ShowKind::Like(ident) => write!(f, "LIKE {ident}"),
+            ShowKind::Where(expr) => write!(f, "WHERE {expr}"),
         }
     }
 }

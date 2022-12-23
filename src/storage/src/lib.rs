@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Storage engine implementation.
-#![feature(map_first_last)]
+
 mod background;
 mod chunk;
 pub mod codec;

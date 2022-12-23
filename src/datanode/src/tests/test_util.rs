@@ -40,8 +40,8 @@ pub struct TestGuard {
 }
 
 pub fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
-    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{}", name)).unwrap();
-    let data_tmp_dir = TempDir::new(&format!("gt_data_{}", name)).unwrap();
+    let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
+    let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
     let opts = DatanodeOptions {
         wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
         storage: ObjectStoreConfig::File {

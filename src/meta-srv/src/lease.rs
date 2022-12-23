@@ -53,5 +53,5 @@ where
 
 #[inline]
 pub fn get_lease_prefix(cluster_id: u64) -> Vec<u8> {
-    format!("{}-{}", DN_LEASE_PREFIX, cluster_id).into_bytes()
+    format!("{DN_LEASE_PREFIX}-{cluster_id}").into_bytes()
 }

@@ -38,12 +38,12 @@ const LAST_CHECKPOINT_FILE: &str = "_last_checkpoint";
 
 #[inline]
 pub fn delta_file(version: ManifestVersion) -> String {
-    format!("{:020}.json", version)
+    format!("{version:020}.json")
 }
 
 #[inline]
 pub fn checkpoint_file(version: ManifestVersion) -> String {
-    format!("{:020}.checkpoint", version)
+    format!("{version:020}.checkpoint")
 }
 
 /// Return's the delta file version from path
@@ -54,7 +54,7 @@ pub fn checkpoint_file(version: ManifestVersion) -> String {
 pub fn delta_version(path: &str) -> ManifestVersion {
     let s = path.split('.').next().unwrap();
     s.parse()
-        .unwrap_or_else(|_| panic!("Invalid delta file: {}", path))
+        .unwrap_or_else(|_| panic!("Invalid delta file: {path}"))
 }
 
 #[inline]
@@ -298,7 +298,7 @@ mod tests {
 
         for v in 0..5 {
             log_store
-                .save(v, format!("hello, {}", v).as_bytes())
+                .save(v, format!("hello, {v}").as_bytes())
                 .await
                 .unwrap();
         }
@@ -307,7 +307,7 @@ mod tests {
         for v in 1..4 {
             let (version, bytes) = it.next_log().await.unwrap().unwrap();
             assert_eq!(v, version);
-            assert_eq!(format!("hello, {}", v).as_bytes(), bytes);
+            assert_eq!(format!("hello, {v}").as_bytes(), bytes);
         }
         assert!(it.next_log().await.unwrap().is_none());
 
@@ -315,7 +315,7 @@ mod tests {
         for v in 0..5 {
             let (version, bytes) = it.next_log().await.unwrap().unwrap();
             assert_eq!(v, version);
-            assert_eq!(format!("hello, {}", v).as_bytes(), bytes);
+            assert_eq!(format!("hello, {v}").as_bytes(), bytes);
         }
         assert!(it.next_log().await.unwrap().is_none());
 
@@ -327,7 +327,7 @@ mod tests {
         for v in 3..5 {
             let (version, bytes) = it.next_log().await.unwrap().unwrap();
             assert_eq!(v, version);
-            assert_eq!(format!("hello, {}", v).as_bytes(), bytes);
+            assert_eq!(format!("hello, {v}").as_bytes(), bytes);
         }
         assert!(it.next_log().await.unwrap().is_none());
 

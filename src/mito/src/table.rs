@@ -56,7 +56,7 @@ use crate::manifest::TableManifest;
 
 #[inline]
 fn table_manifest_dir(table_dir: &str) -> String {
-    format!("{}/manifest/", table_dir)
+    format!("{table_dir}/manifest/")
 }
 
 /// [Table] implementation.
@@ -166,14 +166,14 @@ impl<R: Region> Table for MitoTable<R> {
 
     async fn scan(
         &self,
-        projection: &Option<Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         filters: &[Expr],
         _limit: Option<usize>,
     ) -> TableResult<PhysicalPlanRef> {
         let read_ctx = ReadContext::default();
         let snapshot = self.region.snapshot(&read_ctx).map_err(TableError::new)?;
 
-        let projection = self.transform_projection(&self.region, projection.clone())?;
+        let projection = self.transform_projection(&self.region, projection.cloned())?;
         let filters = filters.into();
         let scan_request = ScanRequest {
             projection,
@@ -284,7 +284,7 @@ impl Stream for ChunkStream {
 
 #[inline]
 fn column_qualified_name(table_name: &str, region_name: &str, column_name: &str) -> String {
-    format!("{}.{}.{}", table_name, region_name, column_name)
+    format!("{table_name}.{region_name}.{column_name}")
 }
 
 impl<R: Region> MitoTable<R> {

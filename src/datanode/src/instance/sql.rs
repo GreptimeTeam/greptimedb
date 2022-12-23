@@ -187,8 +187,7 @@ fn table_idents_to_full_name(
         )),
         _ => error::InvalidSqlSnafu {
             msg: format!(
-                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {}",
-                obj_name
+                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
             ),
         }.fail(),
     }
@@ -227,6 +226,13 @@ impl SqlQueryHandler for Instance {
                 BoxedError::new(e)
             })
             .context(servers::error::ExecuteStatementSnafu)
+    }
+
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> servers::error::Result<bool> {
+        self.catalog_manager
+            .schema(catalog, schema)
+            .map(|s| s.is_some())
+            .context(servers::error::CatalogSnafu)
     }
 }
 

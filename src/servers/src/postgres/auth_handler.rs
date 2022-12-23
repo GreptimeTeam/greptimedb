@@ -29,7 +29,7 @@ use snafu::ResultExt;
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error;
 use crate::error::Result;
-use crate::query_handler::CatalogHandlerRef;
+use crate::query_handler::SqlQueryHandlerRef;
 
 struct PgPwdVerifier {
     user_provider: Option<UserProviderRef>,
@@ -110,20 +110,20 @@ pub struct PgAuthStartupHandler {
     verifier: PgPwdVerifier,
     param_provider: GreptimeDBStartupParameters,
     force_tls: bool,
-    catalog_handler: CatalogHandlerRef,
+    query_handler: SqlQueryHandlerRef,
 }
 
 impl PgAuthStartupHandler {
     pub fn new(
         user_provider: Option<UserProviderRef>,
         force_tls: bool,
-        catalog_handler: CatalogHandlerRef,
+        query_handler: SqlQueryHandlerRef,
     ) -> Self {
         PgAuthStartupHandler {
             verifier: PgPwdVerifier { user_provider },
             param_provider: GreptimeDBStartupParameters::new(),
             force_tls,
-            catalog_handler,
+            query_handler,
         }
     }
 }
@@ -154,7 +154,7 @@ impl StartupHandler for PgAuthStartupHandler {
                 let db_ref = client.metadata().get(super::METADATA_DATABASE);
                 if let Some(db) = db_ref {
                     if !self
-                        .catalog_handler
+                        .query_handler
                         .is_valid_schema(DEFAULT_CATALOG_NAME, db)
                         .map_err(|e| PgWireError::ApiError(Box::new(e)))?
                     {
@@ -162,7 +162,7 @@ impl StartupHandler for PgAuthStartupHandler {
                             client,
                             "FATAL",
                             "3D000",
-                            format!("Database not found: {}", db),
+                            format!("Database not found: {db}"),
                         )
                         .await?;
                         return Ok(());

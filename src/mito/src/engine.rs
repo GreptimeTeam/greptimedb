@@ -49,7 +49,7 @@ const INIT_TABLE_VERSION: TableVersion = 0;
 /// Generate region name in the form of "{TABLE_ID}_{REGION_NUMBER}"
 #[inline]
 fn region_name(table_id: TableId, n: u32) -> String {
-    format!("{}_{:010}", table_id, n)
+    format!("{table_id}_{n:010}")
 }
 
 #[inline]
@@ -59,7 +59,7 @@ fn region_id(table_id: TableId, n: u32) -> RegionId {
 
 #[inline]
 fn table_dir(schema_name: &str, table_id: TableId) -> String {
-    format!("{}/{}/", schema_name, table_id)
+    format!("{schema_name}/{table_id}/")
 }
 
 /// [TableEngine] implementation.
@@ -109,15 +109,15 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         Ok(self.inner.alter_table(ctx, req).await?)
     }
 
-    fn get_table<'a>(
+    fn get_table(
         &self,
         _ctx: &EngineContext,
-        table_ref: &'a TableReference,
+        table_ref: &TableReference,
     ) -> TableResult<Option<TableRef>> {
         Ok(self.inner.get_table(table_ref))
     }
 
-    fn table_exists<'a>(&self, _ctx: &EngineContext, table_ref: &'a TableReference) -> bool {
+    fn table_exists(&self, _ctx: &EngineContext, table_ref: &TableReference) -> bool {
         self.inner.get_table(table_ref).is_some()
     }
 
@@ -292,7 +292,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 return Ok(table);
             } else {
                 return TableExistsSnafu {
-                    table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+                    table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
                 }
                 .fail();
             }
@@ -459,7 +459,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         Ok(table)
     }
 
-    fn get_table<'a>(&self, table_ref: &'a TableReference) -> Option<TableRef> {
+    fn get_table(&self, table_ref: &TableReference) -> Option<TableRef> {
         self.tables
             .read()
             .unwrap()
@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
         let session_ctx = SessionContext::new();
-        let stream = table.scan(&None, &[], None).await.unwrap();
+        let stream = table.scan(None, &[], None).await.unwrap();
         let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
@@ -643,7 +643,7 @@ mod tests {
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
         let session_ctx = SessionContext::new();
-        let stream = table.scan(&None, &[], None).await.unwrap();
+        let stream = table.scan(None, &[], None).await.unwrap();
         let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
@@ -737,7 +737,7 @@ mod tests {
         assert_eq!(2, table.insert(insert_req).await.unwrap());
 
         let session_ctx = SessionContext::new();
-        let stream = table.scan(&None, &[], None).await.unwrap();
+        let stream = table.scan(None, &[], None).await.unwrap();
         let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(tss, *batch.column(3));
 
         // Scan with projections: cpu and memory
-        let stream = table.scan(&Some(vec![1, 2]), &[], None).await.unwrap();
+        let stream = table.scan(Some(&vec![1, 2]), &[], None).await.unwrap();
         let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
@@ -776,7 +776,7 @@ mod tests {
         assert_eq!(memories, *batch.column(1));
 
         // Scan with projections: only ts
-        let stream = table.scan(&Some(vec![3]), &[], None).await.unwrap();
+        let stream = table.scan(Some(&vec![3]), &[], None).await.unwrap();
         let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         assert_eq!(1, batches.len());
@@ -819,7 +819,7 @@ mod tests {
         assert_eq!(test_batch_size, table.insert(insert_req).await.unwrap());
 
         let session_ctx = SessionContext::new();
-        let stream = table.scan(&None, &[], None).await.unwrap();
+        let stream = table.scan(None, &[], None).await.unwrap();
         let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
         let batches = util::collect(stream).await.unwrap();
         let mut total = 0;
@@ -876,7 +876,7 @@ mod tests {
         let result = table_engine.create_table(&ctx, request).await;
 
         assert!(result.is_err());
-        assert!(matches!(result, Err(e) if format!("{:?}", e).contains("Table already exists")));
+        assert!(matches!(result, Err(e) if format!("{e:?}").contains("Table already exists")));
     }
 
     #[tokio::test]

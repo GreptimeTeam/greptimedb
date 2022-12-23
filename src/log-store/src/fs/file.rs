@@ -653,7 +653,7 @@ fn read_at(file: &Arc<File>, offset: usize, file_length: usize) -> Result<Chunk>
     if offset > file_length {
         return Err(Eof);
     }
-    let size = CHUNK_SIZE.min((file_length - offset) as usize);
+    let size = CHUNK_SIZE.min(file_length - offset);
     let mut data = Box::new([0u8; CHUNK_SIZE]);
     crate::fs::io::pread_exact(file.as_ref(), &mut data[0..size], offset as u64)?;
     Ok(Chunk::new(data, size))
@@ -684,7 +684,7 @@ mod tests {
 
         let mut file = LogFile::open(path.clone(), &config)
             .await
-            .unwrap_or_else(|_| panic!("Failed to open file: {}", path));
+            .unwrap_or_else(|_| panic!("Failed to open file: {path}"));
         file.start().await.expect("Failed to start log file");
 
         assert_eq!(
@@ -873,7 +873,7 @@ mod tests {
 
         let mut file = LogFile::open(path.clone(), &config)
             .await
-            .unwrap_or_else(|_| panic!("Failed to open file: {}", path));
+            .unwrap_or_else(|_| panic!("Failed to open file: {path}"));
 
         let state = file.state.clone();
         file.start().await.unwrap();

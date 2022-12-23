@@ -69,7 +69,6 @@ impl UserInfo {
         &self.username
     }
 
-    #[cfg(test)]
     pub fn new(username: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -165,9 +164,7 @@ pub mod test {
                     Password::PlainText(password) => {
                         if username == "greptime" {
                             if password == "greptime" {
-                                return Ok(UserInfo {
-                                    username: "greptime".to_string(),
-                                });
+                                return Ok(UserInfo::new("greptime"));
                             } else {
                                 return super::UserPasswordMismatchSnafu {
                                     username: username.to_string(),

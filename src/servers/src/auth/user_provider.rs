@@ -113,9 +113,7 @@ impl UserProvider for StaticUserProvider {
                 match input_pwd {
                     Password::PlainText(pwd) => {
                         return if save_pwd == pwd.as_bytes() {
-                            Ok(UserInfo {
-                                username: username.to_string(),
-                            })
+                            Ok(UserInfo::new(username))
                         } else {
                             UserPasswordMismatchSnafu {
                                 username: username.to_string(),
@@ -152,7 +150,7 @@ fn auth_mysql(
     }
     let candidate_stage_2 = sha1_one(&xor_result);
     if candidate_stage_2 == hash_stage_2 {
-        Ok(UserInfo { username })
+        Ok(UserInfo::new(username))
     } else {
         UserPasswordMismatchSnafu { username }.fail()
     }
@@ -245,7 +243,7 @@ admin=654321",
             assert!(lw.flush().is_ok());
         }
 
-        let param = format!("file:{}", file_path);
+        let param = format!("file:{file_path}");
         let provider = StaticUserProvider::try_from(param.as_str()).unwrap();
         test_auth(&provider, "root", "123456").await;
         test_auth(&provider, "admin", "654321").await;

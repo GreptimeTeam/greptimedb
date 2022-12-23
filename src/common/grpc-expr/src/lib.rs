@@ -1,4 +1,3 @@
-#![feature(assert_matches)]
 // Copyright 2022 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");

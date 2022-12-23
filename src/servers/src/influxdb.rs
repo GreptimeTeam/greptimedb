@@ -81,10 +81,7 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertRequest> {
 
             writer.commit();
         }
-        Ok(writers
-            .into_iter()
-            .map(|(_, writer)| writer.finish())
-            .collect())
+        Ok(writers.into_values().map(|x| x.finish()).collect())
     }
 }
 

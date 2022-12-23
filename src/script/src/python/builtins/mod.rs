@@ -145,7 +145,7 @@ fn try_into_py_obj(col: DFColValue, vm: &VirtualMachine) -> PyResult<PyObjectRef
         DFColValue::Array(arr) => {
             let ret = PyVector::from(
                 HelperVec::try_into_vector(arr)
-                    .map_err(|err| vm.new_type_error(format!("Unsupported type: {:#?}", err)))?,
+                    .map_err(|err| vm.new_type_error(format!("Unsupported type: {err:#?}")))?,
             )
             .into_pyobject(vm);
             Ok(ret)
@@ -319,13 +319,11 @@ pub(crate) mod greptime_builtin {
         let func: Option<FunctionRef> = FUNCTION_REGISTRY.get_function(name);
         let res = match func {
             Some(f) => f.eval(Default::default(), &v),
-            None => return Err(vm.new_type_error(format!("Can't find function {}", name))),
+            None => return Err(vm.new_type_error(format!("Can't find function {name}"))),
         };
         match res {
             Ok(v) => Ok(v.into()),
-            Err(err) => {
-                Err(vm.new_runtime_error(format!("Fail to evaluate the function,: {}", err)))
-            }
+            Err(err) => Err(vm.new_runtime_error(format!("Fail to evaluate the function,: {err}"))),
         }
     }
 
@@ -338,26 +336,24 @@ pub(crate) mod greptime_builtin {
         let func = FUNCTION_REGISTRY.get_aggr_function(name);
         let f = match func {
             Some(f) => f.create().creator(),
-            None => return Err(vm.new_type_error(format!("Can't find function {}", name))),
+            None => return Err(vm.new_type_error(format!("Can't find function {name}"))),
         };
         let types: Vec<_> = v.iter().map(|v| v.data_type()).collect();
         let acc = f(&types);
         let mut acc = match acc {
             Ok(acc) => acc,
             Err(err) => {
-                return Err(vm.new_runtime_error(format!("Failed to create accumulator: {}", err)))
+                return Err(vm.new_runtime_error(format!("Failed to create accumulator: {err}")))
             }
         };
         match acc.update_batch(&v) {
             Ok(_) => (),
-            Err(err) => {
-                return Err(vm.new_runtime_error(format!("Failed to update batch: {}", err)))
-            }
+            Err(err) => return Err(vm.new_runtime_error(format!("Failed to update batch: {err}"))),
         };
         let res = match acc.evaluate() {
             Ok(r) => r,
             Err(err) => {
-                return Err(vm.new_runtime_error(format!("Failed to evaluate accumulator: {}", err)))
+                return Err(vm.new_runtime_error(format!("Failed to evaluate accumulator: {err}")))
             }
         };
         let res = val_to_pyobj(res, vm);
@@ -792,7 +788,7 @@ pub(crate) mod greptime_builtin {
                 ConstantVector::new(Arc::new(Int64Vector::from_vec(vec![pow])) as _, len_base);
             Arc::new(ret) as _
         } else {
-            return Err(vm.new_type_error(format!("Unsupported type({:#?}) for pow()", pow)));
+            return Err(vm.new_type_error(format!("Unsupported type({pow:#?}) for pow()")));
         };
         // pyfunction can return PyResult<...>, args can be like PyObjectRef or anything
         // impl IntoPyNativeFunc, see rustpython-vm function for more details
@@ -837,8 +833,7 @@ pub(crate) mod greptime_builtin {
             let ret = cur.slice(0, 0);
             let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
                 vm.new_type_error(format!(
-                    "Can't cast result into vector, result: {:?}, err: {:?}",
-                    ret, e
+                    "Can't cast result into vector, result: {ret:?}, err: {e:?}",
                 ))
             })?;
             return Ok(ret.into());
@@ -850,8 +845,7 @@ pub(crate) mod greptime_builtin {
         })?;
         let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
-                "Can't cast result into vector, result: {:?}, err: {:?}",
-                ret, e
+                "Can't cast result into vector, result: {ret:?}, err: {e:?}",
             ))
         })?;
         Ok(ret.into())
@@ -864,8 +858,7 @@ pub(crate) mod greptime_builtin {
             let ret = cur.slice(0, 0);
             let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
                 vm.new_type_error(format!(
-                    "Can't cast result into vector, result: {:?}, err: {:?}",
-                    ret, e
+                    "Can't cast result into vector, result: {ret:?}, err: {e:?}",
                 ))
             })?;
             return Ok(ret.into());
@@ -877,8 +870,7 @@ pub(crate) mod greptime_builtin {
         })?;
         let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
-                "Can't cast result into vector, result: {:?}, err: {:?}",
-                ret, e
+                "Can't cast result into vector, result: {ret:?}, err: {e:?}",
             ))
         })?;
         Ok(ret.into())
@@ -929,7 +921,7 @@ pub(crate) mod greptime_builtin {
             .as_any()
             .downcast_ref::<Int64Array>()
             .ok_or_else(|| {
-                vm.new_type_error(format!("ts must be int64, found: {:?}", ts_array_ref))
+                vm.new_type_error(format!("ts must be int64, found: {ts_array_ref:?}"))
             })?;
         let slices = {
             let oldest = aggregate::min(ts)
@@ -975,7 +967,7 @@ pub(crate) mod greptime_builtin {
                             },
                             Err(err) => Err(vm
                                 .new_runtime_error(
-                                    format!("expect `interval()`'s `func` return a PyVector(`vector`) or int/float/bool, found return to be {:?}, error msg: {err}", obj)
+                                    format!("expect `interval()`'s `func` return a PyVector(`vector`) or int/float/bool, found return to be {obj:?}, error msg: {err}")
                                 )
                             )
                         }
@@ -1019,8 +1011,7 @@ pub(crate) mod greptime_builtin {
         };
         let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
-                "Can't cast result into vector, result: {:?}, err: {:?}",
-                ret, e
+                "Can't cast result into vector, result: {ret:?}, err: {e:?}",
             ))
         })?;
         Ok(ret.into())
@@ -1036,8 +1027,7 @@ pub(crate) mod greptime_builtin {
         };
         let ret = Helper::try_into_vector(ret.clone()).map_err(|e| {
             vm.new_type_error(format!(
-                "Can't cast result into vector, result: {:?}, err: {:?}",
-                ret, e
+                "Can't cast result into vector, result: {ret:?}, err: {e:?}",
             ))
         })?;
         Ok(ret.into())

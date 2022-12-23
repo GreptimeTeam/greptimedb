@@ -61,7 +61,7 @@ impl Table for SystemCatalogTable {
 
     async fn scan(
         &self,
-        _projection: &Option<Vec<usize>>,
+        _projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> table::Result<PhysicalPlanRef> {
@@ -129,7 +129,7 @@ impl SystemCatalogTable {
         let ctx = SessionContext::new();
         let scan = self
             .table
-            .scan(&full_projection, &[], None)
+            .scan(full_projection, &[], None)
             .await
             .context(error::SystemCatalogTableScanSnafu)?;
         let stream = scan
@@ -197,7 +197,7 @@ pub fn build_table_insert_request(full_table_name: String, table_id: TableId) ->
 }
 
 pub fn build_schema_insert_request(catalog_name: String, schema_name: String) -> InsertRequest {
-    let full_schema_name = format!("{}.{}", catalog_name, schema_name);
+    let full_schema_name = format!("{catalog_name}.{schema_name}");
     build_insert_request(
         EntryType::Schema,
         full_schema_name.as_bytes(),
@@ -390,7 +390,7 @@ mod tests {
         if let Entry::Catalog(e) = entry {
             assert_eq!("some_catalog", e.catalog_name);
         } else {
-            panic!("Unexpected type: {:?}", entry);
+            panic!("Unexpected type: {entry:?}");
         }
     }
 
@@ -407,7 +407,7 @@ mod tests {
             assert_eq!("some_catalog", e.catalog_name);
             assert_eq!("some_schema", e.schema_name);
         } else {
-            panic!("Unexpected type: {:?}", entry);
+            panic!("Unexpected type: {entry:?}");
         }
     }
 
@@ -426,7 +426,7 @@ mod tests {
             assert_eq!("some_table", e.table_name);
             assert_eq!(42, e.table_id);
         } else {
-            panic!("Unexpected type: {:?}", entry);
+            panic!("Unexpected type: {entry:?}");
         }
     }
 

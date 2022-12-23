@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use crate::error::{self, Error, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;
 use crate::vectors::VectorRef;
 
-pub type Metadata = BTreeMap<String, String>;
+pub type Metadata = HashMap<String, String>;
 
 /// Key used to store whether the column is time index in arrow field's metadata.
 const TIME_INDEX_KEY: &str = "greptime:time_index";
@@ -131,7 +131,7 @@ impl TryFrom<&Field> for ColumnSchema {
 
     fn try_from(field: &Field) -> Result<ColumnSchema> {
         let data_type = ConcreteDataType::try_from(field.data_type())?;
-        let mut metadata = field.metadata().cloned().unwrap_or_default();
+        let mut metadata = field.metadata().clone();
         let default_constraint = match metadata.remove(DEFAULT_CONSTRAINT_KEY) {
             Some(json) => {
                 Some(serde_json::from_str(&json).context(error::DeserializeSnafu { json })?)
@@ -176,7 +176,7 @@ impl TryFrom<&ColumnSchema> for Field {
             column_schema.data_type.as_arrow_type(),
             column_schema.is_nullable(),
         )
-        .with_metadata(Some(metadata)))
+        .with_metadata(metadata))
     }
 }
 
@@ -215,11 +215,7 @@ mod tests {
         assert!(field.is_nullable());
         assert_eq!(
             "{\"Value\":{\"Int32\":99}}",
-            field
-                .metadata()
-                .unwrap()
-                .get(DEFAULT_CONSTRAINT_KEY)
-                .unwrap()
+            field.metadata().get(DEFAULT_CONSTRAINT_KEY).unwrap()
         );
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
@@ -241,12 +237,8 @@ mod tests {
             .is_none());
 
         let field = Field::try_from(&column_schema).unwrap();
-        assert_eq!("v1", field.metadata().unwrap().get("k1").unwrap());
-        assert!(field
-            .metadata()
-            .unwrap()
-            .get(DEFAULT_CONSTRAINT_KEY)
-            .is_some());
+        assert_eq!("v1", field.metadata().get("k1").unwrap());
+        assert!(field.metadata().get(DEFAULT_CONSTRAINT_KEY).is_some());
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
         assert_eq!(column_schema, new_column_schema);

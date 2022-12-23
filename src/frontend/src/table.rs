@@ -97,7 +97,7 @@ impl Table for DistTable {
 
     async fn scan(
         &self,
-        projection: &Option<Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
     ) -> table::Result<PhysicalPlanRef> {
@@ -121,7 +121,7 @@ impl Table for DistTable {
             partition_execs.push(Arc::new(PartitionExec {
                 table_name: self.table_name.clone(),
                 datanode_instance,
-                projection: projection.clone(),
+                projection: projection.cloned(),
                 filters: filters.to_vec(),
                 limit,
                 batches: Arc::new(RwLock::new(None)),
@@ -162,9 +162,9 @@ impl DistTable {
         filters: &[Expr],
     ) -> Result<Vec<RegionNumber>> {
         let regions = if let Some((first, rest)) = filters.split_first() {
-            let mut target = self.find_regions0(partition_rule.clone(), first)?;
+            let mut target = Self::find_regions0(partition_rule.clone(), first)?;
             for filter in rest {
-                let regions = self.find_regions0(partition_rule.clone(), filter)?;
+                let regions = Self::find_regions0(partition_rule.clone(), filter)?;
 
                 // When all filters are provided as a collection, it often implicitly states that
                 // "all filters must be satisfied". So we join all the results here.
@@ -193,7 +193,6 @@ impl DistTable {
     //   - expr with arithmetic like "a + 1 < 10" (should have been optimized in logic plan?)
     //   - not comparison or neither "AND" nor "OR" operations, for example, "a LIKE x"
     fn find_regions0(
-        &self,
         partition_rule: PartitionRuleRef<Error>,
         filter: &Expr,
     ) -> Result<HashSet<RegionNumber>> {
@@ -222,9 +221,9 @@ impl DistTable {
                 if matches!(op, Operator::And | Operator::Or) =>
             {
                 let left_regions =
-                    self.find_regions0(partition_rule.clone(), &(*left.clone()).into())?;
+                    Self::find_regions0(partition_rule.clone(), &(*left.clone()).into())?;
                 let right_regions =
-                    self.find_regions0(partition_rule.clone(), &(*right.clone()).into())?;
+                    Self::find_regions0(partition_rule.clone(), &(*right.clone()).into())?;
                 let regions = match op {
                     Operator::And => left_regions
                         .intersection(&right_regions)
@@ -385,8 +384,8 @@ impl DistTable {
     }
 }
 
-fn project_schema(table_schema: SchemaRef, projection: &Option<Vec<usize>>) -> SchemaRef {
-    if let Some(projection) = &projection {
+fn project_schema(table_schema: SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
+    if let Some(projection) = projection {
         let columns = table_schema.column_schemas();
         let projected = projection
             .iter()
@@ -864,7 +863,7 @@ mod test {
     ) {
         let expected_output = expected_output.into_iter().join("\n");
         let table_scan = table
-            .scan(&projection, filters.as_slice(), None)
+            .scan(projection.as_ref(), filters.as_slice(), None)
             .await
             .unwrap();
         assert_eq!(

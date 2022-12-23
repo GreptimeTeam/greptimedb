@@ -69,8 +69,7 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("Table `greptime.public.test_table` already exists"),
-            "Actual error message: {}",
-            err
+            "Actual error message: {err}",
         );
     }
 

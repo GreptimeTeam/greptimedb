@@ -255,7 +255,7 @@ impl JsonResponse {
 
                         Err(e) => {
                             return Self::with_error(
-                                format!("Recordbatch error: {}", e),
+                                format!("Recordbatch error: {e}"),
                                 e.status_code(),
                             );
                         }
@@ -271,7 +271,7 @@ impl JsonResponse {
                 },
                 Err(e) => {
                     return Self::with_error(
-                        format!("Query engine output error: {}", e),
+                        format!("Query engine output error: {e}"),
                         e.status_code(),
                     );
                 }
@@ -378,7 +378,7 @@ impl HttpServer {
                 ..Info::default()
             },
             servers: vec![OpenAPIServer {
-                url: format!("/{}", HTTP_API_VERSION),
+                url: format!("/{HTTP_API_VERSION}"),
                 ..OpenAPIServer::default()
             }],
             ..OpenApi::default()
@@ -392,25 +392,25 @@ impl HttpServer {
             .finish_api(&mut api)
             .layer(Extension(Arc::new(api)));
 
-        let mut router = Router::new().nest(&format!("/{}", HTTP_API_VERSION), sql_router);
+        let mut router = Router::new().nest(&format!("/{HTTP_API_VERSION}"), sql_router);
 
         if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
             router = router.nest(
-                &format!("/{}/opentsdb", HTTP_API_VERSION),
+                &format!("/{HTTP_API_VERSION}/opentsdb"),
                 self.route_opentsdb(opentsdb_handler),
             );
         }
 
         if let Some(influxdb_handler) = self.influxdb_handler.clone() {
             router = router.nest(
-                &format!("/{}/influxdb", HTTP_API_VERSION),
+                &format!("/{HTTP_API_VERSION}/influxdb"),
                 self.route_influxdb(influxdb_handler),
             );
         }
 
         if let Some(prom_handler) = self.prom_handler.clone() {
             router = router.nest(
-                &format!("/{}/prometheus", HTTP_API_VERSION),
+                &format!("/{HTTP_API_VERSION}/prometheus"),
                 self.route_prom(prom_handler),
             );
         }
@@ -513,7 +513,7 @@ impl Server for HttpServer {
 /// handle error middleware
 async fn handle_error(err: BoxError) -> Json<JsonResponse> {
     Json(JsonResponse::with_error(
-        format!("Unhandled internal error: {}", err),
+        format!("Unhandled internal error: {err}"),
         StatusCode::Unexpected,
     ))
 }
@@ -553,6 +553,10 @@ mod test {
             _query_ctx: QueryContextRef,
         ) -> Result<Output> {
             unimplemented!()
+        }
+
+        fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
+            Ok(true)
         }
     }
 
