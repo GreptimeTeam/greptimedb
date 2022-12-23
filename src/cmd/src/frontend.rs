@@ -96,7 +96,7 @@ impl StartCommand {
             .context(error::StartFrontendSnafu)?;
         instance.set_plugins(plugins.clone());
 
-        let mut frontend = Frontend::new(opts.clone(), instance, plugins);
+        let mut frontend = Frontend::new(opts, instance, plugins);
         frontend.start().await.context(error::StartFrontendSnafu)
     }
 }
