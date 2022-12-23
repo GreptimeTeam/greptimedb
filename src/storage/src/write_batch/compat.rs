@@ -22,7 +22,8 @@ use crate::write_batch::{self, Mutation, WriteBatch};
 
 impl CompatWrite for WriteBatch {
     fn compat_write(&mut self, dest_schema: &SchemaRef) -> Result<()> {
-        let (data_version, schema_version) = (dest_schema.version(), self.schema().version());
+        let data_version = dest_schema.version();
+        let schema_version = self.schema().version();
         // Fast path, nothing to do if schema version of the write batch is equal to version
         // of destination.
         if data_version == schema_version {

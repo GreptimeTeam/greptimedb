@@ -51,8 +51,8 @@ impl Encoder for PayloadEncoder {
             .context(EncodeArrowSnafu)?;
 
         for mutation in &item.mutations {
-            let rb = mutation.record_batch.df_record_batch();
-            writer.write(rb).context(EncodeArrowSnafu)?;
+            let record_batch = mutation.record_batch.df_record_batch();
+            writer.write(record_batch).context(EncodeArrowSnafu)?;
         }
         writer.finish().context(EncodeArrowSnafu)?;
 
@@ -110,7 +110,7 @@ impl<'a> Decoder for PayloadDecoder<'a> {
         ensure!(
             reader.is_finished(),
             BatchCorruptedSnafu {
-                message: "Impossible, the num of data chunks is different than expected."
+                message: "The num of data chunks is different than expected."
             }
         );
 

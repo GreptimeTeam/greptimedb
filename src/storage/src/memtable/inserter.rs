@@ -35,7 +35,6 @@ impl Inserter {
         }
     }
 
-    // TODO(yingwen): Can we take the WriteBatch?
     /// Insert write batch payload into memtable.
     ///
     /// Won't do schema validation if not configured. Caller (mostly the [`RegionWriter`]) should ensure the

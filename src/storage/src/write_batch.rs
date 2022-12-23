@@ -73,7 +73,10 @@ pub struct Mutation {
 #[derive(Debug)]
 pub struct WriteBatch {
     payload: Payload,
-    row_index: usize,
+    /// Number of rows this batch need to mutate (put, delete, etc).
+    ///
+    /// We use it to check whether this batch is too large.
+    num_rows_to_mutate: usize,
 }
 
 impl WriteRequest for WriteBatch {
@@ -87,7 +90,7 @@ impl WriteRequest for WriteBatch {
 
         let record_batch = self.process_put_data(data)?;
 
-        self.add_row_index(record_batch.num_rows())?;
+        self.add_num_rows_to_mutate(record_batch.num_rows())?;
         self.payload.mutations.push(Mutation {
             op_type: OpType::Put,
             record_batch,
@@ -102,7 +105,7 @@ impl WriteBatch {
     pub fn new(schema: SchemaRef) -> Self {
         Self {
             payload: Payload::new(schema),
-            row_index: 0,
+            num_rows_to_mutate: 0,
         }
     }
 
@@ -151,13 +154,13 @@ impl WriteBatch {
         RecordBatch::new(self.schema().clone(), columns).context(CreateRecordBatchSnafu)
     }
 
-    fn add_row_index(&mut self, len: usize) -> Result<()> {
-        let num_rows = self.row_index + len;
+    fn add_num_rows_to_mutate(&mut self, len: usize) -> Result<()> {
+        let num_rows = self.num_rows_to_mutate + len;
         ensure!(
             num_rows <= MAX_BATCH_SIZE,
             RequestTooLargeSnafu { num_rows }
         );
-        self.row_index = num_rows;
+        self.num_rows_to_mutate = num_rows;
         Ok(())
     }
 }
