@@ -485,8 +485,6 @@ fn create_alter_operation(
         AlterKind::DropColumns { names } => Ok(AlterOperation::DropColumns {
             names: names.to_vec(),
         }),
-        // No need to build alter operation when reaming tables.
-        AlterKind::RenameTable { .. } => unreachable!(),
     }
 }
 

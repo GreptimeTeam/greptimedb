@@ -70,17 +70,16 @@ pub struct AlterTableRequest {
 }
 
 /// Add column request
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AddColumnRequest {
     pub column_schema: ColumnSchema,
     pub is_key: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum AlterKind {
     AddColumns { columns: Vec<AddColumnRequest> },
     DropColumns { names: Vec<String> },
-    RenameTable { new_table_name: String },
 }
 
 /// Drop table request
