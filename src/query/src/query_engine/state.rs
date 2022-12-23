@@ -114,12 +114,8 @@ impl QueryEngineState {
         schema: Option<&str>,
         name: TableReference,
     ) -> DfResult<Arc<dyn TableSource>> {
-        let name = if let Some(schema) = schema {
-            if let TableReference::Bare { table } = name {
-                TableReference::Partial { schema, table }
-            } else {
-                name
-            }
+        let name = if let (Some(schema), TableReference::Bare { table }) = (schema, name) {
+            TableReference::Partial { schema, table }
         } else {
             name
         };
