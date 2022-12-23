@@ -1,6 +1,6 @@
 ---
-Feature Name: "promql_in_rust"
-Tracking Issue: TBD
+Feature Name: "promql-in-rust"
+Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/596
 Date: 2022-12-20
 Author: "Ruihang Xia <waynestxia@gmail.com>"
 ---
@@ -92,7 +92,7 @@ This RFC proposes to add four new plans, they are fundamental building blocks th
 
     Corresponding to `InstantSelector` and `RangeSelector`. We don't calculate timestamp by timestamp, thus use "vector" instead of "instant", this image shows the difference. And "matrix" is another name for "range vector", for not confused with our "vector". The following section will detail how they are implemented using Arrow.
 
-    ![instant_and_vector](instant_and_vector.png)
+    ![instant_and_vector](instant-and-vector.png)
 
     Due to "interval" parameter in PromQL, data after "selector" (or "manipulator" here) are usually shorter than input. And we have to modify the entire record batch to shorten both timestamp, value and tag columns. So they are formed as plan.
 
@@ -118,13 +118,13 @@ This part explains how data is represented. Following the data model in Greptime
 
 Range vector is some sort of matrix, it's consisted of small one-dimension vectors, with each being an input of range function. And, applying range function to a range vector can be thought of kind of convolution.
 
-![range_vector_with_matrix](range_vector_with_matrix.png)
+![range-vector-with-matrix](range-vector-with-matrix.png)
 
 (Left is an illustration of range vector. Notice the Y-axis has no meaning, it's just put different pieces separately. The right side is an imagined "matrix" as range function. Multiplying the left side to it can get a one-dimension "matrix" with four elements. That's the evaluation result of a range vector.)
 
 To adapt this range vector to record batch, it should be represented by a column. This RFC proposes to use `DictionaryArray` from Arrow to represent range vector, or `Matrix`. This is "misusing" `DictionaryArray` to ship some additional information about an array. Because the range vector is sliding over one series, we only need to know the `offset` and `length` of each slides to reconstruct the matrix from an array:
 
-![matrix_from_array](matrix_from_array.png)
+![matrix-from-array](matrix-from-array.png)
 
 The length is not fixed, it depends on the input's timestamp. An PoC implementation of `Matrix` and `increase()` can be found in [this repo](https://github.com/waynexia/corroding-prometheus).
 
@@ -160,6 +160,8 @@ inputs:
 # Drawbacks
 
 Human-being is always error-prone. It's harder to endeavor to rewrite from the ground and requires more attention to ensure correctness, than translate line-by-line. And, since the evaluator's architecture are different, it might be painful to catch up with PromQL's breaking update (if any) in the future.
+
+Misusing Arrow's DictionaryVector as Matrix is another point. This hack needs some `unsafe` function call to bypass Arrow's check. And though Arrow's API is stable, this is still an undocumented behavior.
 
 # Alternatives
 
