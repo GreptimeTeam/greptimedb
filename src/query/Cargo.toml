@@ -1,8 +1,8 @@
 [package]
 name = "query"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 arc-swap = "1.0"
@@ -15,12 +15,12 @@ common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion = "15.0"
-datafusion-common = "15.0"
-datafusion-expr = "15.0"
-datafusion-optimizer = "15.0"
-datafusion-physical-expr = "15.0"
-datafusion-sql = "15.0"
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-optimizer.workspace = true
+datafusion-physical-expr.workspace = true
+datafusion-sql.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"

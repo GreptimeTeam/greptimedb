@@ -1,8 +1,8 @@
 [package]
-edition = "2021"
 name = "common-function"
-version = "0.1.0"
-license = "Apache-2.0"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
 
 [dependencies]
 arc-swap = "1.0"
@@ -11,7 +11,7 @@ common-error = { path = "../error" }
 common-function-macro = { path = "../function-macro" }
 common-query = { path = "../query" }
 common-time = { path = "../time" }
-datafusion-common = "15.0"
+datafusion.workspace = true
 datatypes = { path = "../../datatypes" }
 libc = "0.2"
 num = "0.4"

@@ -16,6 +16,7 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 
 use datafusion::common::Column;
+use datafusion_expr::expr::Sort;
 use datafusion_expr::{expr_fn, lit, Between, BinaryExpr, BuiltinScalarFunction, Expr, Operator};
 use datatypes::schema::Schema;
 use snafu::{ensure, OptionExt};
@@ -331,19 +332,19 @@ pub fn convert_scalar_function(
         // skip Cast and TryCast, is covered in substrait::Cast.
         "sort" | "sort_des" => {
             ensure_arg_len(1)?;
-            Expr::Sort {
+            Expr::Sort(Sort {
                 expr: Box::new(inputs.pop_front().unwrap()),
                 asc: false,
                 nulls_first: false,
-            }
+            })
         }
         "sort_asc" => {
             ensure_arg_len(1)?;
-            Expr::Sort {
+            Expr::Sort(Sort {
                 expr: Box::new(inputs.pop_front().unwrap()),
                 asc: true,
                 nulls_first: false,
-            }
+            })
         }
         // those are datafusion built-in "scalar functions".
         "abs"
@@ -537,11 +538,11 @@ pub fn expression_from_df_expr(
             name: expr.to_string(),
         }
         .fail()?,
-        Expr::Sort {
+        Expr::Sort(Sort {
             expr,
             asc,
             nulls_first: _,
-        } => {
+        }) => {
             let expr = expression_from_df_expr(ctx, expr, schema)?;
             let arguments = utils::expression_to_argument(vec![expr]);
             let op_name = if *asc { "sort_asc" } else { "sort_des" };
@@ -577,6 +578,7 @@ pub fn expression_from_df_expr(
         | Expr::Exists { .. }
         | Expr::InSubquery { .. }
         | Expr::ScalarSubquery(..)
+        | Expr::Placeholder { .. }
         | Expr::QualifiedWildcard { .. } => todo!(),
         Expr::GroupingSet(_) => UnsupportedExprSnafu {
             name: expr.to_string(),
@@ -646,6 +648,8 @@ mod utils {
             Operator::BitwiseShiftRight => "bitwise_shift_right",
             Operator::BitwiseShiftLeft => "bitwise_shift_left",
             Operator::StringConcat => "string_concat",
+            Operator::ILike => "i_like",
+            Operator::NotILike => "not_i_like",
         }
     }
 

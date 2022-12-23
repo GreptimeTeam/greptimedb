@@ -1,9 +1,8 @@
 [package]
 name = "catalog"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 api = { path = "../api" }
@@ -19,7 +18,7 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
-datafusion = "15.0"
+datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"

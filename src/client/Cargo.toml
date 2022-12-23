@@ -1,9 +1,8 @@
 [package]
 name = "client"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 api = { path = "../api" }
@@ -15,7 +14,7 @@ common-grpc-expr = { path = "../common/grpc-expr" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-time = { path = "../common/time" }
-datafusion = "15.0"
+datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 enum_dispatch = "0.3"
 parking_lot = "0.12"

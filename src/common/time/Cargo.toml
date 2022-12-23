@@ -1,8 +1,8 @@
 [package]
 name = "common-time"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 chrono = "0.4"

@@ -1,8 +1,8 @@
 [package]
 name = "storage"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 arc-swap = "1.0"
@@ -21,7 +21,7 @@ futures = "0.3"
 futures-util = "0.3"
 lazy_static = "1.4"
 object-store = { path = "../object-store" }
-parquet = { version = "28.0", features = ["async"] }
+parquet = { workspace = true, features = ["async"] }
 paste = "1.0"
 planus = "0.2"
 prost = "0.11"

@@ -1,8 +1,8 @@
 [package]
-edition = "2021"
 name = "script"
-version = "0.1.0"
-license = "Apache-2.0"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
 
 [features]
 default = ["python"]
@@ -33,10 +33,10 @@ common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 console = "0.15"
-datafusion = { version = "15.0", optional = true }
-datafusion-common = { version = "15.0", optional = true }
-datafusion-expr = { version = "15.0", optional = true }
-datafusion-physical-expr = { version = "15.0", optional = true }
+datafusion = { workspace = true, optional = true }
+datafusion-common = { workspace = true, optional = true }
+datafusion-expr = { workspace = true, optional = true }
+datafusion-physical-expr = { workspace = true, optional = true }
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 futures-util = "0.3"

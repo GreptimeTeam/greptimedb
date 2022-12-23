@@ -386,7 +386,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use sqlparser::ast::{Query as SpQuery, Statement as SpStatement};
+    use sqlparser::ast::{Query as SpQuery, Statement as SpStatement, WildcardAdditionalOptions};
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
@@ -533,7 +533,9 @@ mod tests {
         let select = sqlparser::ast::Select {
             distinct: false,
             top: None,
-            projection: vec![sqlparser::ast::SelectItem::Wildcard],
+            projection: vec![sqlparser::ast::SelectItem::Wildcard(
+                WildcardAdditionalOptions::default(),
+            )],
             into: None,
             from: vec![sqlparser::ast::TableWithJoins {
                 relation: sqlparser::ast::TableFactor::Table {

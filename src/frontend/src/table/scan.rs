@@ -105,9 +105,11 @@ impl DatanodeInstance {
                 .context(error::BuildDfLogicalPlanSnafu)?;
         }
 
-        builder
-            .limit(0, table_scan.limit)
-            .context(error::BuildDfLogicalPlanSnafu)?;
+        if table_scan.limit.is_some() {
+            builder = builder
+                .limit(0, table_scan.limit)
+                .context(error::BuildDfLogicalPlanSnafu)?;
+        }
 
         builder.build().context(error::BuildDfLogicalPlanSnafu)
     }

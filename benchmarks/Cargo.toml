@@ -1,14 +1,14 @@
 [package]
 name = "benchmarks"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-arrow = "28.0"
+arrow.workspace = true
 clap = { version = "4.0", features = ["derive"] }
 client = { path = "../src/client" }
 indicatif = "0.17.1"
 itertools = "0.10.5"
-parquet = "28.0"
+parquet.workspace = true
 tokio = { version = "1.21", features = ["full"] }

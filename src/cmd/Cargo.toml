@@ -1,9 +1,9 @@
 [package]
 name = "cmd"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 default-run = "greptime"
-license = "Apache-2.0"
 
 [[bin]]
 name = "greptime"

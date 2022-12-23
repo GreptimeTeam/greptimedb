@@ -1,20 +1,20 @@
 [package]
 name = "datatypes"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [features]
 default = []
 test = []
 
 [dependencies]
-arrow = "28.0"
-arrow-schema = { version = "28.0", features = ["serde"] }
+arrow.workspace = true
+arrow-schema.workspace = true
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
-datafusion-common = "15.0"
+datafusion-common.workspace = true
 enum_dispatch = "0.3"
 num = "0.4"
 num-traits = "0.2"

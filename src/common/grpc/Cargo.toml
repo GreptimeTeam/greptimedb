@@ -1,8 +1,8 @@
 [package]
 name = "common-grpc"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 api = { path = "../../api" }
@@ -13,7 +13,7 @@ common-query = { path = "../query" }
 common-recordbatch = { path = "../recordbatch" }
 common-runtime = { path = "../runtime" }
 dashmap = "5.4"
-datafusion = "15.0"
+datafusion.workspace = true
 datatypes = { path = "../../datatypes" }
 snafu = { version = "0.7", features = ["backtraces"] }
 tokio = { version = "1.0", features = ["full"] }

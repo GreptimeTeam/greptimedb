@@ -1,13 +1,13 @@
 [package]
 name = "common-recordbatch"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
 common-error = { path = "../error" }
-datafusion = "15.0"
-datafusion-common = "15.0"
+datafusion.workspace = true
+datafusion-common.workspace = true
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 paste = "1.0"

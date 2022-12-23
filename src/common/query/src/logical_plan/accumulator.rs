@@ -18,7 +18,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use datafusion_common::Result as DfResult;
-use datafusion_expr::{Accumulator as DfAccumulator, AggregateState};
+use datafusion_expr::Accumulator as DfAccumulator;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::prelude::*;
 use datatypes::vectors::{Helper as VectorHelper, VectorRef};
@@ -126,7 +126,7 @@ impl DfAccumulatorAdaptor {
 }
 
 impl DfAccumulator for DfAccumulatorAdaptor {
-    fn state(&self) -> DfResult<Vec<AggregateState>> {
+    fn state(&self) -> DfResult<Vec<ScalarValue>> {
         let state_values = self.accumulator.state()?;
         let state_types = self.creator.state_types()?;
         if state_values.len() != state_types.len() {
@@ -138,12 +138,7 @@ impl DfAccumulator for DfAccumulatorAdaptor {
         Ok(state_values
             .into_iter()
             .zip(state_types.iter())
-            .map(|(v, t)| {
-                let scalar = v
-                    .try_to_scalar_value(t)
-                    .context(error::ToScalarValueSnafu)?;
-                Ok(AggregateState::Scalar(scalar))
-            })
+            .map(|(v, t)| v.try_to_scalar_value(t).context(error::ToScalarValueSnafu))
             .collect::<Result<Vec<_>>>()?)
     }
 
