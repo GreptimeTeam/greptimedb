@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use common_query::Output;
-use common_telemetry::{debug, error};
+use common_telemetry::{error, trace};
 use opensrv_mysql::{
     AsyncMysqlShim, ErrorKind, InitWriter, ParamParser, QueryResultWriter, StatementMetaWriter,
 };
@@ -74,7 +74,7 @@ impl MysqlInstanceShim {
     }
 
     async fn do_query(&self, query: &str) -> Vec<Result<Output>> {
-        debug!("Start executing query: '{}'", query);
+        trace!("Start executing query: '{}'", query);
         let start = Instant::now();
 
         // TODO(LFC): Find a better way to deal with these special federated queries:
@@ -89,7 +89,7 @@ impl MysqlInstanceShim {
                     .await
             };
 
-        debug!(
+        trace!(
             "Finished executing query: '{}', total time costs in microseconds: {}",
             query,
             start.elapsed().as_micros()
