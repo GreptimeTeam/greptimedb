@@ -102,8 +102,7 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::DROP => self.parse_drop(),
 
-                    // TODO(LFC): Use "Keyword::USE" when we can upgrade to newer version of crate sqlparser.
-                    Keyword::NoKeyword if w.value.to_lowercase() == "use" => {
+                    Keyword::USE => {
                         self.parser.next_token();
 
                         let database_name =
