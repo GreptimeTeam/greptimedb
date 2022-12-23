@@ -41,6 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -81,6 +83,8 @@ jobs:
   #         path: ./llvm
   #         key: llvm
   #     - uses: arduino/setup-protoc@v1
+  #       with:
+  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
   #     - uses: KyleMayes/install-llvm-action@v1
   #       with:
   #         version: "14.0"
@@ -114,6 +118,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -131,6 +137,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}

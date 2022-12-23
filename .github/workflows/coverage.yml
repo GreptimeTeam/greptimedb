@@ -34,6 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: KyleMayes/install-llvm-action@v1
         with:
           version: "14.0"
