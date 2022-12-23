@@ -36,7 +36,7 @@ use crate::error::{self, InvalidFlightDataSnafu, Result};
 type TonicResult<T> = std::result::Result<T, tonic::Status>;
 type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FlightMessage {
     Schema(SchemaRef),
     Recordbatch(RecordBatch),
@@ -171,11 +171,109 @@ pub fn flight_messages_to_recordbatches(messages: Vec<FlightMessage>) -> Result<
 
 #[cfg(test)]
 mod test {
+    use arrow_flight::utils::batches_to_flight_data;
+    use datatypes::arrow::datatypes::{DataType, Field};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::vectors::Int32Vector;
+
     use super::*;
+    use crate::Error;
 
     #[test]
     fn test_try_decode() {
+        let arrow_schema = ArrowSchema::new(vec![Field::new("n", DataType::Int32, true)]);
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
+
+        let batch1 = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from(vec![Some(1), None, Some(3)])) as _],
+        )
+        .unwrap();
+        let batch2 = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from(vec![None, Some(5)])) as _],
+        )
+        .unwrap();
+
+        let flight_data = batches_to_flight_data(
+            arrow_schema,
+            vec![
+                batch1.clone().into_df_record_batch(),
+                batch2.clone().into_df_record_batch(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(flight_data.len(), 3);
+        let [d1, d2, d3] = flight_data.as_slice() else { unreachable!() };
+
         let decoder = &mut FlightDecoder::default();
         assert!(decoder.schema.is_none());
+
+        let result = decoder.try_decode(d2.clone());
+        assert!(matches!(result, Err(Error::InvalidFlightData { .. })));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Should have decoded schema first!"));
+
+        let message = decoder.try_decode(d1.clone()).unwrap();
+        assert!(matches!(message, FlightMessage::Schema(_)));
+        let FlightMessage::Schema(decoded_schema) = message else { unreachable!() };
+        assert_eq!(decoded_schema, schema);
+
+        assert!(decoder.schema.is_some());
+
+        let message = decoder.try_decode(d2.clone()).unwrap();
+        assert!(matches!(message, FlightMessage::Recordbatch(_)));
+        let FlightMessage::Recordbatch(actual_batch) = message else { unreachable!() };
+        assert_eq!(actual_batch, batch1);
+
+        let message = decoder.try_decode(d3.clone()).unwrap();
+        assert!(matches!(message, FlightMessage::Recordbatch(_)));
+        let FlightMessage::Recordbatch(actual_batch) = message else { unreachable!() };
+        assert_eq!(actual_batch, batch2);
+    }
+
+    #[test]
+    fn test_flight_messages_to_recordbatches() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "m",
+            ConcreteDataType::int32_datatype(),
+            true,
+        )]));
+        let batch1 = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from(vec![Some(2), None, Some(4)])) as _],
+        )
+        .unwrap();
+        let batch2 = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from(vec![None, Some(6)])) as _],
+        )
+        .unwrap();
+        let recordbatches =
+            RecordBatches::try_new(schema.clone(), vec![batch1.clone(), batch2.clone()]).unwrap();
+
+        let m1 = FlightMessage::Schema(schema);
+        let m2 = FlightMessage::Recordbatch(batch1);
+        let m3 = FlightMessage::Recordbatch(batch2);
+
+        let result = flight_messages_to_recordbatches(vec![m2.clone(), m1.clone(), m3.clone()]);
+        assert!(matches!(result, Err(Error::InvalidFlightData { .. })));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("First Flight Message must be schema!"));
+
+        let result = flight_messages_to_recordbatches(vec![m1.clone(), m2.clone(), m1.clone()]);
+        assert!(matches!(result, Err(Error::InvalidFlightData { .. })));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Expect the following Flight Messages are all Recordbatches!"));
+
+        let actual = flight_messages_to_recordbatches(vec![m1, m2, m3]).unwrap();
+        assert_eq!(actual, recordbatches);
     }
 }
