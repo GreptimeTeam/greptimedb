@@ -5042,6 +5042,9 @@ name = "promql"
 version = "0.1.0"
 dependencies = [
  "common-error",
+ "datafusion",
+ "datatypes",
+ "futures",
  "promql-parser",
  "snafu",
 ]
