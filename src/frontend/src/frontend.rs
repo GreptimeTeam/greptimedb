@@ -30,7 +30,7 @@ use crate::opentsdb::OpentsdbOptions;
 use crate::postgres::PostgresOptions;
 use crate::prometheus::PrometheusOptions;
 use crate::server::Services;
-use crate::AnyMap2;
+use crate::Plugins;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrontendOptions {
@@ -67,11 +67,11 @@ where
 {
     opts: FrontendOptions,
     instance: Option<T>,
-    plugins: Arc<AnyMap2>,
+    plugins: Arc<Plugins>,
 }
 
 impl<T: FrontendInstance> Frontend<T> {
-    pub fn new(opts: FrontendOptions, instance: T, plugins: Arc<AnyMap2>) -> Self {
+    pub fn new(opts: FrontendOptions, instance: T, plugins: Arc<Plugins>) -> Self {
         Self {
             opts,
             instance: Some(instance),

@@ -22,7 +22,7 @@ use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
-use frontend::AnyMap2;
+use frontend::Plugins;
 use meta_client::MetaClientOpts;
 use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
@@ -101,8 +101,8 @@ impl StartCommand {
     }
 }
 
-pub fn load_frontend_plugins(user_provider: &Option<String>) -> Result<AnyMap2> {
-    let mut plugins = AnyMap2::new();
+pub fn load_frontend_plugins(user_provider: &Option<String>) -> Result<Plugins> {
+    let mut plugins = Plugins::new();
 
     if let Some(provider) = user_provider {
         let provider = auth::user_provider_from_option(provider).context(IllegalAuthConfigSnafu)?;

@@ -26,7 +26,7 @@ use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
-use frontend::AnyMap2;
+use frontend::Plugins;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -189,7 +189,7 @@ impl StartCommand {
 /// Build frontend instance in standalone mode
 async fn build_frontend(
     fe_opts: FrontendOptions,
-    plugins: Arc<AnyMap2>,
+    plugins: Arc<Plugins>,
     datanode_instance: InstanceRef,
 ) -> Result<Frontend<FeInstance>> {
     let mut frontend_instance = FeInstance::new_standalone(datanode_instance.clone());

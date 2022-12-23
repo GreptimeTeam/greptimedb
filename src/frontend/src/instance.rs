@@ -70,7 +70,7 @@ use crate::frontend::FrontendOptions;
 use crate::sql::insert_to_request;
 use crate::table::insert::insert_request_to_insert_batch;
 use crate::table::route::TableRoutes;
-use crate::AnyMap2;
+use crate::Plugins;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -111,7 +111,7 @@ pub struct Instance {
 
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
-    plugins: Arc<AnyMap2>,
+    plugins: Arc<Plugins>,
 }
 
 impl Instance {
@@ -461,11 +461,11 @@ impl Instance {
         Ok(Output::RecordBatches(RecordBatches::empty()))
     }
 
-    pub fn set_plugins(&mut self, map: Arc<AnyMap2>) {
+    pub fn set_plugins(&mut self, map: Arc<Plugins>) {
         self.plugins = map;
     }
 
-    pub fn plugins(&self) -> Arc<AnyMap2> {
+    pub fn plugins(&self) -> Arc<Plugins> {
         self.plugins.clone()
     }
 }
@@ -1058,7 +1058,7 @@ mod tests {
         let query_ctx = Arc::new(QueryContext::new());
         let (mut instance, _guard) = tests::create_frontend_instance("test_hook").await;
 
-        let mut plugins = AnyMap2::new();
+        let mut plugins = Plugins::new();
         let counter_hook = Arc::new(AssertionHook::default());
         plugins.insert::<SqlQueryInterceptorRef>(counter_hook.clone());
         Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
@@ -1114,7 +1114,7 @@ mod tests {
         let query_ctx = Arc::new(QueryContext::new());
         let (mut instance, _guard) = tests::create_frontend_instance("test_db_hook").await;
 
-        let mut plugins = AnyMap2::new();
+        let mut plugins = Plugins::new();
         let hook = Arc::new(DisableDBOpHook::default());
         plugins.insert::<SqlQueryInterceptorRef>(hook.clone());
         Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
