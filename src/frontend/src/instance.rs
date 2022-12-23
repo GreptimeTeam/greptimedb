@@ -594,6 +594,13 @@ impl SqlQueryHandler for Instance {
             Ok(stmts) => {
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
+                    // TODO(sunng87): figure out at which stage we can call
+                    // this hook after ArrowFlight adoption. We need to provide
+                    // LogicalPlan as to this hook.
+                    if let Err(e) = query_interceptor.pre_execute(&stmt, None, query_ctx.clone()) {
+                        results.push(Err(e));
+                        break;
+                    }
                     match self.query_statement(stmt, query_ctx.clone()).await {
                         Ok(output) => {
                             let output_result =
@@ -621,6 +628,10 @@ impl SqlQueryHandler for Instance {
     ) -> server_error::Result<Output> {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef>();
 
+        // TODO(sunng87): figure out at which stage we can call
+        // this hook after ArrowFlight adoption. We need to provide
+        // LogicalPlan as to this hook.
+        query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
         self.query_statement(stmt, query_ctx.clone())
             .await
             .and_then(|output| query_interceptor.post_execute(output, query_ctx.clone()))
@@ -1037,6 +1048,16 @@ mod tests {
                 Ok(statements)
             }
 
+            fn pre_execute(
+                &self,
+                _statement: &Statement,
+                _plan: Option<&query::plan::LogicalPlan>,
+                _query_ctx: QueryContextRef,
+            ) -> server_error::Result<()> {
+                self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }
+
             fn post_execute(
                 &self,
                 mut output: Output,
@@ -1078,7 +1099,7 @@ mod tests {
             .unwrap();
 
         // assert that the hook is called 3 times
-        assert_eq!(3, counter_hook.c.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(4, counter_hook.c.load(std::sync::atomic::Ordering::Relaxed));
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 10),
             _ => unreachable!(),
