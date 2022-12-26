@@ -55,9 +55,11 @@ impl<'a> ParserContext<'a> {
             let new_table_name_obj = parser.parse_object_name()?;
             let new_table_name = match &new_table_name_obj.0[..] {
                 [table] => table.value.clone(),
-                _ => return Err(ParserError::ParserError(format!(
-                    "expect table name, actual: {new_table_name_obj}"
-                ))),
+                _ => {
+                    return Err(ParserError::ParserError(format!(
+                        "expect table name, actual: {new_table_name_obj}"
+                    )))
+                }
             };
             AlterTableOperation::RenameTable { new_table_name }
         } else {
