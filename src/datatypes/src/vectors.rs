@@ -111,7 +111,7 @@ pub trait Vector: Send + Sync + Serializable + Debug + VectorOp {
     /// Returns whether row is null.
     fn is_null(&self, row: usize) -> bool;
 
-    /// If the only value vector can contain is NULL.
+    /// If the vector only contains NULL.
     fn only_null(&self) -> bool {
         self.null_count() == self.len()
     }
