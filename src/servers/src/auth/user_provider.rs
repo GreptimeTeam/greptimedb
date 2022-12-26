@@ -140,7 +140,7 @@ pub fn auth_mysql(
     salt: Salt,
     username: String,
     save_pwd: &[u8],
-) -> Result<bool, Error> {
+) -> Result<(), Error> {
     // ref: https://github.com/mysql/mysql-server/blob/a246bad76b9271cb4333634e954040a970222e0a/sql/auth/password.cc#L62
     let hash_stage_2 = double_sha1(save_pwd);
     let tmp = sha1_two(salt, &hash_stage_2);
@@ -151,7 +151,7 @@ pub fn auth_mysql(
     }
     let candidate_stage_2 = sha1_one(&xor_result);
     if candidate_stage_2 == hash_stage_2 {
-        Ok(true)
+        Ok(())
     } else {
         UserPasswordMismatchSnafu { username }.fail()
     }
