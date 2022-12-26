@@ -10,6 +10,7 @@ python = ["dep:script"]
 
 [dependencies]
 api = { path = "../api" }
+arrow-flight.workspace = true
 async-trait = "0.1"
 axum = "0.6"
 axum-macros = "0.3"
@@ -35,6 +36,8 @@ meta-srv = { path = "../meta-srv", features = ["mock"] }
 metrics = "0.20"
 mito = { path = "../mito", features = ["test"] }
 object-store = { path = "../object-store" }
+pin-project = "1.0"
+prost = "0.11"
 query = { path = "../query" }
 script = { path = "../script", features = ["python"], optional = true }
 serde = "1.0"

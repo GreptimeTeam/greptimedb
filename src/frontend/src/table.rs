@@ -89,8 +89,8 @@ impl Table for DistTable {
         let spliter = WriteSpliter::with_partition_rule(partition_rule);
         let inserts = spliter.split(request).map_err(TableError::new)?;
         let result = match self.dist_insert(inserts).await.map_err(TableError::new)? {
-            client::ObjectResult::Select(_) => unreachable!(),
             client::ObjectResult::Mutate(result) => result,
+            _ => unreachable!(),
         };
         Ok(result.success as usize)
     }

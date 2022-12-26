@@ -20,6 +20,7 @@ use api::v1::{
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
 use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_grpc::flight::flight_messages_to_recordbatches;
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};
 
@@ -199,24 +200,21 @@ async fn insert_and_assert(db: &Database) {
         .select(client::Select::Sql("select * from demo".to_string()))
         .await
         .unwrap();
-    assert!(matches!(result, ObjectResult::Select(_)));
     match result {
-        ObjectResult::Select(select_result) => {
-            assert_eq!(4, select_result.row_count);
-            let actual_columns = select_result.columns;
-            assert_eq!(4, actual_columns.len());
-
-            // Respect the order in create table schema
-            let expected_columns = vec![
-                expected_host_col,
-                expected_cpu_col,
-                expected_mem_col,
-                expected_ts_col,
-            ];
-            expected_columns
-                .iter()
-                .zip(actual_columns.iter())
-                .for_each(|(x, y)| assert_eq!(x, y));
+        ObjectResult::FlightData(flight_messages) => {
+            let recordbatches = flight_messages_to_recordbatches(flight_messages).unwrap();
+            let pretty = recordbatches.pretty_print().unwrap();
+            let expected = "\
++-------+------+--------+-------------------------+
+| host  | cpu  | memory | ts                      |
++-------+------+--------+-------------------------+
+| host1 | 0.31 | 0.1    | 1970-01-01T00:00:00.100 |
+| host2 |      | 0.2    | 1970-01-01T00:00:00.101 |
+| host3 | 0.41 |        | 1970-01-01T00:00:00.102 |
+| host4 | 0.2  | 0.3    | 1970-01-01T00:00:00.103 |
++-------+------+--------+-------------------------+\
+";
+            assert_eq!(pretty, expected);
         }
         _ => unreachable!(),
     }

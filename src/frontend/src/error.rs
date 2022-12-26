@@ -251,12 +251,6 @@ pub enum Error {
         source: client::Error,
     },
 
-    #[snafu(display("Failed to select from table, source: {}", source))]
-    Select {
-        #[snafu(backtrace)]
-        source: client::Error,
-    },
-
     #[snafu(display("Failed to create table on insertion, source: {}", source))]
     CreateTableOnInsertion {
         #[snafu(backtrace)]
@@ -411,18 +405,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to collect Recordbatch stream, source: {}", source))]
-    CollectRecordbatchStream {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
-    },
-
-    #[snafu(display("Failed to create Recordbatches, source: {}", source))]
-    CreateRecordbatches {
-        #[snafu(backtrace)]
-        source: common_recordbatch::error::Error,
-    },
-
     #[snafu(display("Missing meta_client_opts section in config"))]
     MissingMetasrvOpts { backtrace: Backtrace },
 
@@ -459,6 +441,12 @@ pub enum Error {
     InvokeGrpcServer {
         #[snafu(backtrace)]
         source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to convert Flight Message, source: {}", source))]
+    ConvertFlightMessage {
+        #[snafu(backtrace)]
+        source: common_grpc::error::Error,
     },
 }
 
@@ -532,7 +520,6 @@ impl ErrorExt for Error {
             Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
             Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
             Error::CreateTable { source, .. }
-            | Error::Select { source, .. }
             | Error::CreateDatabase { source, .. }
             | Error::CreateTableOnInsertion { source, .. }
             | Error::AlterTableOnInsertion { source, .. }
@@ -544,15 +531,13 @@ impl ErrorExt for Error {
             Error::ExecuteSql { source, .. } => source.status_code(),
             Error::ExecuteStatement { source, .. } => source.status_code(),
             Error::InsertBatchToRequest { source, .. } => source.status_code(),
-            Error::CollectRecordbatchStream { source } | Error::CreateRecordbatches { source } => {
-                source.status_code()
-            }
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
             Error::BuildVector { source, .. } => source.status_code(),
+            Error::ConvertFlightMessage { source } => source.status_code(),
         }
     }
 

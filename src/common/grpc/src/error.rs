@@ -44,8 +44,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to collect RecordBatches, source: {}", source))]
-    CollectRecordBatches {
+    #[snafu(display("Failed to create RecordBatch, source: {}", source))]
+    CreateRecordBatch {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
@@ -58,15 +58,40 @@ pub enum Error {
         #[snafu(backtrace)]
         source: api::error::Error,
     },
+
+    #[snafu(display("Failed to decode FlightData, source: {}", source))]
+    DecodeFlightData {
+        source: api::DecodeError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid FlightData, reason: {}", reason))]
+    InvalidFlightData {
+        reason: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to convert Arrow Schema, source: {}", source))]
+    ConvertArrowSchema {
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::MissingField { .. } | Error::TypeMismatch { .. } => StatusCode::InvalidArguments,
-            Error::CreateChannel { .. } | Error::Conversion { .. } => StatusCode::Internal,
-            Error::CollectRecordBatches { source } => source.status_code(),
+            Error::MissingField { .. }
+            | Error::TypeMismatch { .. }
+            | Error::InvalidFlightData { .. } => StatusCode::InvalidArguments,
+
+            Error::CreateChannel { .. }
+            | Error::Conversion { .. }
+            | Error::DecodeFlightData { .. } => StatusCode::Internal,
+
+            Error::CreateRecordBatch { source } => source.status_code(),
             Error::ColumnDataType { source } => source.status_code(),
+            Error::ConvertArrowSchema { source } => source.status_code(),
         }
     }
 
