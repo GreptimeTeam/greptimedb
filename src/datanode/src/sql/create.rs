@@ -33,21 +33,29 @@ use table::requests::*;
 use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateSchemaSnafu,
     CreateTableSnafu, InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu,
-    RegisterSchemaSnafu, Result, SchemaNotFoundSnafu,
+    RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
 };
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
     pub(crate) async fn create_database(&self, req: CreateDatabaseRequest) -> Result<Output> {
         let schema = req.db_name;
-        let req = RegisterSchemaRequest {
+        let reg_req = RegisterSchemaRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: schema.clone(),
         };
-        self.catalog_manager
-            .register_schema(req)
+        let success = self
+            .catalog_manager
+            .register_schema(reg_req)
             .await
             .context(RegisterSchemaSnafu)?;
+
+        // FIXME(dennis): looks like register_schema always returns true even
+        // even when the schema already exists.
+        ensure!(
+            success || req.create_if_not_exists,
+            SchemaExistsSnafu { name: schema }
+        );
 
         info!("Successfully created database: {:?}", schema);
         Ok(Output::AffectedRows(1))

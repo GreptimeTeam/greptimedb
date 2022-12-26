@@ -158,6 +158,7 @@ impl DistInstance {
             Statement::CreateDatabase(stmt) => {
                 let expr = CreateDatabaseExpr {
                     database_name: stmt.name.to_string(),
+                    create_if_not_exists: stmt.if_not_exists,
                 };
                 Ok(self.handle_create_database(expr).await?)
             }

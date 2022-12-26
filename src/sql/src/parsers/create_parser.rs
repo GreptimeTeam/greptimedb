@@ -46,7 +46,7 @@ impl<'a> ParserContext<'a> {
             Token::Word(w) => match w.keyword {
                 Keyword::TABLE => self.parse_create_table(),
 
-                Keyword::DATABASE => self.parse_create_database(),
+                Keyword::SCHEMA | Keyword::DATABASE => self.parse_create_database(),
 
                 _ => self.unsupported(w.to_string()),
             },
@@ -56,6 +56,10 @@ impl<'a> ParserContext<'a> {
 
     fn parse_create_database(&mut self) -> Result<Statement> {
         self.parser.next_token();
+
+        let if_not_exists =
+            self.parser
+                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
 
         let database_name = self
             .parser
@@ -68,6 +72,7 @@ impl<'a> ParserContext<'a> {
 
         Ok(Statement::CreateDatabase(CreateDatabase {
             name: database_name,
+            if_not_exists,
         }))
     }
 
@@ -583,6 +588,19 @@ mod tests {
         match &stmts[0] {
             Statement::CreateDatabase(c) => {
                 assert_eq!(c.name.to_string(), "prometheus");
+                assert!(!c.if_not_exists);
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "create database if not exists prometheus";
+        let stmts = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+
+        assert_eq!(1, stmts.len());
+        match &stmts[0] {
+            Statement::CreateDatabase(c) => {
+                assert_eq!(c.name.to_string(), "prometheus");
+                assert!(c.if_not_exists);
             }
             _ => unreachable!(),
         }
