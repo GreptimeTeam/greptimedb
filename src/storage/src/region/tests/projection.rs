@@ -49,6 +49,7 @@ fn new_write_batch_for_test() -> WriteBatch {
             ("v1", LogicalTypeId::Int64, true),
         ],
         Some(1),
+        2,
     )
 }
 

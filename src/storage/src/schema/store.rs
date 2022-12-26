@@ -58,6 +58,7 @@ impl StoreSchema {
         self.schema.arrow_schema()
     }
 
+    // TODO(yingwen): Remove this method.
     pub fn batch_to_arrow_record_batch(
         &self,
         batch: &Batch,
@@ -68,6 +69,14 @@ impl StoreSchema {
             batch.columns().iter().map(|v| v.to_arrow_array()).collect(),
         )
         .context(NewRecordBatchSnafu)
+    }
+
+    /// Returns the ending index of row key columns.
+    ///
+    /// The ending index has the same value as the number of the row key columns.
+    #[inline]
+    pub fn row_key_end(&self) -> usize {
+        self.row_key_end
     }
 
     pub(crate) fn contains_column(&self, name: &str) -> bool {
@@ -164,11 +173,6 @@ impl StoreSchema {
     #[inline]
     pub(crate) fn num_columns(&self) -> usize {
         self.schema.num_columns()
-    }
-
-    #[inline]
-    pub(crate) fn row_key_end(&self) -> usize {
-        self.row_key_end
     }
 
     #[inline]

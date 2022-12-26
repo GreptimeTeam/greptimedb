@@ -19,13 +19,19 @@
 pub type SequenceNumber = u64;
 
 /// Operation type of the value to write to storage.
+///
+/// The enum values are stored in the SST files so don't change
+/// them if possible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OpType {
+    /// Delete operation.
+    Delete = 0,
     /// Put operation.
-    Put,
+    Put = 1,
 }
 
 impl OpType {
+    /// Cast the [OpType] to u8.
     pub fn as_u8(&self) -> u8 {
         *self as u8
     }
@@ -42,7 +48,8 @@ mod tests {
 
     #[test]
     fn test_op_type() {
-        assert_eq!(0, OpType::Put.as_u8());
+        assert_eq!(0, OpType::Delete.as_u8());
+        assert_eq!(1, OpType::Put.as_u8());
         assert_eq!(0, OpType::min_type().as_u8());
     }
 }

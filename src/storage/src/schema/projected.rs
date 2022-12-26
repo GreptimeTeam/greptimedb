@@ -167,7 +167,8 @@ impl ProjectedSchema {
     /// Convert [Batch] into [Chunk].
     ///
     /// This will remove all internal columns. The input `batch` should has the
-    /// same schema as `self.schema_to_read()`.
+    /// same schema as `self.schema_to_read()`. The output [Chunk] has the same
+    /// schema as `self.projected_user_schema()`.
     pub fn batch_to_chunk(&self, batch: &Batch) -> Chunk {
         let columns = match &self.projection {
             Some(projection) => projection

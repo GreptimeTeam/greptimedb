@@ -31,7 +31,7 @@ use log_store::fs::noop::NoopLogStore;
 use object_store::backend::fs;
 use object_store::ObjectStore;
 use store_api::storage::{
-    consts, Chunk, ChunkReader, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
+    consts, Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
 };
 use tempdir::TempDir;
 
@@ -141,6 +141,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
                 ("v0", LogicalTypeId::Int64, true),
             ],
             Some(0),
+            2,
         )
     } else {
         write_batch_util::new_write_batch(
@@ -153,6 +154,7 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
                 ("v0", LogicalTypeId::Int64, true),
             ],
             Some(0),
+            1,
         )
     }
 }

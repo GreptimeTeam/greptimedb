@@ -43,6 +43,7 @@ pub fn new_test_batch() -> WriteBatch {
             ("10", LogicalTypeId::String, false),
         ],
         Some(2),
+        3,
     )
 }
 
