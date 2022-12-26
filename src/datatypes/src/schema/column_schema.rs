@@ -26,7 +26,7 @@ use crate::vectors::VectorRef;
 pub type Metadata = HashMap<String, String>;
 
 /// Key used to store whether the column is time index in arrow field's metadata.
-const TIME_INDEX_KEY: &str = "greptime:time_index";
+pub const TIME_INDEX_KEY: &str = "greptime:time_index";
 /// Key used to store default constraint in arrow field's metadata.
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 

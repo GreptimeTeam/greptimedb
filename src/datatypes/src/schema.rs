@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
+pub use column_schema::TIME_INDEX_KEY;
 use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
@@ -30,7 +31,7 @@ pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
 
 /// Key used to store version number of the schema in metadata.
-const VERSION_KEY: &str = "greptime:version";
+pub const VERSION_KEY: &str = "greptime:version";
 
 /// A common schema, should be immutable.
 #[derive(Debug, Clone, PartialEq, Eq)]

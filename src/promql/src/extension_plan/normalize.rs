@@ -19,26 +19,28 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use datafusion::arrow::compute;
-use datafusion::common::{DFSchemaRef, Statistics};
+use datafusion::common::{DFSchemaRef, Result as DataFusionResult, Statistics};
+use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
 };
-use datatypes::arrow::array::{ArrowPrimitiveType, PrimitiveArray, TimestampMillisecondArray};
+use datatypes::arrow::array::{ArrowPrimitiveType, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{SchemaRef, TimestampMillisecondType};
 use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::schema::TIME_INDEX_KEY;
 use futures::{Stream, StreamExt};
 
 type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
-const TIMESTAMP_COLUMN_NAME: &str = "timestamp";
+// const TIMESTAMP_COLUMN_NAME: &str = "timestamp";
 
 /// Normalize the input record batch. Notice that for simplicity, this method assumes
-/// the input batch only contains sample points from one time series, and the value
-/// column's name is [`VALUE_COLUMN_NAME`] and timestamp column's name is [`TIMESTAMP_COLUMN_NAME`].
+/// the input batch only contains sample points from one time series, and timestamp
+/// column's name is [`TIME_INDEX_KEY`].
 ///
 /// Roughly speaking, this method does these things:
 /// - bias sample's timestamp by offset
@@ -138,7 +140,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
         Ok(Arc::new(Self {
             offset: self.offset,
@@ -150,8 +152,8 @@ impl ExecutionPlan for SeriesNormalizeExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
-    ) -> datafusion::common::Result<SendableRecordBatchStream> {
+        context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
 
         let input = self.input.execute(partition, context)?;
@@ -172,7 +174,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
-        todo!()
+        Some(self.metric.clone_inner())
     }
 
     fn statistics(&self) -> Statistics {
@@ -192,22 +194,26 @@ impl SeriesNormalizeStream {
     pub fn normalize(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
         let ts_column_idx = self
             .schema
-            .column_with_name(TIMESTAMP_COLUMN_NAME)
-            .expect("timestamp column not found")
+            .column_with_name(TIME_INDEX_KEY)
+            .expect("time index column not found")
             .0;
         // todo: maybe the input is not timestamp millisecond array
         let ts_column = input
             .column(ts_column_idx)
             .as_any()
-            .downcast_ref::<PrimitiveArray<TimestampMillisecondType>>()
+            .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
 
         // bias the timestamp column by offset
-        let ts_column_biased = Arc::new(TimestampMillisecondArray::from_iter(
-            ts_column.iter().map(|ts| ts.map(|ts| ts - self.offset)),
-        ));
+        let ts_column_biased = if self.offset == 0 {
+            ts_column.clone()
+        } else {
+            TimestampMillisecondArray::from_iter(
+                ts_column.iter().map(|ts| ts.map(|ts| ts - self.offset)),
+            )
+        };
         let mut columns = input.columns().to_vec();
-        columns[ts_column_idx] = ts_column_biased;
+        columns[ts_column_idx] = Arc::new(ts_column_biased);
 
         // sort the record batch
         let ordered_indices = compute::sort_to_indices(&columns[ts_column_idx], None, None)?;
@@ -254,11 +260,7 @@ mod test {
 
     fn prepare_test_data() -> MemoryExec {
         let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                TIMESTAMP_COLUMN_NAME,
-                TimestampMillisecondType::DATA_TYPE,
-                true,
-            ),
+            Field::new(TIME_INDEX_KEY, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("value", DataType::Float64, true),
             Field::new("path", DataType::Utf8, true),
         ]));
