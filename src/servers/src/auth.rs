@@ -111,7 +111,7 @@ pub enum Error {
     #[snafu(display("Encounter system error, msg: {}", msg))]
     SystemErr { msg: String },
 
-    #[snafu(display("Rpc call return failed, {}: {}", code, msg))]
+    #[snafu(display("Rpc call failed, {}: {}", code, msg))]
     RpcResultErr { code: u32, msg: String },
 
     #[snafu(display("User not found, username: {}", username))]
