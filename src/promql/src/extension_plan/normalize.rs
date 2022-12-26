@@ -297,7 +297,7 @@ mod test {
 
         let expected = String::from(
             "+---------------------+-------+------+\
-            \n| timestamp           | value | path |\
+            \n| greptime:time_index | value | path |\
             \n+---------------------+-------+------+\
             \n| 1970-01-01T00:00:00 | 10    | foo  |\
             \n| 1970-01-01T00:00:30 | 100   | foo  |\
@@ -328,7 +328,7 @@ mod test {
 
         let expected = String::from(
             "+---------------------+-------+------+\
-            \n| timestamp           | value | path |\
+            \n| greptime:time_index | value | path |\
             \n+---------------------+-------+------+\
             \n| 1969-12-31T23:59:59 | 10    | foo  |\
             \n| 1970-01-01T00:00:29 | 100   | foo  |\
