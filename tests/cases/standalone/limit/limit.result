@@ -1,0 +1,25 @@
+SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) LIMIT 0;
+
+++
+++
+
+EXPLAIN SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) LIMIT 0;
+
++----------------------------+----------------------------------+
+| plan_type, #Field, #String | plan, #Field, #String            |
++----------------------------+----------------------------------+
+| logical_plan               | EmptyRelation                    |
+| physical_plan              | EmptyExec: produce_one_row=false |
+|                            |                                  |
++----------------------------+----------------------------------+
+
+EXPLAIN SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) WHERE 1=0;
+
++----------------------------+----------------------------------+
+| plan_type, #Field, #String | plan, #Field, #String            |
++----------------------------+----------------------------------+
+| logical_plan               | EmptyRelation                    |
+| physical_plan              | EmptyExec: produce_one_row=false |
+|                            |                                  |
++----------------------------+----------------------------------+
+
