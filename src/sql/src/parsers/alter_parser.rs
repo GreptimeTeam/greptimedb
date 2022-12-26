@@ -53,14 +53,12 @@ impl<'a> ParserContext<'a> {
             }
         } else if parser.parse_keyword(Keyword::RENAME) {
             let new_table_name_obj = parser.parse_object_name()?;
-            let new_table_name: String = match &new_table_name_obj.0[..] {
-                [table] => Ok(table.value.clone()),
-                [_schema, table] => Ok(table.value.clone()),
-                _ => Err(ParserError::ParserError(format!(
-                    "expect table name to be <schema>.<table> or <table>, actual: {new_table_name_obj}"
+            let new_table_name = match &new_table_name_obj.0[..] {
+                [table] => table.value.clone(),
+                _ => return Err(ParserError::ParserError(format!(
+                    "expect table name, actual: {new_table_name_obj}"
                 ))),
-            }
-            .unwrap();
+            };
             AlterTableOperation::RenameTable { new_table_name }
         } else {
             return Err(ParserError::ParserError(format!(
