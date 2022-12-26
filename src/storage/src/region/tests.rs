@@ -19,17 +19,19 @@ mod basic;
 mod flush;
 mod projection;
 
+use std::collections::HashMap;
+
 use common_telemetry::logging;
 use datatypes::prelude::{ScalarVector, WrapperType};
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;
-use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
+use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use log_store::fs::log::LocalFileLogStore;
 use log_store::fs::noop::NoopLogStore;
 use object_store::backend::fs;
 use object_store::ObjectStore;
 use store_api::storage::{
-    consts, Chunk, ChunkReader, PutOperation, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
+    consts, Chunk, ChunkReader, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
 };
 use tempdir::TempDir;
 
@@ -39,7 +41,6 @@ use crate::manifest::test_utils::*;
 use crate::memtable::DefaultMemtableBuilder;
 use crate::test_util::descriptor_util::RegionDescBuilder;
 use crate::test_util::{self, config_util, schema_util, write_batch_util};
-use crate::write_batch::PutData;
 
 /// Create metadata of a region with schema: (timestamp, v0).
 pub fn new_metadata(region_name: &str, enable_version_column: bool) -> RegionMetadata {
@@ -156,17 +157,18 @@ fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     }
 }
 
-fn new_put_data(data: &[(TimestampMillisecond, Option<i64>)]) -> PutData {
-    let mut put_data = PutData::with_num_columns(2);
+fn new_put_data(data: &[(TimestampMillisecond, Option<i64>)]) -> HashMap<String, VectorRef> {
+    let mut put_data = HashMap::with_capacity(2);
 
     let timestamps =
         TimestampMillisecondVector::from_vec(data.iter().map(|v| v.0.into()).collect());
     let values = Int64Vector::from_owned_iterator(data.iter().map(|kv| kv.1));
 
-    put_data
-        .add_key_column(test_util::TIMESTAMP_NAME, Arc::new(timestamps))
-        .unwrap();
-    put_data.add_value_column("v0", Arc::new(values)).unwrap();
+    put_data.insert(
+        test_util::TIMESTAMP_NAME.to_string(),
+        Arc::new(timestamps) as VectorRef,
+    );
+    put_data.insert("v0".to_string(), Arc::new(values) as VectorRef);
 
     put_data
 }

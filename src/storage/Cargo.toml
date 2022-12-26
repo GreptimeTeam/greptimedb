@@ -13,6 +13,7 @@ bytes = "1.1"
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
+common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }

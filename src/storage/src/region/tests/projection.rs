@@ -12,23 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
-use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
+use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use log_store::fs::log::LocalFileLogStore;
 use store_api::logstore::LogStore;
 use store_api::storage::{
-    Chunk, ChunkReader, PutOperation, ReadContext, Region, ScanRequest, Snapshot, WriteContext,
-    WriteRequest,
+    Chunk, ChunkReader, ReadContext, Region, ScanRequest, Snapshot, WriteContext, WriteRequest,
 };
 use tempdir::TempDir;
 
 use crate::region::{RegionImpl, RegionMetadata};
 use crate::test_util::{self, config_util, descriptor_util, write_batch_util};
-use crate::write_batch::{PutData, WriteBatch};
+use crate::write_batch::WriteBatch;
 
 /// Create metadata with schema (k0, timestamp, v0, v1)
 fn new_metadata(region_name: &str) -> RegionMetadata {
@@ -60,20 +60,31 @@ fn new_write_batch_for_test() -> WriteBatch {
 /// v0: [initial_value, ...., initial_value]
 /// v1: [initial_value, ..., initial_value + len - 1]
 /// ```
-fn new_put_data(len: usize, key_start: i64, ts_start: i64, initial_value: i64) -> PutData {
-    let mut put_data = PutData::with_num_columns(4);
+fn new_put_data(
+    len: usize,
+    key_start: i64,
+    ts_start: i64,
+    initial_value: i64,
+) -> HashMap<String, VectorRef> {
+    let mut put_data = HashMap::with_capacity(4);
 
-    let k0 = Int64Vector::from_values((0..len).map(|v| key_start + v as i64));
-    let ts = TimestampMillisecondVector::from_values((0..len).map(|v| ts_start + v as i64));
-    let v0 = Int64Vector::from_values(std::iter::repeat(initial_value).take(len));
-    let v1 = Int64Vector::from_values((0..len).map(|v| initial_value + v as i64));
+    let k0 = Arc::new(Int64Vector::from_values(
+        (0..len).map(|v| key_start + v as i64),
+    )) as VectorRef;
+    let ts = Arc::new(TimestampMillisecondVector::from_values(
+        (0..len).map(|v| ts_start + v as i64),
+    )) as VectorRef;
+    let v0 = Arc::new(Int64Vector::from_values(
+        std::iter::repeat(initial_value).take(len),
+    )) as VectorRef;
+    let v1 = Arc::new(Int64Vector::from_values(
+        (0..len).map(|v| initial_value + v as i64),
+    )) as VectorRef;
 
-    put_data.add_key_column("k0", Arc::new(k0)).unwrap();
-    put_data
-        .add_key_column(test_util::TIMESTAMP_NAME, Arc::new(ts))
-        .unwrap();
-    put_data.add_value_column("v0", Arc::new(v0)).unwrap();
-    put_data.add_value_column("v1", Arc::new(v1)).unwrap();
+    put_data.insert("k0".to_string(), k0);
+    put_data.insert(test_util::TIMESTAMP_NAME.to_string(), ts);
+    put_data.insert("v0".to_string(), v0);
+    put_data.insert("v1".to_string(), v1);
 
     put_data
 }

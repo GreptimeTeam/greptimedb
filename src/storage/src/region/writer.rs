@@ -35,7 +35,7 @@ use crate::region::{RecoverdMetadata, RecoveredMetadataMap, RegionManifest, Shar
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
 use crate::version::{VersionControl, VersionControlRef, VersionEdit};
-use crate::wal::{Payload, Wal};
+use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
 pub type RegionWriterRef = Arc<RegionWriter>;
@@ -216,8 +216,7 @@ impl RegionWriter {
         version_control.set_committed_sequence(next_sequence);
 
         let header = WalHeader::with_last_manifest_version(manifest_version);
-        wal.write_to_wal(next_sequence, header, Payload::None)
-            .await?;
+        wal.write_to_wal(next_sequence, header, None).await?;
 
         Ok(())
     }
@@ -311,16 +310,12 @@ impl WriterInner {
         let wal_header = WalHeader::with_last_manifest_version(version.manifest_version());
         writer_ctx
             .wal
-            .write_to_wal(
-                next_sequence,
-                wal_header,
-                Payload::WriteBatchArrow(&request),
-            )
+            .write_to_wal(next_sequence, wal_header, Some(request.payload()))
             .await?;
 
         // Insert batch into memtable.
         let mut inserter = Inserter::new(next_sequence);
-        inserter.insert_memtable(&request, version.mutable_memtable())?;
+        inserter.insert_memtable(request.payload(), version.mutable_memtable())?;
 
         // Update committed_sequence to make current batch visible. The `&mut self` of WriterInner
         // guarantees the writer is exclusive.
@@ -350,7 +345,7 @@ impl WriterInner {
             // Read starts from the first entry after last flushed entry, so the start sequence
             // should be flushed_sequence + 1.
             let mut stream = writer_ctx.wal.read_from_wal(flushed_sequence + 1).await?;
-            while let Some((req_sequence, _header, request)) = stream.try_next().await? {
+            while let Some((req_sequence, _header, payload)) = stream.try_next().await? {
                 while let Some((sequence_before_alter, _)) = next_apply_metadata {
                     // There might be multiple metadata changes to be applied, so a loop is necessary.
                     if req_sequence > sequence_before_alter {
@@ -370,7 +365,7 @@ impl WriterInner {
                     }
                 }
 
-                if let Some(request) = request {
+                if let Some(payload) = payload {
                     num_requests += 1;
                     // Note that memtables of `Version` may be updated during replay.
                     let version = version_control.current();
@@ -398,7 +393,7 @@ impl WriterInner {
                     // TODO(yingwen): Trigger flush if the size of memtables reach the flush threshold to avoid
                     // out of memory during replay, but we need to do it carefully to avoid dead lock.
                     let mut inserter = Inserter::new(last_sequence);
-                    inserter.insert_memtable(&request, version.mutable_memtable())?;
+                    inserter.insert_memtable(&payload, version.mutable_memtable())?;
                 }
             }
 

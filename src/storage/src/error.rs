@@ -17,7 +17,7 @@ use std::io::Error as IoError;
 use std::str::Utf8Error;
 
 use common_error::prelude::*;
-use datatypes::arrow;
+use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use serde_json::error::Error as JsonError;
 use store_api::manifest::action::ProtocolVersion;
@@ -25,6 +25,7 @@ use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::metadata::Error as MetadataError;
+use crate::write_batch;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -60,7 +61,7 @@ pub enum Error {
     #[snafu(display("Failed to create RecordBatch from vectors, source: {}", source))]
     NewRecordBatch {
         backtrace: Backtrace,
-        source: arrow::error::ArrowError,
+        source: ArrowError,
     },
 
     #[snafu(display("Fail to read object from path: {}, source: {}", path, source))]
@@ -143,12 +144,6 @@ pub enum Error {
     JoinTask {
         source: common_runtime::JoinError,
         backtrace: Backtrace,
-    },
-
-    #[snafu(display("Invalid timestamp in write batch, source: {}", source))]
-    InvalidTimestamp {
-        #[snafu(backtrace)]
-        source: crate::write_batch::Error,
     },
 
     #[snafu(display("Task already cancelled"))]
@@ -293,13 +288,14 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to add default value for column {}, source: {}",
-        column,
+        "Failed to create default value for column {}, source: {}",
+        name,
         source
     ))]
-    AddDefault {
-        column: String,
-        source: crate::write_batch::Error,
+    CreateDefault {
+        name: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
     },
 
     #[snafu(display(
@@ -366,6 +362,78 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Unknown column {}", name))]
+    UnknownColumn { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to create record batch for write batch, source:{}", source))]
+    CreateRecordBatch {
+        #[snafu(backtrace)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display(
+        "Request is too large, max is {}, current is {}",
+        write_batch::MAX_BATCH_SIZE,
+        num_rows
+    ))]
+    RequestTooLarge {
+        num_rows: usize,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Type of column {} does not match type in schema, expect {:?}, given {:?}",
+        name,
+        expect,
+        given
+    ))]
+    TypeMismatch {
+        name: String,
+        expect: ConcreteDataType,
+        given: ConcreteDataType,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Column {} is not null but input has null", name))]
+    HasNull { name: String, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Length of column {} not equals to other columns, expect {}, given {}",
+        name,
+        expect,
+        given
+    ))]
+    LenNotEquals {
+        name: String,
+        expect: usize,
+        given: usize,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to decode write batch, corrupted data {}", message))]
+    BatchCorrupted {
+        message: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to decode arrow data, source: {}", source))]
+    DecodeArrow {
+        backtrace: Backtrace,
+        source: ArrowError,
+    },
+
+    #[snafu(display("Failed to encode arrow data, source: {}", source))]
+    EncodeArrow {
+        backtrace: Backtrace,
+        source: ArrowError,
+    },
+
+    #[snafu(display("Failed to parse schema, source: {}", source))]
+    ParseSchema {
+        backtrace: Backtrace,
+        source: datatypes::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -378,12 +446,16 @@ impl ErrorExt for Error {
             InvalidScanIndex { .. }
             | BatchMissingColumn { .. }
             | BatchMissingTimestamp { .. }
-            | InvalidTimestamp { .. }
             | InvalidProjection { .. }
             | BuildBatch { .. }
             | NotInSchemaToCompat { .. }
             | WriteToOldVersion { .. }
-            | IllegalTimestampColumnType { .. } => StatusCode::InvalidArguments,
+            | IllegalTimestampColumnType { .. }
+            | CreateRecordBatch { .. }
+            | RequestTooLarge { .. }
+            | TypeMismatch { .. }
+            | HasNull { .. }
+            | LenNotEquals { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. }
             | EncodeJson { .. }
@@ -402,7 +474,11 @@ impl ErrorExt for Error {
             | CompatRead { .. }
             | CreateDefaultToRead { .. }
             | NoDefaultToRead { .. }
-            | NewRecordBatch { .. } => StatusCode::Unexpected,
+            | NewRecordBatch { .. }
+            | BatchCorrupted { .. }
+            | DecodeArrow { .. }
+            | EncodeArrow { .. }
+            | ParseSchema { .. } => StatusCode::Unexpected,
 
             FlushIo { .. }
             | WriteParquet { .. }
@@ -420,11 +496,13 @@ impl ErrorExt for Error {
             | InvalidRegionState { .. }
             | ReadWal { .. } => StatusCode::StorageUnavailable,
 
+            UnknownColumn { .. } => StatusCode::TableColumnNotFound,
+
             InvalidAlterRequest { source, .. }
             | InvalidRegionDesc { source, .. }
             | ConvertColumnSchema { source, .. } => source.status_code(),
             PushBatch { source, .. } => source.status_code(),
-            AddDefault { source, .. } => source.status_code(),
+            CreateDefault { source, .. } => source.status_code(),
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalStable { source, .. } => source.status_code(),
         }
@@ -441,9 +519,7 @@ impl ErrorExt for Error {
 
 #[cfg(test)]
 mod tests {
-
     use common_error::prelude::StatusCode::*;
-    use datatypes::arrow::error::ArrowError;
     use snafu::GenerateImplicitData;
 
     use super::*;

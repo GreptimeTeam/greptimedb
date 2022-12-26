@@ -152,6 +152,11 @@ impl StoreSchema {
     }
 
     #[inline]
+    pub(crate) fn value_indices(&self) -> impl Iterator<Item = usize> {
+        self.row_key_end..self.user_column_end
+    }
+
+    #[inline]
     pub(crate) fn column_name(&self, idx: usize) -> &str {
         &self.schema.column_schemas()[idx].name
     }
@@ -288,6 +293,8 @@ mod tests {
         assert_eq!(4, store_schema.op_type_index());
         let row_key_indices: Vec<_> = store_schema.row_key_indices().collect();
         assert_eq!([0, 1], &row_key_indices[..]);
+        let value_indices: Vec<_> = store_schema.value_indices().collect();
+        assert_eq!([2], &value_indices[..]);
 
         // Test batch and chunk conversion.
         let batch = tests::new_batch();

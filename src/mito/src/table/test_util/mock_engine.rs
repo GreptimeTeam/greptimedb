@@ -24,7 +24,7 @@ use common_telemetry::logging;
 use datatypes::prelude::{DataType, Value, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema};
 use storage::metadata::{RegionMetaImpl, RegionMetadata};
-use storage::write_batch::{Mutation, WriteBatch};
+use storage::write_batch::WriteBatch;
 use store_api::storage::{
     AlterRequest, Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse,
     OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, RegionMeta, ScanRequest,
@@ -219,10 +219,10 @@ impl MockRegionInner {
 
         let mut memtable = self.memtable.write().unwrap();
 
-        for Mutation::Put(put) in request.iter() {
+        for mutation in &request.payload().mutations {
             for ColumnSchema { name, .. } in metadata.user_schema().column_schemas() {
                 let column = memtable.get_mut(name).unwrap();
-                if let Some(data) = put.column_by_name(name) {
+                if let Some(data) = mutation.record_batch.column_by_name(name) {
                     (0..data.len()).for_each(|i| column.push(data.get(i)));
                 }
             }

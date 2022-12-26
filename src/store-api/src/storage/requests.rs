@@ -12,12 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
 
 use common_error::ext::ErrorExt;
 use common_query::logical_plan::Expr;
-use common_time::RangeMillis;
 use datatypes::vectors::VectorRef;
 
 use crate::storage::{ColumnDescriptor, RegionDescriptor, SequenceNumber};
@@ -28,35 +26,11 @@ use crate::storage::{ColumnDescriptor, RegionDescriptor, SequenceNumber};
 /// the request follows the same schema restriction.
 pub trait WriteRequest: Send {
     type Error: ErrorExt + Send + Sync;
-    type PutOp: PutOperation;
 
     /// Add put operation to the request.
-    fn put(&mut self, put: Self::PutOp) -> Result<(), Self::Error>;
-
-    /// Returns all possible time ranges that contain the timestamp in this batch.
     ///
-    /// Each time range is aligned to given `duration`.
-    fn time_ranges(&self, duration: Duration) -> Result<Vec<RangeMillis>, Self::Error>;
-
-    /// Create a new put operation.
-    fn put_op(&self) -> Self::PutOp;
-
-    /// Create a new put operation with capacity reserved for `num_columns`.
-    fn put_op_with_columns(num_columns: usize) -> Self::PutOp;
-}
-
-/// Put multiple rows.
-pub trait PutOperation: Send + std::fmt::Debug {
-    type Error: ErrorExt + Send + Sync;
-
-    /// Put data to the key column.
-    fn add_key_column(&mut self, name: &str, vector: VectorRef) -> Result<(), Self::Error>;
-
-    /// Put data to the version column.
-    fn add_version_column(&mut self, vector: VectorRef) -> Result<(), Self::Error>;
-
-    /// Put data to the value column.
-    fn add_value_column(&mut self, name: &str, vector: VectorRef) -> Result<(), Self::Error>;
+    /// `data` is the columnar format of the data to put.
+    fn put(&mut self, data: HashMap<String, VectorRef>) -> Result<(), Self::Error>;
 }
 
 #[derive(Default)]

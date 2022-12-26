@@ -12,20 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_recordbatch::RecordBatch;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{self, Result};
 use crate::schema::compat::CompatWrite;
-use crate::write_batch::{Mutation, PutData, WriteBatch};
+use crate::write_batch::{self, Mutation, WriteBatch};
 
 impl CompatWrite for WriteBatch {
     fn compat_write(&mut self, dest_schema: &SchemaRef) -> Result<()> {
-        let (data_version, schema_version) = (dest_schema.version(), self.schema.version());
+        let data_version = dest_schema.version();
+        let schema_version = self.schema().version();
         // Fast path, nothing to do if schema version of the write batch is equal to version
         // of destination.
         if data_version == schema_version {
-            debug_assert_eq!(dest_schema.column_schemas(), self.schema.column_schemas());
+            debug_assert_eq!(dest_schema.column_schemas(), self.schema().column_schemas());
 
             return Ok(());
         }
@@ -39,7 +41,7 @@ impl CompatWrite for WriteBatch {
         );
 
         // For columns not in schema, returns error instead of discarding the column silently.
-        let column_not_in = column_not_in_schema(dest_schema, self.schema.column_schemas());
+        let column_not_in = column_not_in_schema(dest_schema, self.schema().column_schemas());
         ensure!(
             column_not_in.is_none(),
             error::NotInSchemaToCompatSnafu {
@@ -48,36 +50,38 @@ impl CompatWrite for WriteBatch {
             }
         );
 
-        for m in &mut self.mutations {
-            match m {
-                Mutation::Put(put_data) => {
-                    put_data.compat_write(dest_schema)?;
-                }
-            }
+        for mutation in &mut self.payload.mutations {
+            mutation.compat_write(dest_schema)?;
         }
 
         // Change schema to `dest_schema`.
-        self.schema = dest_schema.clone();
+        self.payload.schema = dest_schema.clone();
 
         Ok(())
     }
 }
 
-impl CompatWrite for PutData {
+impl CompatWrite for Mutation {
     fn compat_write(&mut self, dest_schema: &SchemaRef) -> Result<()> {
-        if self.is_empty() {
+        if self.record_batch.num_rows() == 0 {
             return Ok(());
         }
 
+        let num_rows = self.record_batch.num_rows();
+        let mut columns = Vec::with_capacity(dest_schema.num_columns());
         for column_schema in dest_schema.column_schemas() {
-            if self.column_by_name(&column_schema.name).is_none() {
+            if let Some(vector) = self.record_batch.column_by_name(&column_schema.name) {
+                columns.push(vector.clone());
+            } else {
                 // We need to fill the column by null or its default value.
-                self.add_default_by_name(column_schema)
-                    .context(error::AddDefaultSnafu {
-                        column: &column_schema.name,
-                    })?;
+                let vector = write_batch::new_column_with_default_value(column_schema, num_rows)?;
+                columns.push(vector);
             }
         }
+
+        // Using dest schema to build RecordBatch.
+        self.record_batch = RecordBatch::new(dest_schema.clone(), columns)
+            .context(error::CreateRecordBatchSnafu)?;
 
         Ok(())
     }
@@ -95,12 +99,13 @@ fn column_not_in_schema(schema: &SchemaRef, column_schemas: &[ColumnSchema]) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
-    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector};
-    use store_api::storage::{PutOperation, WriteRequest};
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
+    use store_api::storage::WriteRequest;
 
     use super::*;
     use crate::error::Error;
@@ -135,23 +140,31 @@ mod tests {
         Arc::new(schema)
     }
 
-    fn new_put_data() -> PutData {
-        let mut put_data = PutData::new();
-        let k0 = Arc::new(Int32Vector::from_slice(&[1, 2, 3]));
-        let ts = Arc::new(TimestampMillisecondVector::from_values([11, 12, 13]));
+    fn new_put_data() -> HashMap<String, VectorRef> {
+        let mut put_data = HashMap::new();
+        let k0 = Arc::new(Int32Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let ts = Arc::new(TimestampMillisecondVector::from_values([11, 12, 13])) as VectorRef;
 
-        put_data.add_key_column("k0", k0).unwrap();
-        put_data.add_key_column("ts", ts).unwrap();
+        put_data.insert("k0".to_string(), k0);
+        put_data.insert("ts".to_string(), ts);
 
         put_data
     }
 
     #[test]
-    fn test_put_data_compat_write() {
-        let mut put_data = new_put_data();
+    fn test_mutation_compat_write() {
+        let put_data = new_put_data();
+        let schema_old = new_test_schema(None);
+        // Mutation doesn't check schema version, so we don't have to bump the version here.
         let schema = new_test_schema(Some(Some(ColumnDefaultConstraint::null_value())));
-        put_data.compat_write(&schema).unwrap();
-        let v0 = put_data.column_by_name("v0").unwrap();
+        // Use WriteBatch to build a payload and its mutation.
+        let mut batch = WriteBatch::new(schema_old);
+        batch.put(put_data).unwrap();
+
+        let mutation = &mut batch.payload.mutations[0];
+        mutation.compat_write(&schema).unwrap();
+
+        let v0 = mutation.record_batch.column_by_name("v0").unwrap();
         assert!(v0.only_null());
     }
 
@@ -170,8 +183,9 @@ mod tests {
         );
         batch.compat_write(&schema_new).unwrap();
         assert_eq!(schema_new, *batch.schema());
-        let Mutation::Put(put_data) = batch.iter().next().unwrap();
-        put_data.column_by_name("v0").unwrap();
+
+        let mutation = &batch.payload().mutations[0];
+        mutation.record_batch.column_by_name("v0").unwrap();
     }
 
     #[test]

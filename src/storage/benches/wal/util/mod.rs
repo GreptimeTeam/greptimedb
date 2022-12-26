@@ -14,17 +14,18 @@
 
 pub mod write_batch_util;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{
-    BooleanVector, Float64Vector, StringVector, TimestampMillisecondVector, UInt64Vector,
+    BooleanVector, Float64Vector, StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef,
 };
 use rand::Rng;
 use storage::proto;
-use storage::write_batch::{PutData, WriteBatch};
-use store_api::storage::{consts, PutOperation, WriteRequest};
+use storage::write_batch::WriteBatch;
+use store_api::storage::{consts, WriteRequest};
 
 pub fn new_test_batch() -> WriteBatch {
     write_batch_util::new_write_batch(
@@ -69,25 +70,25 @@ pub fn gen_new_batch_and_types(putdate_nums: usize) -> (WriteBatch, Vec<i32>) {
         rng.fill(&mut boolvs[..]);
         rng.fill(&mut tsvs[..]);
         rng.fill(&mut fvs[..]);
-        let intv = Arc::new(UInt64Vector::from_slice(&intvs));
-        let boolv = Arc::new(BooleanVector::from(boolvs.to_vec()));
-        let tsv = Arc::new(TimestampMillisecondVector::from_values(tsvs));
-        let fvs = Arc::new(Float64Vector::from_slice(&fvs));
-        let svs = Arc::new(StringVector::from_slice(&svs));
-        let mut put_data = PutData::default();
-        put_data.add_key_column("k1", intv.clone()).unwrap();
-        put_data.add_version_column(intv).unwrap();
-        put_data.add_value_column("v1", boolv).unwrap();
-        put_data.add_key_column("ts", tsv.clone()).unwrap();
-        put_data.add_key_column("4", fvs.clone()).unwrap();
-        put_data.add_key_column("5", fvs.clone()).unwrap();
-        put_data.add_key_column("6", fvs.clone()).unwrap();
-        put_data.add_key_column("7", fvs.clone()).unwrap();
-        put_data.add_key_column("8", fvs.clone()).unwrap();
-        put_data.add_key_column("9", fvs.clone()).unwrap();
-        put_data.add_key_column("10", svs.clone()).unwrap();
+        let intv = Arc::new(UInt64Vector::from_slice(&intvs)) as VectorRef;
+        let boolv = Arc::new(BooleanVector::from(boolvs.to_vec())) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_values(tsvs)) as VectorRef;
+        let fvs = Arc::new(Float64Vector::from_slice(&fvs)) as VectorRef;
+        let svs = Arc::new(StringVector::from_slice(&svs)) as VectorRef;
+        let mut put_data = HashMap::with_capacity(11);
+        put_data.insert("k1".to_string(), intv.clone());
+        put_data.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
+        put_data.insert("v1".to_string(), boolv);
+        put_data.insert("ts".to_string(), tsv.clone());
+        put_data.insert("4".to_string(), fvs.clone());
+        put_data.insert("5".to_string(), fvs.clone());
+        put_data.insert("6".to_string(), fvs.clone());
+        put_data.insert("7".to_string(), fvs.clone());
+        put_data.insert("8".to_string(), fvs.clone());
+        put_data.insert("9".to_string(), fvs.clone());
+        put_data.insert("10".to_string(), svs.clone());
         batch.put(put_data).unwrap();
     }
-    let types = proto::wal::gen_mutation_types(&batch);
+    let types = proto::wal::gen_mutation_types(batch.payload());
     (batch, types)
 }

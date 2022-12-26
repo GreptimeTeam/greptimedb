@@ -13,4 +13,3 @@
 // limitations under the License.
 
 pub mod wal;
-pub mod write_batch;
