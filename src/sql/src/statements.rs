@@ -24,6 +24,7 @@ pub mod statement;
 use std::str::FromStr;
 
 use api::helper::ColumnDataTypeWrapper;
+use common_base::bytes::Bytes;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
@@ -127,6 +128,26 @@ fn parse_string_to_value(
     }
 }
 
+fn parse_hex_string(s: &str) -> Result<Value> {
+    match hex::decode(s) {
+        Ok(b) => Ok(Value::Binary(Bytes::from(b))),
+        Err(hex::FromHexError::InvalidHexCharacter { c, index }) => ParseSqlValueSnafu {
+            msg: format!(
+                "Fail to parse hex string to Byte: invalid character {c:?} at position {index}"
+            ),
+        }
+        .fail(),
+        Err(hex::FromHexError::OddLength) => ParseSqlValueSnafu {
+            msg: "Fail to parse hex string to Byte: odd number of digits".to_string(),
+        }
+        .fail(),
+        Err(e) => ParseSqlValueSnafu {
+            msg: format!("Fail to parse hex string to Byte {s}, {e:?}"),
+        }
+        .fail(),
+    }
+}
+
 macro_rules! parse_number_to_value {
     ($data_type: expr, $n: ident,  $(($Type: ident, $PrimitiveType: ident)), +) => {
         match $data_type {
@@ -200,6 +221,7 @@ pub fn sql_value_to_value(
         SqlValue::DoubleQuotedString(s) | SqlValue::SingleQuotedString(s) => {
             parse_string_to_value(column_name, s.to_owned(), data_type)?
         }
+        SqlValue::HexStringLiteral(s) => parse_hex_string(s)?,
         _ => todo!("Other sql value"),
     })
 }
@@ -299,6 +321,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
+        SqlDataType::Varbinary(_) => Ok(ConcreteDataType::binary_datatype()),
         SqlDataType::Custom(obj_name, _) => match &obj_name.0[..] {
             [type_name] => {
                 if type_name
@@ -379,6 +402,10 @@ mod tests {
             SqlDataType::Timestamp(None, TimezoneInfo::None),
             ConcreteDataType::timestamp_millisecond_datatype(),
         );
+        check_type(
+            SqlDataType::Varbinary(None),
+            ConcreteDataType::binary_datatype(),
+        );
     }
 
     #[test]
@@ -428,6 +455,23 @@ mod tests {
             ),
             "v is {v:?}",
         );
+
+        let sql_val = SqlValue::HexStringLiteral("48656c6c6f20776f726c6421".to_string());
+        let v = sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val).unwrap();
+        assert_eq!(Value::Binary(Bytes::from(b"Hello world!".as_slice())), v);
+
+        let sql_val = SqlValue::HexStringLiteral("9AF".to_string());
+        let v = sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val);
+        assert!(v.is_err());
+        assert!(
+            format!("{v:?}").contains("odd number of digits"),
+            "v is {v:?}"
+        );
+
+        let sql_val = SqlValue::HexStringLiteral("AG".to_string());
+        let v = sql_value_to_value("a", &ConcreteDataType::binary_datatype(), &sql_val);
+        assert!(v.is_err());
+        assert!(format!("{v:?}").contains("invalid character"), "v is {v:?}",);
     }
 
     #[test]

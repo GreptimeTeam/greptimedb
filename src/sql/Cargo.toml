@@ -7,10 +7,12 @@ license.workspace = true
 [dependencies]
 api = { path = "../api" }
 catalog = { path = "../catalog" }
+common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
+hex = "0.4"
 itertools = "0.10"
 mito = { path = "../mito" }
 once_cell = "1.10"

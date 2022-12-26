@@ -6684,10 +6684,12 @@ version = "0.1.0"
 dependencies = [
  "api",
  "catalog",
+ "common-base",
  "common-catalog",
  "common-error",
  "common-time",
  "datatypes",
+ "hex",
  "itertools",
  "mito",
  "once_cell",
