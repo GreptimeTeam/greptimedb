@@ -21,7 +21,7 @@ mod util;
 #[tokio::main]
 async fn main() {
     let mut args: Vec<String> = std::env::args().collect();
-    let test_filter = if !args.is_empty() {
+    let test_filter = if args.len() > 1 {
         args.pop().unwrap()
     } else {
         "".to_string()
