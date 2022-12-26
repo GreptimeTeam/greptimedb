@@ -32,6 +32,7 @@ pub enum OpType {
 
 impl OpType {
     /// Cast the [OpType] to u8.
+    #[inline]
     pub fn as_u8(&self) -> u8 {
         *self as u8
     }

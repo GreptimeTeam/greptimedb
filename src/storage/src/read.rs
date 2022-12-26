@@ -135,6 +135,14 @@ pub trait BatchOp {
     /// Note that the nulls of `filter` are interpreted as `false` will lead to these elements
     /// being masked out.
     fn filter(&self, batch: &Batch, filter: &BooleanVector) -> Result<Batch>;
+
+    /// Unselect deleted rows according to the [`OpType`](store_api::storage::OpType).
+    ///
+    /// # Panics
+    /// Panics if
+    /// - `batch` doesn't have a valid op type column.
+    /// - `selected.len()` is less than the number of rows.
+    fn unselect_deleted(&self, batch: &Batch, selected: &mut BitVec);
 }
 
 /// Reusable [Batch] builder.

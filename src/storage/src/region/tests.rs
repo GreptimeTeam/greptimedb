@@ -124,6 +124,17 @@ impl<S: LogStore> TesterBase<S> {
     pub fn committed_sequence(&self) -> SequenceNumber {
         self.region.committed_sequence()
     }
+
+    /// Delete by keys (timestamp).
+    pub async fn delete(&self, keys: &[i64]) -> WriteResponse {
+        let keys: Vec<TimestampMillisecond> = keys.iter().map(|v| (*v).into()).collect();
+        // Build a batch without version.
+        let mut batch = new_write_batch_for_test(false);
+        let keys = new_delete_data(&keys);
+        batch.delete(keys).unwrap();
+
+        self.region.write(&self.write_ctx, batch).await.unwrap()
+    }
 }
 
 pub type FileTesterBase = TesterBase<LocalFileLogStore>;
@@ -173,6 +184,20 @@ fn new_put_data(data: &[(TimestampMillisecond, Option<i64>)]) -> HashMap<String,
     put_data.insert("v0".to_string(), Arc::new(values) as VectorRef);
 
     put_data
+}
+
+fn new_delete_data(keys: &[TimestampMillisecond]) -> HashMap<String, VectorRef> {
+    let mut delete_data = HashMap::new();
+
+    let timestamps =
+        TimestampMillisecondVector::from_vec(keys.iter().map(|v| v.0.into()).collect());
+
+    delete_data.insert(
+        test_util::TIMESTAMP_NAME.to_string(),
+        Arc::new(timestamps) as VectorRef,
+    );
+
+    delete_data
 }
 
 fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
