@@ -5,9 +5,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use datafusion::arrow::compute;
-use datafusion::common::DFSchemaRef;
+use datafusion::common::{DFSchemaRef, Statistics};
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
-use datafusion::physical_plan::{ExecutionPlan, RecordBatchStream, SendableRecordBatchStream};
+use datafusion::physical_expr::PhysicalSortExpr;
+use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::{
+    DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
+};
 use datatypes::arrow::array::{ArrowPrimitiveType, PrimitiveArray, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{SchemaRef, TimestampMillisecondType};
 use datatypes::arrow::error::Result as ArrowResult;
@@ -42,23 +46,28 @@ impl UserDefinedLogicalNode for SeriesNormalize {
     }
 
     fn schema(&self) -> &DFSchemaRef {
-        &self.input.schema()
+        self.input.schema()
     }
 
     fn expressions(&self) -> Vec<datafusion::logical_expr::Expr> {
         vec![]
     }
 
-    fn fmt_for_explain(&self, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        todo!()
+    fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "PromSeriesNormalize: offset=[{}]", self.offset)
     }
 
     fn from_template(
         &self,
         _exprs: &[datafusion::logical_expr::Expr],
-        _inputs: &[LogicalPlan],
-    ) -> std::sync::Arc<dyn UserDefinedLogicalNode> {
-        todo!()
+        inputs: &[LogicalPlan],
+    ) -> Arc<dyn UserDefinedLogicalNode> {
+        assert!(!inputs.is_empty());
+
+        Arc::new(Self {
+            offset: self.offset,
+            input: inputs[0].clone(),
+        })
     }
 }
 
@@ -74,6 +83,7 @@ impl SeriesNormalize {
         Arc::new(SeriesNormalizeExec {
             offset: self.offset,
             input: exec_input,
+            metric: ExecutionPlanMetricsSet::new(),
         })
     }
 }
@@ -83,6 +93,7 @@ pub struct SeriesNormalizeExec {
     offset: Millisecond,
 
     input: Arc<dyn ExecutionPlan>,
+    metric: ExecutionPlanMetricsSet,
 }
 
 impl ExecutionPlan for SeriesNormalizeExec {
@@ -94,12 +105,16 @@ impl ExecutionPlan for SeriesNormalizeExec {
         self.input.schema()
     }
 
-    fn output_partitioning(&self) -> datafusion::physical_plan::Partitioning {
+    fn output_partitioning(&self) -> Partitioning {
         self.input.output_partitioning()
     }
 
-    fn output_ordering(&self) -> Option<&[datafusion::physical_expr::PhysicalSortExpr]> {
+    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
         self.input.output_ordering()
+    }
+
+    fn maintains_input_order(&self) -> bool {
+        false
     }
 
     fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
@@ -108,9 +123,14 @@ impl ExecutionPlan for SeriesNormalizeExec {
 
     fn with_new_children(
         self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        todo!()
+        assert!(!children.is_empty());
+        Ok(Arc::new(Self {
+            offset: self.offset,
+            input: children[0].clone(),
+            metric: self.metric.clone(),
+        }))
     }
 
     fn execute(
@@ -118,16 +138,31 @@ impl ExecutionPlan for SeriesNormalizeExec {
         partition: usize,
         context: Arc<datafusion::execution::context::TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
+        let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+
         let input = self.input.execute(partition, context)?;
         Ok(Box::pin(SeriesNormalizeStream {
             offset: self.offset,
             schema: input.schema(),
             input,
+            metric: baseline_metric,
         }))
     }
 
-    fn statistics(&self) -> datafusion::common::Statistics {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default => {
+                write!(f, "PromSeriesNormalizeExec: offset=[{}]", self.offset)
+            }
+        }
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
         todo!()
+    }
+
+    fn statistics(&self) -> Statistics {
+        self.input.statistics()
     }
 }
 
@@ -136,6 +171,7 @@ pub struct SeriesNormalizeStream {
 
     schema: SchemaRef,
     input: SendableRecordBatchStream,
+    metric: BaselineMetrics,
 }
 
 impl SeriesNormalizeStream {
@@ -179,12 +215,14 @@ impl Stream for SeriesNormalizeStream {
     type Item = ArrowResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.input.poll_next_unpin(cx) {
+        let poll = match self.input.poll_next_unpin(cx) {
             Poll::Ready(batch) => {
-                Poll::Ready(batch.map(|batch| batch.map(|batch| self.normalize(batch)).flatten()))
+                let _timer = self.metric.elapsed_compute().timer();
+                Poll::Ready(batch.map(|batch| batch.and_then(|batch| self.normalize(batch))))
             }
             Poll::Pending => Poll::Pending,
-        }
+        };
+        self.metric.record_poll(poll)
     }
 }
 
@@ -210,14 +248,12 @@ mod test {
             Field::new("value", DataType::Float64, true),
             Field::new("path", DataType::Utf8, true),
         ]));
-        let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice(&[
+        let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice([
             60_000, 120_000, 0, 30_000, 90_000,
         ])) as _;
-        let value_column =
-            Arc::new(Float64Array::from_slice(&[0.0, 1.0, 10.0, 100.0, 1000.0])) as _;
-        let path_column = Arc::new(StringArray::from_slice(&[
-            "foo", "foo", "foo", "foo", "foo",
-        ])) as _;
+        let value_column = Arc::new(Float64Array::from_slice([0.0, 1.0, 10.0, 100.0, 1000.0])) as _;
+        let path_column =
+            Arc::new(StringArray::from_slice(["foo", "foo", "foo", "foo", "foo"])) as _;
         let data = RecordBatch::try_new(
             schema.clone(),
             vec![timestamp_column, value_column, path_column],
@@ -233,6 +269,7 @@ mod test {
         let normalize_exec = Arc::new(SeriesNormalizeExec {
             offset: 0,
             input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
         });
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())
@@ -263,6 +300,7 @@ mod test {
         let normalize_exec = Arc::new(SeriesNormalizeExec {
             offset: 1_000, // offset 1s
             input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
         });
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())
