@@ -1,0 +1,25 @@
+CREATE TABLE test(i INTEGER, j BIGINT TIME INDEX);
+
+MutateResult { success: 1, failure: 0 }
+
+INSERT INTO test VALUES (1, 1), (2, 2);
+
+MutateResult { success: 2, failure: 0 }
+
+ALTER TABLE test ADD COLUMN k INTEGER DEFAULT 3;
+
+MutateResult { success: 0, failure: 0 }
+
+SELECT * FROM test;
+
++-------------------+-----------------------+-------------------+
+| i, #Field, #Int32 | j, #Timestamp, #Int64 | k, #Field, #Int32 |
++-------------------+-----------------------+-------------------+
+| 1                 | 1                     | 3                 |
+| 2                 | 2                     | 3                 |
++-------------------+-----------------------+-------------------+
+
+DROP TABLE test;
+
+MutateResult { success: 1, failure: 0 }
+
