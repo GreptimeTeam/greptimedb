@@ -416,6 +416,7 @@ mod tests {
         check_type(
             SqlDataType::Varbinary(None),
             ConcreteDataType::binary_datatype(),
+        );
         check_type(
             SqlDataType::UnsignedBigInt(None),
             ConcreteDataType::uint64_datatype(),
