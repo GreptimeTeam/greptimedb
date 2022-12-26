@@ -253,8 +253,10 @@ impl<'a> ParserContext<'a> {
             .parse_column_def()
             .context(SyntaxSnafu { sql: self.sql })?;
 
-        if !matches!(column.data_type, DataType::Timestamp(_, _) | DataType::BigInt(_))
-            || matches!(self.parser.peek_token(), Token::Comma)
+        if !matches!(
+            column.data_type,
+            DataType::Timestamp(_, _) | DataType::BigInt(_)
+        ) || matches!(self.parser.peek_token(), Token::Comma)
         {
             columns.push(column);
             return Ok(());
