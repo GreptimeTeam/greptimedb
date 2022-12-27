@@ -116,8 +116,8 @@ pub enum Error {
 
     #[snafu(display("Auth failed, source: {}", source))]
     AuthBackend {
+        #[snafu(backtrace)]
         source: BoxedError,
-        backtrace: Backtrace,
     },
 
     #[snafu(display("User not found, username: {}", username))]
@@ -153,7 +153,7 @@ impl ErrorExt for Error {
     }
 }
 
-type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 pub mod test {
