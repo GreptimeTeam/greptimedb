@@ -76,6 +76,13 @@ impl SqlHandler {
             AlterTableOperation::DropColumn { name } => AlterKind::DropColumns {
                 names: vec![name.value.clone()],
             },
+            AlterTableOperation::RenameTable { .. } => {
+                // TODO update proto to support alter table name
+                return error::InvalidSqlSnafu {
+                    msg: "rename table not unsupported yet".to_string(),
+                }
+                .fail();
+            }
         };
         Ok(AlterTableRequest {
             catalog_name: Some(table_ref.catalog.to_string()),
@@ -132,5 +139,15 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_alter_to_request_with_renaming_table() {
+        let handler = create_mock_sql_handler().await;
+        let alter_table = parse_sql("ALTER TABLE test_table RENAME table_t;");
+        let err = handler
+            .alter_to_request(alter_table, TableReference::bare("test_table"))
+            .unwrap_err();
+        assert_matches!(err, crate::error::Error::InvalidSql { .. });
     }
 }
