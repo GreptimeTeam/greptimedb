@@ -15,7 +15,7 @@
 use api::result::{build_err_result, AdminResultBuilder, ObjectResultBuilder};
 use api::v1::{
     admin_expr, object_expr, AdminExpr, AdminResult, Column, CreateDatabaseExpr, ObjectExpr,
-    ObjectResult, SelectExpr,
+    ObjectResult, QueryRequest,
 };
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::Ticket;
@@ -105,11 +105,11 @@ impl Instance {
         }
     }
 
-    async fn handle_select(&self, select_expr: SelectExpr) -> Result<ObjectResult> {
+    async fn handle_query_request(&self, query_request: QueryRequest) -> Result<ObjectResult> {
         let ticket = Request::new(Ticket {
             ticket: ObjectExpr {
                 header: None,
-                expr: Some(object_expr::Expr::Select(select_expr)),
+                expr: Some(object_expr::Expr::Query(query_request)),
             }
             .encode_to_vec(),
         });
@@ -169,12 +169,12 @@ impl GrpcQueryHandler for Instance {
                 self.handle_insert(catalog_name, schema_name, table_name, insert_batches)
                     .await
             }
-            Some(object_expr::Expr::Select(select_expr)) => self
-                .handle_select(select_expr.clone())
+            Some(object_expr::Expr::Query(query_request)) => self
+                .handle_query_request(query_request.clone())
                 .await
                 .map_err(BoxedError::new)
                 .context(servers::error::ExecuteQuerySnafu {
-                    query: format!("{select_expr:?}"),
+                    query: format!("{query_request:?}"),
                 })?,
             other => {
                 return servers::error::NotSupportedSnafu {

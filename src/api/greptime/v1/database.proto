@@ -18,15 +18,12 @@ message ObjectExpr {
   ExprHeader header = 1;
   oneof expr {
     InsertExpr insert = 2;
-    SelectExpr select = 3;
-    UpdateExpr update = 4;
-    DeleteExpr delete = 5;
+    QueryRequest query = 3;
   }
 }
 
-// TODO(fys): Only support sql now, and will support promql etc in the future
-message SelectExpr {
-  oneof expr {
+message QueryRequest {
+  oneof query {
     string sql = 1;
     bytes logical_plan = 2;
   }
@@ -47,11 +44,6 @@ message InsertExpr {
   // The region number of current insert request.
   uint32 region_number = 5;
 }
-
-// TODO(jiachun)
-message UpdateExpr {}
-// TODO(jiachun)
-message DeleteExpr {}
 
 message ObjectResult {
   ResultHeader header = 1;
