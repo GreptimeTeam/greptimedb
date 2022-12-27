@@ -15,7 +15,7 @@ datafusion-expr.workspace = true
 datatypes = { path = "../../datatypes" }
 futures = "0.3"
 prost = "0.9"
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 table = { path = "../../table" }
 
 [dependencies.substrait_proto]

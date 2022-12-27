@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 futures = { version = "0.3" }
 opendal = { version = "0.22", features = ["layers-tracing", "layers-metrics"] }
-tokio = { version = "1.0", features = ["full"] }
+tokio.workspace = true
 
 [dev-dependencies]
 anyhow = "1.0"

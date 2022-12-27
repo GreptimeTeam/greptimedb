@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 api = { path = "../../api" }
-async-trait = "0.1"
+async-trait.workspace = true
 common-base = { path = "../base" }
 common-catalog = { path = "../catalog" }
 common-error = { path = "../error" }

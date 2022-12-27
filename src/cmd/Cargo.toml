@@ -18,17 +18,17 @@ common-telemetry = { path = "../common/telemetry", features = [
 ] }
 datanode = { path = "../datanode" }
 frontend = { path = "../frontend" }
-futures = "0.3"
+futures.workspace = true
 meta-client = { path = "../meta-client" }
 meta-srv = { path = "../meta-srv" }
-serde = "1.0"
+serde.workspace = true
 servers = { path = "../servers" }
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 tokio = { version = "1.18", features = ["full"] }
 toml = "0.5"
 
 [dev-dependencies]
-serde = "1.0"
+serde.workspace = true
 tempdir = "0.3"
 
 [build-dependencies]
