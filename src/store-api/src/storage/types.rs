@@ -39,7 +39,7 @@ impl OpType {
 
     /// Minimal op type after casting to u8.
     pub const fn min_type() -> OpType {
-        OpType::Put
+        OpType::Delete
     }
 }
 
