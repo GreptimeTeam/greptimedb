@@ -17,8 +17,8 @@ use std::sync::Arc;
 use api::v1::codec::SelectResult as GrpcSelectResult;
 use api::v1::column::SemanticType;
 use api::v1::{
-    object_expr, object_result, select_expr, DatabaseRequest, ExprHeader, InsertExpr,
-    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, SelectExpr,
+    object_expr, object_result, query_request, DatabaseRequest, ExprHeader, InsertExpr,
+    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, QueryRequest,
 };
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{raw_flight_data_to_message, FlightMessage};
@@ -83,28 +83,28 @@ impl Database {
 
     pub async fn select(&self, expr: Select) -> Result<ObjectResult> {
         let select_expr = match expr {
-            Select::Sql(sql) => SelectExpr {
-                expr: Some(select_expr::Expr::Sql(sql)),
+            Select::Sql(sql) => QueryRequest {
+                query: Some(query_request::Query::Sql(sql)),
             },
         };
         self.do_select(select_expr).await
     }
 
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<ObjectResult> {
-        let select_expr = SelectExpr {
-            expr: Some(select_expr::Expr::LogicalPlan(logical_plan)),
+        let select_expr = QueryRequest {
+            query: Some(query_request::Query::LogicalPlan(logical_plan)),
         };
         self.do_select(select_expr).await
     }
 
-    async fn do_select(&self, select_expr: SelectExpr) -> Result<ObjectResult> {
+    async fn do_select(&self, select_expr: QueryRequest) -> Result<ObjectResult> {
         let header = ExprHeader {
             version: PROTOCOL_VERSION,
         };
 
         let expr = ObjectExpr {
             header: Some(header),
-            expr: Some(object_expr::Expr::Select(select_expr)),
+            expr: Some(object_expr::Expr::Query(select_expr)),
         };
 
         let obj_result = self.object(expr).await?;
