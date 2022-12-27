@@ -205,7 +205,7 @@ pub struct SeriesNormalizeStream {
 
 impl SeriesNormalizeStream {
     pub fn normalize(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
-        // todo: maybe the input is not timestamp millisecond array
+        // TODO(ruihang): maybe the input is not timestamp millisecond array
         let ts_column = input
             .column(self.time_index)
             .as_any()
