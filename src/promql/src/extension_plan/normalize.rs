@@ -31,16 +31,12 @@ use datatypes::arrow::array::{ArrowPrimitiveType, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{SchemaRef, TimestampMillisecondType};
 use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::schema::TIME_INDEX_KEY;
 use futures::{Stream, StreamExt};
 
 type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
-// const TIMESTAMP_COLUMN_NAME: &str = "timestamp";
-
 /// Normalize the input record batch. Notice that for simplicity, this method assumes
-/// the input batch only contains sample points from one time series, and timestamp
-/// column's name is [`TIME_INDEX_KEY`].
+/// the input batch only contains sample points from one time series.
 ///
 /// Roughly speaking, this method does these things:
 /// - bias sample's timestamp by offset
@@ -48,6 +44,7 @@ type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 #[derive(Debug)]
 pub struct SeriesNormalize {
     offset: Millisecond,
+    time_index_column_name: String,
 
     input: LogicalPlan,
 }
@@ -82,15 +79,21 @@ impl UserDefinedLogicalNode for SeriesNormalize {
 
         Arc::new(Self {
             offset: self.offset,
+            time_index_column_name: self.time_index_column_name.clone(),
             input: inputs[0].clone(),
         })
     }
 }
 
 impl SeriesNormalize {
-    pub fn new(offset: Duration, input: LogicalPlan) -> Self {
+    pub fn new<N: AsRef<str>>(
+        offset: Duration,
+        time_index_column_name: N,
+        input: LogicalPlan,
+    ) -> Self {
         Self {
             offset: offset.as_millis() as i64,
+            time_index_column_name: time_index_column_name.as_ref().to_string(),
             input,
         }
     }
@@ -98,6 +101,7 @@ impl SeriesNormalize {
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         Arc::new(SeriesNormalizeExec {
             offset: self.offset,
+            time_index_column_name: self.time_index_column_name.clone(),
             input: exec_input,
             metric: ExecutionPlanMetricsSet::new(),
         })
@@ -107,6 +111,7 @@ impl SeriesNormalize {
 #[derive(Debug)]
 pub struct SeriesNormalizeExec {
     offset: Millisecond,
+    time_index_column_name: String,
 
     input: Arc<dyn ExecutionPlan>,
     metric: ExecutionPlanMetricsSet,
@@ -144,6 +149,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
         assert!(!children.is_empty());
         Ok(Arc::new(Self {
             offset: self.offset,
+            time_index_column_name: self.time_index_column_name.clone(),
             input: children[0].clone(),
             metric: self.metric.clone(),
         }))
@@ -159,6 +165,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
         let input = self.input.execute(partition, context)?;
         Ok(Box::pin(SeriesNormalizeStream {
             offset: self.offset,
+            time_index_column_name: self.time_index_column_name.clone(),
             schema: input.schema(),
             input,
             metric: baseline_metric,
@@ -184,6 +191,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
 
 pub struct SeriesNormalizeStream {
     offset: Millisecond,
+    time_index_column_name: String,
 
     schema: SchemaRef,
     input: SendableRecordBatchStream,
@@ -194,7 +202,7 @@ impl SeriesNormalizeStream {
     pub fn normalize(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
         let ts_column_idx = self
             .schema
-            .column_with_name(TIME_INDEX_KEY)
+            .column_with_name(&self.time_index_column_name)
             .expect("time index column not found")
             .0;
         // todo: maybe the input is not timestamp millisecond array
@@ -258,9 +266,11 @@ mod test {
 
     use super::*;
 
+    const TIME_INDEX_COLUMN: &str = "timestamp";
+
     fn prepare_test_data() -> MemoryExec {
         let schema = Arc::new(Schema::new(vec![
-            Field::new(TIME_INDEX_KEY, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("value", DataType::Float64, true),
             Field::new("path", DataType::Utf8, true),
         ]));
@@ -284,6 +294,7 @@ mod test {
         let memory_exec = Arc::new(prepare_test_data());
         let normalize_exec = Arc::new(SeriesNormalizeExec {
             offset: 0,
+            time_index_column_name: TIME_INDEX_COLUMN.to_string(),
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -297,7 +308,7 @@ mod test {
 
         let expected = String::from(
             "+---------------------+-------+------+\
-            \n| greptime:time_index | value | path |\
+            \n| timestamp           | value | path |\
             \n+---------------------+-------+------+\
             \n| 1970-01-01T00:00:00 | 10    | foo  |\
             \n| 1970-01-01T00:00:30 | 100   | foo  |\
@@ -315,6 +326,7 @@ mod test {
         let memory_exec = Arc::new(prepare_test_data());
         let normalize_exec = Arc::new(SeriesNormalizeExec {
             offset: 1_000, // offset 1s
+            time_index_column_name: TIME_INDEX_COLUMN.to_string(),
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
         });
@@ -328,7 +340,7 @@ mod test {
 
         let expected = String::from(
             "+---------------------+-------+------+\
-            \n| greptime:time_index | value | path |\
+            \n| timestamp           | value | path |\
             \n+---------------------+-------+------+\
             \n| 1969-12-31T23:59:59 | 10    | foo  |\
             \n| 1970-01-01T00:00:29 | 100   | foo  |\
