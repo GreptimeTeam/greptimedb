@@ -135,7 +135,7 @@ impl Display for ResultDisplayer {
                         .and_then(|x| x.pretty_print().map_err(|e| e.to_string()));
                     match pretty {
                         Ok(s) => write!(f, "{s}"),
-                        Err(e) => write!(f, "err: {e}"),
+                        Err(e) => write!(f, "format result error: {e}"),
                     }
                 }
             },
