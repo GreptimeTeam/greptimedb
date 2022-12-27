@@ -163,10 +163,15 @@ impl ExecutionPlan for SeriesNormalizeExec {
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
 
         let input = self.input.execute(partition, context)?;
+        let schema = input.schema();
+        let time_index = schema
+            .column_with_name(&self.time_index_column_name)
+            .expect("time index column not found")
+            .0;
         Ok(Box::pin(SeriesNormalizeStream {
             offset: self.offset,
-            time_index_column_name: self.time_index_column_name.clone(),
-            schema: input.schema(),
+            time_index,
+            schema,
             input,
             metric: baseline_metric,
         }))
@@ -191,7 +196,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
 
 pub struct SeriesNormalizeStream {
     offset: Millisecond,
-    time_index_column_name: String,
+    time_index: usize,
 
     schema: SchemaRef,
     input: SendableRecordBatchStream,
@@ -200,14 +205,9 @@ pub struct SeriesNormalizeStream {
 
 impl SeriesNormalizeStream {
     pub fn normalize(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
-        let ts_column_idx = self
-            .schema
-            .column_with_name(&self.time_index_column_name)
-            .expect("time index column not found")
-            .0;
         // todo: maybe the input is not timestamp millisecond array
         let ts_column = input
-            .column(ts_column_idx)
+            .column(self.time_index)
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
@@ -221,10 +221,10 @@ impl SeriesNormalizeStream {
             )
         };
         let mut columns = input.columns().to_vec();
-        columns[ts_column_idx] = Arc::new(ts_column_biased);
+        columns[self.time_index] = Arc::new(ts_column_biased);
 
         // sort the record batch
-        let ordered_indices = compute::sort_to_indices(&columns[ts_column_idx], None, None)?;
+        let ordered_indices = compute::sort_to_indices(&columns[self.time_index], None, None)?;
         let ordered_columns = columns
             .iter()
             .map(|array| compute::take(array, &ordered_indices, None))
