@@ -108,12 +108,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Tonic status error, source: {}", source))]
-    TonicStatus {
-        source: tonic::Status,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Auth failed, source: {}", source))]
     AuthBackend {
         #[snafu(backtrace)]
@@ -135,7 +129,6 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidConfig { .. } => StatusCode::InvalidArguments,
             Error::Io { .. } => StatusCode::Internal,
-            Error::TonicStatus { .. } => StatusCode::Internal,
             Error::AuthBackend { .. } => StatusCode::Internal,
 
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
