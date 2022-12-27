@@ -15,7 +15,7 @@
 use api::prometheus::remote::read_request::ResponseType;
 use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
 use api::v1::object_expr::Expr;
-use api::v1::{select_expr, ObjectExpr, SelectExpr};
+use api::v1::{query_request, ObjectExpr, QueryRequest};
 use async_trait::async_trait;
 use client::ObjectResult;
 use common_error::prelude::BoxedError;
@@ -91,8 +91,8 @@ impl Instance {
 
             let query = ObjectExpr {
                 header: None,
-                expr: Some(Expr::Select(SelectExpr {
-                    expr: Some(select_expr::Expr::Sql(sql.to_string())),
+                expr: Some(Expr::Query(QueryRequest {
+                    query: Some(query_request::Query::Sql(sql.to_string())),
                 })),
             };
             let object_result = self
