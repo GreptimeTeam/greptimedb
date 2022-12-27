@@ -211,7 +211,7 @@ async fn test_scan_different_batch() {
 async fn test_put_delete_scan() {
     let dir = TempDir::new("put-delete-scan").unwrap();
     let store_dir = dir.path().to_str().unwrap();
-    let tester = Tester::new(REGION_NAME, store_dir).await;
+    let mut tester = Tester::new(REGION_NAME, store_dir).await;
 
     let data = vec![
         (1000, Some(100)),
@@ -229,5 +229,10 @@ async fn test_put_delete_scan() {
 
     let output = tester.full_scan().await;
     let expect = vec![(1000, Some(100)), (1002, None), (1004, Some(104))];
+    assert_eq!(expect, output);
+
+    // Deletion is also persistent.
+    tester.try_reopen().await.unwrap();
+    let output = tester.full_scan().await;
     assert_eq!(expect, output);
 }

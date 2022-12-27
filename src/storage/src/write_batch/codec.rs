@@ -89,9 +89,7 @@ impl<'a> Decoder for PayloadDecoder<'a> {
             let record_batch = RecordBatch::try_from_df_record_batch(schema.clone(), record_batch)
                 .context(CreateRecordBatchSnafu)?;
             let op_type = match MutationType::from_i32(*mutation_type) {
-                Some(MutationType::Delete) => {
-                    unimplemented!("delete mutation is not implemented")
-                }
+                Some(MutationType::Delete) => OpType::Delete,
                 Some(MutationType::Put) => OpType::Put,
                 None => {
                     return BatchCorruptedSnafu {
