@@ -18,6 +18,7 @@ pub const DEFAULT_USERNAME: &str = "greptime";
 
 use std::sync::Arc;
 
+use common_error::ext::BoxedError;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use snafu::{Backtrace, ErrorCompat, OptionExt, Snafu};
@@ -28,7 +29,7 @@ use crate::auth::user_provider::StaticUserProvider;
 pub trait UserProvider: Send + Sync {
     fn name(&self) -> &str;
 
-    async fn auth(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfo, Error>;
+    async fn auth(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfo>;
 }
 
 pub type UserProviderRef = Arc<dyn UserProvider>;
@@ -76,7 +77,7 @@ impl UserInfo {
     }
 }
 
-pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef, Error> {
+pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
     let (name, content) = opt.split_once(':').context(InvalidConfigSnafu {
         value: opt.to_string(),
         msg: "UserProviderOption must be in format `<option>:<value>`",
@@ -99,23 +100,25 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef, Error>
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Invalid config value: {}, {}", value, msg))]
-    InvalidConfig {
-        value: String,
-        msg: String,
+    InvalidConfig { value: String, msg: String },
+
+    #[snafu(display("IO error, source: {}", source))]
+    Io {
+        source: std::io::Error,
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Encounter IO error, source: {}", source))]
-    IOErr { source: std::io::Error },
+    #[snafu(display("Auth failed, source: {}", source))]
+    AuthBackend {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("User not found, username: {}", username))]
     UserNotFound { username: String },
 
     #[snafu(display("Unsupported password type: {}", password_type))]
-    UnsupportedPasswordType {
-        password_type: String,
-        backtrace: Backtrace,
-    },
+    UnsupportedPasswordType { password_type: String },
 
     #[snafu(display("Username and password does not match, username: {}", username))]
     UserPasswordMismatch { username: String },
@@ -125,7 +128,8 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::InvalidConfig { .. } => StatusCode::InvalidArguments,
-            Error::IOErr { .. } => StatusCode::Internal,
+            Error::Io { .. } => StatusCode::Internal,
+            Error::AuthBackend { .. } => StatusCode::Internal,
 
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
             Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,
@@ -141,6 +145,8 @@ impl ErrorExt for Error {
         self
     }
 }
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 pub mod test {

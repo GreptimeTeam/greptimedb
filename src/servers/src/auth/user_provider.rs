@@ -25,7 +25,7 @@ use sha1::Sha1;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::auth::{
-    Error, HashedPassword, IOErrSnafu, Identity, InvalidConfigSnafu, Password, Salt,
+    Error, HashedPassword, Identity, InvalidConfigSnafu, IoSnafu, Password, Result, Salt,
     UnsupportedPasswordTypeSnafu, UserInfo, UserNotFoundSnafu, UserPasswordMismatchSnafu,
     UserProvider,
 };
@@ -35,7 +35,7 @@ pub const STATIC_USER_PROVIDER: &str = "static_user_provider";
 impl TryFrom<&str> for StaticUserProvider {
     type Error = Error;
 
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
+    fn try_from(value: &str) -> Result<Self> {
         let (mode, content) = value.split_once(':').context(InvalidConfigSnafu {
             value: value.to_string(),
             msg: "StaticUserProviderOption must be in format `<option>:<value>`",
@@ -49,7 +49,7 @@ impl TryFrom<&str> for StaticUserProvider {
                     msg: "StaticUserProviderOption file must be a valid file path",
                 });
 
-                let file = File::open(path).context(IOErrSnafu)?;
+                let file = File::open(path).context(IoSnafu)?;
                 let credential = io::BufReader::new(file)
                     .lines()
                     .filter_map(|line| line.ok())
@@ -78,7 +78,7 @@ impl TryFrom<&str> for StaticUserProvider {
                     })?;
                     Ok((k.to_string(), v.as_bytes().to_vec()))
                 })
-                .collect::<Result<HashMap<String, Vec<u8>>, Error>>()
+                .collect::<Result<HashMap<String, Vec<u8>>>>()
                 .map(|users| StaticUserProvider { users }),
             _ => InvalidConfigSnafu {
                 value: mode.to_string(),
@@ -99,11 +99,7 @@ impl UserProvider for StaticUserProvider {
         STATIC_USER_PROVIDER
     }
 
-    async fn auth(
-        &self,
-        input_id: Identity<'_>,
-        input_pwd: Password<'_>,
-    ) -> Result<UserInfo, Error> {
+    async fn auth(&self, input_id: Identity<'_>, input_pwd: Password<'_>) -> Result<UserInfo> {
         match input_id {
             Identity::UserId(username, _) => {
                 let save_pwd = self.users.get(username).context(UserNotFoundSnafu {
@@ -122,7 +118,8 @@ impl UserProvider for StaticUserProvider {
                         }
                     }
                     Password::MysqlNativePassword(auth_data, salt) => {
-                        auth_mysql(auth_data, salt, username.to_string(), save_pwd)
+                        auth_mysql(auth_data, salt, username, save_pwd)
+                            .map(|_| UserInfo::new(username))
                     }
                     Password::PgMD5(_, _) => UnsupportedPasswordTypeSnafu {
                         password_type: "pg_md5",
@@ -134,12 +131,12 @@ impl UserProvider for StaticUserProvider {
     }
 }
 
-fn auth_mysql(
+pub fn auth_mysql(
     auth_data: HashedPassword,
     salt: Salt,
-    username: String,
+    username: &str,
     save_pwd: &[u8],
-) -> Result<UserInfo, Error> {
+) -> Result<()> {
     // ref: https://github.com/mysql/mysql-server/blob/a246bad76b9271cb4333634e954040a970222e0a/sql/auth/password.cc#L62
     let hash_stage_2 = double_sha1(save_pwd);
     let tmp = sha1_two(salt, &hash_stage_2);
@@ -150,9 +147,12 @@ fn auth_mysql(
     }
     let candidate_stage_2 = sha1_one(&xor_result);
     if candidate_stage_2 == hash_stage_2 {
-        Ok(UserInfo::new(username))
+        Ok(())
     } else {
-        UserPasswordMismatchSnafu { username }.fail()
+        UserPasswordMismatchSnafu {
+            username: username.to_string(),
+        }
+        .fail()
     }
 }
 
