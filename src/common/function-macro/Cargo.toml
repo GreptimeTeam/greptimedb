@@ -15,5 +15,5 @@ syn = "1.0"
 arc-swap = "1.0"
 common-query = { path = "../query" }
 datatypes = { path = "../../datatypes" }
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 static_assertions = "1.1.0"

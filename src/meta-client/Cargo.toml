@@ -13,7 +13,7 @@ common-telemetry = { path = "../common/telemetry" }
 etcd-client = "0.10"
 rand = "0.8"
 serde = "1.0"
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 tokio = { version = "1.18", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"

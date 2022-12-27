@@ -11,4 +11,4 @@ client = { path = "../src/client" }
 indicatif = "0.17.1"
 itertools = "0.10.5"
 parquet.workspace = true
-tokio = { version = "1.21", features = ["full"] }
+tokio.workspace = true

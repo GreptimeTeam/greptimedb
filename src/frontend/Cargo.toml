@@ -40,7 +40,7 @@ serde = "1.0"
 serde_json = "1.0"
 servers = { path = "../servers" }
 session = { path = "../session" }
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 sql = { path = "../sql" }
 store-api = { path = "../store-api" }
 substrait = { path = "../common/substrait" }
