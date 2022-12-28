@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 api = { path = "../api" }
-async-stream = "0.3"
+async-stream.workspace = true
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }

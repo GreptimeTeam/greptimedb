@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
@@ -30,16 +29,35 @@ use tempdir::TempDir;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{CreateTableSnafu, Result};
+use crate::instance::Instance;
 use crate::sql::SqlHandler;
 
-/// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
-/// Only for test.
-pub struct TestGuard {
+pub(crate) struct MockInstance {
+    instance: Instance,
+    _guard: TestGuard,
+}
+
+impl MockInstance {
+    pub(crate) async fn new(name: &str) -> Self {
+        let (opts, _guard) = create_tmp_dir_and_datanode_opts(name);
+
+        let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
+        instance.start().await.unwrap();
+
+        MockInstance { instance, _guard }
+    }
+
+    pub(crate) fn inner(&self) -> &Instance {
+        &self.instance
+    }
+}
+
+struct TestGuard {
     _wal_tmp_dir: TempDir,
     _data_tmp_dir: TempDir,
 }
 
-pub fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
+fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
     let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
     let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
     let opts = DatanodeOptions {
@@ -59,9 +77,8 @@ pub fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGua
     )
 }
 
-pub async fn create_test_table(
-    catalog_manager: &CatalogManagerRef,
-    sql_handler: &SqlHandler,
+pub(crate) async fn create_test_table(
+    instance: &MockInstance,
     ts_type: ConcreteDataType,
 ) -> Result<()> {
     let column_schemas = vec![
@@ -72,7 +89,7 @@ pub async fn create_test_table(
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = sql_handler.table_engine();
+    let table_engine: TableEngineRef = instance.inner().sql_handler().table_engine();
     let table = table_engine
         .create_table(
             &EngineContext::default(),
@@ -97,11 +114,10 @@ pub async fn create_test_table(
         .await
         .context(CreateTableSnafu { table_name })?;
 
-    let schema_provider = catalog_manager
-        .catalog(DEFAULT_CATALOG_NAME)
-        .unwrap()
-        .unwrap()
-        .schema(DEFAULT_SCHEMA_NAME)
+    let schema_provider = instance
+        .inner()
+        .catalog_manager
+        .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
         .unwrap()
         .unwrap();
     schema_provider

@@ -2137,6 +2137,7 @@ version = "0.1.0"
 dependencies = [
  "api",
  "arrow-flight",
+ "async-stream",
  "async-trait",
  "axum",
  "axum-macros",
@@ -2157,6 +2158,7 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datatypes",
+ "flatbuffers",
  "futures",
  "hyper",
  "log-store",

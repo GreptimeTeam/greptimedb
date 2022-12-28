@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 anymap = "1.0.0-beta.2"
 api = { path = "../api" }
-async-stream = "0.3"
+async-stream.workspace = true
 async-trait = "0.1"
 catalog = { path = "../catalog" }
 chrono = "0.4"

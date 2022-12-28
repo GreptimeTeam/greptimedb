@@ -73,13 +73,11 @@ impl Database {
             .collect()
     }
 
-    pub async fn select(&self, expr: Select) -> Result<ObjectResult> {
-        let select_expr = match expr {
-            Select::Sql(sql) => QueryRequest {
-                query: Some(query_request::Query::Sql(sql)),
-            },
+    pub async fn sql(&self, sql: &str) -> Result<ObjectResult> {
+        let query = QueryRequest {
+            query: Some(query_request::Query::Sql(sql.to_string())),
         };
-        self.do_select(select_expr).await
+        self.do_select(query).await
     }
 
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<ObjectResult> {
@@ -164,10 +162,6 @@ impl TryFrom<api::v1::ObjectResult> for ObjectResult {
             }
         })
     }
-}
-
-pub enum Select {
-    Sql(String),
 }
 
 impl TryFrom<ObjectResult> for Output {

@@ -18,8 +18,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use client::{Client, Database as DB, Error as ClientError, ObjectResult, Select};
+use client::{Client, Database as DB, Error as ClientError, ObjectResult};
 use common_grpc::flight;
+use common_grpc::flight::FlightMessage;
 use sqlness::{Database, Environment};
 use tokio::process::{Child, Command};
 
@@ -112,8 +113,7 @@ pub struct GreptimeDB {
 #[async_trait]
 impl Database for GreptimeDB {
     async fn query(&self, query: String) -> Box<dyn Display> {
-        let sql = Select::Sql(query);
-        let result = self.db.select(sql).await;
+        let result = self.db.sql(&query).await;
         Box::new(ResultDisplayer { result }) as _
     }
 }
@@ -130,12 +130,19 @@ impl Display for ResultDisplayer {
                     write!(f, "{mutate_result:?}")
                 }
                 ObjectResult::FlightData(messages) => {
-                    let pretty = flight::flight_messages_to_recordbatches(messages.clone())
-                        .map_err(|e| e.to_string())
-                        .and_then(|x| x.pretty_print().map_err(|e| e.to_string()));
-                    match pretty {
-                        Ok(s) => write!(f, "{s}"),
-                        Err(e) => write!(f, "format result error: {e}"),
+                    if let Some(FlightMessage::AffectedRows(rows)) = messages.get(0) {
+                        write!(f, "Affected Rows: {rows}")
+                    } else {
+                        let pretty = flight::flight_messages_to_recordbatches(messages.clone())
+                            .map_err(|e| e.to_string())
+                            .and_then(|x| x.pretty_print().map_err(|e| e.to_string()));
+                        match pretty {
+                            Ok(s) => write!(f, "{s}"),
+                            Err(e) => write!(
+                                f,
+                                "Failed to convert Flight messages {messages:?} to Recordbatches, error: {e}"
+                            ),
+                        }
                     }
                 }
             },

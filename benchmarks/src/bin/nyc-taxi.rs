@@ -28,7 +28,7 @@ use clap::Parser;
 use client::admin::Admin;
 use client::api::v1::column::Values;
 use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertExpr, TableId};
-use client::{Client, Database, Select};
+use client::{Client, Database};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tokio::task::JoinSet;
@@ -405,7 +405,7 @@ async fn do_query(num_iter: usize, db: &Database) {
         println!("Running query: {query}");
         for i in 0..num_iter {
             let now = Instant::now();
-            let _res = db.select(Select::Sql(query.clone())).await.unwrap();
+            let _res = db.sql(&query).await.unwrap();
             let elapsed = now.elapsed();
             println!(
                 "query {}, iteration {}: {}ms",
