@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+bytemuck = "1.12"
 common-error = { path = "../common/error" }
+datatypes = { path = "../datatypes" }
 promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "71d8a90" }
 snafu = { version = "0.7", features = ["backtraces"] }

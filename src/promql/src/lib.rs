@@ -14,3 +14,4 @@
 
 pub mod engine;
 pub mod error;
+mod range_array;

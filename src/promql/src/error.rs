@@ -23,6 +23,22 @@ common_error::define_opaque_error!(Error);
 pub enum InnerError {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Illegal range: offset {}, length {}, array len {}",
+        offset,
+        length,
+        len
+    ))]
+    IllegalRange {
+        offset: i32,
+        length: i32,
+        len: usize,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Empty range is not expected"))]
+    EmptyRange { backtrace: Backtrace },
 }
 
 impl ErrorExt for InnerError {
@@ -30,6 +46,7 @@ impl ErrorExt for InnerError {
         use InnerError::*;
         match self {
             UnsupportedExpr { .. } => StatusCode::InvalidArguments,
+            IllegalRange { .. } | EmptyRange { .. } => StatusCode::Internal,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {
