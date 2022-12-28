@@ -18,7 +18,7 @@ use std::pin::Pin;
 
 use api::v1::object_expr::Expr;
 use api::v1::query_request::Query;
-use api::v1::{FlightAppMeta, ObjectExpr};
+use api::v1::{FlightDataExt, ObjectExpr};
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
@@ -154,10 +154,10 @@ impl Instance {
             }
             Output::AffectedRows(rows) => {
                 let stream = async_stream::stream! {
-                    let app_meta = FlightAppMeta {
+                    let ext_data = FlightDataExt {
                         affected_rows: rows as _,
                     }.encode_to_vec();
-                    yield Ok(FlightData::new(None, IpcMessage(build_none_flight_msg()), app_meta, vec![]))
+                    yield Ok(FlightData::new(None, IpcMessage(build_none_flight_msg()), vec![], ext_data))
                 };
                 Box::pin(stream) as _
             }

@@ -57,6 +57,6 @@ message FlightDataRaw {
   repeated bytes raw_data = 1;
 }
 
-message FlightAppMeta {
+message FlightDataExt {
   uint32 affected_rows = 1;
 }

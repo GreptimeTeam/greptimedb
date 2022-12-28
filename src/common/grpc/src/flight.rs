@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use api::result::ObjectResultBuilder;
-use api::v1::{FlightAppMeta, ObjectResult};
+use api::v1::{FlightDataExt, ObjectResult};
 use arrow_flight::utils::flight_data_to_arrow_batch;
 use arrow_flight::FlightData;
 use common_error::prelude::StatusCode;
@@ -61,9 +61,9 @@ impl FlightDecoder {
         })?;
         match message.header_type() {
             MessageHeader::NONE => {
-                let app_meta = FlightAppMeta::decode(flight_data.app_metadata.as_slice())
+                let ext_data = FlightDataExt::decode(flight_data.data_body.as_slice())
                     .context(DecodeFlightDataSnafu)?;
-                Ok(FlightMessage::AffectedRows(app_meta.affected_rows as _))
+                Ok(FlightMessage::AffectedRows(ext_data.affected_rows as _))
             }
             MessageHeader::Schema => {
                 let arrow_schema = ArrowSchema::try_from(&flight_data).map_err(|e| {
