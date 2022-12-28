@@ -12,17 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::helper::ColumnDataTypeWrapper;
-use api::result::{build_err_result, ObjectResultBuilder};
-use api::v1::codec::SelectResult;
-use api::v1::column::{SemanticType, Values};
-use api::v1::{Column, ObjectResult};
+use api::v1::column::Values;
 use common_base::BitVec;
-use common_error::prelude::ErrorExt;
-use common_error::status_code::StatusCode;
-use common_query::Output;
-use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
-use datatypes::schema::SchemaRef;
 use datatypes::types::{TimestampType, WrapperType};
 use datatypes::vectors::{
     BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
@@ -30,89 +21,9 @@ use datatypes::vectors::{
     TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
     UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
 };
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 
-use crate::error::{self, ConversionSnafu, Result};
-
-// TODO(LFC): replace with FlightData
-pub async fn to_object_result(output: std::result::Result<Output, impl ErrorExt>) -> ObjectResult {
-    let result = match output {
-        Ok(Output::AffectedRows(rows)) => Ok(ObjectResultBuilder::new()
-            .status_code(StatusCode::Success as u32)
-            .mutate_result(rows as u32, 0)
-            .build()),
-        Ok(Output::Stream(stream)) => collect(stream).await,
-        Ok(Output::RecordBatches(recordbatches)) => build_result(recordbatches),
-        Err(e) => return build_err_result(&e),
-    };
-    match result {
-        Ok(r) => r,
-        Err(e) => build_err_result(&e),
-    }
-}
-
-async fn collect(stream: SendableRecordBatchStream) -> Result<ObjectResult> {
-    let recordbatches = RecordBatches::try_collect(stream)
-        .await
-        .context(error::CreateRecordBatchSnafu)?;
-    let object_result = build_result(recordbatches)?;
-    Ok(object_result)
-}
-
-fn build_result(recordbatches: RecordBatches) -> Result<ObjectResult> {
-    let select_result = try_convert(recordbatches)?;
-    let object_result = ObjectResultBuilder::new()
-        .status_code(StatusCode::Success as u32)
-        .select_result(select_result)
-        .build();
-    Ok(object_result)
-}
-
-#[inline]
-fn get_semantic_type(schema: &SchemaRef, idx: usize) -> i32 {
-    if Some(idx) == schema.timestamp_index() {
-        SemanticType::Timestamp as i32
-    } else {
-        // FIXME(dennis): set primary key's columns semantic type as Tag,
-        // but we can't get the table's schema here right now.
-        SemanticType::Field as i32
-    }
-}
-
-fn try_convert(record_batches: RecordBatches) -> Result<SelectResult> {
-    let schema = record_batches.schema();
-    let record_batches = record_batches.take();
-
-    let row_count: usize = record_batches.iter().map(|r| r.num_rows()).sum();
-
-    let schemas = schema.column_schemas();
-    let mut columns = Vec::with_capacity(schemas.len());
-
-    for (idx, column_schema) in schemas.iter().enumerate() {
-        let column_name = column_schema.name.clone();
-
-        let arrays: Vec<_> = record_batches
-            .iter()
-            .map(|r| r.column(idx).clone())
-            .collect();
-
-        let column = Column {
-            column_name,
-            values: Some(values(&arrays)?),
-            null_mask: null_mask(&arrays, row_count),
-            datatype: ColumnDataTypeWrapper::try_from(column_schema.data_type.clone())
-                .context(error::ColumnDataTypeSnafu)?
-                .datatype() as i32,
-            semantic_type: get_semantic_type(&schema, idx),
-        };
-        columns.push(column);
-    }
-
-    Ok(SelectResult {
-        columns,
-        row_count: row_count as u32,
-    })
-}
+use crate::error::{ConversionSnafu, Result};
 
 pub fn null_mask(arrays: &[VectorRef], row_count: usize) -> Vec<u8> {
     let null_count: usize = arrays.iter().map(|a| a.null_count()).sum();
@@ -264,33 +175,7 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
 mod tests {
     use std::sync::Arc;
 
-    use common_recordbatch::{RecordBatch, RecordBatches};
-    use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema};
-
     use super::*;
-
-    #[test]
-    fn test_convert_record_batches_to_select_result() {
-        let r1 = mock_record_batch();
-        let schema = r1.schema.clone();
-        let r2 = mock_record_batch();
-        let record_batches = vec![r1, r2];
-        let record_batches = RecordBatches::try_new(schema, record_batches).unwrap();
-
-        let s = try_convert(record_batches).unwrap();
-
-        let c1 = s.columns.get(0).unwrap();
-        let c2 = s.columns.get(1).unwrap();
-        assert_eq!("c1", c1.column_name);
-        assert_eq!("c2", c2.column_name);
-
-        assert_eq!(vec![0b0010_0100], c1.null_mask);
-        assert_eq!(vec![0b0011_0110], c2.null_mask);
-
-        assert_eq!(vec![1, 2, 1, 2], c1.values.as_ref().unwrap().u32_values);
-        assert_eq!(vec![1, 1], c2.values.as_ref().unwrap().u32_values);
-    }
 
     #[test]
     fn test_convert_arrow_arrays_i32() {
@@ -358,19 +243,5 @@ mod tests {
         let a2: VectorRef = Arc::new(Int32Vector::from(vec![Some(4), Some(5), None]));
         let mask = null_mask(&[a1, a2], 3 + 3);
         assert_eq!(vec![0b0010_0000], mask);
-    }
-
-    fn mock_record_batch() -> RecordBatch {
-        let column_schemas = vec![
-            ColumnSchema::new("c1", ConcreteDataType::uint32_datatype(), true),
-            ColumnSchema::new("c2", ConcreteDataType::uint32_datatype(), true),
-        ];
-        let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
-
-        let v1 = Arc::new(UInt32Vector::from(vec![Some(1), Some(2), None]));
-        let v2 = Arc::new(UInt32Vector::from(vec![Some(1), None, None]));
-        let columns: Vec<VectorRef> = vec![v1, v2];
-
-        RecordBatch::new(schema, columns).unwrap()
     }
 }

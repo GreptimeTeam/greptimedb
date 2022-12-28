@@ -243,6 +243,12 @@ pub enum Error {
 
     #[snafu(display("Error accessing catalog: {}", source))]
     CatalogError { source: catalog::error::Error },
+
+    #[snafu(display("Failed to convert Flight Message, source: {}", source))]
+    ConvertFlightMessage {
+        #[snafu(backtrace)]
+        source: common_grpc::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -285,7 +291,10 @@ impl ErrorExt for Error {
             | DecodeRegionNumber { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
-            InfluxdbLinesWrite { source, .. } => source.status_code(),
+            InfluxdbLinesWrite { source, .. } | ConvertFlightMessage { source } => {
+                source.status_code()
+            }
+
             Hyper { .. } => StatusCode::Unknown,
             TlsRequired { .. } => StatusCode::Unknown,
             StartFrontend { source, .. } => source.status_code(),

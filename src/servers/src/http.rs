@@ -171,7 +171,6 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
 
             for recordbatch in recordbatches {
                 for row in recordbatch.rows() {
-                    let row = row.map_err(|e| e.to_string())?;
                     let value_row = row
                         .into_iter()
                         .map(|f| Value::try_from(f).map_err(|err| err.to_string()))

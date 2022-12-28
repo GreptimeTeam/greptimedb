@@ -17,9 +17,5 @@ tonic::include_proto!("greptime.v1");
 
 pub const GREPTIME_FD_SET: &[u8] = tonic::include_file_descriptor_set!("greptime_fd");
 
-pub mod codec {
-    tonic::include_proto!("greptime.v1.codec");
-}
-
 mod column_def;
 pub mod meta;

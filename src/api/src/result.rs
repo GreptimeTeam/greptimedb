@@ -14,10 +14,8 @@
 
 use common_error::prelude::ErrorExt;
 
-use crate::v1::codec::SelectResult;
 use crate::v1::{
     admin_result, object_result, AdminResult, MutateResult, ObjectResult, ResultHeader,
-    SelectResult as SelectResultRaw,
 };
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -36,7 +34,6 @@ pub struct ObjectResultBuilder {
 
 pub enum Body {
     Mutate((Success, Failure)),
-    Select(SelectResult),
     FlightDataRaw(FlightDataRaw),
 }
 
@@ -69,11 +66,6 @@ impl ObjectResultBuilder {
         self
     }
 
-    pub fn select_result(mut self, select_result: SelectResult) -> Self {
-        self.result = Some(Body::Select(select_result));
-        self
-    }
-
     pub fn flight_data(mut self, flight_data: FlightDataRaw) -> Self {
         self.result = Some(Body::FlightDataRaw(flight_data));
         self
@@ -93,9 +85,6 @@ impl ObjectResultBuilder {
                     failure,
                 }))
             }
-            Some(Body::Select(select)) => Some(object_result::Result::Select(SelectResultRaw {
-                raw_data: select.into(),
-            })),
             Some(Body::FlightDataRaw(raw_data)) => Some(object_result::Result::FlightData(
                 crate::v1::FlightDataRaw { raw_data },
             )),

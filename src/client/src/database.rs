@@ -12,24 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use api::v1::codec::SelectResult as GrpcSelectResult;
-use api::v1::column::SemanticType;
 use api::v1::{
     object_expr, object_result, query_request, DatabaseRequest, ExprHeader, InsertExpr,
     MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, QueryRequest,
 };
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{raw_flight_data_to_message, FlightMessage};
-use common_grpc_expr::column_to_vector;
 use common_query::Output;
-use common_recordbatch::{RecordBatch, RecordBatches};
-use datatypes::prelude::*;
-use datatypes::schema::{ColumnSchema, Schema};
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{ColumnToVectorSnafu, ConvertSchemaSnafu, DatanodeSnafu, DecodeSelectSnafu};
+use crate::error::DatanodeSnafu;
 use crate::{error, Client, Result};
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -141,7 +133,6 @@ impl Database {
 
 #[derive(Debug)]
 pub enum ObjectResult {
-    Select(GrpcSelectResult),
     FlightData(Vec<FlightMessage>),
     Mutate(GrpcMutateResult),
 }
@@ -165,10 +156,6 @@ impl TryFrom<api::v1::ObjectResult> for ObjectResult {
             actual: 0_usize,
         })?;
         Ok(match obj_result {
-            object_result::Result::Select(select) => {
-                let result = (*select.raw_data).try_into().context(DecodeSelectSnafu)?;
-                ObjectResult::Select(result)
-            }
             object_result::Result::Mutate(mutate) => ObjectResult::Mutate(mutate),
             object_result::Result::FlightData(flight_data) => {
                 let flight_messages = raw_flight_data_to_message(flight_data.raw_data)
@@ -188,41 +175,6 @@ impl TryFrom<ObjectResult> for Output {
 
     fn try_from(value: ObjectResult) -> Result<Self> {
         let output = match value {
-            ObjectResult::Select(select) => {
-                let vectors = select
-                    .columns
-                    .iter()
-                    .map(|column| {
-                        column_to_vector(column, select.row_count).context(ColumnToVectorSnafu)
-                    })
-                    .collect::<Result<Vec<VectorRef>>>()?;
-
-                let column_schemas = select
-                    .columns
-                    .iter()
-                    .zip(vectors.iter())
-                    .map(|(column, vector)| {
-                        let datatype = vector.data_type();
-                        // nullable or not, does not affect the output
-                        let mut column_schema =
-                            ColumnSchema::new(&column.column_name, datatype, true);
-                        if column.semantic_type == SemanticType::Timestamp as i32 {
-                            column_schema = column_schema.with_time_index(true);
-                        }
-                        column_schema
-                    })
-                    .collect::<Vec<ColumnSchema>>();
-
-                let schema = Arc::new(Schema::try_new(column_schemas).context(ConvertSchemaSnafu)?);
-                let recordbatches = if vectors.is_empty() {
-                    RecordBatches::try_new(schema, vec![])
-                } else {
-                    RecordBatch::new(schema, vectors)
-                        .and_then(|batch| RecordBatches::try_new(batch.schema.clone(), vec![batch]))
-                }
-                .context(error::CreateRecordBatchesSnafu)?;
-                Output::RecordBatches(recordbatches)
-            }
             ObjectResult::Mutate(mutate) => {
                 if mutate.failure != 0 {
                     return error::MutateFailureSnafu {
@@ -240,16 +192,18 @@ impl TryFrom<ObjectResult> for Output {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::Column;
     use common_grpc::select::{null_mask, values};
+    use common_grpc_expr::column_to_vector;
+    use datatypes::prelude::{Vector, VectorRef};
     use datatypes::vectors::{
         BinaryVector, BooleanVector, DateTimeVector, DateVector, Float32Vector, Float64Vector,
         Int16Vector, Int32Vector, Int64Vector, Int8Vector, StringVector, UInt16Vector,
         UInt32Vector, UInt64Vector, UInt8Vector,
     };
-
-    use super::*;
 
     #[test]
     fn test_column_to_vector() {
