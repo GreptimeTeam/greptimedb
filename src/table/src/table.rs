@@ -26,7 +26,7 @@ use datatypes::schema::SchemaRef;
 
 use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
-use crate::requests::{AlterTableRequest, InsertRequest};
+use crate::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
 
 pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
 
@@ -49,6 +49,8 @@ pub trait Table: Send + Sync {
     }
 
     /// Insert values into table.
+    ///
+    /// Returns number of inserted rows.
     async fn insert(&self, _request: InsertRequest) -> Result<usize> {
         UnsupportedSnafu {
             operation: "INSERT",
@@ -74,9 +76,20 @@ pub trait Table: Send + Sync {
         Ok(FilterPushDownType::Unsupported)
     }
 
+    /// Alter table.
     async fn alter(&self, _context: AlterContext, _request: AlterTableRequest) -> Result<()> {
         UnsupportedSnafu {
             operation: "ALTER TABLE",
+        }
+        .fail()?
+    }
+
+    /// Delete rows in the table.
+    ///
+    /// Returns number of deleted rows.
+    async fn delete(&self, _request: DeleteRequest) -> Result<usize> {
+        UnsupportedSnafu {
+            operation: "DELETE",
         }
         .fail()?
     }
