@@ -35,7 +35,7 @@ use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response, Streaming};
 
 use crate::error::{self, Result};
-use crate::instance::flight::stream::FlightRecordbatchStream;
+use crate::instance::flight::stream::FlightRecordBatchStream;
 use crate::instance::Instance;
 
 type TonicResult<T> = std::result::Result<T, tonic::Status>;
@@ -145,11 +145,11 @@ impl Instance {
         };
         Ok(match output {
             Output::Stream(stream) => {
-                let stream = FlightRecordbatchStream::new(stream);
+                let stream = FlightRecordBatchStream::new(stream);
                 Box::pin(stream) as _
             }
             Output::RecordBatches(x) => {
-                let stream = FlightRecordbatchStream::new(x.as_stream());
+                let stream = FlightRecordBatchStream::new(x.as_stream());
                 Box::pin(stream) as _
             }
             Output::AffectedRows(rows) => {

@@ -31,14 +31,14 @@ use crate::error;
 use crate::instance::flight::TonicResult;
 
 #[pin_project(PinnedDrop)]
-pub(super) struct FlightRecordbatchStream {
+pub(super) struct FlightRecordBatchStream {
     #[pin]
     rx: mpsc::Receiver<Result<FlightData, tonic::Status>>,
     join_handle: JoinHandle<()>,
     done: bool,
 }
 
-impl FlightRecordbatchStream {
+impl FlightRecordBatchStream {
     pub(super) fn new(recordbatches: SendableRecordBatchStream) -> Self {
         let (tx, rx) = mpsc::channel::<TonicResult<FlightData>>(1);
         let join_handle =
@@ -96,13 +96,13 @@ impl FlightRecordbatchStream {
 }
 
 #[pinned_drop]
-impl PinnedDrop for FlightRecordbatchStream {
+impl PinnedDrop for FlightRecordBatchStream {
     fn drop(self: Pin<&mut Self>) {
         self.join_handle.abort();
     }
 }
 
-impl Stream for FlightRecordbatchStream {
+impl Stream for FlightRecordBatchStream {
     type Item = TonicResult<FlightData>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -152,13 +152,13 @@ mod test {
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()])
             .unwrap()
             .as_stream();
-        let mut get_stream = FlightRecordbatchStream::new(recordbatches);
+        let mut stream = FlightRecordBatchStream::new(recordbatches);
 
         let mut raw_data = Vec::with_capacity(2);
-        raw_data.push(get_stream.next().await.unwrap().unwrap());
-        raw_data.push(get_stream.next().await.unwrap().unwrap());
-        assert!(get_stream.next().await.is_none());
-        assert!(get_stream.done);
+        raw_data.push(stream.next().await.unwrap().unwrap());
+        raw_data.push(stream.next().await.unwrap().unwrap());
+        assert!(stream.next().await.is_none());
+        assert!(stream.done);
 
         let decoder = &mut FlightDecoder::default();
         let mut flight_messages = raw_data
