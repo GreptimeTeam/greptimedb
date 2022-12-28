@@ -37,13 +37,6 @@ pub trait Entry: Encode + Send + Sync {
 
     fn set_id(&mut self, id: Id);
 
-    /// Returns epoch of entry.
-    fn epoch(&self) -> Epoch;
-
-    fn len(&self) -> usize;
-
-    fn is_empty(&self) -> bool;
-
     fn namespace(&self) -> Self::Namespace;
 }
 

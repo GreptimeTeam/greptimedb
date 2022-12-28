@@ -109,18 +109,6 @@ mod tests {
 
         fn set_id(&mut self, _id: Id) {}
 
-        fn epoch(&self) -> Epoch {
-            self.epoch
-        }
-
-        fn len(&self) -> usize {
-            self.data.len()
-        }
-
-        fn is_empty(&self) -> bool {
-            self.data.is_empty()
-        }
-
         fn namespace(&self) -> Self::Namespace {
             Namespace {}
         }

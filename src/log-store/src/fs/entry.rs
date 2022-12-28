@@ -179,18 +179,6 @@ impl Entry for EntryImpl {
         self.id = id;
     }
 
-    fn epoch(&self) -> Epoch {
-        self.epoch
-    }
-
-    fn len(&self) -> usize {
-        ENTRY_MIN_LEN + self.data.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
     fn namespace(&self) -> Self::Namespace {
         LocalNamespace::new(self.namespace_id)
     }

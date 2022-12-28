@@ -358,7 +358,7 @@ impl LogFile {
             match res {
                 Ok(entries) => {
                     for e in entries {
-                        last_offset += e.len();
+                        last_offset += e.encoded_size();
                         last_entry_id = Some(e.id());
                     }
                 }
