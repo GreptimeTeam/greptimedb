@@ -17,7 +17,7 @@ mod stream;
 use std::pin::Pin;
 
 use api::v1::object_expr::Expr;
-use api::v1::select_expr::Expr as SelectExpr;
+use api::v1::query_request::Query;
 use api::v1::ObjectExpr;
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
@@ -29,8 +29,7 @@ use common_query::Output;
 use futures::Stream;
 use prost::Message;
 use session::context::QueryContext;
-use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::statement::Statement;
+use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response, Streaming};
 
 use crate::error::{self, Result};
@@ -81,18 +80,15 @@ impl FlightService for Instance {
             .expr
             .context(error::MissingRequiredFieldSnafu { name: "expr" })?;
         match expr {
-            Expr::Select(select_expr) => {
-                let select_expr = select_expr
-                    .expr
+            Expr::Query(query_request) => {
+                let query = query_request
+                    .query
                     .context(error::MissingRequiredFieldSnafu { name: "expr" })?;
-                let stream = self.handle_select_expr(select_expr).await?;
+                let stream = self.handle_query(query).await?;
                 Ok(Response::new(Box::pin(stream) as TonicStream<FlightData>))
             }
             // TODO(LFC): Implement Insertion Flight interface.
             Expr::Insert(_) => Err(tonic::Status::unimplemented("Not yet implemented")),
-            Expr::Update(_) | Expr::Delete(_) => {
-                Err(tonic::Status::unimplemented("Not yet implemented"))
-            }
         }
     }
 
@@ -134,22 +130,16 @@ impl FlightService for Instance {
 }
 
 impl Instance {
-    async fn handle_select_expr(&self, select_expr: SelectExpr) -> Result<GetStream> {
-        let output = match select_expr {
-            SelectExpr::Sql(sql) => {
+    async fn handle_query(&self, query: Query) -> Result<GetStream> {
+        let output = match query {
+            Query::Sql(sql) => {
                 let stmt = self
                     .query_engine
                     .sql_to_statement(&sql)
                     .context(error::ExecuteSqlSnafu)?;
-                ensure!(
-                    matches!(stmt, Statement::Query(_)),
-                    error::InvalidSqlSnafu {
-                        msg: format!("expect SQL to be selection, actual: {sql}")
-                    }
-                );
                 self.execute_stmt(stmt, QueryContext::arc()).await?
             }
-            SelectExpr::LogicalPlan(plan) => self.execute_logical(plan).await?,
+            Query::LogicalPlan(plan) => self.execute_logical(plan).await?,
         };
 
         let recordbatch_stream = match output {

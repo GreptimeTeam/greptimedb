@@ -18,15 +18,12 @@ message ObjectExpr {
   ExprHeader header = 1;
   oneof expr {
     InsertExpr insert = 2;
-    SelectExpr select = 3;
-    UpdateExpr update = 4;
-    DeleteExpr delete = 5;
+    QueryRequest query = 3;
   }
 }
 
-// TODO(fys): Only support sql now, and will support promql etc in the future
-message SelectExpr {
-  oneof expr {
+message QueryRequest {
+  oneof query {
     string sql = 1;
     bytes logical_plan = 2;
   }
@@ -48,23 +45,12 @@ message InsertExpr {
   uint32 region_number = 5;
 }
 
-// TODO(jiachun)
-message UpdateExpr {}
-// TODO(jiachun)
-message DeleteExpr {}
-
 message ObjectResult {
   ResultHeader header = 1;
   oneof result {
-    SelectResult select = 2;
-    MutateResult mutate = 3;
-    FlightDataRaw flight_data = 4;
+    MutateResult mutate = 2;
+    FlightDataRaw flight_data = 3;
   }
-}
-
-// TODO(LFC): replace with flight data
-message SelectResult {
-  bytes raw_data = 1;
 }
 
 message FlightDataRaw {

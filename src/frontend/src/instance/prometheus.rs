@@ -12,24 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::prometheus::remote::read_request::ResponseType;
 use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
+use api::v1::object_expr::Expr;
+use api::v1::{query_request, ObjectExpr, QueryRequest};
 use async_trait::async_trait;
 use client::ObjectResult;
 use common_error::prelude::BoxedError;
-use common_grpc::select::to_object_result;
+use common_grpc::flight;
 use common_telemetry::logging;
 use prost::Message;
 use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use servers::Mode;
-use session::context::QueryContext;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 
-use crate::instance::{parse_stmt, Instance};
+use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
 
@@ -66,13 +65,11 @@ fn object_result_to_query_result(
     table_name: &str,
     object_result: ObjectResult,
 ) -> ServerResult<QueryResult> {
-    let select_result = match object_result {
-        ObjectResult::Select(result) => result,
-        _ => unreachable!(),
-    };
-
+    let ObjectResult::FlightData(flight_messages) = object_result else { unreachable!() };
+    let recordbatches = flight::flight_messages_to_recordbatches(flight_messages)
+        .context(error::ConvertFlightMessageSnafu)?;
     Ok(QueryResult {
-        timeseries: prometheus::select_result_to_timeseries(table_name, select_result)?,
+        timeseries: prometheus::recordbatches_to_timeseries(table_name, recordbatches)?,
     })
 }
 
@@ -92,24 +89,16 @@ impl Instance {
                 sql
             );
 
-            let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
-
-            let mut stmts = parse_stmt(&sql)
-                .map_err(BoxedError::new)
-                .context(error::ExecuteQuerySnafu { query: &sql })?;
-
-            ensure!(
-                stmts.len() == 1,
-                error::InvalidQuerySnafu {
-                    reason: "The sql has multiple statements".to_string()
-                }
-            );
-            let stmt = stmts.remove(0);
-
-            let output = self.sql_handler.do_statement_query(stmt, query_ctx).await;
-
-            let object_result = to_object_result(output)
-                .await
+            let query = ObjectExpr {
+                header: None,
+                expr: Some(Expr::Query(QueryRequest {
+                    query: Some(query_request::Query::Sql(sql.to_string())),
+                })),
+            };
+            let object_result = self
+                .grpc_query_handler
+                .do_query(query)
+                .await?
                 .try_into()
                 .map_err(BoxedError::new)
                 .context(error::ExecuteQuerySnafu { query: &sql })?;

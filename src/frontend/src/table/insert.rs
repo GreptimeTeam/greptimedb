@@ -72,7 +72,7 @@ impl DistTable {
             let object_result = join.await.context(error::JoinTaskSnafu)??;
             let result = match object_result {
                 ObjectResult::Mutate(result) => result,
-                ObjectResult::Select(_) | ObjectResult::FlightData(_) => unreachable!(),
+                ObjectResult::FlightData(_) => unreachable!(),
             };
             success += result.success;
             failure += result.failure;

@@ -108,7 +108,6 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         recordbatch: &RecordBatch,
     ) -> Result<()> {
         for row in recordbatch.rows() {
-            let row = row.context(error::CollectRecordbatchSnafu)?;
             for value in row.into_iter() {
                 match value {
                     Value::Null => row_writer.write_col(None::<u8>)?,

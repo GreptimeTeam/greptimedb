@@ -721,9 +721,9 @@ mod tests {
 
     use api::v1::column::SemanticType;
     use api::v1::{
-        admin_expr, admin_result, column, object_expr, object_result, select_expr, Column,
+        admin_expr, admin_result, column, object_expr, object_result, query_request, Column,
         ColumnDataType, ColumnDef as GrpcColumnDef, ExprHeader, FlightDataRaw, MutateResult,
-        SelectExpr,
+        QueryRequest,
     };
     use common_grpc::flight::{raw_flight_data_to_message, FlightMessage};
     use common_recordbatch::RecordBatch;
@@ -930,8 +930,8 @@ mod tests {
         // select
         let object_expr = ObjectExpr {
             header: Some(ExprHeader::default()),
-            expr: Some(object_expr::Expr::Select(SelectExpr {
-                expr: Some(select_expr::Expr::Sql("select * from demo".to_string())),
+            expr: Some(Expr::Query(QueryRequest {
+                query: Some(query_request::Query::Sql("select * from demo".to_string())),
             })),
         };
         let result = GrpcQueryHandler::do_query(&*instance, object_expr)

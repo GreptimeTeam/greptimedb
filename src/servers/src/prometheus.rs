@@ -19,12 +19,14 @@ use std::hash::{Hash, Hasher};
 
 use api::prometheus::remote::label_matcher::Type as MatcherType;
 use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
-use api::v1::codec::SelectResult;
 use api::v1::column::SemanticType;
 use api::v1::{column, Column, ColumnDataType, InsertExpr};
 use common_grpc::writer::Precision::Millisecond;
+use common_recordbatch::{RecordBatch, RecordBatches};
+use common_time::timestamp::TimeUnit;
+use datatypes::prelude::{ConcreteDataType, Value};
 use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use snap::raw::{Decoder, Encoder};
 use table::requests::InsertRequest;
 
@@ -175,78 +177,87 @@ impl PartialOrd for TimeSeriesId {
 
 /// Collect each row's timeseries id
 /// This processing is ugly, hope https://github.com/GreptimeTeam/greptimedb/issues/336 making some progress in future.
-fn collect_timeseries_ids(
-    table_name: &str,
-    row_count: usize,
-    columns: &[Column],
-) -> Vec<TimeSeriesId> {
+fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<TimeSeriesId> {
+    let row_count = recordbatch.num_rows();
     let mut timeseries_ids = Vec::with_capacity(row_count);
 
-    let mut columns_rows = vec![0; columns.len()];
-
     for row in 0..row_count {
-        let mut labels = Vec::with_capacity(columns.len() - 1);
-
+        let mut labels = Vec::with_capacity(recordbatch.num_columns() - 1);
         labels.push(new_label(
             METRIC_NAME_LABEL.to_string(),
             table_name.to_string(),
         ));
 
-        for (i, column) in columns.iter().enumerate() {
-            let column_name = &column.column_name;
-            let null_mask = &column.null_mask;
-            let values = &column.values;
-
-            if column_name == VALUE_COLUMN_NAME || column_name == TIMESTAMP_COLUMN_NAME {
+        for (i, column_schema) in recordbatch.schema.column_schemas().iter().enumerate() {
+            if column_schema.name == VALUE_COLUMN_NAME
+                || column_schema.name == TIMESTAMP_COLUMN_NAME
+            {
                 continue;
             }
 
+            let column = &recordbatch.columns()[i];
             // A label with an empty label value is considered equivalent to a label that does not exist.
-            if !null_mask.is_empty() && null_mask[row] == 0 {
+            if column.is_null(row) {
                 continue;
             }
 
-            let row = columns_rows[i];
-            columns_rows[i] += 1;
-
-            let column_value = values.as_ref().map(|vs| vs.string_values[row].to_string());
-            if let Some(value) = column_value {
-                labels.push(new_label(column_name.to_string(), value));
-            }
+            let value = column.get(row).to_string();
+            labels.push(new_label(column_schema.name.clone(), value));
         }
         timeseries_ids.push(TimeSeriesId { labels });
     }
     timeseries_ids
 }
 
-pub fn select_result_to_timeseries(
+pub fn recordbatches_to_timeseries(
     table_name: &str,
-    select_result: SelectResult,
+    recordbatches: RecordBatches,
 ) -> Result<Vec<TimeSeries>> {
-    let row_count = select_result.row_count as usize;
-    let columns = select_result.columns;
-    let ts_column = columns
-        .iter()
-        .find(|c| c.column_name == TIMESTAMP_COLUMN_NAME)
-        .context(error::InvalidPromRemoteReadQueryResultSnafu {
-            msg: "missing greptime_timestamp column in query result",
-        })?;
+    Ok(recordbatches
+        .take()
+        .into_iter()
+        .map(|x| recordbatch_to_timeseries(table_name, x))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect())
+}
 
-    let value_column = columns
-        .iter()
-        .find(|c| c.column_name == VALUE_COLUMN_NAME)
-        .context(error::InvalidPromRemoteReadQueryResultSnafu {
+fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Vec<TimeSeries>> {
+    let ts_column = recordbatch.column_by_name(TIMESTAMP_COLUMN_NAME).context(
+        error::InvalidPromRemoteReadQueryResultSnafu {
+            msg: "missing greptime_timestamp column in query result",
+        },
+    )?;
+    ensure!(
+        ts_column.data_type() == ConcreteDataType::timestamp_millisecond_datatype(),
+        error::InvalidPromRemoteReadQueryResultSnafu {
+            msg: format!(
+                "Expect timestamp column of datatype Timestamp(Millisecond), actual {:?}",
+                ts_column.data_type()
+            )
+        }
+    );
+
+    let value_column = recordbatch.column_by_name(VALUE_COLUMN_NAME).context(
+        error::InvalidPromRemoteReadQueryResultSnafu {
             msg: "missing greptime_value column in query result",
-        })?;
+        },
+    )?;
+    ensure!(
+        value_column.data_type() == ConcreteDataType::float64_datatype(),
+        error::InvalidPromRemoteReadQueryResultSnafu {
+            msg: format!(
+                "Expect value column of datatype Float64, actual {:?}",
+                value_column.data_type()
+            )
+        }
+    );
+
     // First, collect each row's timeseries id
-    let timeseries_ids = collect_timeseries_ids(table_name, row_count, &columns);
+    let timeseries_ids = collect_timeseries_ids(table, &recordbatch);
     // Then, group timeseries by it's id.
     let mut timeseries_map: BTreeMap<&TimeSeriesId, TimeSeries> = BTreeMap::default();
-
-    let mut value_column_row = 0;
-    let mut ts_column_row = 0;
-    let value_null_mask = &value_column.null_mask;
-    let ts_null_mask = &ts_column.null_mask;
 
     for (row, timeseries_id) in timeseries_ids.iter().enumerate() {
         let timeseries = timeseries_map
@@ -256,30 +267,19 @@ pub fn select_result_to_timeseries(
                 ..Default::default()
             });
 
-        if !ts_null_mask.is_empty() && ts_null_mask[row] == 0 {
+        if ts_column.is_null(row) || value_column.is_null(row) {
             continue;
         }
-        let ts_row = ts_column_row;
-        ts_column_row += 1;
 
-        if !value_null_mask.is_empty() && value_null_mask[row] == 0 {
-            continue;
-        }
-        let value_row = value_column_row;
-        value_column_row += 1;
-
-        let sample = Sample {
-            value: value_column
-                .values
-                .as_ref()
-                .map(|vs| vs.f64_values[value_row])
-                .unwrap_or(0.0f64),
-            timestamp: ts_column
-                .values
-                .as_ref()
-                .map(|vs| vs.ts_millisecond_values[ts_row])
-                .unwrap_or(0i64),
+        let value: f64 = match value_column.get(row) {
+            Value::Float64(value) => value.into(),
+            _ => unreachable!("checked by the \"ensure\" above"),
         };
+        let timestamp = match ts_column.get(row) {
+            Value::Timestamp(t) if t.unit() == TimeUnit::Millisecond => t.value(),
+            _ => unreachable!("checked by the \"ensure\" above"),
+        };
+        let sample = Sample { value, timestamp };
 
         timeseries.samples.push(sample);
     }
@@ -509,8 +509,9 @@ mod tests {
     use api::prometheus::remote::LabelMatcher;
     use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
+    use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::Value;
-    use datatypes::vectors::Vector;
+    use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector, Vector};
 
     use super::*;
 
@@ -764,38 +765,47 @@ mod tests {
     }
 
     #[test]
-    fn test_select_result_to_timeseries() {
-        let select_result = SelectResult {
-            row_count: 2,
-            columns: vec![
-                Column {
-                    column_name: TIMESTAMP_COLUMN_NAME.to_string(),
-                    values: Some(column::Values {
-                        ts_millisecond_values: vec![1000, 2000],
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                Column {
-                    column_name: VALUE_COLUMN_NAME.to_string(),
-                    values: Some(column::Values {
-                        f64_values: vec![3.0, 7.0],
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                Column {
-                    column_name: "instance".to_string(),
-                    values: Some(column::Values {
-                        string_values: vec!["host1".to_string(), "host2".to_string()],
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            ],
-        };
+    fn test_recordbatches_to_timeseries() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                TIMESTAMP_COLUMN_NAME,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                VALUE_COLUMN_NAME,
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+            ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
+        ]));
 
-        let timeseries = select_result_to_timeseries("metric1", select_result).unwrap();
+        let recordbatches = RecordBatches::try_new(
+            schema.clone(),
+            vec![
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![1000])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![3.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1"])) as _,
+                    ],
+                )
+                .unwrap(),
+                RecordBatch::new(
+                    schema,
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![2000])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![7.0])) as _,
+                        Arc::new(StringVector::from(vec!["host2"])) as _,
+                    ],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let timeseries = recordbatches_to_timeseries("metric1", recordbatches).unwrap();
         assert_eq!(2, timeseries.len());
 
         assert_eq!(
