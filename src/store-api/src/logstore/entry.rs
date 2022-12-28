@@ -32,9 +32,6 @@ pub trait Entry: Encode + Send + Sync {
     /// Return entry id that monotonically increments.
     fn id(&self) -> Id;
 
-    /// Return file offset of entry.
-    fn offset(&self) -> Offset;
-
     fn set_id(&mut self, id: Id);
 
     fn namespace(&self) -> Self::Namespace;

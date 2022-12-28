@@ -103,10 +103,6 @@ mod tests {
             0u64
         }
 
-        fn offset(&self) -> Offset {
-            self.offset
-        }
-
         fn set_id(&mut self, _id: Id) {}
 
         fn namespace(&self) -> Self::Namespace {

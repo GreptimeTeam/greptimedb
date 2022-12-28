@@ -99,6 +99,18 @@ pub enum Error {
         source: JoinError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to encode entry to protobuf, source: {}", source))]
+    EncodeProtobuf {
+        source: protobuf::error::ProtobufError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to decode entry to protobuf bytes, source: {}", source))]
+    DecodeProtobuf {
+        source: protobuf::error::ProtobufError,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {

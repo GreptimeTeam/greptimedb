@@ -157,6 +157,10 @@ impl EntryImpl {
             namespace_id: namespace.id(),
         }
     }
+
+    pub fn encoded_size(&self) -> usize {
+        self.data.len() + ENTRY_MIN_LEN
+    }
 }
 
 impl Entry for EntryImpl {
@@ -169,10 +173,6 @@ impl Entry for EntryImpl {
 
     fn id(&self) -> Id {
         self.id
-    }
-
-    fn offset(&self) -> Offset {
-        self.offset
     }
 
     fn set_id(&mut self, id: Id) {
