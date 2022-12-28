@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 arc-swap = "1.0"
 async-compat = "0.2"
-async-stream = "0.3"
+async-stream.workspace = true
 async-trait = "0.1"
 bytes = "1.1"
 common-base = { path = "../common/base" }

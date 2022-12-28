@@ -21,17 +21,11 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
 use session::context::QueryContext;
 
-use crate::instance::Instance;
-use crate::tests::test_util;
+use crate::tests::test_util::{self, MockInstance};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_database_and_insert_query() {
-    common_telemetry::init_default_ut_logging();
-
-    let (opts, _guard) =
-        test_util::create_tmp_dir_and_datanode_opts("create_database_and_insert_query");
-    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-    instance.start().await.unwrap();
+    let instance = MockInstance::new("create_database_and_insert_query").await;
 
     let output = execute_sql(&instance, "create database test").await;
     assert!(matches!(output, Output::AffectedRows(1)));
@@ -77,12 +71,7 @@ async fn test_create_database_and_insert_query() {
 }
 #[tokio::test(flavor = "multi_thread")]
 async fn test_issue477_same_table_name_in_different_databases() {
-    common_telemetry::init_default_ut_logging();
-
-    let (opts, _guard) =
-        test_util::create_tmp_dir_and_datanode_opts("create_database_and_insert_query");
-    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-    instance.start().await.unwrap();
+    let instance = MockInstance::new("test_issue477_same_table_name_in_different_databases").await;
 
     // Create database a and b
     let output = execute_sql(&instance, "create database a").await;
@@ -149,7 +138,7 @@ async fn test_issue477_same_table_name_in_different_databases() {
     .await;
 }
 
-async fn assert_query_result(instance: &Instance, sql: &str, ts: i64, host: &str) {
+async fn assert_query_result(instance: &MockInstance, sql: &str, ts: i64, host: &str) {
     let query_output = execute_sql(instance, sql).await;
     match query_output {
         Output::Stream(s) => {
@@ -169,16 +158,11 @@ async fn assert_query_result(instance: &Instance, sql: &str, ts: i64, host: &str
     }
 }
 
-async fn setup_test_instance(test_name: &str) -> Instance {
-    common_telemetry::init_default_ut_logging();
-
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts(test_name);
-    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-    instance.start().await.unwrap();
+async fn setup_test_instance(test_name: &str) -> MockInstance {
+    let instance = MockInstance::new(test_name).await;
 
     test_util::create_test_table(
-        instance.catalog_manager(),
-        instance.sql_handler(),
+        &instance,
         ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
@@ -203,19 +187,11 @@ async fn test_execute_insert() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_execute_insert_query_with_i64_timestamp() {
-    common_telemetry::init_default_ut_logging();
+    let instance = MockInstance::new("insert_query_i64_timestamp").await;
 
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("insert_query_i64_timestamp");
-    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-    instance.start().await.unwrap();
-
-    test_util::create_test_table(
-        instance.catalog_manager(),
-        instance.sql_handler(),
-        ConcreteDataType::int64_datatype(),
-    )
-    .await
-    .unwrap();
+    test_util::create_test_table(&instance, ConcreteDataType::int64_datatype())
+        .await
+        .unwrap();
 
     let output = execute_sql(
         &instance,
@@ -262,9 +238,7 @@ async fn test_execute_insert_query_with_i64_timestamp() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_execute_query() {
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_query");
-    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-    instance.start().await.unwrap();
+    let instance = MockInstance::new("execute_query").await;
 
     let output = execute_sql(&instance, "select sum(number) from numbers limit 20").await;
     match output {
@@ -284,10 +258,7 @@ async fn test_execute_query() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_execute_show_databases_tables() {
-    let (opts, _guard) =
-        test_util::create_tmp_dir_and_datanode_opts("execute_show_databases_tables");
-    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-    instance.start().await.unwrap();
+    let instance = MockInstance::new("execute_show_databases_tables").await;
 
     let output = execute_sql(&instance, "show databases").await;
     match output {
@@ -331,8 +302,7 @@ async fn test_execute_show_databases_tables() {
 
     // creat a table
     test_util::create_test_table(
-        instance.catalog_manager(),
-        instance.sql_handler(),
+        &instance,
         ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
@@ -367,11 +337,7 @@ async fn test_execute_show_databases_tables() {
 
 #[tokio::test(flavor = "multi_thread")]
 pub async fn test_execute_create() {
-    common_telemetry::init_default_ut_logging();
-
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_create");
-    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-    instance.start().await.unwrap();
+    let instance = MockInstance::new("execute_create").await;
 
     let output = execute_sql(
         &instance,
@@ -480,9 +446,7 @@ async fn test_alter_table() {
 }
 
 async fn test_insert_with_default_value_for_type(type_name: &str) {
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("execute_create");
-    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-    instance.start().await.unwrap();
+    let instance = MockInstance::new("execute_create").await;
 
     let create_sql = format!(
         r#"create table test_table(
@@ -527,17 +491,13 @@ async fn test_insert_with_default_value_for_type(type_name: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_insert_with_default_value() {
-    common_telemetry::init_default_ut_logging();
-
     test_insert_with_default_value_for_type("timestamp").await;
     test_insert_with_default_value_for_type("bigint").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_use_database() {
-    let (opts, _guard) = test_util::create_tmp_dir_and_datanode_opts("use_database");
-    let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
-    instance.start().await.unwrap();
+    let instance = MockInstance::new("test_use_database").await;
 
     let output = execute_sql(&instance, "create database db1").await;
     assert!(matches!(output, Output::AffectedRows(1)));
@@ -594,11 +554,11 @@ async fn test_use_database() {
     check_output_stream(output, expected).await;
 }
 
-async fn execute_sql(instance: &Instance, sql: &str) -> Output {
+async fn execute_sql(instance: &MockInstance, sql: &str) -> Output {
     execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
 }
 
-async fn execute_sql_in_db(instance: &Instance, sql: &str, db: &str) -> Output {
+async fn execute_sql_in_db(instance: &MockInstance, sql: &str, db: &str) -> Output {
     let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
-    instance.execute_sql(sql, query_ctx).await.unwrap()
+    instance.inner().execute_sql(sql, query_ctx).await.unwrap()
 }

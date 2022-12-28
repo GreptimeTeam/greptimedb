@@ -56,3 +56,7 @@ message ObjectResult {
 message FlightDataRaw {
   repeated bytes raw_data = 1;
 }
+
+message FlightAppMeta {
+  uint32 affected_rows = 1;
+}

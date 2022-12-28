@@ -48,6 +48,7 @@ license = "Apache-2.0"
 arrow = "29.0"
 arrow-flight = "29.0"
 arrow-schema = { version = "29.0", features = ["serde"] }
+async-stream = "0.3"
 async-trait = "0.1"
 # TODO(LFC): Use released Datafusion when it officially dpendent on Arrow 29.0
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }

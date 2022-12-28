@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use api::result::ObjectResultBuilder;
-use api::v1::ObjectResult;
+use api::v1::{FlightAppMeta, ObjectResult};
 use arrow_flight::utils::flight_data_to_arrow_batch;
 use arrow_flight::FlightData;
 use common_error::prelude::StatusCode;
@@ -31,7 +31,10 @@ use snafu::{OptionExt, ResultExt};
 use tonic::codegen::futures_core::Stream;
 use tonic::Response;
 
-use crate::error::{self, InvalidFlightDataSnafu, Result};
+use crate::error::{
+    ConvertArrowSchemaSnafu, CreateRecordBatchSnafu, DecodeFlightDataSnafu, InvalidFlightDataSnafu,
+    Result,
+};
 
 type TonicResult<T> = std::result::Result<T, tonic::Status>;
 type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
@@ -40,6 +43,7 @@ type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 
 pub enum FlightMessage {
     Schema(SchemaRef),
     Recordbatch(RecordBatch),
+    AffectedRows(usize),
 }
 
 #[derive(Default)]
@@ -56,6 +60,11 @@ impl FlightDecoder {
             .build()
         })?;
         match message.header_type() {
+            MessageHeader::NONE => {
+                let app_meta = FlightAppMeta::decode(flight_data.app_metadata.as_slice())
+                    .context(DecodeFlightDataSnafu)?;
+                Ok(FlightMessage::AffectedRows(app_meta.affected_rows as _))
+            }
             MessageHeader::Schema => {
                 let arrow_schema = ArrowSchema::try_from(&flight_data).map_err(|e| {
                     InvalidFlightDataSnafu {
@@ -63,9 +72,8 @@ impl FlightDecoder {
                     }
                     .build()
                 })?;
-                let schema = Arc::new(
-                    Schema::try_from(arrow_schema).context(error::ConvertArrowSchemaSnafu)?,
-                );
+                let schema =
+                    Arc::new(Schema::try_from(arrow_schema).context(ConvertArrowSchemaSnafu)?);
 
                 self.schema = Some(schema.clone());
 
@@ -86,7 +94,7 @@ impl FlightDecoder {
                             .build()
                         })?;
                 let recordbatch = RecordBatch::try_from_df_record_batch(schema, arrow_batch)
-                    .context(error::CreateRecordBatchSnafu)?;
+                    .context(CreateRecordBatchSnafu)?;
                 Ok(FlightMessage::Recordbatch(recordbatch))
             }
             other => {
@@ -127,7 +135,7 @@ pub async fn flight_data_to_object_result(
 pub fn raw_flight_data_to_message(raw_data: Vec<Vec<u8>>) -> Result<Vec<FlightMessage>> {
     let flight_data = raw_data
         .into_iter()
-        .map(|x| FlightData::decode(x.as_slice()).context(error::DecodeFlightDataSnafu))
+        .map(|x| FlightData::decode(x.as_slice()).context(DecodeFlightDataSnafu))
         .collect::<Result<Vec<FlightData>>>()?;
 
     let decoder = &mut FlightDecoder::default();
@@ -165,7 +173,7 @@ pub fn flight_messages_to_recordbatches(messages: Vec<FlightMessage>) -> Result<
             }
         }
 
-        RecordBatches::try_new(schema, recordbatches).context(error::CreateRecordBatchSnafu)
+        RecordBatches::try_new(schema, recordbatches).context(CreateRecordBatchSnafu)
     }
 }
 

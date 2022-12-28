@@ -20,7 +20,7 @@ use api::v1::{
 use client::admin::Admin;
 use client::{Client, Database, ObjectResult};
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_grpc::flight::flight_messages_to_recordbatches;
+use common_grpc::flight::{flight_messages_to_recordbatches, FlightMessage};
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};
 
@@ -167,7 +167,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         kind: Some(kind),
     };
     let result = admin.alter(expr).await.unwrap();
-    assert_eq!(result.result, None);
+    assert!(result.result.is_none());
 
     // insert
     insert_and_assert(&db).await;
@@ -195,11 +195,21 @@ async fn insert_and_assert(db: &Database) {
     let result = db.insert(expr).await;
     result.unwrap();
 
-    // select
     let result = db
-        .select(client::Select::Sql("select * from demo".to_string()))
+        .sql(
+            "INSERT INTO demo(host, cpu, memory, ts) VALUES \
+            ('host5', 66.6, 1024, 1672201027000),\
+            ('host6', 88.8, 333.3, 1672201028000)",
+        )
         .await
         .unwrap();
+    assert!(matches!(result, ObjectResult::FlightData(_)));
+    let ObjectResult::FlightData(mut messages) = result else { unreachable!() };
+    assert_eq!(messages.len(), 1);
+    assert!(matches!(messages.remove(0), FlightMessage::AffectedRows(2)));
+
+    // select
+    let result = db.sql("SELECT * FROM demo").await.unwrap();
     match result {
         ObjectResult::FlightData(flight_messages) => {
             let recordbatches = flight_messages_to_recordbatches(flight_messages).unwrap();
@@ -212,6 +222,8 @@ async fn insert_and_assert(db: &Database) {
 | host2 |      | 0.2    | 1970-01-01T00:00:00.101 |
 | host3 | 0.41 |        | 1970-01-01T00:00:00.102 |
 | host4 | 0.2  | 0.3    | 1970-01-01T00:00:00.103 |
+| host5 | 66.6 | 1024   | 2022-12-28T04:17:07     |
+| host6 | 88.8 | 333.3  | 2022-12-28T04:17:08     |
 +-------+------+--------+-------------------------+\
 ";
             assert_eq!(pretty, expected);

@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 api = { path = "../api" }
 arc-swap = "1.0"
-async-stream = "0.3"
+async-stream.workspace = true
 async-trait = "0.1"
 backoff = { version = "0.4", features = ["tokio"] }
 common-catalog = { path = "../common/catalog" }

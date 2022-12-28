@@ -10,7 +10,7 @@ test = ["tempdir"]
 
 [dependencies]
 arc-swap = "1.0"
-async-stream = "0.3"
+async-stream.workspace = true
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 common-catalog = { path = "../common/catalog" }

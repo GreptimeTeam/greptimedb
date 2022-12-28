@@ -31,14 +31,14 @@ use crate::error;
 use crate::instance::flight::TonicResult;
 
 #[pin_project(PinnedDrop)]
-pub(super) struct GetStream {
+pub(super) struct FlightRecordbatchStream {
     #[pin]
     rx: mpsc::Receiver<Result<FlightData, tonic::Status>>,
     join_handle: JoinHandle<()>,
     done: bool,
 }
 
-impl GetStream {
+impl FlightRecordbatchStream {
     pub(super) fn new(recordbatches: SendableRecordBatchStream) -> Self {
         let (tx, rx) = mpsc::channel::<TonicResult<FlightData>>(1);
         let join_handle =
@@ -96,13 +96,13 @@ impl GetStream {
 }
 
 #[pinned_drop]
-impl PinnedDrop for GetStream {
+impl PinnedDrop for FlightRecordbatchStream {
     fn drop(self: Pin<&mut Self>) {
         self.join_handle.abort();
     }
 }
 
-impl Stream for GetStream {
+impl Stream for FlightRecordbatchStream {
     type Item = TonicResult<FlightData>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -139,7 +139,7 @@ mod test {
     use super::*;
 
     #[tokio::test]
-    async fn test_get_stream() {
+    async fn test_flight_recordbatch_stream() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "a",
             ConcreteDataType::int32_datatype(),
@@ -152,7 +152,7 @@ mod test {
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()])
             .unwrap()
             .as_stream();
-        let mut get_stream = GetStream::new(recordbatches);
+        let mut get_stream = FlightRecordbatchStream::new(recordbatches);
 
         let mut raw_data = Vec::with_capacity(2);
         raw_data.push(get_stream.next().await.unwrap().unwrap());
