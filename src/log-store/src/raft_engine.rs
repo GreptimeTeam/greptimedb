@@ -15,13 +15,15 @@
 use std::hash::{Hash, Hasher};
 
 use common_base::buffer::{Buffer, BufferMut};
-use protobuf::{parse_from_bytes, Message};
+use protobuf::Message;
 use snafu::ResultExt;
-use store_api::logstore::entry::{Encode, Entry as EntryTrait, Epoch, Id, Offset};
+use store_api::logstore::entry::{Encode, Entry as EntryTrait, Id};
 use store_api::logstore::namespace::Namespace as NamespaceTrait;
 
-use crate::error::{DecodeProtobufSnafu, DecodeSnafu, EncodeProtobufSnafu, EncodeSnafu, Error};
+use crate::error::{DecodeProtobufSnafu, EncodeProtobufSnafu, EncodeSnafu, Error};
 use crate::raft_engine::protos::logstore::{Entry, Namespace};
+
+pub mod RaftEngineLogstore;
 
 pub mod protos {
     include!(concat!(env!("OUT_DIR"), concat!("/", "protos/", "mod.rs")));

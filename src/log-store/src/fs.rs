@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use store_api::logstore::entry::{Id, Offset};
-use store_api::logstore::AppendResponse;
-
 mod chunk;
 pub mod config;
 mod crc;
@@ -26,21 +23,3 @@ mod io;
 pub mod log;
 mod namespace;
 pub mod noop;
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct AppendResponseImpl {
-    entry_id: Id,
-    offset: Offset,
-}
-
-impl AppendResponse for AppendResponseImpl {
-    #[inline]
-    fn entry_id(&self) -> Id {
-        self.entry_id
-    }
-
-    #[inline]
-    fn offset(&self) -> Offset {
-        self.offset
-    }
-}

@@ -22,6 +22,7 @@ crc = "3.0"
 futures.workspace = true
 futures-util = "0.3"
 hex = "0.4"
+raft-engine = "0.3"
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
 tempdir = "0.3"

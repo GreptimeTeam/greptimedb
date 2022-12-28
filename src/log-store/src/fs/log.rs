@@ -24,7 +24,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::{Encode, Entry, Id};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
-use store_api::logstore::LogStore;
+use store_api::logstore::{AppendResponse, LogStore};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -38,7 +38,6 @@ use crate::fs::entry::EntryImpl;
 use crate::fs::file::{LogFile, LogFileRef};
 use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
-use crate::fs::AppendResponseImpl;
 
 type FileMap = BTreeMap<u64, LogFileRef>;
 
@@ -251,13 +250,12 @@ impl LogStore for LocalFileLogStore {
     type Error = Error;
     type Namespace = LocalNamespace;
     type Entry = EntryImpl;
-    type AppendResponse = AppendResponseImpl;
 
     async fn start(&self) -> Result<()> {
         let files = self.files.clone();
         let obsolete_ids = self.obsolete_ids.clone();
         let interval = self.config.gc_interval;
-        let token = tokio_util::sync::CancellationToken::new();
+        let token = CancellationToken::new();
         let child = token.child_token();
 
         let handle = common_runtime::spawn_bg(async move {
@@ -302,7 +300,7 @@ impl LogStore for LocalFileLogStore {
         Ok(handle.await.context(WaitGcTaskStopSnafu)?)
     }
 
-    async fn append(&self, mut entry: Self::Entry) -> Result<Self::AppendResponse> {
+    async fn append(&self, mut entry: Self::Entry) -> Result<AppendResponse> {
         // TODO(hl): configurable retry times
         for _ in 0..3 {
             let current_active_file = self.active_file();

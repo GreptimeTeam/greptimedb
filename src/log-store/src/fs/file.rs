@@ -30,6 +30,7 @@ use snafu::ResultExt;
 use store_api::logstore::entry::{Encode, Entry, Id, Offset};
 use store_api::logstore::entry_stream::EntryStream;
 use store_api::logstore::namespace::Namespace;
+use store_api::logstore::AppendResponse;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{Receiver, Sender as MpscSender};
 use tokio::sync::oneshot::Sender as OneshotSender;
@@ -47,7 +48,6 @@ use crate::fs::crc::CRC_ALGO;
 use crate::fs::entry::{EntryImpl, StreamImpl};
 use crate::fs::file_name::FileName;
 use crate::fs::namespace::LocalNamespace;
-use crate::fs::AppendResponseImpl;
 
 pub const CHUNK_SIZE: usize = 4096;
 const LOG_WRITER_BATCH_SIZE: usize = 16;
@@ -422,7 +422,7 @@ impl LogFile {
     }
 
     /// Appends an entry to `LogFile` and return a `Result` containing the id of entry appended.
-    pub async fn append<T: Entry>(&self, e: &mut T) -> Result<AppendResponseImpl>
+    pub async fn append<T: Entry>(&self, e: &mut T) -> Result<AppendResponse>
     where
         T: Encode<Error = Error>,
     {
@@ -522,7 +522,7 @@ impl Debug for LogFile {
 
 #[derive(Debug)]
 pub(crate) struct AppendRequest {
-    tx: OneshotSender<std::result::Result<AppendResponseImpl, ()>>,
+    tx: OneshotSender<std::result::Result<AppendResponse, ()>>,
     offset: Offset,
     id: Id,
     data: Bytes,
@@ -531,10 +531,7 @@ pub(crate) struct AppendRequest {
 impl AppendRequest {
     #[inline]
     pub fn complete(self) {
-        let _ = self.tx.send(Ok(AppendResponseImpl {
-            offset: self.offset,
-            entry_id: self.id,
-        }));
+        let _ = self.tx.send(Ok(AppendResponse { entry_id: self.id }));
     }
 
     #[inline]
