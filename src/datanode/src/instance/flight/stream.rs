@@ -139,7 +139,7 @@ mod test {
     use super::*;
 
     #[tokio::test]
-    async fn test_flight_recordbatch_stream() {
+    async fn test_flight_record_batch_stream() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "a",
             ConcreteDataType::int32_datatype(),
