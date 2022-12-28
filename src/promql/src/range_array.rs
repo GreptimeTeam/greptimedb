@@ -94,6 +94,14 @@ impl RangeArray {
         unsafe { Ok(Self::from_ranges_unchecked(values, ranges)) }
     }
 
+    /// Construct [RangeArray] from given range without checking its validaty.
+    ///
+    /// # Safety
+    ///
+    /// Caller should ensure the given range are valid. Otherwise use [`from_ranges`]
+    /// instead.
+    ///
+    /// [`from_ranges`]: crate::range_array::RangeArray#method.from_ranges
     pub unsafe fn from_ranges_unchecked<R>(values: ArrayRef, ranges: R) -> Self
     where
         R: IntoIterator<Item = (i32, i32)>,
@@ -131,6 +139,10 @@ impl RangeArray {
 
     pub fn len(&self) -> usize {
         self.array.keys().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.array.keys().is_empty()
     }
 
     pub fn get(&self, index: usize) -> Option<ArrayRef> {
@@ -337,5 +349,13 @@ mod test {
         let rounded_range_array = RangeArray::try_new(dict_array).unwrap();
         let formatted = expand_format(&rounded_range_array);
         assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn empty_range_array() {
+        let values_array = Arc::new(UInt64Array::from_iter([1, 2, 3, 4, 5, 6, 7, 8, 9]));
+        let ranges = [];
+        let range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
+        assert!(range_array.is_empty());
     }
 }
