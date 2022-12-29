@@ -41,7 +41,7 @@ use crate::extension_plan::Millisecond;
 ///
 /// This plan will try to align the input time series, for every timestamp between
 /// `start` and `end` with step `interval`. Find in the `lookback` range if data
-/// is missing at the given timestamp. If data is absent in some timestmap, all columns
+/// is missing at the given timestamp. If data is absent in some timestamp, all columns
 /// except the time index will left blank.
 #[derive(Debug)]
 pub struct InstantManipulator {
