@@ -27,8 +27,8 @@ use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayFormatType, ExecutionPlan, Partitioning, PhysicalExpr, RecordBatchStream,
-    SendableRecordBatchStream, Statistics,
+    DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
+    Statistics,
 };
 use datatypes::arrow::compute;
 use datatypes::arrow::error::Result as ArrowResult;
@@ -36,17 +36,20 @@ use futures::{Stream, StreamExt};
 
 use crate::extension_plan::Millisecond;
 
+/// Manipulate the input record batch to make it suit for Instant Operator.
+///
+/// This plan will try to align the input time series, for every timestamp between
+/// `start` and `end` with step `interval`. Find in the `lookback` range if data
+/// is missing at the given timestamp. If data is absent in some timestmap, all columns
+/// except the time index will left blank.
 #[derive(Debug)]
 pub struct InstantManipulator {
     start: Millisecond,
     end: Millisecond,
     lookback_delta: Millisecond,
     interval: Millisecond,
-
     time_index_column: String,
-    value_columns: Vec<String>,
 
-    exprs: Vec<Expr>,
     input: LogicalPlan,
 }
 
@@ -64,7 +67,7 @@ impl UserDefinedLogicalNode for InstantManipulator {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        self.exprs.clone()
+        vec![]
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -72,19 +75,12 @@ impl UserDefinedLogicalNode for InstantManipulator {
             f,
             "PromInstantManipulator: lookback=[{}], interval=[{}], time index=[{}]",
             self.lookback_delta, self.interval, self.time_index_column
-        )?;
-        for (i, expr_item) in self.exprs.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{:?}", expr_item)?;
-        }
-        Ok(())
+        )
     }
 
     fn from_template(
         &self,
-        exprs: &[Expr],
+        _exprs: &[Expr],
         inputs: &[LogicalPlan],
     ) -> Arc<dyn UserDefinedLogicalNode> {
         assert!(!inputs.is_empty());
@@ -95,8 +91,6 @@ impl UserDefinedLogicalNode for InstantManipulator {
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index_column: self.time_index_column.clone(),
-            value_columns: self.value_columns.clone(),
-            exprs: exprs.to_vec(),
             input: inputs[0].clone(),
         })
     }
@@ -109,8 +103,6 @@ impl InstantManipulator {
         lookback_delta: Millisecond,
         interval: Millisecond,
         time_index_column: String,
-        value_columns: Vec<String>,
-        exprs: E,
         input: LogicalPlan,
     ) -> Self {
         Self {
@@ -119,26 +111,18 @@ impl InstantManipulator {
             lookback_delta,
             interval,
             time_index_column,
-            value_columns,
-            exprs: exprs.as_ref().to_vec(),
             input,
         }
     }
 
-    pub fn to_execution_plan(
-        &self,
-        exec_input: Arc<dyn ExecutionPlan>,
-        physical_exprs: Vec<Arc<dyn PhysicalExpr>>,
-    ) -> Arc<dyn ExecutionPlan> {
+    pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         Arc::new(InstantManipulatorExec {
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index_column: self.time_index_column.clone(),
-            value_columns: self.value_columns.clone(),
             input: exec_input,
-            exprs: physical_exprs,
             metric: ExecutionPlanMetricsSet::new(),
         })
     }
@@ -150,13 +134,9 @@ pub struct InstantManipulatorExec {
     end: Millisecond,
     lookback_delta: Millisecond,
     interval: Millisecond,
-
     time_index_column: String,
-    value_columns: Vec<String>,
 
     input: Arc<dyn ExecutionPlan>,
-    exprs: Vec<Arc<dyn PhysicalExpr>>,
-
     metric: ExecutionPlanMetricsSet,
 }
 
@@ -196,8 +176,6 @@ impl ExecutionPlan for InstantManipulatorExec {
             lookback_delta: self.lookback_delta,
             interval: self.interval,
             time_index_column: self.time_index_column.clone(),
-            value_columns: self.value_columns.clone(),
-            exprs: self.exprs.clone(),
             input: children[0].clone(),
             metric: self.metric.clone(),
         }))
@@ -299,11 +277,6 @@ impl Stream for InstantManipulatorStream {
 }
 
 impl InstantManipulatorStream {
-    /// Manipulate the input record batch to make it suit for Instant Operator.
-    ///
-    /// This plan will try to align the input time series, for every timestamp between
-    /// `start` and `end` with step `interval`. Find in the `lookback` range if data
-    /// is missing at the given timestamp.
     pub fn manipulate(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
         let mut take_indices = Vec::with_capacity(input.num_rows());
         // TODO(ruihang): maybe the input is not timestamp millisecond array
@@ -315,10 +288,12 @@ impl InstantManipulatorStream {
 
         // prepare two vectors
         let mut cursor = 0;
-        let expected_iter = (self.start..=self.end).step_by(self.interval as usize);
+        let aligned_ts = (self.start..=self.end)
+            .step_by(self.interval as usize)
+            .collect::<Vec<_>>();
 
         // calculate the offsets to take
-        'next: for expected_ts in expected_iter {
+        'next: for expected_ts in aligned_ts.iter().copied() {
             // first, search toward end to see if there is matched timestamp
             while cursor < ts_column.len() {
                 let curr = ts_column.value(cursor);
@@ -330,11 +305,14 @@ impl InstantManipulatorStream {
                 }
                 cursor += 1;
             }
+            if cursor == ts_column.len() {
+                cursor -= 1;
+            }
             // then, search backward to lookback
             loop {
                 let curr = ts_column.value(cursor);
                 if curr + self.lookback_delta < expected_ts {
-                    // not found in lookback, leave this field blank
+                    // not found in lookback, leave this field blank.
                     take_indices.push(None);
                     break;
                 } else if curr < expected_ts && curr + self.lookback_delta >= expected_ts {
@@ -343,28 +321,398 @@ impl InstantManipulatorStream {
                     break;
                 } else if cursor == 0 {
                     // reach the first value and not found in lookback, leave this field blank
+                    take_indices.push(None);
                     break;
                 }
                 cursor -= 1;
             }
         }
 
-        // take record batch
-        Self::take_record_batch_optional(input, take_indices)
+        // take record batch and replace the time index column
+        self.take_record_batch_optional(input, take_indices, aligned_ts)
     }
 
     /// Helper function to apply "take" on record batch.
     fn take_record_batch_optional(
+        &self,
         record_batch: RecordBatch,
         take_indices: Vec<Option<u64>>,
+        aligned_ts: Vec<Millisecond>,
     ) -> ArrowResult<RecordBatch> {
         let indices_array = UInt64Array::from(take_indices);
-        let arrays = record_batch
+        let mut arrays = record_batch
             .columns()
             .iter()
             .map(|array| compute::take(array, &indices_array, None))
             .collect::<ArrowResult<Vec<_>>>()?;
+        arrays[self.time_index] = Arc::new(TimestampMillisecondArray::from(aligned_ts));
 
         RecordBatch::try_new(record_batch.schema(), arrays)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use datafusion::arrow::array::Float64Array;
+    use datafusion::arrow::datatypes::{
+        ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
+    };
+    use datafusion::from_slice::FromSlice;
+    use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::prelude::SessionContext;
+    use datatypes::arrow::array::TimestampMillisecondArray;
+    use datatypes::arrow_array::StringArray;
+
+    use super::*;
+
+    const TIME_INDEX_COLUMN: &str = "timestamp";
+
+    fn prepare_test_data() -> MemoryExec {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new("value", DataType::Float64, true),
+            Field::new("path", DataType::Utf8, true),
+        ]));
+        let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice([
+            0, 30_000, 60_000, 90_000, 120_000, // every 30s
+            180_000, 240_000, // every 60s
+            241_000, 271_000, 291_000, // others
+        ])) as _;
+        let value_column = Arc::new(Float64Array::from_slice([1.0; 10])) as _;
+        let path_column = Arc::new(StringArray::from_slice(["foo"; 10])) as _;
+        let data = RecordBatch::try_new(
+            schema.clone(),
+            vec![timestamp_column, value_column, path_column],
+        )
+        .unwrap();
+
+        MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
+    }
+
+    async fn do_normalize_test(
+        start: Millisecond,
+        end: Millisecond,
+        lookback_delta: Millisecond,
+        interval: Millisecond,
+        expected: String,
+    ) {
+        let memory_exec = Arc::new(prepare_test_data());
+        let normalize_exec = Arc::new(InstantManipulatorExec {
+            start,
+            end,
+            lookback_delta,
+            interval,
+            time_index_column: TIME_INDEX_COLUMN.to_string(),
+            input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())
+            .await
+            .unwrap();
+        let result_literal = datatypes::arrow::util::pretty::pretty_format_batches(&result)
+            .unwrap()
+            .to_string();
+
+        assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn lookback_10s_interval_30s() {
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1970-01-01T00:00:00 | 1     | foo  |\
+            \n| 1970-01-01T00:00:30 | 1     | foo  |\
+            \n| 1970-01-01T00:01:00 | 1     | foo  |\
+            \n| 1970-01-01T00:01:30 | 1     | foo  |\
+            \n| 1970-01-01T00:02:00 | 1     | foo  |\
+            \n| 1970-01-01T00:02:30 |       |      |\
+            \n| 1970-01-01T00:03:00 | 1     | foo  |\
+            \n| 1970-01-01T00:03:30 |       |      |\
+            \n| 1970-01-01T00:04:00 | 1     | foo  |\
+            \n| 1970-01-01T00:04:30 |       |      |\
+            \n| 1970-01-01T00:05:00 | 1     | foo  |\
+            \n+---------------------+-------+------+",
+        );
+        do_normalize_test(0, 310_000, 10_000, 30_000, expected).await;
+    }
+
+    #[tokio::test]
+    async fn lookback_10s_interval_10s() {
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1970-01-01T00:00:00 | 1     | foo  |\
+            \n| 1970-01-01T00:00:10 | 1     | foo  |\
+            \n| 1970-01-01T00:00:20 |       |      |\
+            \n| 1970-01-01T00:00:30 | 1     | foo  |\
+            \n| 1970-01-01T00:00:40 | 1     | foo  |\
+            \n| 1970-01-01T00:00:50 |       |      |\
+            \n| 1970-01-01T00:01:00 | 1     | foo  |\
+            \n| 1970-01-01T00:01:10 | 1     | foo  |\
+            \n| 1970-01-01T00:01:20 |       |      |\
+            \n| 1970-01-01T00:01:30 | 1     | foo  |\
+            \n| 1970-01-01T00:01:40 | 1     | foo  |\
+            \n| 1970-01-01T00:01:50 |       |      |\
+            \n| 1970-01-01T00:02:00 | 1     | foo  |\
+            \n| 1970-01-01T00:02:10 | 1     | foo  |\
+            \n| 1970-01-01T00:02:20 |       |      |\
+            \n| 1970-01-01T00:02:30 |       |      |\
+            \n| 1970-01-01T00:02:40 |       |      |\
+            \n| 1970-01-01T00:02:50 |       |      |\
+            \n| 1970-01-01T00:03:00 | 1     | foo  |\
+            \n| 1970-01-01T00:03:10 | 1     | foo  |\
+            \n| 1970-01-01T00:03:20 |       |      |\
+            \n| 1970-01-01T00:03:30 |       |      |\
+            \n| 1970-01-01T00:03:40 |       |      |\
+            \n| 1970-01-01T00:03:50 |       |      |\
+            \n| 1970-01-01T00:04:00 | 1     | foo  |\
+            \n| 1970-01-01T00:04:10 | 1     | foo  |\
+            \n| 1970-01-01T00:04:20 |       |      |\
+            \n| 1970-01-01T00:04:30 |       |      |\
+            \n| 1970-01-01T00:04:40 | 1     | foo  |\
+            \n| 1970-01-01T00:04:50 |       |      |\
+            \n| 1970-01-01T00:05:00 | 1     | foo  |\
+            \n+---------------------+-------+------+",
+        );
+        do_normalize_test(0, 300_000, 10_000, 10_000, expected).await;
+    }
+
+    #[tokio::test]
+    async fn lookback_30s_interval_30s() {
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1970-01-01T00:00:00 | 1     | foo  |\
+            \n| 1970-01-01T00:00:30 | 1     | foo  |\
+            \n| 1970-01-01T00:01:00 | 1     | foo  |\
+            \n| 1970-01-01T00:01:30 | 1     | foo  |\
+            \n| 1970-01-01T00:02:00 | 1     | foo  |\
+            \n| 1970-01-01T00:02:30 | 1     | foo  |\
+            \n| 1970-01-01T00:03:00 | 1     | foo  |\
+            \n| 1970-01-01T00:03:30 | 1     | foo  |\
+            \n| 1970-01-01T00:04:00 | 1     | foo  |\
+            \n| 1970-01-01T00:04:30 | 1     | foo  |\
+            \n| 1970-01-01T00:05:00 | 1     | foo  |\
+            \n+---------------------+-------+------+",
+        );
+        do_normalize_test(0, 300_000, 30_000, 30_000, expected).await;
+    }
+
+    #[tokio::test]
+    async fn lookback_30s_interval_10s() {
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1970-01-01T00:00:00 | 1     | foo  |\
+            \n| 1970-01-01T00:00:10 | 1     | foo  |\
+            \n| 1970-01-01T00:00:20 | 1     | foo  |\
+            \n| 1970-01-01T00:00:30 | 1     | foo  |\
+            \n| 1970-01-01T00:00:40 | 1     | foo  |\
+            \n| 1970-01-01T00:00:50 | 1     | foo  |\
+            \n| 1970-01-01T00:01:00 | 1     | foo  |\
+            \n| 1970-01-01T00:01:10 | 1     | foo  |\
+            \n| 1970-01-01T00:01:20 | 1     | foo  |\
+            \n| 1970-01-01T00:01:30 | 1     | foo  |\
+            \n| 1970-01-01T00:01:40 | 1     | foo  |\
+            \n| 1970-01-01T00:01:50 | 1     | foo  |\
+            \n| 1970-01-01T00:02:00 | 1     | foo  |\
+            \n| 1970-01-01T00:02:10 | 1     | foo  |\
+            \n| 1970-01-01T00:02:20 | 1     | foo  |\
+            \n| 1970-01-01T00:02:30 | 1     | foo  |\
+            \n| 1970-01-01T00:02:40 |       |      |\
+            \n| 1970-01-01T00:02:50 |       |      |\
+            \n| 1970-01-01T00:03:00 | 1     | foo  |\
+            \n| 1970-01-01T00:03:10 | 1     | foo  |\
+            \n| 1970-01-01T00:03:20 | 1     | foo  |\
+            \n| 1970-01-01T00:03:30 | 1     | foo  |\
+            \n| 1970-01-01T00:03:40 |       |      |\
+            \n| 1970-01-01T00:03:50 |       |      |\
+            \n| 1970-01-01T00:04:00 | 1     | foo  |\
+            \n| 1970-01-01T00:04:10 | 1     | foo  |\
+            \n| 1970-01-01T00:04:20 | 1     | foo  |\
+            \n| 1970-01-01T00:04:30 | 1     | foo  |\
+            \n| 1970-01-01T00:04:40 | 1     | foo  |\
+            \n| 1970-01-01T00:04:50 | 1     | foo  |\
+            \n| 1970-01-01T00:05:00 | 1     | foo  |\
+            \n+---------------------+-------+------+",
+        );
+        do_normalize_test(0, 300_000, 30_000, 10_000, expected).await;
+    }
+
+    #[tokio::test]
+    async fn lookback_60s_interval_10s() {
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1970-01-01T00:00:00 | 1     | foo  |\
+            \n| 1970-01-01T00:00:10 | 1     | foo  |\
+            \n| 1970-01-01T00:00:20 | 1     | foo  |\
+            \n| 1970-01-01T00:00:30 | 1     | foo  |\
+            \n| 1970-01-01T00:00:40 | 1     | foo  |\
+            \n| 1970-01-01T00:00:50 | 1     | foo  |\
+            \n| 1970-01-01T00:01:00 | 1     | foo  |\
+            \n| 1970-01-01T00:01:10 | 1     | foo  |\
+            \n| 1970-01-01T00:01:20 | 1     | foo  |\
+            \n| 1970-01-01T00:01:30 | 1     | foo  |\
+            \n| 1970-01-01T00:01:40 | 1     | foo  |\
+            \n| 1970-01-01T00:01:50 | 1     | foo  |\
+            \n| 1970-01-01T00:02:00 | 1     | foo  |\
+            \n| 1970-01-01T00:02:10 | 1     | foo  |\
+            \n| 1970-01-01T00:02:20 | 1     | foo  |\
+            \n| 1970-01-01T00:02:30 | 1     | foo  |\
+            \n| 1970-01-01T00:02:40 | 1     | foo  |\
+            \n| 1970-01-01T00:02:50 | 1     | foo  |\
+            \n| 1970-01-01T00:03:00 | 1     | foo  |\
+            \n| 1970-01-01T00:03:10 | 1     | foo  |\
+            \n| 1970-01-01T00:03:20 | 1     | foo  |\
+            \n| 1970-01-01T00:03:30 | 1     | foo  |\
+            \n| 1970-01-01T00:03:40 | 1     | foo  |\
+            \n| 1970-01-01T00:03:50 | 1     | foo  |\
+            \n| 1970-01-01T00:04:00 | 1     | foo  |\
+            \n| 1970-01-01T00:04:10 | 1     | foo  |\
+            \n| 1970-01-01T00:04:20 | 1     | foo  |\
+            \n| 1970-01-01T00:04:30 | 1     | foo  |\
+            \n| 1970-01-01T00:04:40 | 1     | foo  |\
+            \n| 1970-01-01T00:04:50 | 1     | foo  |\
+            \n| 1970-01-01T00:05:00 | 1     | foo  |\
+            \n+---------------------+-------+------+",
+        );
+        do_normalize_test(0, 300_000, 60_000, 10_000, expected).await;
+    }
+
+    #[tokio::test]
+    async fn lookback_60s_interval_30s() {
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1970-01-01T00:00:00 | 1     | foo  |\
+            \n| 1970-01-01T00:00:30 | 1     | foo  |\
+            \n| 1970-01-01T00:01:00 | 1     | foo  |\
+            \n| 1970-01-01T00:01:30 | 1     | foo  |\
+            \n| 1970-01-01T00:02:00 | 1     | foo  |\
+            \n| 1970-01-01T00:02:30 | 1     | foo  |\
+            \n| 1970-01-01T00:03:00 | 1     | foo  |\
+            \n| 1970-01-01T00:03:30 | 1     | foo  |\
+            \n| 1970-01-01T00:04:00 | 1     | foo  |\
+            \n| 1970-01-01T00:04:30 | 1     | foo  |\
+            \n| 1970-01-01T00:05:00 | 1     | foo  |\
+            \n+---------------------+-------+------+",
+        );
+        do_normalize_test(0, 300_000, 60_000, 30_000, expected).await;
+    }
+
+    #[tokio::test]
+    async fn small_range_lookback_0s_interval_1s() {
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1970-01-01T00:03:50 |       |      |\
+            \n| 1970-01-01T00:03:51 |       |      |\
+            \n| 1970-01-01T00:03:52 |       |      |\
+            \n| 1970-01-01T00:03:53 |       |      |\
+            \n| 1970-01-01T00:03:54 |       |      |\
+            \n| 1970-01-01T00:03:55 |       |      |\
+            \n| 1970-01-01T00:03:56 |       |      |\
+            \n| 1970-01-01T00:03:57 |       |      |\
+            \n| 1970-01-01T00:03:58 |       |      |\
+            \n| 1970-01-01T00:03:59 |       |      |\
+            \n| 1970-01-01T00:04:00 | 1     | foo  |\
+            \n| 1970-01-01T00:04:01 | 1     | foo  |\
+            \n| 1970-01-01T00:04:02 |       |      |\
+            \n| 1970-01-01T00:04:03 |       |      |\
+            \n| 1970-01-01T00:04:04 |       |      |\
+            \n| 1970-01-01T00:04:05 |       |      |\
+            \n+---------------------+-------+------+",
+        );
+        do_normalize_test(230_000, 245_000, 0, 1_000, expected).await;
+    }
+
+    #[tokio::test]
+    async fn small_range_lookback_10s_interval_10s() {
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1970-01-01T00:00:00 | 1     | foo  |\
+            \n| 1970-01-01T00:00:10 | 1     | foo  |\
+            \n| 1970-01-01T00:00:20 |       |      |\
+            \n| 1970-01-01T00:00:30 | 1     | foo  |\
+            \n+---------------------+-------+------+",
+        );
+        do_normalize_test(0, 30_000, 10_000, 10_000, expected).await;
+    }
+
+    #[tokio::test]
+    async fn large_range_lookback_30s_interval_60s() {
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1969-12-31T23:45:00 |       |      |\
+            \n| 1969-12-31T23:46:00 |       |      |\
+            \n| 1969-12-31T23:47:00 |       |      |\
+            \n| 1969-12-31T23:48:00 |       |      |\
+            \n| 1969-12-31T23:49:00 |       |      |\
+            \n| 1969-12-31T23:50:00 |       |      |\
+            \n| 1969-12-31T23:51:00 |       |      |\
+            \n| 1969-12-31T23:52:00 |       |      |\
+            \n| 1969-12-31T23:53:00 |       |      |\
+            \n| 1969-12-31T23:54:00 |       |      |\
+            \n| 1969-12-31T23:55:00 |       |      |\
+            \n| 1969-12-31T23:56:00 |       |      |\
+            \n| 1969-12-31T23:57:00 |       |      |\
+            \n| 1969-12-31T23:58:00 |       |      |\
+            \n| 1969-12-31T23:59:00 |       |      |\
+            \n| 1970-01-01T00:00:00 | 1     | foo  |\
+            \n| 1970-01-01T00:01:00 | 1     | foo  |\
+            \n| 1970-01-01T00:02:00 | 1     | foo  |\
+            \n| 1970-01-01T00:03:00 | 1     | foo  |\
+            \n| 1970-01-01T00:04:00 | 1     | foo  |\
+            \n| 1970-01-01T00:05:00 | 1     | foo  |\
+            \n| 1970-01-01T00:06:00 |       |      |\
+            \n| 1970-01-01T00:07:00 |       |      |\
+            \n| 1970-01-01T00:08:00 |       |      |\
+            \n| 1970-01-01T00:09:00 |       |      |\
+            \n| 1970-01-01T00:10:00 |       |      |\
+            \n| 1970-01-01T00:11:00 |       |      |\
+            \n| 1970-01-01T00:12:00 |       |      |\
+            \n| 1970-01-01T00:13:00 |       |      |\
+            \n| 1970-01-01T00:14:00 |       |      |\
+            \n| 1970-01-01T00:15:00 |       |      |\
+            \n+---------------------+-------+------+",
+        );
+        do_normalize_test(-900_000, 900_000, 30_000, 60_000, expected).await;
+    }
+
+    #[tokio::test]
+    async fn small_range_lookback_30s_interval_30s() {
+        let expected = String::from(
+            "+---------------------+-------+------+\
+            \n| timestamp           | value | path |\
+            \n+---------------------+-------+------+\
+            \n| 1970-01-01T00:03:10 | 1     | foo  |\
+            \n| 1970-01-01T00:03:20 | 1     | foo  |\
+            \n| 1970-01-01T00:03:30 | 1     | foo  |\
+            \n| 1970-01-01T00:03:40 |       |      |\
+            \n| 1970-01-01T00:03:50 |       |      |\
+            \n| 1970-01-01T00:04:00 | 1     | foo  |\
+            \n| 1970-01-01T00:04:10 | 1     | foo  |\
+            \n| 1970-01-01T00:04:20 | 1     | foo  |\
+            \n| 1970-01-01T00:04:30 | 1     | foo  |\
+            \n| 1970-01-01T00:04:40 | 1     | foo  |\
+            \n| 1970-01-01T00:04:50 | 1     | foo  |\
+            \n| 1970-01-01T00:05:00 | 1     | foo  |\
+            \n+---------------------+-------+------+",
+        );
+        do_normalize_test(190_000, 300_000, 30_000, 10_000, expected).await;
     }
 }
