@@ -15,10 +15,9 @@ message DatabaseResponse {
 }
 
 message ObjectExpr {
-  ExprHeader header = 1;
-  oneof expr {
-    InsertExpr insert = 2;
-    QueryRequest query = 3;
+  oneof request {
+    InsertRequest insert = 1;
+    QueryRequest query = 2;
   }
 }
 
@@ -29,7 +28,7 @@ message QueryRequest {
   }
 }
 
-message InsertExpr {
+message InsertRequest {
   string schema_name = 1;
   string table_name = 2;
 
@@ -38,7 +37,7 @@ message InsertExpr {
 
   // The row_count of all columns, which include null and non-null values.
   //
-  // Note: the row_count of all columns in a InsertExpr must be same.
+  // Note: the row_count of all columns in a InsertRequest must be same.
   uint32 row_count = 4;
 
   // The region number of current insert request.
@@ -47,14 +46,7 @@ message InsertExpr {
 
 message ObjectResult {
   ResultHeader header = 1;
-  oneof result {
-    MutateResult mutate = 2;
-    FlightDataRaw flight_data = 3;
-  }
-}
-
-message FlightDataRaw {
-  repeated bytes raw_data = 1;
+  repeated bytes flight_data = 2;
 }
 
 message FlightDataExt {

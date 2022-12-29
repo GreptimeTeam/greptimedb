@@ -137,6 +137,7 @@ checksum = "8f1f8f5a6f3d50d89e3797d7593a50f96bb2aaa20ca0cc7be1fb673232c91d72"
 name = "api"
 version = "0.1.0"
 dependencies = [
+ "arrow-flight",
  "common-base",
  "common-error",
  "common-time",
@@ -1477,6 +1478,7 @@ dependencies = [
  "dashmap",
  "datafusion",
  "datatypes",
+ "flatbuffers",
  "futures",
  "prost 0.11.3",
  "rand 0.8.5",
@@ -2158,7 +2160,6 @@ dependencies = [
  "datafusion",
  "datafusion-common",
  "datatypes",
- "flatbuffers",
  "futures",
  "hyper",
  "log-store",

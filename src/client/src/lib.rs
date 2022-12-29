@@ -21,5 +21,5 @@ pub mod load_balance;
 pub use api;
 
 pub use self::client::Client;
-pub use self::database::{Database, ObjectResult};
+pub use self::database::{Database, RpcOutput};
 pub use self::error::{Error, Result};

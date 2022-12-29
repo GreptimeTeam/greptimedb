@@ -18,9 +18,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use client::{Client, Database as DB, Error as ClientError, ObjectResult};
-use common_grpc::flight;
-use common_grpc::flight::FlightMessage;
+use client::{Client, Database as DB, Error as ClientError, RpcOutput};
 use sqlness::{Database, Environment};
 use tokio::process::{Child, Command};
 
@@ -119,29 +117,22 @@ impl Database for GreptimeDB {
 }
 
 struct ResultDisplayer {
-    result: Result<ObjectResult, ClientError>,
+    result: Result<RpcOutput, ClientError>,
 }
 
 impl Display for ResultDisplayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.result {
             Ok(result) => match result {
-                ObjectResult::Mutate(mutate_result) => {
-                    write!(f, "{mutate_result:?}")
+                RpcOutput::AffectedRows(rows) => {
+                    write!(f, "Affected Rows: {rows}")
                 }
-                ObjectResult::FlightData(messages) => {
-                    if let Some(FlightMessage::AffectedRows(rows)) = messages.get(0) {
-                        write!(f, "Affected Rows: {rows}")
-                    } else {
-                        let pretty = flight::flight_messages_to_recordbatches(messages.clone())
-                            .map_err(|e| e.to_string())
-                            .and_then(|x| x.pretty_print().map_err(|e| e.to_string()));
-                        match pretty {
-                            Ok(s) => write!(f, "{s}"),
-                            Err(e) => write!(
-                                f,
-                                "Failed to convert Flight messages {messages:?} to Recordbatches, error: {e}"
-                            ),
+                RpcOutput::RecordBatches(recordbatches) => {
+                    let pretty = recordbatches.pretty_print().map_err(|e| e.to_string());
+                    match pretty {
+                        Ok(s) => write!(f, "{s}"),
+                        Err(e) => {
+                            write!(f, "Failed to pretty format {recordbatches:?}, error: {e}")
                         }
                     }
                 }

@@ -29,7 +29,6 @@ common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
-flatbuffers = "22"
 futures = "0.3"
 hyper = { version = "0.14", features = ["full"] }
 log-store = { path = "../log-store" }

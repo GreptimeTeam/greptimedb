@@ -15,9 +15,8 @@
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use api::v1::InsertExpr;
-use client::{Database, ObjectResult};
-use common_grpc::flight::flight_messages_to_recordbatches;
+use api::v1::InsertRequest;
+use client::{Database, RpcOutput};
 use common_query::prelude::Expr;
 use common_recordbatch::RecordBatches;
 use datafusion::datasource::DefaultTableSource;
@@ -28,7 +27,7 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
-use crate::error::{self, ConvertFlightMessageSnafu, Result};
+use crate::error::{self, Result};
 
 #[derive(Clone)]
 pub struct DatanodeInstance {
@@ -47,7 +46,7 @@ impl DatanodeInstance {
         Self { table, db }
     }
 
-    pub(crate) async fn grpc_insert(&self, request: InsertExpr) -> client::Result<ObjectResult> {
+    pub(crate) async fn grpc_insert(&self, request: InsertRequest) -> client::Result<RpcOutput> {
         self.db.insert(request).await
     }
 
@@ -63,13 +62,7 @@ impl DatanodeInstance {
             .logical_plan(substrait_plan.to_vec())
             .await
             .context(error::RequestDatanodeSnafu)?;
-        let recordbatches = match result {
-            ObjectResult::FlightData(flight_message) => {
-                flight_messages_to_recordbatches(flight_message)
-                    .context(ConvertFlightMessageSnafu)?
-            }
-            _ => unreachable!(),
-        };
+        let RpcOutput::RecordBatches(recordbatches) = result else { unreachable!() };
         Ok(recordbatches)
     }
 

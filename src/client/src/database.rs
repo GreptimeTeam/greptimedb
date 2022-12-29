@@ -13,15 +13,18 @@
 // limitations under the License.
 
 use api::v1::{
-    object_expr, object_result, query_request, DatabaseRequest, ExprHeader, InsertExpr,
-    MutateResult as GrpcMutateResult, ObjectExpr, ObjectResult as GrpcObjectResult, QueryRequest,
+    object_expr, query_request, DatabaseRequest, InsertRequest, ObjectExpr,
+    ObjectResult as GrpcObjectResult, QueryRequest,
 };
 use common_error::status_code::StatusCode;
-use common_grpc::flight::{raw_flight_data_to_message, FlightMessage};
+use common_grpc::flight::{
+    flight_messages_to_recordbatches, raw_flight_data_to_message, FlightMessage,
+};
 use common_query::Output;
+use common_recordbatch::RecordBatches;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::DatanodeSnafu;
+use crate::error::{ConvertFlightDataSnafu, DatanodeSnafu, IllegalFlightMessagesSnafu};
 use crate::{error, Client, Result};
 
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -44,57 +47,30 @@ impl Database {
         &self.name
     }
 
-    pub async fn insert(&self, insert: InsertExpr) -> Result<ObjectResult> {
-        let header = ExprHeader {
-            version: PROTOCOL_VERSION,
-        };
+    pub async fn insert(&self, request: InsertRequest) -> Result<RpcOutput> {
         let expr = ObjectExpr {
-            header: Some(header),
-            expr: Some(object_expr::Expr::Insert(insert)),
+            request: Some(object_expr::Request::Insert(request)),
         };
         self.object(expr).await?.try_into()
     }
 
-    pub async fn batch_insert(&self, insert_exprs: Vec<InsertExpr>) -> Result<Vec<ObjectResult>> {
-        let header = ExprHeader {
-            version: PROTOCOL_VERSION,
-        };
-        let obj_exprs = insert_exprs
-            .into_iter()
-            .map(|expr| ObjectExpr {
-                header: Some(header.clone()),
-                expr: Some(object_expr::Expr::Insert(expr)),
-            })
-            .collect();
-        self.objects(obj_exprs)
-            .await?
-            .into_iter()
-            .map(|result| result.try_into())
-            .collect()
-    }
-
-    pub async fn sql(&self, sql: &str) -> Result<ObjectResult> {
+    pub async fn sql(&self, sql: &str) -> Result<RpcOutput> {
         let query = QueryRequest {
             query: Some(query_request::Query::Sql(sql.to_string())),
         };
-        self.do_select(query).await
+        self.do_query(query).await
     }
 
-    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<ObjectResult> {
-        let select_expr = QueryRequest {
+    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<RpcOutput> {
+        let query = QueryRequest {
             query: Some(query_request::Query::LogicalPlan(logical_plan)),
         };
-        self.do_select(select_expr).await
+        self.do_query(query).await
     }
 
-    async fn do_select(&self, select_expr: QueryRequest) -> Result<ObjectResult> {
-        let header = ExprHeader {
-            version: PROTOCOL_VERSION,
-        };
-
+    async fn do_query(&self, request: QueryRequest) -> Result<RpcOutput> {
         let expr = ObjectExpr {
-            header: Some(header),
-            expr: Some(object_expr::Expr::Query(select_expr)),
+            request: Some(object_expr::Request::Query(request)),
         };
 
         let obj_result = self.object(expr).await?;
@@ -130,12 +106,12 @@ impl Database {
 }
 
 #[derive(Debug)]
-pub enum ObjectResult {
-    FlightData(Vec<FlightMessage>),
-    Mutate(GrpcMutateResult),
+pub enum RpcOutput {
+    RecordBatches(RecordBatches),
+    AffectedRows(usize),
 }
 
-impl TryFrom<api::v1::ObjectResult> for ObjectResult {
+impl TryFrom<api::v1::ObjectResult> for RpcOutput {
     type Error = error::Error;
 
     fn try_from(object_result: api::v1::ObjectResult) -> std::result::Result<Self, Self::Error> {
@@ -148,39 +124,32 @@ impl TryFrom<api::v1::ObjectResult> for ObjectResult {
             .fail();
         }
 
-        let obj_result = object_result.result.context(error::MissingResultSnafu {
-            name: "result".to_string(),
-            expected: 1_usize,
-            actual: 0_usize,
-        })?;
-        Ok(match obj_result {
-            object_result::Result::Mutate(mutate) => ObjectResult::Mutate(mutate),
-            object_result::Result::FlightData(flight_data) => {
-                let flight_messages = raw_flight_data_to_message(flight_data.raw_data)
-                    .context(error::ConvertFlightDataSnafu)?;
-                ObjectResult::FlightData(flight_messages)
-            }
-        })
+        let flight_messages = raw_flight_data_to_message(object_result.flight_data)
+            .context(ConvertFlightDataSnafu)?;
+
+        let output = if let Some(FlightMessage::AffectedRows(rows)) = flight_messages.get(0) {
+            ensure!(
+                flight_messages.len() == 1,
+                IllegalFlightMessagesSnafu {
+                    reason: "Expect 'AffectedRows' Flight messages to be one and only!"
+                }
+            );
+            RpcOutput::AffectedRows(*rows)
+        } else {
+            let recordbatches = flight_messages_to_recordbatches(flight_messages)
+                .context(ConvertFlightDataSnafu)?;
+            RpcOutput::RecordBatches(recordbatches)
+        };
+        Ok(output)
     }
 }
 
-impl TryFrom<ObjectResult> for Output {
-    type Error = error::Error;
-
-    fn try_from(value: ObjectResult) -> Result<Self> {
-        let output = match value {
-            ObjectResult::Mutate(mutate) => {
-                if mutate.failure != 0 {
-                    return error::MutateFailureSnafu {
-                        failure: mutate.failure,
-                    }
-                    .fail();
-                }
-                Output::AffectedRows(mutate.success as usize)
-            }
-            ObjectResult::FlightData(_) => unreachable!(),
-        };
-        Ok(output)
+impl From<RpcOutput> for Output {
+    fn from(value: RpcOutput) -> Self {
+        match value {
+            RpcOutput::AffectedRows(x) => Output::AffectedRows(x),
+            RpcOutput::RecordBatches(x) => Output::RecordBatches(x),
+        }
     }
 }
 

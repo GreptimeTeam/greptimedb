@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use api::v1::{Column, InsertExpr};
+use api::v1::{Column, InsertRequest as GrpcInsertRequest};
 use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
@@ -34,8 +34,7 @@ impl InfluxdbLineProtocolHandler for Instance {
     async fn exec(&self, request: &InfluxdbRequest) -> servers::error::Result<()> {
         match self.mode {
             Mode::Standalone => {
-                let exprs: Vec<InsertExpr> = request.try_into()?;
-                self.handle_inserts(exprs)
+                self.handle_inserts(request.try_into()?)
                     .await
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteQuerySnafu {
@@ -57,7 +56,7 @@ impl InfluxdbLineProtocolHandler for Instance {
 }
 
 impl Instance {
-    pub(crate) async fn dist_insert(&self, inserts: Vec<InsertExpr>) -> Result<usize> {
+    pub(crate) async fn dist_insert(&self, inserts: Vec<GrpcInsertRequest>) -> Result<usize> {
         let mut joins = Vec::with_capacity(inserts.len());
         let catalog_name = DEFAULT_CATALOG_NAME;
 

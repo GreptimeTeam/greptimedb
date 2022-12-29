@@ -21,7 +21,7 @@ use std::sync::Arc;
 use api::v1::AlterExpr;
 use async_trait::async_trait;
 use client::admin::Admin;
-use client::Database;
+use client::{Database, RpcOutput};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
@@ -88,11 +88,10 @@ impl Table for DistTable {
 
         let spliter = WriteSpliter::with_partition_rule(partition_rule);
         let inserts = spliter.split(request).map_err(TableError::new)?;
-        let result = match self.dist_insert(inserts).await.map_err(TableError::new)? {
-            client::ObjectResult::Mutate(result) => result,
-            _ => unreachable!(),
-        };
-        Ok(result.success as usize)
+
+        let output = self.dist_insert(inserts).await.map_err(TableError::new)?;
+        let RpcOutput::AffectedRows(rows) = output else { unreachable!() };
+        Ok(rows)
     }
 
     async fn scan(
@@ -508,7 +507,7 @@ impl PartitionExec {
 #[cfg(test)]
 mod test {
     use api::v1::column::SemanticType;
-    use api::v1::{column, Column, ColumnDataType};
+    use api::v1::{column, Column, ColumnDataType, InsertRequest};
     use common_query::physical_plan::DfPhysicalPlanAdapter;
     use common_recordbatch::adapter::RecordBatchStreamAdapter;
     use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -993,49 +992,45 @@ mod test {
         data: Vec<i32>,
         start_ts: i64,
     ) {
-        let rows = data.len() as u32;
-        let values = vec![(
-            vec![
-                Column {
-                    column_name: "ts".to_string(),
-                    values: Some(column::Values {
-                        i64_values: (start_ts..start_ts + rows as i64).collect::<Vec<i64>>(),
-                        ..Default::default()
-                    }),
-                    datatype: ColumnDataType::Int64 as i32,
-                    semantic_type: SemanticType::Timestamp as i32,
+        let row_count = data.len() as u32;
+        let columns = vec![
+            Column {
+                column_name: "ts".to_string(),
+                values: Some(column::Values {
+                    i64_values: (start_ts..start_ts + row_count as i64).collect::<Vec<i64>>(),
                     ..Default::default()
-                },
-                Column {
-                    column_name: "a".to_string(),
-                    values: Some(column::Values {
-                        i32_values: data,
-                        ..Default::default()
-                    }),
-                    datatype: ColumnDataType::Int32 as i32,
+                }),
+                datatype: ColumnDataType::Int64 as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+            Column {
+                column_name: "a".to_string(),
+                values: Some(column::Values {
+                    i32_values: data,
                     ..Default::default()
-                },
-                Column {
-                    column_name: "row_id".to_string(),
-                    values: Some(column::Values {
-                        i32_values: (1..=rows as i32).collect::<Vec<i32>>(),
-                        ..Default::default()
-                    }),
-                    datatype: ColumnDataType::Int32 as i32,
+                }),
+                datatype: ColumnDataType::Int32 as i32,
+                ..Default::default()
+            },
+            Column {
+                column_name: "row_id".to_string(),
+                values: Some(column::Values {
+                    i32_values: (1..=row_count as i32).collect::<Vec<i32>>(),
                     ..Default::default()
-                },
-            ],
-            rows,
-        )];
-        dn_instance
-            .execute_grpc_insert(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-                &table_name.table_name,
-                values,
-            )
-            .await
-            .unwrap();
+                }),
+                datatype: ColumnDataType::Int32 as i32,
+                ..Default::default()
+            },
+        ];
+        let request = InsertRequest {
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+            columns,
+            row_count,
+            region_number: 0,
+        };
+        dn_instance.handle_insert(request).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -20,7 +20,7 @@ use std::hash::{Hash, Hasher};
 use api::prometheus::remote::label_matcher::Type as MatcherType;
 use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::column::SemanticType;
-use api::v1::{column, Column, ColumnDataType, InsertExpr};
+use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
 use common_grpc::writer::Precision::Millisecond;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
@@ -339,21 +339,20 @@ fn timeseries_to_insert_request(db: &str, mut timeseries: TimeSeries) -> Result<
 }
 
 // TODO(fys): it will remove in the future.
-/// Cast a remote write request into gRPC's InsertExpr.
-pub fn write_request_to_insert_exprs(
+pub fn to_grpc_insert_requests(
     database: &str,
     mut request: WriteRequest,
-) -> Result<Vec<InsertExpr>> {
+) -> Result<Vec<GrpcInsertRequest>> {
     let timeseries = std::mem::take(&mut request.timeseries);
 
     timeseries
         .into_iter()
-        .map(|timeseries| timeseries_to_insert_expr(database, timeseries))
+        .map(|timeseries| to_grpc_insert_request(database, timeseries))
         .collect()
 }
 
 // TODO(fys): it will remove in the future.
-fn timeseries_to_insert_expr(database: &str, mut timeseries: TimeSeries) -> Result<InsertExpr> {
+fn to_grpc_insert_request(database: &str, mut timeseries: TimeSeries) -> Result<GrpcInsertRequest> {
     let schema_name = database.to_string();
 
     // TODO(dennis): save exemplars into a column
@@ -411,7 +410,7 @@ fn timeseries_to_insert_expr(database: &str, mut timeseries: TimeSeries) -> Resu
         });
     }
 
-    Ok(InsertExpr {
+    Ok(GrpcInsertRequest {
         schema_name,
         table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
@@ -666,7 +665,7 @@ mod tests {
             ..Default::default()
         };
 
-        let exprs = write_request_to_insert_exprs("prometheus", write_request).unwrap();
+        let exprs = to_grpc_insert_requests("prometheus", write_request).unwrap();
         assert_eq!(3, exprs.len());
         assert_eq!("prometheus", exprs[0].schema_name);
         assert_eq!("prometheus", exprs[1].schema_name);

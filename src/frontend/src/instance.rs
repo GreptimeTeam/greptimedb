@@ -22,20 +22,21 @@ use std::time::Duration;
 
 use api::result::{ObjectResultBuilder, PROTOCOL_VERSION};
 use api::v1::alter_expr::Kind;
-use api::v1::object_expr::Expr;
+use api::v1::object_expr::Request;
 use api::v1::{
     admin_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, Column, CreateDatabaseExpr,
-    CreateTableExpr, DropTableExpr, ExprHeader, InsertExpr, ObjectExpr,
+    CreateTableExpr, DropTableExpr, ExprHeader, InsertRequest, ObjectExpr,
     ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManagerRef, CatalogProviderRef, SchemaProviderRef};
 use client::admin::admin_result_to_output;
-use client::ObjectResult;
+use client::RpcOutput;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, info};
@@ -245,10 +246,10 @@ impl Instance {
     }
 
     /// Handle batch inserts
-    pub async fn handle_inserts(&self, insert_expr: Vec<InsertExpr>) -> Result<Output> {
+    pub async fn handle_inserts(&self, requests: Vec<InsertRequest>) -> Result<Output> {
         let mut success = 0;
-        for expr in insert_expr {
-            match self.handle_insert(expr).await? {
+        for request in requests {
+            match self.handle_insert(request).await? {
                 Output::AffectedRows(rows) => success += rows,
                 _ => unreachable!("Insert should not yield output other than AffectedRows"),
             }
@@ -256,30 +257,26 @@ impl Instance {
         Ok(Output::AffectedRows(success))
     }
 
-    /// Handle insert. for 'values' insertion, create/alter the destination table on demand.
-    async fn handle_insert(&self, mut insert_expr: InsertExpr) -> Result<Output> {
-        let table_name = &insert_expr.table_name;
+    // TODO(LFC): Revisit GRPC insertion feature, check if the "create/alter table on demand" functionality is broken.
+    // Should be supplied with enough tests.
+    async fn handle_insert(&self, request: InsertRequest) -> Result<Output> {
+        let schema_name = &request.schema_name;
+        let table_name = &request.table_name;
         let catalog_name = DEFAULT_CATALOG_NAME;
-        let schema_name = &insert_expr.schema_name;
 
-        let columns = &insert_expr.columns;
+        let columns = &request.columns;
 
         self.create_or_alter_table_on_demand(catalog_name, schema_name, table_name, columns)
             .await?;
 
-        insert_expr.region_number = 0;
-
         let query = ObjectExpr {
-            header: Some(ExprHeader {
-                version: PROTOCOL_VERSION,
-            }),
-            expr: Some(Expr::Insert(insert_expr)),
+            request: Some(Request::Insert(request)),
         };
         let result = GrpcQueryHandler::do_query(&*self.grpc_query_handler, query)
             .await
             .context(error::InvokeGrpcServerSnafu)?;
-        let result: ObjectResult = result.try_into().context(InsertSnafu)?;
-        result.try_into().context(InsertSnafu)
+        let result: RpcOutput = result.try_into().context(InsertSnafu)?;
+        Ok(result.into())
     }
 
     // check if table already exist:
@@ -514,14 +511,14 @@ impl Instance {
                         .map_err(BoxedError::new)
                         .context(server_error::ExecuteQuerySnafu { query })?;
 
-                    let expr = InsertExpr {
+                    let request = InsertRequest {
                         schema_name,
                         table_name,
                         region_number: 0,
                         columns,
                         row_count,
                     };
-                    self.handle_insert(expr).await
+                    self.handle_insert(request).await
                 }
                 Mode::Distributed => {
                     let affected = self
@@ -672,24 +669,26 @@ impl ScriptHandler for Instance {
 #[async_trait]
 impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> server_error::Result<GrpcObjectResult> {
-        let expr = query
+        let request = query
             .clone()
-            .expr
+            .request
             .context(server_error::InvalidQuerySnafu {
                 reason: "empty expr",
             })?;
-        match expr {
-            Expr::Insert(insert_expr) => {
+        match request {
+            Request::Insert(request) => {
                 let output = self
-                    .handle_insert(insert_expr.clone())
+                    .handle_insert(request.clone())
                     .await
                     .map_err(BoxedError::new)
                     .with_context(|_| server_error::ExecuteQuerySnafu {
-                        query: format!("{insert_expr:?}"),
+                        query: format!("{request:?}"),
                     })?;
                 let object_result = match output {
                     Output::AffectedRows(rows) => ObjectResultBuilder::default()
-                        .mutate_result(rows as _, 0)
+                        .flight_data(vec![
+                            FlightEncoder::default().encode(FlightMessage::AffectedRows(rows))
+                        ])
                         .build(),
                     _ => unreachable!(),
                 };
@@ -721,9 +720,8 @@ mod tests {
 
     use api::v1::column::SemanticType;
     use api::v1::{
-        admin_expr, admin_result, column, object_expr, object_result, query_request, Column,
-        ColumnDataType, ColumnDef as GrpcColumnDef, ExprHeader, FlightDataRaw, MutateResult,
-        QueryRequest,
+        admin_expr, admin_result, column, query_request, Column, ColumnDataType,
+        ColumnDef as GrpcColumnDef, ExprHeader, MutateResult, QueryRequest,
     };
     use common_grpc::flight::{raw_flight_data_to_message, FlightMessage};
     use common_recordbatch::RecordBatch;
@@ -905,7 +903,7 @@ mod tests {
             expected_ts_col.clone(),
         ];
         let row_count = 4;
-        let insert_expr = InsertExpr {
+        let request = InsertRequest {
             schema_name: "public".to_string(),
             table_name: "demo".to_string(),
             region_number: 0,
@@ -913,94 +911,84 @@ mod tests {
             row_count,
         };
         let object_expr = ObjectExpr {
-            header: Some(ExprHeader::default()),
-            expr: Some(object_expr::Expr::Insert(insert_expr)),
+            request: Some(Request::Insert(request)),
         };
         let result = GrpcQueryHandler::do_query(&*instance, object_expr)
             .await
             .unwrap();
-        assert_matches!(
-            result.result,
-            Some(object_result::Result::Mutate(MutateResult {
-                success: 4,
-                failure: 0
-            }))
-        );
+        let raw_data = result.flight_data;
+        let mut flight_messages = raw_flight_data_to_message(raw_data).unwrap();
+        assert_eq!(flight_messages.len(), 1);
+        let message = flight_messages.remove(0);
+        assert!(matches!(message, FlightMessage::AffectedRows(4)));
 
         // select
         let object_expr = ObjectExpr {
-            header: Some(ExprHeader::default()),
-            expr: Some(Expr::Query(QueryRequest {
+            request: Some(Request::Query(QueryRequest {
                 query: Some(query_request::Query::Sql("select * from demo".to_string())),
             })),
         };
         let result = GrpcQueryHandler::do_query(&*instance, object_expr)
             .await
             .unwrap();
-        match result.result {
-            Some(object_result::Result::FlightData(FlightDataRaw { raw_data })) => {
-                let mut flight_messages = raw_flight_data_to_message(raw_data).unwrap();
-                assert_eq!(flight_messages.len(), 2);
+        let raw_data = result.flight_data;
+        let mut flight_messages = raw_flight_data_to_message(raw_data).unwrap();
+        assert_eq!(flight_messages.len(), 2);
 
-                let expected_schema = Arc::new(Schema::new(vec![
-                    ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-                    ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-                    ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-                    ColumnSchema::new("disk_util", ConcreteDataType::float64_datatype(), true)
-                        .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(
-                            9.9f64,
-                        ))))
-                        .unwrap(),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        true,
-                    )
-                    .with_time_index(true),
-                ]));
-                match flight_messages.remove(0) {
-                    FlightMessage::Schema(schema) => {
-                        assert_eq!(schema, expected_schema);
-                    }
-                    _ => unreachable!(),
-                }
+        let expected_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("disk_util", ConcreteDataType::float64_datatype(), true)
+                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(9.9f64))))
+                .unwrap(),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            )
+            .with_time_index(true),
+        ]));
+        match flight_messages.remove(0) {
+            FlightMessage::Schema(schema) => {
+                assert_eq!(schema, expected_schema);
+            }
+            _ => unreachable!(),
+        }
 
-                match flight_messages.remove(0) {
-                    FlightMessage::Recordbatch(recordbatch) => {
-                        let expect_recordbatch = RecordBatch::new(
-                            expected_schema,
-                            vec![
-                                Arc::new(StringVector::from(vec![
-                                    "fe.host.a",
-                                    "fe.host.b",
-                                    "fe.host.c",
-                                    "fe.host.d",
-                                ])) as _,
-                                Arc::new(Float64Vector::from(vec![
-                                    Some(1.0f64),
-                                    None,
-                                    Some(3.0f64),
-                                    Some(4.0f64),
-                                ])) as _,
-                                Arc::new(Float64Vector::from(vec![
-                                    Some(100f64),
-                                    Some(200f64),
-                                    None,
-                                    Some(400f64),
-                                ])) as _,
-                                Arc::new(Float64Vector::from_vec(
-                                    iter::repeat(9.9f64).take(4).collect(),
-                                )) as _,
-                                Arc::new(TimestampMillisecondVector::from_vec(vec![
-                                    1000i64, 2000, 3000, 4000,
-                                ])) as _,
-                            ],
-                        )
-                        .unwrap();
-                        assert_eq!(recordbatch, expect_recordbatch);
-                    }
-                    _ => unreachable!(),
-                }
+        match flight_messages.remove(0) {
+            FlightMessage::Recordbatch(recordbatch) => {
+                let expect_recordbatch = RecordBatch::new(
+                    expected_schema,
+                    vec![
+                        Arc::new(StringVector::from(vec![
+                            "fe.host.a",
+                            "fe.host.b",
+                            "fe.host.c",
+                            "fe.host.d",
+                        ])) as _,
+                        Arc::new(Float64Vector::from(vec![
+                            Some(1.0f64),
+                            None,
+                            Some(3.0f64),
+                            Some(4.0f64),
+                        ])) as _,
+                        Arc::new(Float64Vector::from(vec![
+                            Some(100f64),
+                            Some(200f64),
+                            None,
+                            Some(400f64),
+                        ])) as _,
+                        Arc::new(Float64Vector::from_vec(
+                            iter::repeat(9.9f64).take(4).collect(),
+                        )) as _,
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![
+                            1000i64, 2000, 3000, 4000,
+                        ])) as _,
+                    ],
+                )
+                .unwrap();
+                assert_eq!(recordbatch, expect_recordbatch);
             }
             _ => unreachable!(),
         }

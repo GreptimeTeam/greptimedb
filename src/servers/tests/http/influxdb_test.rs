@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::v1::InsertExpr;
+use api::v1::InsertRequest;
 use async_trait::async_trait;
 use axum::{http, Router};
 use axum_test_helper::TestClient;
@@ -34,9 +34,9 @@ struct DummyInstance {
 #[async_trait]
 impl InfluxdbLineProtocolHandler for DummyInstance {
     async fn exec(&self, request: &InfluxdbRequest) -> Result<()> {
-        let exprs: Vec<InsertExpr> = request.try_into()?;
+        let requests: Vec<InsertRequest> = request.try_into()?;
 
-        for expr in exprs {
+        for expr in requests {
             let _ = self.tx.send((expr.schema_name, expr.table_name)).await;
         }
 
