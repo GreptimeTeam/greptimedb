@@ -80,12 +80,8 @@ impl TryFrom<AlterTable> for AlterExpr {
                     drop_columns: vec![DropColumn { name: name.value }],
                 })
             }
-            AlterTableOperation::RenameTable { .. } => {
-                // TODO update proto to support alter table name
-                return UnsupportedAlterTableStatementSnafu {
-                    msg: "rename table not supported yet",
-                }
-                .fail();
+            AlterTableOperation::RenameTable { new_table_name } => {
+                alter_expr::Kind::RenameTable(api::v1::RenameTable { new_table_name })
             }
         };
         let expr = AlterExpr {

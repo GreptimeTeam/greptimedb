@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::alter_expr::Kind;
-use api::v1::{AlterExpr, CreateTableExpr, DropColumns};
+use api::v1::{AlterExpr, CreateTableExpr, DropColumns, RenameTable};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -79,6 +79,16 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
                 names: drop_columns.into_iter().map(|c| c.name).collect(),
             };
 
+            let request = AlterTableRequest {
+                catalog_name,
+                schema_name,
+                table_name: expr.table_name,
+                alter_kind,
+            };
+            Ok(Some(request))
+        }
+        Some(Kind::RenameTable(RenameTable { new_table_name })) => {
+            let alter_kind = AlterKind::RenameTable { new_table_name };
             let request = AlterTableRequest {
                 catalog_name,
                 schema_name,

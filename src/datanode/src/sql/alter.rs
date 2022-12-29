@@ -76,13 +76,9 @@ impl SqlHandler {
             AlterTableOperation::DropColumn { name } => AlterKind::DropColumns {
                 names: vec![name.value.clone()],
             },
-            AlterTableOperation::RenameTable { .. } => {
-                // TODO update proto to support alter table name
-                return error::InvalidSqlSnafu {
-                    msg: "rename table not unsupported yet".to_string(),
-                }
-                .fail();
-            }
+            AlterTableOperation::RenameTable { new_table_name } => AlterKind::RenameTable {
+                new_table_name: new_table_name.clone(),
+            },
         };
         Ok(AlterTableRequest {
             catalog_name: Some(table_ref.catalog.to_string()),
