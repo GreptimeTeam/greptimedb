@@ -23,7 +23,7 @@ use store_api::logstore::namespace::Namespace as NamespaceTrait;
 use crate::error::{DecodeProtobufSnafu, EncodeProtobufSnafu, EncodeSnafu, Error};
 use crate::raft_engine::protos::logstore::{Entry, Namespace};
 
-pub mod RaftEngineLogstore;
+pub mod log_store;
 
 pub mod protos {
     include!(concat!(env!("OUT_DIR"), concat!("/", "protos/", "mod.rs")));

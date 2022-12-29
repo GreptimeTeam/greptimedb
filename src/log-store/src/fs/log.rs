@@ -333,7 +333,7 @@ impl LogStore for LocalFileLogStore {
         .fail();
     }
 
-    async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
+    async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Vec<Id>> {
         todo!()
     }
 

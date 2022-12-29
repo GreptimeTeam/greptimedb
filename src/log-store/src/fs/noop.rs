@@ -43,7 +43,7 @@ impl LogStore for NoopLogStore {
         Ok(AppendResponse { entry_id: 0 })
     }
 
-    async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Id> {
+    async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Vec<Id>> {
         todo!()
     }
 

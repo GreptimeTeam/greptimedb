@@ -43,7 +43,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         &self,
         ns: &Self::Namespace,
         e: Vec<Self::Entry>,
-    ) -> Result<Id, Self::Error>;
+    ) -> Result<Vec<Id>, Self::Error>;
 
     /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.
