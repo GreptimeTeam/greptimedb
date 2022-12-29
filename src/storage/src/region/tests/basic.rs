@@ -236,3 +236,34 @@ async fn test_put_delete_scan() {
     let output = tester.full_scan().await;
     assert_eq!(expect, output);
 }
+
+#[tokio::test]
+async fn test_put_delete_absent_key() {
+    let dir = TempDir::new("put-delete-scan").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+    let mut tester = Tester::new(REGION_NAME, store_dir).await;
+
+    let data = vec![
+        (1000, Some(100)),
+        (1001, Some(101)),
+        (1002, None),
+        (1003, None),
+        (1004, Some(104)),
+    ];
+
+    tester.put(&data).await;
+
+    // 999 and 1006 is absent.
+    let keys = [999, 1002, 1004, 1006];
+
+    tester.delete(&keys).await;
+
+    let output = tester.full_scan().await;
+    let expect = vec![(1000, Some(100)), (1001, Some(101)), (1003, None)];
+    assert_eq!(expect, output);
+
+    // Deletion is also persistent.
+    tester.try_reopen().await.unwrap();
+    let output = tester.full_scan().await;
+    assert_eq!(expect, output);
+}
