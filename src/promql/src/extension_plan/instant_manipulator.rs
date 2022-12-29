@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::cmp::Ordering;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -297,11 +298,13 @@ impl InstantManipulatorStream {
             // first, search toward end to see if there is matched timestamp
             while cursor < ts_column.len() {
                 let curr = ts_column.value(cursor);
-                if curr == expected_ts {
-                    take_indices.push(Some(cursor as u64));
-                    continue 'next;
-                } else if curr > expected_ts {
-                    break;
+                match curr.cmp(&expected_ts) {
+                    Ordering::Equal => {
+                        take_indices.push(Some(cursor as u64));
+                        continue 'next;
+                    }
+                    Ordering::Greater => break,
+                    Ordering::Less => {}
                 }
                 cursor += 1;
             }
