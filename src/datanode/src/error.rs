@@ -408,16 +408,14 @@ mod tests {
 
     use common_error::ext::BoxedError;
     use common_error::mock::MockError;
-    use snafu::IntoError;
 
     use super::*;
 
     fn throw_query_error() -> std::result::Result<(), query::error::Error> {
-        Err(
-            query::error::QueryExecutionSnafu.into_error(BoxedError::new(
-                MockError::with_backtrace(StatusCode::Internal),
-            )),
-        )
+        query::error::CatalogNotFoundSnafu {
+            catalog: String::new(),
+        }
+        .fail()
     }
 
     fn throw_catalog_error() -> catalog::error::Result<()> {
@@ -431,6 +429,11 @@ mod tests {
         assert_eq!(StatusCode::Internal, err.status_code());
     }
 
+    fn assert_invalid_argument_error(err: &Error) {
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
     fn assert_tonic_internal_error(err: Error) {
         let s: tonic::Status = err.into();
         assert_eq!(s.code(), tonic::Code::Internal);
@@ -439,7 +442,7 @@ mod tests {
     #[test]
     fn test_error() {
         let err = throw_query_error().context(ExecuteSqlSnafu).err().unwrap();
-        assert_internal_error(&err);
+        assert_invalid_argument_error(&err);
         assert_tonic_internal_error(err);
         let err = throw_catalog_error()
             .context(NewCatalogSnafu)

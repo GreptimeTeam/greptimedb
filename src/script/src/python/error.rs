@@ -227,21 +227,21 @@ pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
 
 #[cfg(test)]
 mod tests {
-    use common_error::mock::MockError;
-    use common_error::prelude::BoxedError;
-    use snafu::{IntoError, ResultExt};
+    use snafu::ResultExt;
 
     use super::*;
 
     fn throw_query_error() -> query::error::Result<()> {
-        let mock_err = MockError::with_backtrace(StatusCode::TableColumnNotFound);
-        Err(query::error::QueryExecutionSnafu.into_error(BoxedError::new(mock_err)))
+        query::error::TableNotFoundSnafu {
+            table: String::new(),
+        }
+        .fail()
     }
 
     #[test]
     fn test_error() {
         let err = throw_query_error().context(DatabaseQuerySnafu).unwrap_err();
-        assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
         assert!(err.backtrace_opt().is_some());
     }
 }
