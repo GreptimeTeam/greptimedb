@@ -5,29 +5,15 @@ package greptime.v1;
 import "greptime/v1/column.proto";
 import "greptime/v1/common.proto";
 
-message AdminRequest {
-  string name = 1;
-  repeated AdminExpr exprs = 2;
-}
-
-message AdminResponse {
-  repeated AdminResult results = 1;
-}
-
-message AdminExpr {
-  ExprHeader header = 1;
+// "Data Definition Language" requests, that create, modify or delete the database structures but not the data.
+// `DdlRequest` could carry more information than plain SQL, for example, the "table_id" in `CreateTableExpr`.
+// So create a new DDL expr if you need it.
+message DdlRequest {
   oneof expr {
     CreateTableExpr create_table = 2;
     AlterExpr alter = 3;
     CreateDatabaseExpr create_database = 4;
     DropTableExpr drop_table = 5;
-  }
-}
-
-message AdminResult {
-  ResultHeader header = 1;
-  oneof result {
-    MutateResult mutate = 2;
   }
 }
 

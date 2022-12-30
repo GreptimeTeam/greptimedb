@@ -16,9 +16,10 @@ mod stream;
 
 use std::pin::Pin;
 
+use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::object_expr::Request as GrpcRequest;
 use api::v1::query_request::Query;
-use api::v1::{InsertRequest, ObjectExpr};
+use api::v1::{DdlRequest, InsertRequest, ObjectExpr};
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
@@ -92,6 +93,7 @@ impl FlightService for Instance {
                 self.handle_query(query).await?
             }
             GrpcRequest::Insert(request) => self.handle_insert(request).await?,
+            GrpcRequest::Ddl(request) => self.handle_ddl(request).await?,
         };
         let stream = to_flight_data_stream(output);
         Ok(Response::new(stream))
@@ -165,6 +167,18 @@ impl Instance {
             .await
             .context(InsertSnafu { table_name })?;
         Ok(Output::AffectedRows(affected_rows))
+    }
+
+    async fn handle_ddl(&self, request: DdlRequest) -> Result<Output> {
+        let expr = request
+            .expr
+            .context(MissingRequiredFieldSnafu { name: "expr" })?;
+        match expr {
+            DdlExpr::CreateTable(expr) => self.handle_create(expr).await,
+            DdlExpr::Alter(expr) => self.handle_alter(expr).await,
+            DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr).await,
+            DdlExpr::DropTable(expr) => self.handle_drop_table(expr).await,
+        }
     }
 }
 

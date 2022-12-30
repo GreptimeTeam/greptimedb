@@ -56,7 +56,7 @@ impl Services {
                     .context(error::RuntimeResourceSnafu)?,
             );
 
-            let grpc_server = GrpcServer::new(instance.clone(), instance.clone(), grpc_runtime);
+            let grpc_server = GrpcServer::new(instance.clone(), grpc_runtime);
 
             Some((Box::new(grpc_server) as _, grpc_addr))
         } else {

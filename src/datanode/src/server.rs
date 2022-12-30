@@ -69,7 +69,7 @@ impl Services {
         };
 
         Ok(Self {
-            grpc_server: GrpcServer::new(instance.clone(), instance, grpc_runtime),
+            grpc_server: GrpcServer::new(instance, grpc_runtime),
             mysql_server,
         })
     }

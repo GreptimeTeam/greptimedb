@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use api::v1::AlterExpr;
 use async_trait::async_trait;
-use client::admin::Admin;
 use client::{Database, RpcOutput};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::error::Result as QueryResult;
@@ -367,15 +366,12 @@ impl DistTable {
             }
         );
         for datanode in leaders {
-            let admin = Admin::new(
+            let db = Database::new(
                 DEFAULT_CATALOG_NAME,
                 self.datanode_clients.get_client(&datanode).await,
             );
-            debug!("Sent alter table {:?} to {:?}", expr, admin);
-            let result = admin
-                .alter(expr.clone())
-                .await
-                .context(RequestDatanodeSnafu)?;
+            debug!("Sending {:?} to {:?}", expr, db);
+            let result = db.alter(expr.clone()).await.context(RequestDatanodeSnafu)?;
             debug!("Alter table result: {:?}", result);
             // TODO(hl): We should further check and track alter result in some global DDL task tracker
         }

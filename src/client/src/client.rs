@@ -104,20 +104,6 @@ impl Client {
         self.inner.set_peers(urls);
     }
 
-    pub async fn admin(&self, req: AdminRequest) -> Result<AdminResponse> {
-        let req = BatchRequest {
-            admins: vec![req],
-            ..Default::default()
-        };
-
-        let mut res = self.batch(req).await?;
-        res.admins.pop().context(error::MissingResultSnafu {
-            name: "admins",
-            expected: 1_usize,
-            actual: 0_usize,
-        })
-    }
-
     pub async fn database(&self, req: DatabaseRequest) -> Result<DatabaseResponse> {
         let req = BatchRequest {
             databases: vec![req],

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, TableId};
-use client::admin::Admin;
 use client::{Client, Database};
 use prost_09::Message;
 use substrait_proto::protobuf::plan_rel::RelType as PlanRelType;
@@ -66,8 +65,8 @@ async fn run() {
         region_ids: vec![0],
     };
 
-    let admin = Admin::new("create table", client.clone());
-    let result = admin.create(create_table_expr).await.unwrap();
+    let db = Database::new("create table", client.clone());
+    let result = db.create(create_table_expr).await.unwrap();
     event!(Level::INFO, "create table result: {:#?}", result);
 
     let logical = mock_logical_plan();

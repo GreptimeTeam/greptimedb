@@ -36,11 +36,8 @@ pub enum Error {
         source: substrait::error::Error,
     },
 
-    #[snafu(display("Failed to execute physical plan, source: {}", source))]
-    ExecutePhysicalPlan {
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
+    #[snafu(display("Incorrect internal state: {}", state))]
+    IncorrectInternalState { state: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to create catalog list, source: {}", source))]
     NewCatalog {
@@ -325,7 +322,6 @@ impl ErrorExt for Error {
         match self {
             Error::ExecuteSql { source } => source.status_code(),
             Error::DecodeLogicalPlan { source } => source.status_code(),
-            Error::ExecutePhysicalPlan { source } => source.status_code(),
             Error::NewCatalog { source } => source.status_code(),
             Error::FindTable { source, .. } => source.status_code(),
             Error::CreateTable { source, .. }
@@ -373,7 +369,8 @@ impl ErrorExt for Error {
             | Error::Catalog { .. }
             | Error::MissingRequiredField { .. }
             | Error::FlightGet { .. }
-            | Error::InvalidFlightTicket { .. } => StatusCode::Internal,
+            | Error::InvalidFlightTicket { .. }
+            | Error::IncorrectInternalState { .. } => StatusCode::Internal,
 
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),

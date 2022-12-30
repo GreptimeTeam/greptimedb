@@ -51,9 +51,6 @@ pub enum Error {
         source: common_grpc::Error,
     },
 
-    #[snafu(display("Mutate result has failure {}", failure))]
-    MutateFailure { failure: u32, backtrace: Backtrace },
-
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
         #[snafu(backtrace)]
@@ -91,7 +88,6 @@ impl ErrorExt for Error {
             | Error::MissingHeader { .. }
             | Error::TonicStatus { .. }
             | Error::Datanode { .. }
-            | Error::MutateFailure { .. }
             | Error::ColumnDataType { .. }
             | Error::MissingField { .. } => StatusCode::Internal,
             Error::CreateChannel { source, .. } | Error::ConvertFlightData { source } => {
