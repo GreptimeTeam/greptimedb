@@ -408,13 +408,16 @@ mod tests {
 
     use common_error::ext::BoxedError;
     use common_error::mock::MockError;
+    use snafu::IntoError;
 
     use super::*;
 
     fn throw_query_error() -> std::result::Result<(), query::error::Error> {
-        Err(query::error::Error::new(MockError::with_backtrace(
-            StatusCode::Internal,
-        )))
+        Err(
+            query::error::QueryExecutionSnafu.into_error(BoxedError::new(
+                MockError::with_backtrace(StatusCode::Internal),
+            )),
+        )
     }
 
     fn throw_catalog_error() -> catalog::error::Result<()> {

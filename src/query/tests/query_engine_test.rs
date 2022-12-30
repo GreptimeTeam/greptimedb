@@ -24,6 +24,7 @@ use std::sync::Arc;
 use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::prelude::BoxedError;
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
@@ -32,10 +33,11 @@ use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::UInt32Vector;
-use query::error::Result;
+use query::error::{QueryExecutionSnafu, Result};
 use query::plan::LogicalPlan;
 use query::query_engine::QueryEngineFactory;
 use session::context::QueryContext;
+use snafu::ResultExt;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
 use table::test_util::MemTable;
@@ -45,7 +47,9 @@ use crate::pow::pow;
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    let catalog_list = catalog::local::new_memory_catalog_list()?;
+    let catalog_list = catalog::local::new_memory_catalog_list()
+        .map_err(BoxedError::new)
+        .context(QueryExecutionSnafu)?;
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
 
@@ -105,7 +109,9 @@ async fn test_datafusion_query_engine() -> Result<()> {
 #[tokio::test]
 async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    let catalog_list = catalog::local::new_memory_catalog_list()?;
+    let catalog_list = catalog::local::new_memory_catalog_list()
+        .map_err(BoxedError::new)
+        .context(QueryExecutionSnafu)?;
 
     let default_schema = Arc::new(MemorySchemaProvider::new());
     default_schema

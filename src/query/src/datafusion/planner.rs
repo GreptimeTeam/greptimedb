@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_error::prelude::BoxedError;
 use common_query::logical_plan::create_aggregate_function;
 use datafusion::catalog::TableReference;
 use datafusion::error::Result as DfResult;
@@ -30,7 +31,7 @@ use sql::statements::query::Query;
 use sql::statements::statement::Statement;
 
 use crate::datafusion::error;
-use crate::error::Result;
+use crate::error::{QueryPlanSnafu, Result};
 use crate::plan::LogicalPlan;
 use crate::planner::Planner;
 use crate::query_engine::QueryEngineState;
@@ -53,7 +54,9 @@ impl<'a, S: ContextProvider + Send + Sync> DfPlanner<'a, S> {
         let result = self
             .sql_to_rel
             .query_to_plan(query.inner, &mut PlannerContext::default())
-            .context(error::PlanSqlSnafu { sql })?;
+            .context(error::PlanSqlSnafu { sql })
+            .map_err(BoxedError::new)
+            .context(QueryPlanSnafu)?;
 
         Ok(LogicalPlan::DfPlan(result))
     }
@@ -65,7 +68,9 @@ impl<'a, S: ContextProvider + Send + Sync> DfPlanner<'a, S> {
             .sql_statement_to_plan(explain.inner.clone())
             .context(error::PlanSqlSnafu {
                 sql: explain.to_string(),
-            })?;
+            })
+            .map_err(BoxedError::new)
+            .context(QueryPlanSnafu)?;
 
         Ok(LogicalPlan::DfPlan(result))
     }

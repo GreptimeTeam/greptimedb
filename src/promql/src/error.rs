@@ -16,18 +16,16 @@ use std::any::Any;
 
 use common_error::prelude::*;
 
-common_error::define_opaque_error!(Error);
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum InnerError {
+pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
 }
 
-impl ErrorExt for InnerError {
+impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        use InnerError::*;
+        use Error::*;
         match self {
             UnsupportedExpr { .. } => StatusCode::InvalidArguments,
         }
@@ -38,12 +36,6 @@ impl ErrorExt for InnerError {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl From<InnerError> for Error {
-    fn from(e: InnerError) -> Error {
-        Error::new(e)
     }
 }
 

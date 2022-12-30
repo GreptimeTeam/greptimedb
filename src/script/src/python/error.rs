@@ -228,13 +228,14 @@ pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
 #[cfg(test)]
 mod tests {
     use common_error::mock::MockError;
-    use snafu::ResultExt;
+    use common_error::prelude::BoxedError;
+    use snafu::{IntoError, ResultExt};
 
     use super::*;
 
     fn throw_query_error() -> query::error::Result<()> {
         let mock_err = MockError::with_backtrace(StatusCode::TableColumnNotFound);
-        Err(query::error::Error::new(mock_err))
+        Err(query::error::QueryExecutionSnafu.into_error(BoxedError::new(mock_err)))
     }
 
     #[test]
