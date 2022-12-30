@@ -102,8 +102,32 @@ impl ConnInfo {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub enum Channel {
     Grpc,
     Http,
     Mysql,
+}
+
+#[cfg(test)]
+mod test {
+    use crate::context::{Channel, UserInfo};
+    use crate::Session;
+
+    #[test]
+    fn test_session() {
+        let session = Session::new("127.0.0.1:9000".parse().unwrap(), Channel::Mysql);
+        // test user_info
+        assert_eq!(session.user_info().username(), "greptime");
+        session.set_user_info(UserInfo::new("root"));
+        assert_eq!(session.user_info().username(), "root");
+
+        // test channel
+        assert_eq!(session.conn_info().channel, Channel::Mysql);
+        assert_eq!(
+            session.conn_info().client_host.ip().to_string(),
+            "127.0.0.1"
+        );
+        assert_eq!(session.conn_info().client_host.port(), 9000);
+    }
 }
