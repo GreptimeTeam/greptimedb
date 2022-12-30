@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::column::SemanticType;
-use api::v1::{column, Column, ColumnDataType, InsertExpr};
+use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_grpc::writer::Precision;
 use table::requests::InsertRequest;
@@ -144,8 +144,9 @@ impl DataPoint {
         line_writer.finish()
     }
 
-    // TODO(fys): will remove in the future.
-    pub fn as_grpc_insert(&self) -> InsertExpr {
+    // TODO(LFC): opentsdb and influxdb insertions should go through the Table trait directly.
+    // Currently: line protocol -> grpc request -> grpc interface -> table trait
+    pub fn as_grpc_insert(&self) -> GrpcInsertRequest {
         let schema_name = DEFAULT_SCHEMA_NAME.to_string();
         let mut columns = Vec::with_capacity(2 + self.tags.len());
 
@@ -186,7 +187,7 @@ impl DataPoint {
             });
         }
 
-        InsertExpr {
+        GrpcInsertRequest {
             schema_name,
             table_name: self.metric.clone(),
             region_number: 0,

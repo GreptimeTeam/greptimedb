@@ -27,7 +27,7 @@ use arrow::record_batch::RecordBatch;
 use clap::Parser;
 use client::admin::Admin;
 use client::api::v1::column::Values;
-use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertExpr, TableId};
+use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertRequest, TableId};
 use client::{Client, Database};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -100,7 +100,7 @@ async fn write_data(
     for record_batch in record_batch_reader {
         let record_batch = record_batch.unwrap();
         let (columns, row_count) = convert_record_batch(record_batch);
-        let insert_expr = InsertExpr {
+        let request = InsertRequest {
             schema_name: "public".to_string(),
             table_name: TABLE_NAME.to_string(),
             region_number: 0,
@@ -108,7 +108,7 @@ async fn write_data(
             row_count,
         };
         let now = Instant::now();
-        db.insert(insert_expr).await.unwrap();
+        db.insert(request).await.unwrap();
         let elapsed = now.elapsed();
         total_rpc_elapsed_ms += elapsed.as_millis();
         progress_bar.inc(row_count as _);

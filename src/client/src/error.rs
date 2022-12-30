@@ -19,10 +19,9 @@ use common_error::prelude::*;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Connect failed to {}, source: {}", url, source))]
-    ConnectFailed {
-        url: String,
-        source: tonic::transport::Error,
+    #[snafu(display("Illegal Flight messages, reason: {}", reason))]
+    IllegalFlightMessages {
+        reason: String,
         backtrace: Backtrace,
     },
 
@@ -87,7 +86,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ConnectFailed { .. }
+            Error::IllegalFlightMessages { .. }
             | Error::MissingResult { .. }
             | Error::MissingHeader { .. }
             | Error::TonicStatus { .. }

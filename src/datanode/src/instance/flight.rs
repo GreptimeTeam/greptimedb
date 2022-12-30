@@ -16,25 +16,28 @@ mod stream;
 
 use std::pin::Pin;
 
-use api::v1::object_expr::Expr;
+use api::v1::object_expr::Request as GrpcRequest;
 use api::v1::query_request::Query;
-use api::v1::{FlightDataExt, ObjectExpr};
+use api::v1::{InsertRequest, ObjectExpr};
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
-    HandshakeRequest, HandshakeResponse, IpcMessage, PutResult, SchemaResult, Ticket,
+    HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
 use async_trait::async_trait;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::Output;
-use datatypes::arrow;
-use flatbuffers::FlatBufferBuilder;
 use futures::Stream;
 use prost::Message;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response, Streaming};
 
-use crate::error::{self, Result};
+use crate::error::{
+    CatalogSnafu, ExecuteSqlSnafu, InsertDataSnafu, InsertSnafu, InvalidFlightTicketSnafu,
+    MissingRequiredFieldSnafu, Result, TableNotFoundSnafu,
+};
 use crate::instance::flight::stream::FlightRecordBatchStream;
 use crate::instance::Instance;
 
@@ -77,21 +80,21 @@ impl FlightService for Instance {
 
     async fn do_get(&self, request: Request<Ticket>) -> TonicResult<Response<Self::DoGetStream>> {
         let ticket = request.into_inner().ticket;
-        let expr = ObjectExpr::decode(ticket.as_slice())
-            .context(error::InvalidFlightTicketSnafu)?
-            .expr
-            .context(error::MissingRequiredFieldSnafu { name: "expr" })?;
-        match expr {
-            Expr::Query(query_request) => {
+        let request = ObjectExpr::decode(ticket.as_slice())
+            .context(InvalidFlightTicketSnafu)?
+            .request
+            .context(MissingRequiredFieldSnafu { name: "request" })?;
+        let output = match request {
+            GrpcRequest::Query(query_request) => {
                 let query = query_request
                     .query
-                    .context(error::MissingRequiredFieldSnafu { name: "expr" })?;
-                let stream = self.handle_query(query).await?;
-                Ok(Response::new(stream))
+                    .context(MissingRequiredFieldSnafu { name: "query" })?;
+                self.handle_query(query).await?
             }
-            // TODO(LFC): Implement Insertion Flight interface.
-            Expr::Insert(_) => Err(tonic::Status::unimplemented("Not yet implemented")),
-        }
+            GrpcRequest::Insert(request) => self.handle_insert(request).await?,
+        };
+        let stream = to_flight_data_stream(output);
+        Ok(Response::new(stream))
     }
 
     type DoPutStream = TonicStream<PutResult>;
@@ -132,56 +135,61 @@ impl FlightService for Instance {
 }
 
 impl Instance {
-    async fn handle_query(&self, query: Query) -> Result<TonicStream<FlightData>> {
-        let output = match query {
+    async fn handle_query(&self, query: Query) -> Result<Output> {
+        Ok(match query {
             Query::Sql(sql) => {
                 let stmt = self
                     .query_engine
                     .sql_to_statement(&sql)
-                    .context(error::ExecuteSqlSnafu)?;
+                    .context(ExecuteSqlSnafu)?;
                 self.execute_stmt(stmt, QueryContext::arc()).await?
             }
             Query::LogicalPlan(plan) => self.execute_logical(plan).await?,
-        };
-        Ok(match output {
-            Output::Stream(stream) => {
-                let stream = FlightRecordBatchStream::new(stream);
-                Box::pin(stream) as _
-            }
-            Output::RecordBatches(x) => {
-                let stream = FlightRecordBatchStream::new(x.as_stream());
-                Box::pin(stream) as _
-            }
-            Output::AffectedRows(rows) => {
-                let stream = async_stream::stream! {
-                    let ext_data = FlightDataExt {
-                        affected_rows: rows as _,
-                    }.encode_to_vec();
-                    yield Ok(FlightData::new(None, IpcMessage(build_none_flight_msg()), vec![], ext_data))
-                };
-                Box::pin(stream) as _
-            }
         })
+    }
+
+    pub async fn handle_insert(&self, request: InsertRequest) -> Result<Output> {
+        let table_name = &request.table_name.clone();
+        // TODO(LFC): InsertRequest should carry catalog name, too.
+        let table = self
+            .catalog_manager
+            .table(DEFAULT_CATALOG_NAME, &request.schema_name, table_name)
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu { table_name })?;
+
+        let request = common_grpc_expr::insert::to_table_insert_request(request, table.schema())
+            .context(InsertDataSnafu)?;
+
+        let affected_rows = table
+            .insert(request)
+            .await
+            .context(InsertSnafu { table_name })?;
+        Ok(Output::AffectedRows(affected_rows))
     }
 }
 
-fn build_none_flight_msg() -> Vec<u8> {
-    let mut builder = FlatBufferBuilder::new();
-
-    let mut message = arrow::ipc::MessageBuilder::new(&mut builder);
-    message.add_version(arrow::ipc::MetadataVersion::V5);
-    message.add_header_type(arrow::ipc::MessageHeader::NONE);
-    message.add_bodyLength(0);
-
-    let data = message.finish();
-    builder.finish(data, None);
-
-    builder.finished_data().to_vec()
+fn to_flight_data_stream(output: Output) -> TonicStream<FlightData> {
+    match output {
+        Output::Stream(stream) => {
+            let stream = FlightRecordBatchStream::new(stream);
+            Box::pin(stream) as _
+        }
+        Output::RecordBatches(x) => {
+            let stream = FlightRecordBatchStream::new(x.as_stream());
+            Box::pin(stream) as _
+        }
+        Output::AffectedRows(rows) => {
+            let stream = tokio_stream::once(Ok(
+                FlightEncoder::default().encode(FlightMessage::AffectedRows(rows))
+            ));
+            Box::pin(stream) as _
+        }
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use api::v1::{object_result, FlightDataRaw, QueryRequest};
+    use api::v1::QueryRequest;
     use common_grpc::flight;
     use common_grpc::flight::FlightMessage;
     use datatypes::prelude::*;
@@ -201,8 +209,7 @@ mod test {
 
         let ticket = Request::new(Ticket {
             ticket: ObjectExpr {
-                header: None,
-                expr: Some(Expr::Query(QueryRequest {
+                request: Some(GrpcRequest::Query(QueryRequest {
                     query: Some(Query::Sql(
                         "INSERT INTO demo(host, cpu, memory, ts) VALUES \
                             ('host1', 66.6, 1024, 1672201025000),\
@@ -218,10 +225,7 @@ mod test {
         let result = flight::flight_data_to_object_result(response)
             .await
             .unwrap();
-        let result = result.result.unwrap();
-        assert!(matches!(result, object_result::Result::FlightData(_)));
-
-        let object_result::Result::FlightData(FlightDataRaw { raw_data }) = result else { unreachable!() };
+        let raw_data = result.flight_data;
         let mut messages = flight::raw_flight_data_to_message(raw_data).unwrap();
         assert_eq!(messages.len(), 1);
 
@@ -232,8 +236,7 @@ mod test {
 
         let ticket = Request::new(Ticket {
             ticket: ObjectExpr {
-                header: None,
-                expr: Some(Expr::Query(QueryRequest {
+                request: Some(GrpcRequest::Query(QueryRequest {
                     query: Some(Query::Sql(
                         "SELECT ts, host, cpu, memory FROM demo".to_string(),
                     )),
@@ -246,10 +249,7 @@ mod test {
         let result = flight::flight_data_to_object_result(response)
             .await
             .unwrap();
-        let result = result.result.unwrap();
-        assert!(matches!(result, object_result::Result::FlightData(_)));
-
-        let object_result::Result::FlightData(FlightDataRaw { raw_data }) = result else { unreachable!() };
+        let raw_data = result.flight_data;
         let messages = flight::raw_flight_data_to_message(raw_data).unwrap();
         assert_eq!(messages.len(), 2);
 

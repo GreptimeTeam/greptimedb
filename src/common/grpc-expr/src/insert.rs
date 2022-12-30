@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::{SemanticType, Values};
-use api::v1::{AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateTableExpr};
+use api::v1::{
+    AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateTableExpr,
+    InsertRequest as GrpcInsertRequest,
+};
 use common_base::BitVec;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_time::timestamp::Timestamp;
 use common_time::{Date, DateTime};
 use datatypes::data_type::{ConcreteDataType, DataType};
@@ -30,7 +32,6 @@ use datatypes::vectors::MutableVector;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
-use table::Table;
 
 use crate::error::{
     ColumnDataTypeSnafu, ColumnNotFoundSnafu, CreateVectorSnafu, DuplicatedTimestampColumnSnafu,
@@ -280,50 +281,43 @@ pub fn build_create_expr_from_insertion(
     Ok(expr)
 }
 
-pub fn insertion_expr_to_request(
-    catalog_name: &str,
-    schema_name: &str,
-    table_name: &str,
-    insert_batches: Vec<(Vec<Column>, u32)>,
-    table: Arc<dyn Table>,
+pub fn to_table_insert_request(
+    request: GrpcInsertRequest,
+    schema: SchemaRef,
 ) -> Result<InsertRequest> {
-    let schema = table.schema();
-    let mut columns_builders = HashMap::with_capacity(schema.column_schemas().len());
+    let catalog_name = DEFAULT_CATALOG_NAME;
+    let schema_name = &request.schema_name;
+    let table_name = &request.table_name;
+    let row_count = request.row_count as usize;
 
-    for (columns, row_count) in insert_batches {
-        for Column {
-            column_name,
-            values,
-            null_mask,
-            ..
-        } in columns
-        {
-            let values = match values {
-                Some(vals) => vals,
-                None => continue,
-            };
+    let mut columns_values = HashMap::with_capacity(request.columns.len());
+    for Column {
+        column_name,
+        values,
+        null_mask,
+        ..
+    } in request.columns
+    {
+        let Some(values) = values else { continue };
 
-            let column = column_name.clone();
-            let vector_builder = match columns_builders.entry(column) {
-                Entry::Occupied(entry) => entry.into_mut(),
-                Entry::Vacant(entry) => {
-                    let column_schema = schema.column_schema_by_name(&column_name).context(
-                        ColumnNotFoundSnafu {
-                            column_name: &column_name,
-                            table_name,
-                        },
-                    )?;
-                    let data_type = &column_schema.data_type;
-                    entry.insert(data_type.create_mutable_vector(row_count as usize))
-                }
-            };
-            add_values_to_builder(vector_builder, values, row_count as usize, null_mask)?;
-        }
+        let vector_builder = &mut schema
+            .column_schema_by_name(&column_name)
+            .context(ColumnNotFoundSnafu {
+                column_name: &column_name,
+                table_name,
+            })?
+            .data_type
+            .create_mutable_vector(row_count);
+
+        add_values_to_builder(vector_builder, values, row_count, null_mask)?;
+
+        ensure!(
+            columns_values
+                .insert(column_name, vector_builder.to_vector())
+                .is_none(),
+            IllegalInsertDataSnafu
+        );
     }
-    let columns_values = columns_builders
-        .into_iter()
-        .map(|(column_name, mut vector_builder)| (column_name, vector_builder.to_vector()))
-        .collect();
 
     Ok(InsertRequest {
         catalog_name: catalog_name.to_string(),
@@ -479,10 +473,7 @@ mod tests {
     use table::metadata::TableInfoRef;
     use table::Table;
 
-    use super::{
-        build_create_expr_from_insertion, convert_values, insertion_expr_to_request, is_null,
-        TAG_SEMANTIC_TYPE, TIMESTAMP_SEMANTIC_TYPE,
-    };
+    use super::*;
     use crate::error;
     use crate::error::ColumnDataTypeSnafu;
     use crate::insert::find_new_columns;
@@ -628,12 +619,18 @@ mod tests {
     }
 
     #[test]
-    fn test_insertion_expr_to_request() {
+    fn test_to_table_insert_request() {
         let table: Arc<dyn Table> = Arc::new(DemoTable {});
 
-        let insert_batches = vec![mock_insert_batch()];
-        let insert_req =
-            insertion_expr_to_request("greptime", "public", "demo", insert_batches, table).unwrap();
+        let (columns, row_count) = mock_insert_batch();
+        let request = GrpcInsertRequest {
+            schema_name: "public".to_string(),
+            table_name: "demo".to_string(),
+            columns,
+            row_count,
+            region_number: 0,
+        };
+        let insert_req = to_table_insert_request(request, table.schema()).unwrap();
 
         assert_eq!("greptime", insert_req.catalog_name);
         assert_eq!("public", insert_req.schema_name);

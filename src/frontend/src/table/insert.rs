@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::SemanticType;
-use api::v1::{Column, InsertExpr, MutateResult};
-use client::{Database, ObjectResult};
+use api::v1::{Column, InsertRequest as GrpcInsertRequest};
+use client::{Database, RpcOutput};
 use datatypes::prelude::ConcreteDataType;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
@@ -33,7 +33,7 @@ impl DistTable {
     pub async fn dist_insert(
         &self,
         inserts: HashMap<RegionNumber, InsertRequest>,
-    ) -> Result<ObjectResult> {
+    ) -> Result<RpcOutput> {
         let route = self.table_routes.get_route(&self.table_name).await?;
 
         let mut joins = Vec::with_capacity(inserts.len());
@@ -57,7 +57,7 @@ impl DistTable {
             // TODO(fys): a separate runtime should be used here.
             let join = tokio::spawn(async move {
                 instance
-                    .grpc_insert(to_insert_expr(region_id, insert)?)
+                    .grpc_insert(to_grpc_insert_request(region_id, insert)?)
                     .await
                     .context(error::RequestDatanodeSnafu)
             });
@@ -66,19 +66,12 @@ impl DistTable {
         }
 
         let mut success = 0;
-        let mut failure = 0;
-
         for join in joins {
             let object_result = join.await.context(error::JoinTaskSnafu)??;
-            let result = match object_result {
-                ObjectResult::Mutate(result) => result,
-                ObjectResult::FlightData(_) => unreachable!(),
-            };
-            success += result.success;
-            failure += result.failure;
+            let RpcOutput::AffectedRows(rows) = object_result else { unreachable!() };
+            success += rows;
         }
-
-        Ok(ObjectResult::Mutate(MutateResult { success, failure }))
+        Ok(RpcOutput::AffectedRows(success))
     }
 }
 
@@ -130,10 +123,13 @@ pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<(Vec<Col
     Ok((columns, row_count))
 }
 
-fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<InsertExpr> {
+fn to_grpc_insert_request(
+    region_number: RegionNumber,
+    insert: InsertRequest,
+) -> Result<GrpcInsertRequest> {
     let table_name = insert.table_name.clone();
     let (columns, row_count) = insert_request_to_insert_batch(&insert)?;
-    Ok(InsertExpr {
+    Ok(GrpcInsertRequest {
         schema_name: insert.schema_name,
         table_name,
         region_number,
@@ -146,21 +142,21 @@ fn to_insert_expr(region_number: RegionNumber, insert: InsertRequest) -> Result<
 mod tests {
     use std::collections::HashMap;
 
-    use api::v1::{ColumnDataType, InsertExpr};
+    use api::v1::ColumnDataType;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ScalarVectorBuilder;
     use datatypes::vectors::{Int16VectorBuilder, MutableVector, StringVectorBuilder};
     use table::requests::InsertRequest;
 
-    use super::to_insert_expr;
+    use super::*;
 
     #[test]
-    fn test_to_insert_expr() {
+    fn test_to_grpc_insert_request() {
         let insert_request = mock_insert_request();
 
-        let insert_expr = to_insert_expr(12, insert_request).unwrap();
+        let request = to_grpc_insert_request(12, insert_request).unwrap();
 
-        verify_insert_expr(insert_expr);
+        verify_grpc_insert_request(request);
     }
 
     fn mock_insert_request() -> InsertRequest {
@@ -186,11 +182,11 @@ mod tests {
         }
     }
 
-    fn verify_insert_expr(insert_expr: InsertExpr) {
-        let table_name = insert_expr.table_name;
+    fn verify_grpc_insert_request(request: GrpcInsertRequest) {
+        let table_name = request.table_name;
         assert_eq!("demo", table_name);
 
-        for column in insert_expr.columns {
+        for column in request.columns {
             let name = column.column_name;
             if name == "id" {
                 assert_eq!(0, column.null_mask[0]);
@@ -207,7 +203,7 @@ mod tests {
             }
         }
 
-        let region_number = insert_expr.region_number;
+        let region_number = request.region_number;
         assert_eq!(12, region_number);
     }
 }

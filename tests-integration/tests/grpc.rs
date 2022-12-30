@@ -15,12 +15,11 @@ use api::v1::alter_expr::Kind;
 use api::v1::column::SemanticType;
 use api::v1::{
     admin_result, column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-    CreateTableExpr, InsertExpr, MutateResult, TableId,
+    CreateTableExpr, InsertRequest, MutateResult, TableId,
 };
 use client::admin::Admin;
-use client::{Client, Database, ObjectResult};
+use client::{Client, Database, RpcOutput};
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_grpc::flight::{flight_messages_to_recordbatches, FlightMessage};
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};
 
@@ -180,7 +179,7 @@ async fn insert_and_assert(db: &Database) {
     // testing data:
     let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
 
-    let expr = InsertExpr {
+    let request = InsertRequest {
         schema_name: "public".to_string(),
         table_name: "demo".to_string(),
         region_number: 0,
@@ -192,7 +191,7 @@ async fn insert_and_assert(db: &Database) {
         ],
         row_count: 4,
     };
-    let result = db.insert(expr).await;
+    let result = db.insert(request).await;
     result.unwrap();
 
     let result = db
@@ -203,16 +202,12 @@ async fn insert_and_assert(db: &Database) {
         )
         .await
         .unwrap();
-    assert!(matches!(result, ObjectResult::FlightData(_)));
-    let ObjectResult::FlightData(mut messages) = result else { unreachable!() };
-    assert_eq!(messages.len(), 1);
-    assert!(matches!(messages.remove(0), FlightMessage::AffectedRows(2)));
+    assert!(matches!(result, RpcOutput::AffectedRows(2)));
 
     // select
     let result = db.sql("SELECT * FROM demo").await.unwrap();
     match result {
-        ObjectResult::FlightData(flight_messages) => {
-            let recordbatches = flight_messages_to_recordbatches(flight_messages).unwrap();
+        RpcOutput::RecordBatches(recordbatches) => {
             let pretty = recordbatches.pretty_print().unwrap();
             let expected = "\
 +-------+------+--------+-------------------------+

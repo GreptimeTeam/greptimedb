@@ -14,10 +14,9 @@
 
 mod alter;
 pub mod error;
-mod insert;
+pub mod insert;
 
 pub use alter::{alter_expr_to_request, create_expr_to_request, create_table_schema};
 pub use insert::{
-    build_alter_table_request, build_create_expr_from_insertion, column_to_vector,
-    find_new_columns, insertion_expr_to_request,
+    build_alter_table_request, build_create_expr_from_insertion, column_to_vector, find_new_columns,
 };

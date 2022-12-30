@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use api::v1::InsertExpr;
+use api::v1::InsertRequest as GrpcInsertRequest;
 use common_grpc::writer::{LinesWriter, Precision};
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
@@ -86,7 +86,7 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertRequest> {
 }
 
 // TODO(fys): will remove in the future.
-impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
+impl TryFrom<&InfluxdbRequest> for Vec<GrpcInsertRequest> {
     type Error = Error;
 
     fn try_from(value: &InfluxdbRequest) -> Result<Self, Self::Error> {
@@ -163,7 +163,7 @@ impl TryFrom<&InfluxdbRequest> for Vec<InsertExpr> {
             .into_iter()
             .map(|(table_name, writer)| {
                 let (columns, row_count) = writer.finish();
-                InsertExpr {
+                GrpcInsertRequest {
                     schema_name: schema_name.clone(),
                     table_name,
                     region_number: 0,
@@ -180,7 +180,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::column::{SemanticType, Values};
-    use api::v1::{Column, ColumnDataType, InsertExpr};
+    use api::v1::{Column, ColumnDataType};
     use common_base::BitVec;
     use common_time::timestamp::TimeUnit;
     use common_time::Timestamp;
@@ -188,6 +188,7 @@ mod tests {
     use datatypes::vectors::Vector;
     use table::requests::InsertRequest;
 
+    use super::*;
     use crate::influxdb::InfluxdbRequest;
 
     #[test]
@@ -230,15 +231,14 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
             lines: lines.to_string(),
         };
 
-        let insert_exprs: Vec<InsertExpr> = influxdb_req.try_into().unwrap();
+        let requests: Vec<GrpcInsertRequest> = influxdb_req.try_into().unwrap();
+        assert_eq!(2, requests.len());
 
-        assert_eq!(2, insert_exprs.len());
-
-        for expr in insert_exprs {
-            assert_eq!("public", expr.schema_name);
-            match &expr.table_name[..] {
-                "monitor1" => assert_monitor_1(&expr.columns),
-                "monitor2" => assert_monitor_2(&expr.columns),
+        for request in requests {
+            assert_eq!("public", request.schema_name);
+            match &request.table_name[..] {
+                "monitor1" => assert_monitor_1(&request.columns),
+                "monitor2" => assert_monitor_2(&request.columns),
                 _ => panic!(),
             }
         }

@@ -442,12 +442,6 @@ pub enum Error {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
-
-    #[snafu(display("Failed to convert Flight Message, source: {}", source))]
-    ConvertFlightMessage {
-        #[snafu(backtrace)]
-        source: common_grpc::error::Error,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -537,7 +531,6 @@ impl ErrorExt for Error {
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
             Error::BuildVector { source, .. } => source.status_code(),
-            Error::ConvertFlightMessage { source } => source.status_code(),
         }
     }
 

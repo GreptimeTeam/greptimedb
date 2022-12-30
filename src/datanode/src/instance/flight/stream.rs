@@ -15,11 +15,10 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use arrow_flight::utils::flight_data_from_arrow_batch;
-use arrow_flight::{FlightData, SchemaAsIpc};
+use arrow_flight::FlightData;
+use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::warn;
-use datatypes::arrow;
 use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::{SinkExt, Stream, StreamExt};
@@ -33,14 +32,15 @@ use crate::instance::flight::TonicResult;
 #[pin_project(PinnedDrop)]
 pub(super) struct FlightRecordBatchStream {
     #[pin]
-    rx: mpsc::Receiver<Result<FlightData, tonic::Status>>,
+    rx: mpsc::Receiver<Result<FlightMessage, tonic::Status>>,
     join_handle: JoinHandle<()>,
     done: bool,
+    encoder: FlightEncoder,
 }
 
 impl FlightRecordBatchStream {
     pub(super) fn new(recordbatches: SendableRecordBatchStream) -> Self {
-        let (tx, rx) = mpsc::channel::<TonicResult<FlightData>>(1);
+        let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
         let join_handle =
             common_runtime::spawn_read(
                 async move { Self::flight_data_stream(recordbatches, tx).await },
@@ -49,36 +49,24 @@ impl FlightRecordBatchStream {
             rx,
             join_handle,
             done: false,
+            encoder: FlightEncoder::default(),
         }
     }
 
     async fn flight_data_stream(
         mut recordbatches: SendableRecordBatchStream,
-        mut tx: Sender<TonicResult<FlightData>>,
+        mut tx: Sender<TonicResult<FlightMessage>>,
     ) {
         let schema = recordbatches.schema();
-        let options = arrow::ipc::writer::IpcWriteOptions::default();
-        let schema_flight_data: FlightData =
-            SchemaAsIpc::new(schema.arrow_schema(), &options).into();
-        if let Err(e) = tx.send(Ok(schema_flight_data)).await {
+        if let Err(e) = tx.send(Ok(FlightMessage::Schema(schema))).await {
             warn!("stop sending Flight data, err: {e}");
             return;
         }
 
         while let Some(batch_or_err) = recordbatches.next().await {
             match batch_or_err {
-                Ok(batch) => {
-                    let (flight_dictionaries, flight_batch) =
-                        flight_data_from_arrow_batch(batch.df_record_batch(), &options);
-
-                    // TODO(LFC): Handle dictionary as FlightData here, when we supported Arrow's Dictionary DataType.
-                    // Currently we don't have a datatype corresponding to Arrow's Dictionary DataType,
-                    // so there won't be any "dictionaries" here. Assert to be sure about it, and
-                    // perform a "testing guard" in case we forgot to handle the possible "dictionaries"
-                    // here in the future.
-                    debug_assert_eq!(flight_dictionaries.len(), 0);
-
-                    if let Err(e) = tx.send(Ok(flight_batch)).await {
+                Ok(recordbatch) => {
+                    if let Err(e) = tx.send(Ok(FlightMessage::Recordbatch(recordbatch))).await {
                         warn!("stop sending Flight data, err: {e}");
                         return;
                     }
@@ -115,11 +103,17 @@ impl Stream for FlightRecordBatchStream {
                     *this.done = true;
                     Poll::Ready(None)
                 }
-                e @ Poll::Ready(Some(Err(_))) => {
-                    *this.done = true;
-                    e
-                }
-                other => other,
+                Poll::Ready(Some(result)) => match result {
+                    Ok(flight_message) => {
+                        let flight_data = this.encoder.encode(flight_message);
+                        Poll::Ready(Some(Ok(flight_data)))
+                    }
+                    Err(e) => {
+                        *this.done = true;
+                        Poll::Ready(Some(Err(e)))
+                    }
+                },
+                Poll::Pending => Poll::Pending,
             }
         }
     }

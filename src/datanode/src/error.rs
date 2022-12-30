@@ -267,9 +267,6 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display("Insert batch is empty"))]
-    EmptyInsertBatch,
-
     #[snafu(display(
         "Table id provider not found, cannot execute SQL directly on datanode in distributed mode"
     ))]
@@ -384,7 +381,6 @@ impl ErrorExt for Error {
             Error::OpenStorageEngine { source } => source.status_code(),
             Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
             Error::MetaClientInit { source, .. } => source.status_code(),
-            Error::EmptyInsertBatch => StatusCode::InvalidArguments,
             Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::MissingNodeId { .. } => StatusCode::InvalidArguments,

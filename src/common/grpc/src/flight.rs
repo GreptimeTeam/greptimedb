@@ -18,13 +18,15 @@ use std::sync::Arc;
 
 use api::result::ObjectResultBuilder;
 use api::v1::{FlightDataExt, ObjectResult};
-use arrow_flight::utils::flight_data_to_arrow_batch;
-use arrow_flight::FlightData;
+use arrow_flight::utils::{flight_data_from_arrow_batch, flight_data_to_arrow_batch};
+use arrow_flight::{FlightData, IpcMessage, SchemaAsIpc};
 use common_error::prelude::StatusCode;
 use common_recordbatch::{RecordBatch, RecordBatches};
+use datatypes::arrow;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
-use datatypes::arrow::ipc::{root_as_message, MessageHeader};
+use datatypes::arrow::ipc::{root_as_message, writer, MessageHeader};
 use datatypes::schema::{Schema, SchemaRef};
+use flatbuffers::FlatBufferBuilder;
 use futures::TryStreamExt;
 use prost::Message;
 use snafu::{OptionExt, ResultExt};
@@ -44,6 +46,43 @@ pub enum FlightMessage {
     Schema(SchemaRef),
     Recordbatch(RecordBatch),
     AffectedRows(usize),
+}
+
+#[derive(Default)]
+pub struct FlightEncoder {
+    write_options: writer::IpcWriteOptions,
+}
+
+impl FlightEncoder {
+    pub fn encode(&self, flight_message: FlightMessage) -> FlightData {
+        match flight_message {
+            FlightMessage::Schema(schema) => {
+                SchemaAsIpc::new(schema.arrow_schema(), &self.write_options).into()
+            }
+            FlightMessage::Recordbatch(recordbatch) => {
+                let (flight_dictionaries, flight_batch) = flight_data_from_arrow_batch(
+                    recordbatch.df_record_batch(),
+                    &self.write_options,
+                );
+
+                // TODO(LFC): Handle dictionary as FlightData here, when we supported Arrow's Dictionary DataType.
+                // Currently we don't have a datatype corresponding to Arrow's Dictionary DataType,
+                // so there won't be any "dictionaries" here. Assert to be sure about it, and
+                // perform a "testing guard" in case we forgot to handle the possible "dictionaries"
+                // here in the future.
+                debug_assert_eq!(flight_dictionaries.len(), 0);
+
+                flight_batch
+            }
+            FlightMessage::AffectedRows(rows) => {
+                let ext_data = FlightDataExt {
+                    affected_rows: rows as _,
+                }
+                .encode_to_vec();
+                FlightData::new(None, IpcMessage(build_none_flight_msg()), vec![], ext_data)
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -115,16 +154,10 @@ pub async fn flight_data_to_object_result(
     let stream = response.into_inner();
     let result: TonicResult<Vec<FlightData>> = stream.try_collect().await;
     match result {
-        Ok(flight_data) => {
-            let flight_data = flight_data
-                .into_iter()
-                .map(|x| x.encode_to_vec())
-                .collect::<Vec<Vec<u8>>>();
-            Ok(ObjectResultBuilder::new()
-                .status_code(StatusCode::Success as u32)
-                .flight_data(flight_data)
-                .build())
-        }
+        Ok(flight_data) => Ok(ObjectResultBuilder::new()
+            .status_code(StatusCode::Success as u32)
+            .flight_data(flight_data)
+            .build()),
         Err(e) => Ok(ObjectResultBuilder::new()
             .status_code(StatusCode::Internal as _)
             .err_msg(e.to_string())
@@ -175,6 +208,20 @@ pub fn flight_messages_to_recordbatches(messages: Vec<FlightMessage>) -> Result<
 
         RecordBatches::try_new(schema, recordbatches).context(CreateRecordBatchSnafu)
     }
+}
+
+fn build_none_flight_msg() -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::new();
+
+    let mut message = arrow::ipc::MessageBuilder::new(&mut builder);
+    message.add_version(arrow::ipc::MetadataVersion::V5);
+    message.add_header_type(MessageHeader::NONE);
+    message.add_bodyLength(0);
+
+    let data = message.finish();
+    builder.finish(data, None);
+
+    builder.finished_data().to_vec()
 }
 
 #[cfg(test)]
