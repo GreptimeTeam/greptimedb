@@ -73,7 +73,7 @@ impl UserDefinedLogicalNode for InstantManipulate {
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "PromInstantManipulator: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
+            "PromInstantManipulate: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
             self.start, self.end, self.lookback_delta, self.interval, self.time_index_column
         )
     }
@@ -211,7 +211,7 @@ impl ExecutionPlan for InstantManipulateExec {
             DisplayFormatType::Default => {
                 write!(
                     f,
-                    "PromInstantManipulatorExec: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
+                    "PromInstantManipulateExec: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
                    self.start,self.end, self.lookback_delta, self.interval, self.time_index_column
                 )
             }
