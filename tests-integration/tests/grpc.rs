@@ -14,10 +14,9 @@
 use api::v1::alter_expr::Kind;
 use api::v1::column::SemanticType;
 use api::v1::{
-    admin_result, column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-    CreateTableExpr, InsertRequest, MutateResult, TableId,
+    column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef, CreateTableExpr,
+    InsertRequest, TableId,
 };
-use client::admin::Admin;
 use client::{Client, Database, RpcOutput};
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use servers::server::Server;
@@ -133,18 +132,11 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     let grpc_client = Client::with_urls(vec![addr]);
 
     let db = Database::new("greptime", grpc_client.clone());
-    let admin = Admin::new("greptime", grpc_client);
 
     // create
     let expr = testing_create_expr();
-    let result = admin.create(expr).await.unwrap();
-    assert!(matches!(
-        result.result,
-        Some(admin_result::Result::Mutate(MutateResult {
-            success: 1,
-            failure: 0
-        }))
-    ));
+    let result = db.create(expr).await.unwrap();
+    assert!(matches!(result, RpcOutput::AffectedRows(1)));
 
     //alter
     let add_column = ColumnDef {
@@ -160,13 +152,13 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         }],
     });
     let expr = AlterExpr {
-        table_name: "test_table".to_string(),
+        table_name: "demo".to_string(),
         catalog_name: "".to_string(),
         schema_name: "".to_string(),
         kind: Some(kind),
     };
-    let result = admin.alter(expr).await.unwrap();
-    assert!(result.result.is_none());
+    let result = db.alter(expr).await.unwrap();
+    assert!(matches!(result, RpcOutput::AffectedRows(0)));
 
     // insert
     insert_and_assert(&db).await;
@@ -205,7 +197,10 @@ async fn insert_and_assert(db: &Database) {
     assert!(matches!(result, RpcOutput::AffectedRows(2)));
 
     // select
-    let result = db.sql("SELECT * FROM demo").await.unwrap();
+    let result = db
+        .sql("SELECT host, cpu, memory, ts FROM demo")
+        .await
+        .unwrap();
     match result {
         RpcOutput::RecordBatches(recordbatches) => {
             let pretty = recordbatches.pretty_print().unwrap();

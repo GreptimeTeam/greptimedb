@@ -169,7 +169,8 @@ impl PrometheusProtocolHandler for Instance {
 mod tests {
     use api::prometheus::remote::label_matcher::Type as MatcherType;
     use api::prometheus::remote::{Label, LabelMatcher, Sample};
-    use api::v1::CreateDatabaseExpr;
+    use servers::query_handler::SqlQueryHandler;
+    use session::context::QueryContext;
 
     use super::*;
     use crate::tests;
@@ -187,12 +188,12 @@ mod tests {
 
         let db = "prometheus";
 
-        instance
-            .handle_create_database(CreateDatabaseExpr {
-                database_name: db.to_string(),
-            })
+        assert!(instance
+            .do_query("CREATE DATABASE prometheus", QueryContext::arc())
             .await
-            .unwrap();
+            .get(0)
+            .unwrap()
+            .is_ok());
 
         instance.write(db, write_request).await.unwrap();
 

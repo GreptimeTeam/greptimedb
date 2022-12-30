@@ -15,12 +15,9 @@
 use arrow_flight::FlightData;
 use prost::Message;
 
-use crate::v1::{admin_result, AdminResult, MutateResult, ObjectResult, ResultHeader};
+use crate::v1::{ObjectResult, ResultHeader};
 
 pub const PROTOCOL_VERSION: u32 = 1;
-
-pub type Success = u32;
-pub type Failure = u32;
 
 #[derive(Default)]
 pub struct ObjectResultBuilder {
@@ -77,61 +74,6 @@ impl ObjectResultBuilder {
         ObjectResult {
             header,
             flight_data,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct AdminResultBuilder {
-    version: u32,
-    code: u32,
-    err_msg: Option<String>,
-    mutate: Option<(Success, Failure)>,
-}
-
-impl AdminResultBuilder {
-    pub fn status_code(mut self, code: u32) -> Self {
-        self.code = code;
-        self
-    }
-
-    pub fn err_msg(mut self, err_msg: String) -> Self {
-        self.err_msg = Some(err_msg);
-        self
-    }
-
-    pub fn mutate_result(mut self, success: u32, failure: u32) -> Self {
-        self.mutate = Some((success, failure));
-        self
-    }
-
-    pub fn build(self) -> AdminResult {
-        let header = Some(ResultHeader {
-            version: self.version,
-            code: self.code,
-            err_msg: self.err_msg.unwrap_or_default(),
-        });
-
-        let result = if let Some((success, failure)) = self.mutate {
-            Some(admin_result::Result::Mutate(MutateResult {
-                success,
-                failure,
-            }))
-        } else {
-            None
-        };
-
-        AdminResult { header, result }
-    }
-}
-
-impl Default for AdminResultBuilder {
-    fn default() -> Self {
-        Self {
-            version: PROTOCOL_VERSION,
-            code: 0,
-            err_msg: None,
-            mutate: None,
         }
     }
 }
