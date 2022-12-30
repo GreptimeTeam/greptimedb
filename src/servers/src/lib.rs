@@ -39,3 +39,50 @@ pub enum Mode {
     Standalone,
     Distributed,
 }
+
+/// Attempt to parse catalog and schema from given database name
+///
+/// The database name may come from different sources:
+///
+/// - MySQL `schema` name in MySQL protocol login request: it's optional and user
+/// and switch database using `USE` command
+/// - Postgres `database` parameter in Postgres wire protocol, required
+/// - HTTP RESTful API: the database parameter, optional
+///
+/// When database name is provided, we attempt to parse catalog and schema from
+/// it. We assume the format `[<catalog>-]<schema>`:
+///
+/// - If `[<catalog>-]` part is not provided, we use whole database name as
+/// schema name
+/// - if `[<catalog>-]` is provided, we split database name with `-` and use
+/// `<catalog>` and `<schema>`.
+pub(crate) fn parse_catalog_and_schema_from_client_database_name(db: &str) -> (Option<&str>, &str) {
+    let parts = db.splitn(2, '-').collect::<Vec<&str>>();
+    if parts.len() == 2 {
+        (Some(parts[0]), parts[1])
+    } else {
+        (None, db)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn test_parse_catalog_and_schema_from_client_database_name() {
+        assert_eq!(
+            (None, "fullschema"),
+            super::parse_catalog_and_schema_from_client_database_name("fullschema")
+        );
+
+        assert_eq!(
+            (Some("catalog"), "schema"),
+            super::parse_catalog_and_schema_from_client_database_name("catalog-schema")
+        );
+
+        assert_eq!(
+            (Some("catalog"), "schema1-schema2"),
+            super::parse_catalog_and_schema_from_client_database_name("catalog-schema1-schema2")
+        );
+    }
+}

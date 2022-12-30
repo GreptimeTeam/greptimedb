@@ -47,7 +47,10 @@ where
     C: ClientInfo,
 {
     let query_context = QueryContext::new();
-    if let Some(current_schema) = client.metadata().get(super::METADATA_DATABASE) {
+    if let Some(current_catalog) = client.metadata().get(super::METADATA_CATALOG) {
+        query_context.set_current_catalog(current_catalog);
+    }
+    if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
         query_context.set_current_schema(current_schema);
     }
 

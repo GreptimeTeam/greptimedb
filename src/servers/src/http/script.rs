@@ -90,6 +90,8 @@ pub async fn run_script(
             json_err!("invalid name");
         }
 
+        // TODO(sunng87): query_context and db name resolution
+
         let output = script_handler.execute_script(name.unwrap()).await;
         let resp = JsonResponse::from_output(vec![output]).await;
 

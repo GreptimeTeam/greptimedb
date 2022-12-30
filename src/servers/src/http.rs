@@ -30,6 +30,7 @@ use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
 use axum::response::{Html, Json};
 use axum::{routing, BoxError, Extension, Router};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -40,6 +41,7 @@ use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use session::context::QueryContext;
 use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
@@ -57,6 +59,38 @@ use crate::query_handler::{
     ScriptHandlerRef, SqlQueryHandlerRef,
 };
 use crate::server::Server;
+
+/// create query context from database name information, catalog and schema are
+/// resolved from the name
+pub(crate) fn query_context_from_db(
+    query_handler: SqlQueryHandlerRef,
+    db: Option<String>,
+) -> std::result::Result<Arc<QueryContext>, JsonResponse> {
+    if let Some(db) = &db {
+        let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
+        let catalog = catalog.unwrap_or(DEFAULT_CATALOG_NAME);
+
+        match query_handler.is_valid_schema(catalog, schema) {
+            Ok(true) => Ok(Arc::new(QueryContext::with(
+                catalog.to_owned(),
+                schema.to_owned(),
+            ))),
+            Ok(false) => Err(JsonResponse::with_error(
+                format!("Database not found: {db}"),
+                StatusCode::DatabaseNotFound,
+            )),
+            Err(e) => Err(JsonResponse::with_error(
+                format!("Error checking database: {db}, {e}"),
+                StatusCode::Internal,
+            )),
+        }
+    } else {
+        Ok(Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME.to_owned(),
+            DEFAULT_SCHEMA_NAME.to_owned(),
+        )))
+    }
+}
 
 const HTTP_API_VERSION: &str = "v1";
 

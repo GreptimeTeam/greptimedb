@@ -18,5 +18,9 @@ mod server;
 
 pub(crate) const METADATA_USER: &str = "user";
 pub(crate) const METADATA_DATABASE: &str = "database";
+/// key to store our parsed catalog
+pub(crate) const METADATA_CATALOG: &str = "catalog";
+/// key to store our parsed schema
+pub(crate) const METADATA_SCHEMA: &str = "schema";
 
 pub use server::PostgresServer;

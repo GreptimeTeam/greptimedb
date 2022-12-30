@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_recordbatch::util;
 use datatypes::data_type::ConcreteDataType;
@@ -559,6 +559,9 @@ async fn execute_sql(instance: &MockInstance, sql: &str) -> Output {
 }
 
 async fn execute_sql_in_db(instance: &MockInstance, sql: &str, db: &str) -> Output {
-    let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
+    let query_ctx = Arc::new(QueryContext::with(
+        DEFAULT_CATALOG_NAME.to_owned(),
+        db.to_string(),
+    ));
     instance.inner().execute_sql(sql, query_ctx).await.unwrap()
 }

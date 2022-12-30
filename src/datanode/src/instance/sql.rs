@@ -255,7 +255,10 @@ mod test {
         let bare = ObjectName(vec![my_table.into()]);
 
         let using_schema = "foo";
-        let query_ctx = Arc::new(QueryContext::with_current_schema(using_schema.to_string()));
+        let query_ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME.to_owned(),
+            using_schema.to_string(),
+        ));
         let empty_ctx = Arc::new(QueryContext::new());
 
         assert_eq!(
