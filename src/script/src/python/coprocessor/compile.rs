@@ -25,7 +25,7 @@ use crate::python::coprocessor::parse::{ret_parse_error, DecoratorArgs};
 use crate::python::error::{PyCompileSnafu, PyParseSnafu, Result};
 
 fn create_located<T>(node: T, loc: Location) -> Located<T> {
-    Located::new(loc, node)
+    Located::new(loc, loc, node)
 }
 
 /// generate a call to the coprocessor function
