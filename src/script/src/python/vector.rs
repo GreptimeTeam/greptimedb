@@ -948,7 +948,7 @@ impl AsMapping for PyVector {
 
 impl AsSequence for PyVector {
     fn as_sequence() -> &'static PySequenceMethods {
-        static AS_SEQUENCE:Lazy<PySequenceMethods> = Lazy::new(|| PySequenceMethods {
+        static AS_SEQUENCE: Lazy<PySequenceMethods> = Lazy::new(|| PySequenceMethods {
             length: atomic_func!(|seq, _vm| Ok(PyVector::sequence_downcast(seq).len())),
             item: atomic_func!(|seq, i, vm| {
                 let zelf = PyVector::sequence_downcast(seq);

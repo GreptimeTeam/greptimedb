@@ -6,7 +6,21 @@ license.workspace = true
 
 [features]
 default = ["python"]
-python = ["dep:datafusion", "dep:datafusion-common", "dep:datafusion-expr", "dep:datafusion-physical-expr", "dep:rustpython-vm", "dep:rustpython-parser", "dep:rustpython-compiler", "dep:rustpython-compiler-core", "dep:rustpython-codegen", "dep:rustpython-ast", "dep:rustpython-pylib", "dep:rustpython-stdlib", "dep:paste"]
+python = [
+    "dep:datafusion",
+    "dep:datafusion-common",
+    "dep:datafusion-expr",
+    "dep:datafusion-physical-expr",
+    "dep:rustpython-vm",
+    "dep:rustpython-parser",
+    "dep:rustpython-compiler",
+    "dep:rustpython-compiler-core",
+    "dep:rustpython-codegen",
+    "dep:rustpython-ast",
+    "dep:rustpython-pylib",
+    "dep:rustpython-stdlib",
+    "dep:paste",
+]
 
 [dependencies]
 async-trait.workspace = true
