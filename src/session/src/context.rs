@@ -107,6 +107,10 @@ pub enum Channel {
     Grpc,
     Http,
     Mysql,
+    Postgres,
+    Opentsdb,
+    Influxdb,
+    Prometheus,
 }
 
 #[cfg(test)]
