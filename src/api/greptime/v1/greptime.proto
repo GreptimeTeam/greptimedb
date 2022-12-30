@@ -11,9 +11,9 @@ service Greptime {
 
 message BatchRequest {
   RequestHeader header = 1;
-  repeated DatabaseRequest databases = 3;
+  repeated DatabaseRequest databases = 2;
 }
 
 message BatchResponse {
-  repeated DatabaseResponse databases = 2;
+  repeated DatabaseResponse databases = 1;
 }

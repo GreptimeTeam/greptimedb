@@ -86,13 +86,13 @@ impl FlightService for Instance {
             .request
             .context(MissingRequiredFieldSnafu { name: "request" })?;
         let output = match request {
+            GrpcRequest::Insert(request) => self.handle_insert(request).await?,
             GrpcRequest::Query(query_request) => {
                 let query = query_request
                     .query
                     .context(MissingRequiredFieldSnafu { name: "query" })?;
                 self.handle_query(query).await?
             }
-            GrpcRequest::Insert(request) => self.handle_insert(request).await?,
             GrpcRequest::Ddl(request) => self.handle_ddl(request).await?,
         };
         let stream = to_flight_data_stream(output);

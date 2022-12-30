@@ -10,10 +10,10 @@ import "greptime/v1/common.proto";
 // So create a new DDL expr if you need it.
 message DdlRequest {
   oneof expr {
+    CreateDatabaseExpr create_database = 1;
     CreateTableExpr create_table = 2;
     AlterExpr alter = 3;
-    CreateDatabaseExpr create_database = 4;
-    DropTableExpr drop_table = 5;
+    DropTableExpr drop_table = 4;
   }
 }
 
