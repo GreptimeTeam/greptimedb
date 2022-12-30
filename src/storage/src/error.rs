@@ -404,7 +404,7 @@ pub enum Error {
         expect,
         given
     ))]
-    LenNotEquals {
+    UnequalLengths {
         name: String,
         expect: usize,
         given: usize,
@@ -458,7 +458,7 @@ impl ErrorExt for Error {
             | RequestTooLarge { .. }
             | TypeMismatch { .. }
             | HasNull { .. }
-            | LenNotEquals { .. }
+            | UnequalLengths { .. }
             | MoreColumnThanExpected { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. }

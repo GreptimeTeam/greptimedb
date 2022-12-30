@@ -27,8 +27,8 @@ use store_api::storage::{OpType, WriteRequest};
 
 use crate::error::{
     BatchMissingColumnSnafu, CreateDefaultSnafu, CreateRecordBatchSnafu, Error, HasNullSnafu,
-    LenNotEqualsSnafu, MoreColumnThanExpectedSnafu, RequestTooLargeSnafu, Result,
-    TypeMismatchSnafu, UnknownColumnSnafu,
+    MoreColumnThanExpectedSnafu, RequestTooLargeSnafu, Result, TypeMismatchSnafu,
+    UnequalLengthsSnafu, UnknownColumnSnafu,
 };
 
 /// Max number of updates in a write batch.
@@ -320,7 +320,7 @@ impl NameToVector {
         for (name, vector) in &data {
             ensure!(
                 num_rows == vector.len(),
-                LenNotEqualsSnafu {
+                UnequalLengthsSnafu {
                     name,
                     expect: num_rows,
                     given: vector.len(),
