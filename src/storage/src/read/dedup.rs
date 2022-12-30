@@ -66,8 +66,8 @@ impl<R> DedupReader<R> {
             .get_or_insert_with(Batch::default)
             .clone_from(&batch); // Use `clone_from` to reuse allocated memory if possible.
 
-        // TODO(yingwen): To support `DELETE`, we could find all rows whose op_types are equal
-        // to `OpType::Delete`, mark their `selected` to false, then filter the batch.
+        // Find all rows whose op_types are `OpType::Delete`, mark their `selected` to false.
+        self.schema.unselect_deleted(&batch, &mut self.selected);
 
         let filter = BooleanVector::from_iterator(self.selected.iter().by_vals());
         // Filter duplicate rows.

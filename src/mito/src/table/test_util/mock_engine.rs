@@ -27,8 +27,8 @@ use storage::metadata::{RegionMetaImpl, RegionMetadata};
 use storage::write_batch::WriteBatch;
 use store_api::storage::{
     AlterRequest, Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse,
-    OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, RegionMeta, ScanRequest,
-    ScanResponse, SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
+    OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, ScanRequest, ScanResponse,
+    SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
@@ -173,7 +173,11 @@ impl Region for MockRegion {
     }
 
     fn write_request(&self) -> WriteBatch {
-        WriteBatch::new(self.in_memory_metadata().schema().clone())
+        let metadata = self.inner.metadata.load();
+        let user_schema = metadata.user_schema().clone();
+        let row_key_end = metadata.schema().store_schema().row_key_end();
+
+        WriteBatch::new(user_schema, row_key_end)
     }
 
     async fn alter(&self, request: AlterRequest) -> Result<()> {

@@ -24,8 +24,8 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AlterRequest, OpenOptions, ReadContext, Region, RegionId, RegionMeta, SequenceNumber,
-    WriteContext, WriteResponse,
+    AlterRequest, OpenOptions, ReadContext, Region, RegionId, SequenceNumber, WriteContext,
+    WriteResponse,
 };
 
 use crate::error::{self, Error, Result};
@@ -91,7 +91,11 @@ impl<S: LogStore> Region for RegionImpl<S> {
     }
 
     fn write_request(&self) -> Self::WriteRequest {
-        WriteBatch::new(self.in_memory_metadata().schema().clone())
+        let metadata = self.inner.version_control().metadata();
+        let user_schema = metadata.user_schema().clone();
+        let row_key_end = metadata.schema().store_schema().row_key_end();
+
+        WriteBatch::new(user_schema, row_key_end)
     }
 
     async fn alter(&self, request: AlterRequest) -> Result<()> {

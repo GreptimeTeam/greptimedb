@@ -24,6 +24,7 @@ pub fn gen_mutation_types(payload: &Payload) -> Vec<i32> {
         .mutations
         .iter()
         .map(|m| match m.op_type {
+            OpType::Delete => MutationType::Delete.into(),
             OpType::Put => MutationType::Put.into(),
         })
         .collect::<Vec<_>>()

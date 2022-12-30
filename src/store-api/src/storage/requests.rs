@@ -31,6 +31,11 @@ pub trait WriteRequest: Send {
     ///
     /// `data` is the columnar format of the data to put.
     fn put(&mut self, data: HashMap<String, VectorRef>) -> Result<(), Self::Error>;
+
+    /// Delete rows by `keys`.
+    ///
+    /// `keys` are the row keys, in columnar format, of the rows to delete.
+    fn delete(&mut self, keys: HashMap<String, VectorRef>) -> Result<(), Self::Error>;
 }
 
 #[derive(Default)]

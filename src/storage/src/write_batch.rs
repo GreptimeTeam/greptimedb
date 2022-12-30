@@ -18,17 +18,20 @@ mod compat;
 use std::collections::HashMap;
 
 use common_recordbatch::RecordBatch;
+use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::value::ValueRef;
 use datatypes::vectors::VectorRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{OpType, WriteRequest};
 
 use crate::error::{
     BatchMissingColumnSnafu, CreateDefaultSnafu, CreateRecordBatchSnafu, Error, HasNullSnafu,
-    LenNotEqualsSnafu, RequestTooLargeSnafu, Result, TypeMismatchSnafu, UnknownColumnSnafu,
+    MoreColumnThanExpectedSnafu, RequestTooLargeSnafu, Result, TypeMismatchSnafu,
+    UnequalLengthsSnafu, UnknownColumnSnafu,
 };
 
-/// Max number of updates of a write batch.
+/// Max number of updates in a write batch.
 pub(crate) const MAX_BATCH_SIZE: usize = 1_000_000;
 
 /// Data of [WriteBatch].
@@ -77,6 +80,11 @@ pub struct WriteBatch {
     ///
     /// We use it to check whether this batch is too large.
     num_rows_to_mutate: usize,
+    /// The ending index of row key columns.
+    ///
+    /// The `WriteBatch` use this index to locate all row key columns from
+    /// the schema.
+    row_key_end: usize,
 }
 
 impl WriteRequest for WriteBatch {
@@ -98,14 +106,41 @@ impl WriteRequest for WriteBatch {
 
         Ok(())
     }
+
+    fn delete(&mut self, keys: HashMap<String, VectorRef>) -> Result<()> {
+        let data = NameToVector::new(keys)?;
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let record_batch = self.process_delete_data(data)?;
+
+        self.add_num_rows_to_mutate(record_batch.num_rows())?;
+        self.payload.mutations.push(Mutation {
+            op_type: OpType::Delete,
+            record_batch,
+        });
+
+        Ok(())
+    }
 }
 
 // WriteBatch pub methods.
 impl WriteBatch {
-    pub fn new(schema: SchemaRef) -> Self {
+    /// Creates a new `WriteBatch`.
+    ///
+    /// The `schema` is the user schema of the region (no internal columns) and
+    /// the `row_key_end` is the ending index of row key columns.
+    ///
+    /// # Panics
+    /// Panics if `row_key_end <= schema.num_columns()`.
+    pub fn new(schema: SchemaRef, row_key_end: usize) -> Self {
+        assert!(row_key_end <= schema.num_columns());
+
         Self {
             payload: Payload::new(schema),
             num_rows_to_mutate: 0,
+            row_key_end,
         }
     }
 
@@ -154,6 +189,46 @@ impl WriteBatch {
         RecordBatch::new(self.schema().clone(), columns).context(CreateRecordBatchSnafu)
     }
 
+    /// Validates `data` and converts it into a [RecordBatch].
+    ///
+    /// It fills value columns by null, ignoring whether the column is nullable as the contents
+    /// of value columns won't be read.
+    fn process_delete_data(&self, data: NameToVector) -> Result<RecordBatch> {
+        // Ensure row key columns are provided.
+        for column_schema in self.row_key_column_schemas() {
+            ensure!(
+                data.0.contains_key(&column_schema.name),
+                BatchMissingColumnSnafu {
+                    column: &column_schema.name,
+                }
+            );
+        }
+        // Ensure only provides row key columns.
+        ensure!(
+            data.0.len() == self.row_key_column_schemas().len(),
+            MoreColumnThanExpectedSnafu
+        );
+
+        let num_rows = data.num_rows();
+        let mut columns = Vec::with_capacity(self.schema().num_columns());
+        for column_schema in self.schema().column_schemas() {
+            match data.0.get(&column_schema.name) {
+                Some(col) => {
+                    validate_column(column_schema, col)?;
+                    columns.push(col.clone());
+                }
+                None => {
+                    // Fills value columns by null, these columns are just placeholders to ensure
+                    // the schema of the record batch is correct.
+                    let col = new_column_with_null(&column_schema.data_type, num_rows);
+                    columns.push(col);
+                }
+            }
+        }
+
+        RecordBatch::new(self.schema().clone(), columns).context(CreateRecordBatchSnafu)
+    }
+
     fn add_num_rows_to_mutate(&mut self, len: usize) -> Result<()> {
         let num_rows = self.num_rows_to_mutate + len;
         ensure!(
@@ -162,6 +237,11 @@ impl WriteBatch {
         );
         self.num_rows_to_mutate = num_rows;
         Ok(())
+    }
+
+    /// Returns all row key columns in the schema.
+    fn row_key_column_schemas(&self) -> &[ColumnSchema] {
+        &self.payload.schema.column_schemas()[..self.row_key_end]
     }
 }
 
@@ -218,6 +298,17 @@ pub(crate) fn new_column_with_default_value(
     Ok(vector)
 }
 
+/// Creates a new column and fills it by null.
+fn new_column_with_null(data_type: &ConcreteDataType, num_rows: usize) -> VectorRef {
+    // TODO(yingwen): Use `NullVector` once it supports setting logical type.
+    let mut mutable_vector = data_type.create_mutable_vector(num_rows);
+    for _ in 0..num_rows {
+        // Safety: push null is safe.
+        mutable_vector.push_value_ref(ValueRef::Null).unwrap();
+    }
+    mutable_vector.to_vector()
+}
+
 /// Vectors in [NameToVector] have same length.
 ///
 /// MUST construct it via [`NameToVector::new()`] to ensure the vector lengths are validated.
@@ -229,7 +320,7 @@ impl NameToVector {
         for (name, vector) in &data {
             ensure!(
                 num_rows == vector.len(),
-                LenNotEqualsSnafu {
+                UnequalLengthsSnafu {
                     name,
                     expect: num_rows,
                     given: vector.len(),
@@ -264,6 +355,7 @@ pub(crate) fn new_test_batch() -> WriteBatch {
             ("v1", LogicalTypeId::Boolean, true),
         ],
         Some(2),
+        3,
     )
 }
 
@@ -325,7 +417,6 @@ mod tests {
         put_data.insert("ts".to_string(), tsv);
 
         let mut batch = new_test_batch();
-        assert!(batch.payload().is_empty());
         batch.put(put_data).unwrap();
         assert!(!batch.payload().is_empty());
 
@@ -352,7 +443,7 @@ mod tests {
         put_data.insert("k1".to_string(), boolv);
 
         let mut batch =
-            write_batch_util::new_write_batch(&[("k1", LogicalTypeId::Boolean, false)], None);
+            write_batch_util::new_write_batch(&[("k1", LogicalTypeId::Boolean, false)], None, 1);
         let err = batch.put(put_data).unwrap_err();
         check_err(err, "Request is too large");
     }
@@ -432,5 +523,83 @@ mod tests {
         let mut batch = new_test_batch();
         let err = batch.put(put_data).unwrap_err();
         assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
+    }
+
+    #[test]
+    fn test_put_empty() {
+        let mut batch = new_test_batch();
+        batch.put(HashMap::new()).unwrap();
+        assert!(batch.payload().is_empty());
+    }
+
+    #[test]
+    fn test_delete_empty() {
+        let mut batch = new_test_batch();
+        batch.delete(HashMap::new()).unwrap();
+        assert!(batch.payload().is_empty());
+    }
+
+    #[test]
+    fn test_write_batch_delete() {
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0, 0])) as VectorRef;
+
+        let mut keys = HashMap::with_capacity(3);
+        keys.insert("k1".to_string(), intv.clone());
+        keys.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
+        keys.insert("ts".to_string(), tsv);
+
+        let mut batch = new_test_batch();
+        batch.delete(keys).unwrap();
+
+        let record_batch = &batch.payload().mutations[0].record_batch;
+        assert_eq!(3, record_batch.num_rows());
+        assert_eq!(4, record_batch.num_columns());
+        let v1 = record_batch.column_by_name("v1").unwrap();
+        assert!(v1.only_null());
+    }
+
+    #[test]
+    fn test_delete_missing_column() {
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+
+        let mut keys = HashMap::with_capacity(3);
+        keys.insert("k1".to_string(), intv.clone());
+        keys.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
+
+        let mut batch = new_test_batch();
+        let err = batch.delete(keys).unwrap_err();
+        check_err(err, "Missing column ts");
+    }
+
+    #[test]
+    fn test_delete_columns_more_than_row_key() {
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0, 0])) as VectorRef;
+
+        let mut keys = HashMap::with_capacity(3);
+        keys.insert("k1".to_string(), intv.clone());
+        keys.insert(consts::VERSION_COLUMN_NAME.to_string(), intv.clone());
+        keys.insert("ts".to_string(), tsv);
+        keys.insert("v2".to_string(), intv);
+
+        let mut batch = new_test_batch();
+        let err = batch.delete(keys).unwrap_err();
+        check_err(err, "More columns than expected");
+    }
+
+    #[test]
+    fn test_delete_type_mismatch() {
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let boolv = Arc::new(BooleanVector::from(vec![true, false, true])) as VectorRef;
+
+        let mut keys = HashMap::with_capacity(3);
+        keys.insert("k1".to_string(), intv.clone());
+        keys.insert(consts::VERSION_COLUMN_NAME.to_string(), intv);
+        keys.insert("ts".to_string(), boolv);
+
+        let mut batch = new_test_batch();
+        let err = batch.delete(keys).unwrap_err();
+        check_err(err, "Type of column ts does not match");
     }
 }

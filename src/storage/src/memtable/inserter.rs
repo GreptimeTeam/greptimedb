@@ -143,6 +143,7 @@ mod tests {
                 ("value", LogicalTypeId::Int64, true),
             ],
             Some(0),
+            1,
         )
     }
 

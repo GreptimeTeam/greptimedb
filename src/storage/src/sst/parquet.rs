@@ -312,20 +312,19 @@ mod tests {
 
         // v1
         assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![1234, 1234, 1234, 1234, 1234, 1234]))
-                as Arc<dyn Array>),
+            &(Arc::new(UInt64Array::from(vec![1234; 6])) as Arc<dyn Array>),
             chunk.column(3)
         );
 
         // sequence
         assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![10, 10, 10, 10, 10, 10])) as Arc<dyn Array>),
+            &(Arc::new(UInt64Array::from(vec![10; 6])) as Arc<dyn Array>),
             chunk.column(4)
         );
 
         // op_type
         assert_eq!(
-            &(Arc::new(UInt8Array::from(vec![0, 0, 0, 0, 0, 0])) as Arc<dyn Array>),
+            &(Arc::new(UInt8Array::from(vec![1; 6])) as Arc<dyn Array>),
             chunk.column(5)
         );
     }

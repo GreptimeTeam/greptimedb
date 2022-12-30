@@ -404,7 +404,7 @@ pub enum Error {
         expect,
         given
     ))]
-    LenNotEquals {
+    UnequalLengths {
         name: String,
         expect: usize,
         given: usize,
@@ -434,6 +434,9 @@ pub enum Error {
         backtrace: Backtrace,
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("More columns than expected in the request"))]
+    MoreColumnThanExpected { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -455,7 +458,8 @@ impl ErrorExt for Error {
             | RequestTooLarge { .. }
             | TypeMismatch { .. }
             | HasNull { .. }
-            | LenNotEquals { .. } => StatusCode::InvalidArguments,
+            | UnequalLengths { .. }
+            | MoreColumnThanExpected { .. } => StatusCode::InvalidArguments,
 
             Utf8 { .. }
             | EncodeJson { .. }
