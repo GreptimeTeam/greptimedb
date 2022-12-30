@@ -72,12 +72,7 @@ impl RangeArray {
         let ranges_iter = dict
             .keys()
             .iter()
-            .map(|compound_key| {
-                compound_key.map(|key| {
-                    let [offset, length] = bytemuck::cast::<i64, [i32; 2]>(key);
-                    (offset, length)
-                })
-            })
+            .map(|compound_key| compound_key.map(unpack))
             .collect::<Option<Vec<_>>>()
             .context(EmptyRangeSnafu)?;
         Self::check_ranges(dict.values().len(), ranges_iter)?;
@@ -87,7 +82,7 @@ impl RangeArray {
 
     pub fn from_ranges<R>(values: ArrayRef, ranges: R) -> Result<Self>
     where
-        R: IntoIterator<Item = (i32, i32)> + Clone,
+        R: IntoIterator<Item = (u32, u32)> + Clone,
     {
         Self::check_ranges(values.len(), ranges.clone())?;
 
@@ -104,12 +99,12 @@ impl RangeArray {
     /// [`from_ranges`]: crate::range_array::RangeArray#method.from_ranges
     pub unsafe fn from_ranges_unchecked<R>(values: ArrayRef, ranges: R) -> Self
     where
-        R: IntoIterator<Item = (i32, i32)>,
+        R: IntoIterator<Item = (u32, u32)>,
     {
         let key_array = Int64Array::from_iter(
             ranges
                 .into_iter()
-                .map(|(offset, length)| bytemuck::cast::<[i32; 2], i64>([offset, length])),
+                .map(|(offset, length)| pack(offset, length)),
         );
 
         // Build from ArrayData to bypass the "offset" checker. Because
@@ -151,7 +146,7 @@ impl RangeArray {
         }
 
         let compound_key = self.array.keys().value(index);
-        let [offset, length] = bytemuck::cast::<i64, [i32; 2]>(compound_key);
+        let (offset, length) = unpack(compound_key);
         let array = self.array.values().slice(offset as usize, length as usize);
 
         Some(array)
@@ -166,7 +161,7 @@ impl RangeArray {
 
     fn check_ranges<R>(value_len: usize, ranges: R) -> Result<()>
     where
-        R: IntoIterator<Item = (i32, i32)>,
+        R: IntoIterator<Item = (u32, u32)>,
     {
         for (offset, length) in ranges.into_iter() {
             ensure!(
@@ -204,18 +199,27 @@ impl std::fmt::Debug for RangeArray {
             .iter()
             .map(|compound_key| {
                 compound_key.map(|key| {
-                    let [offset, length] = bytemuck::cast::<i64, [i32; 2]>(key);
+                    let (offset, length) = unpack(key);
                     offset..(offset + length)
                 })
             })
             .collect::<Vec<_>>();
-        writeln!(
-            f,
-            "DictionaryArray {{array: {:?} ranges: {:?}}}",
-            self.array.values(),
-            ranges
-        )
+        f.debug_struct("RangeArray")
+            .field("base array", self.array.values())
+            .field("ranges", &ranges)
+            .finish()
     }
+}
+
+// util functions
+
+fn pack(offset: u32, length: u32) -> i64 {
+    bytemuck::cast::<[u32; 2], i64>([offset, length])
+}
+
+fn unpack(compound: i64) -> (u32, u32) {
+    let [offset, length] = bytemuck::cast::<i64, [u32; 2]>(compound);
+    (offset, length)
 }
 
 #[cfg(test)]

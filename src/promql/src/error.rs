@@ -31,8 +31,8 @@ pub enum InnerError {
         len
     ))]
     IllegalRange {
-        offset: i32,
-        length: i32,
+        offset: u32,
+        length: u32,
         len: usize,
         backtrace: Backtrace,
     },
