@@ -25,7 +25,7 @@ use crate::error::{EmptyRangeSnafu, IllegalRangeSnafu, Result};
 ///
 /// It's build on top of Arrow's [DictionaryArray]. [DictionaryArray] contains two
 /// sub-arrays, one for dictionary key and another for dictionary value. Both of them
-/// can be arbitary types, but here the key array is fixed to i64 type.
+/// can be arbitrary types, but here the key array is fixed to i64 type.
 ///
 /// ```text
 ///             │ ┌─────┬─────┬─────┬─────┐
