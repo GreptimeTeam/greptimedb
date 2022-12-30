@@ -14,23 +14,38 @@
 
 pub mod context;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::context::{QueryContext, QueryContextRef};
+use arc_swap::ArcSwap;
 
-#[derive(Default)]
+use crate::context::{Channel, ConnInfo, ConnInfoRef, QueryContext, QueryContextRef, UserInfo};
+
 pub struct Session {
     query_ctx: QueryContextRef,
+    user_info: ArcSwap<UserInfo>,
+    conn_info: ConnInfoRef,
 }
 
 impl Session {
-    pub fn new() -> Self {
+    pub fn new(addr: SocketAddr, channel: Channel) -> Self {
         Session {
             query_ctx: Arc::new(QueryContext::new()),
+            user_info: ArcSwap::new(Arc::new(UserInfo::default())),
+            conn_info: Arc::new(ConnInfo::new(addr, channel)),
         }
     }
 
     pub fn context(&self) -> QueryContextRef {
         self.query_ctx.clone()
+    }
+    pub fn conn_info(&self) -> ConnInfoRef {
+        self.conn_info.clone()
+    }
+    pub fn user_info(&self) -> Arc<UserInfo> {
+        self.user_info.load().clone()
+    }
+    pub fn set_user_info(&self, user_info: UserInfo) {
+        self.user_info.store(Arc::new(user_info));
     }
 }

@@ -127,11 +127,7 @@ impl MysqlServer {
         force_tls: bool,
         user_provider: Option<UserProviderRef>,
     ) -> Result<()> {
-        let mut shim = MysqlInstanceShim::create(
-            query_handler,
-            stream.peer_addr()?.to_string(),
-            user_provider,
-        );
+        let mut shim = MysqlInstanceShim::create(query_handler, stream.peer_addr()?, user_provider);
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
         let ops = IntermediaryOptions::default();

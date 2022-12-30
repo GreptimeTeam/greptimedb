@@ -18,8 +18,8 @@ use axum::body::Body;
 use axum::extract::{Json, Query, RawBody, State};
 use common_telemetry::metric;
 use metrics::counter;
-use servers::auth::UserInfo;
 use servers::http::{handler as http_handler, script as script_handler, ApiState, JsonOutput};
+use session::context::UserInfo;
 use table::test_util::MemTable;
 
 use crate::{create_testing_script_handler, create_testing_sql_query_handler};

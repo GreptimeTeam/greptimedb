@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use common_telemetry::info;
 
 pub type QueryContextRef = Arc<QueryContext>;
+pub type ConnInfoRef = Arc<ConnInfo>;
 
 pub struct QueryContext {
     current_schema: ArcSwapOption<String>,
@@ -56,5 +58,80 @@ impl QueryContext {
             "set new session default schema: {:?}, swap old: {:?}",
             schema, last
         )
+    }
+}
+
+pub const DEFAULT_USERNAME: &str = "greptime";
+
+#[derive(Clone, Debug)]
+pub struct UserInfo {
+    username: String,
+}
+
+impl Default for UserInfo {
+    fn default() -> Self {
+        Self {
+            username: DEFAULT_USERNAME.to_string(),
+        }
+    }
+}
+
+impl UserInfo {
+    pub fn username(&self) -> &str {
+        self.username.as_str()
+    }
+
+    pub fn new(username: impl Into<String>) -> Self {
+        Self {
+            username: username.into(),
+        }
+    }
+}
+
+pub struct ConnInfo {
+    pub client_host: SocketAddr,
+    pub channel: Channel,
+}
+
+impl ConnInfo {
+    pub fn new(client_host: SocketAddr, channel: Channel) -> Self {
+        Self {
+            client_host,
+            channel,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Channel {
+    Grpc,
+    Http,
+    Mysql,
+    Postgres,
+    Opentsdb,
+    Influxdb,
+    Prometheus,
+}
+
+#[cfg(test)]
+mod test {
+    use crate::context::{Channel, UserInfo};
+    use crate::Session;
+
+    #[test]
+    fn test_session() {
+        let session = Session::new("127.0.0.1:9000".parse().unwrap(), Channel::Mysql);
+        // test user_info
+        assert_eq!(session.user_info().username(), "greptime");
+        session.set_user_info(UserInfo::new("root"));
+        assert_eq!(session.user_info().username(), "root");
+
+        // test channel
+        assert_eq!(session.conn_info().channel, Channel::Mysql);
+        assert_eq!(
+            session.conn_info().client_host.ip().to_string(),
+            "127.0.0.1"
+        );
+        assert_eq!(session.conn_info().client_host.port(), 9000);
     }
 }
