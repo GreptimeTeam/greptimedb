@@ -37,24 +37,23 @@ use futures::{Stream, StreamExt};
 
 use crate::extension_plan::Millisecond;
 
-/// Manipulate the input record batch to make it suit for Instant Operator.
+/// Manipulate the input record batch to make it suitable for Instant Operator.
 ///
 /// This plan will try to align the input time series, for every timestamp between
 /// `start` and `end` with step `interval`. Find in the `lookback` range if data
 /// is missing at the given timestamp. If data is absent in some timestamp, all columns
 /// except the time index will left blank.
 #[derive(Debug)]
-pub struct InstantManipulator {
+pub struct InstantManipulate {
     start: Millisecond,
     end: Millisecond,
     lookback_delta: Millisecond,
     interval: Millisecond,
     time_index_column: String,
-
     input: LogicalPlan,
 }
 
-impl UserDefinedLogicalNode for InstantManipulator {
+impl UserDefinedLogicalNode for InstantManipulate {
     fn as_any(&self) -> &dyn Any {
         self as _
     }
@@ -74,8 +73,8 @@ impl UserDefinedLogicalNode for InstantManipulator {
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "PromInstantManipulator: lookback=[{}], interval=[{}], time index=[{}]",
-            self.lookback_delta, self.interval, self.time_index_column
+            "PromInstantManipulator: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
+            self.start, self.end, self.lookback_delta, self.interval, self.time_index_column
         )
     }
 
@@ -97,8 +96,8 @@ impl UserDefinedLogicalNode for InstantManipulator {
     }
 }
 
-impl InstantManipulator {
-    pub fn new<E: AsRef<[Expr]>>(
+impl InstantManipulate {
+    pub fn new(
         start: Millisecond,
         end: Millisecond,
         lookback_delta: Millisecond,
@@ -117,7 +116,7 @@ impl InstantManipulator {
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        Arc::new(InstantManipulatorExec {
+        Arc::new(InstantManipulateExec {
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
@@ -130,7 +129,7 @@ impl InstantManipulator {
 }
 
 #[derive(Debug)]
-pub struct InstantManipulatorExec {
+pub struct InstantManipulateExec {
     start: Millisecond,
     end: Millisecond,
     lookback_delta: Millisecond,
@@ -141,7 +140,7 @@ pub struct InstantManipulatorExec {
     metric: ExecutionPlanMetricsSet,
 }
 
-impl ExecutionPlan for InstantManipulatorExec {
+impl ExecutionPlan for InstantManipulateExec {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -195,7 +194,7 @@ impl ExecutionPlan for InstantManipulatorExec {
             .column_with_name(&self.time_index_column)
             .expect("time index column not found")
             .0;
-        Ok(Box::pin(InstantManipulatorStream {
+        Ok(Box::pin(InstantManipulateStream {
             start: self.start,
             end: self.end,
             lookback_delta: self.lookback_delta,
@@ -212,8 +211,8 @@ impl ExecutionPlan for InstantManipulatorExec {
             DisplayFormatType::Default => {
                 write!(
                     f,
-                    "PromInstantManipulatorExec: lookback=[{}], interval=[{}], time index=[{}]",
-                    self.lookback_delta, self.interval, self.time_index_column
+                    "PromInstantManipulatorExec: range=[{}..{}], lookback=[{}], interval=[{}], time index=[{}]",
+                   self.start,self.end, self.lookback_delta, self.interval, self.time_index_column
                 )
             }
         }
@@ -243,7 +242,7 @@ impl ExecutionPlan for InstantManipulatorExec {
     }
 }
 
-pub struct InstantManipulatorStream {
+pub struct InstantManipulateStream {
     start: Millisecond,
     end: Millisecond,
     lookback_delta: Millisecond,
@@ -256,13 +255,13 @@ pub struct InstantManipulatorStream {
     metric: BaselineMetrics,
 }
 
-impl RecordBatchStream for InstantManipulatorStream {
+impl RecordBatchStream for InstantManipulateStream {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
 }
 
-impl Stream for InstantManipulatorStream {
+impl Stream for InstantManipulateStream {
     type Item = ArrowResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -277,7 +276,8 @@ impl Stream for InstantManipulatorStream {
     }
 }
 
-impl InstantManipulatorStream {
+impl InstantManipulateStream {
+    // refer to Go version: https://github.com/prometheus/prometheus/blob/e934d0f01158a1d55fa0ebb035346b195fcc1260/promql/engine.go#L1571
     pub fn manipulate(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
         let mut take_indices = Vec::with_capacity(input.num_rows());
         // TODO(ruihang): maybe the input is not timestamp millisecond array
@@ -287,7 +287,6 @@ impl InstantManipulatorStream {
             .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
 
-        // prepare two vectors
         let mut cursor = 0;
         let aligned_ts = (self.start..=self.end)
             .step_by(self.interval as usize)
@@ -400,7 +399,7 @@ mod test {
         expected: String,
     ) {
         let memory_exec = Arc::new(prepare_test_data());
-        let normalize_exec = Arc::new(InstantManipulatorExec {
+        let normalize_exec = Arc::new(InstantManipulateExec {
             start,
             end,
             lookback_delta,

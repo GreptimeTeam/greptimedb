@@ -33,7 +33,7 @@ use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{Stream, StreamExt};
 
-use super::Millisecond;
+use crate::extension_plan::Millisecond;
 
 /// Normalize the input record batch. Notice that for simplicity, this method assumes
 /// the input batch only contains sample points from one time series.
