@@ -21,13 +21,13 @@ use std::path::Path;
 use async_trait::async_trait;
 use digest;
 use digest::Digest;
+use session::context::UserInfo;
 use sha1::Sha1;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::auth::{
     Error, HashedPassword, Identity, InvalidConfigSnafu, IoSnafu, Password, Result, Salt,
-    UnsupportedPasswordTypeSnafu, UserInfo, UserNotFoundSnafu, UserPasswordMismatchSnafu,
-    UserProvider,
+    UnsupportedPasswordTypeSnafu, UserNotFoundSnafu, UserPasswordMismatchSnafu, UserProvider,
 };
 
 pub const STATIC_USER_PROVIDER: &str = "static_user_provider";

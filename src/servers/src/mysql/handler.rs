@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,13 +23,11 @@ use opensrv_mysql::{
     AsyncMysqlShim, ErrorKind, InitWriter, ParamParser, QueryResultWriter, StatementMetaWriter,
 };
 use rand::RngCore;
+use session::context::Channel;
 use session::Session;
 use tokio::io::AsyncWrite;
-use tokio::sync::RwLock;
 
 use crate::auth::{Identity, Password, UserProviderRef};
-use crate::context::Channel::Mysql;
-use crate::context::{Context, CtxBuilder};
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
 use crate::query_handler::SqlQueryHandlerRef;
@@ -37,9 +36,6 @@ use crate::query_handler::SqlQueryHandlerRef;
 pub struct MysqlInstanceShim {
     query_handler: SqlQueryHandlerRef,
     salt: [u8; 20],
-    client_addr: String,
-    // TODO(LFC): Break `Context` struct into different fields in `Session`, each with its own purpose.
-    ctx: Arc<RwLock<Option<Context>>>,
     session: Arc<Session>,
     user_provider: Option<UserProviderRef>,
 }
@@ -47,7 +43,7 @@ pub struct MysqlInstanceShim {
 impl MysqlInstanceShim {
     pub fn create(
         query_handler: SqlQueryHandlerRef,
-        client_addr: String,
+        client_addr: SocketAddr,
         user_provider: Option<UserProviderRef>,
     ) -> MysqlInstanceShim {
         // init a random salt
@@ -66,9 +62,7 @@ impl MysqlInstanceShim {
         MysqlInstanceShim {
             query_handler,
             salt: scramble,
-            client_addr,
-            ctx: Arc::new(RwLock::new(None)),
-            session: Arc::new(Session::new()),
+            session: Arc::new(Session::new(client_addr, Channel::Mysql)),
             user_provider,
         }
     }
@@ -115,11 +109,11 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     ) -> bool {
         // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
-        let client_addr = self.client_addr.clone();
 
         let mut user_info = None;
+        let addr = self.session.conn_info().client_host.to_string();
         if let Some(user_provider) = &self.user_provider {
-            let user_id = Identity::UserId(&username, Some(&client_addr));
+            let user_id = Identity::UserId(&username, Some(addr.as_str()));
 
             let password = match auth_plugin {
                 "mysql_native_password" => Password::MysqlNativePassword(auth_data, salt),
@@ -140,22 +134,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         }
         let user_info = user_info.unwrap_or_default();
 
-        return match CtxBuilder::new()
-            .client_addr(client_addr)
-            .set_channel(Mysql)
-            .set_user_info(user_info)
-            .build()
-        {
-            Ok(ctx) => {
-                let mut a = self.ctx.write().await;
-                *a = Some(ctx);
-                true
-            }
-            Err(e) => {
-                error!(e; "create ctx failed when authing mysql conn");
-                false
-            }
-        };
+        self.session.set_user_info(user_info);
+
+        true
     }
 
     async fn on_prepare<'a>(&'a mut self, _: &'a str, w: StatementMetaWriter<'a, W>) -> Result<()> {

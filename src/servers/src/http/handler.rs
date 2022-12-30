@@ -24,9 +24,8 @@ use common_error::status_code::StatusCode;
 use common_telemetry::metric;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use session::context::QueryContext;
+use session::context::{QueryContext, UserInfo};
 
-use crate::auth::UserInfo;
 use crate::http::{ApiState, JsonResponse};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]

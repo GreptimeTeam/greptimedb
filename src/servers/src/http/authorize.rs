@@ -19,10 +19,11 @@ use axum::response::Response;
 use common_telemetry::error;
 use futures::future::BoxFuture;
 use http_body::Body;
+use session::context::UserInfo;
 use snafu::{OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
-use crate::auth::{Identity, UserInfo, UserProviderRef};
+use crate::auth::{Identity, UserProviderRef};
 use crate::error::{self, Result};
 
 pub struct HttpAuth<RespBody> {
@@ -174,11 +175,12 @@ mod tests {
     use axum::body::BoxBody;
     use axum::http;
     use hyper::Request;
+    use session::context::UserInfo;
     use tower_http::auth::AsyncAuthorizeRequest;
 
     use super::{auth_header, decode_basic, AuthScheme, HttpAuth};
     use crate::auth::test::MockUserProvider;
-    use crate::auth::{UserInfo, UserProvider};
+    use crate::auth::UserProvider;
     use crate::error;
     use crate::error::Result;
 
@@ -194,7 +196,7 @@ mod tests {
         let auth_res = http_auth.authorize(req).await.unwrap();
         let user_info: &UserInfo = auth_res.extensions().get().unwrap();
         let default = UserInfo::default();
-        assert_eq!(default.user_name(), user_info.user_name());
+        assert_eq!(default.username(), user_info.username());
 
         // In mock user provider, right username:password == "greptime:greptime"
         let mock_user_provider = Some(Arc::new(MockUserProvider {}) as Arc<dyn UserProvider>);
@@ -208,7 +210,7 @@ mod tests {
         let req = http_auth.authorize(req).await.unwrap();
         let user_info: &UserInfo = req.extensions().get().unwrap();
         let default = UserInfo::default();
-        assert_eq!(default.user_name(), user_info.user_name());
+        assert_eq!(default.username(), user_info.username());
 
         let req = mock_http_request_no_auth().unwrap();
         let auth_res = http_auth.authorize(req).await;
