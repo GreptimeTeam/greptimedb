@@ -15,19 +15,19 @@
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use async_stream::{stream, try_stream};
-use async_trait::async_trait;
-use futures_util::StreamExt;
+use async_stream::stream;
 use raft_engine::{Engine, LogBatch, MessageExt};
 use snafu::ResultExt;
 use store_api::logstore::entry::Id;
 use store_api::logstore::entry_stream::SendableEntryStream;
+use store_api::logstore::namespace::Namespace as NamespaceTrait;
 use store_api::logstore::{AppendResponse, LogStore};
 
-use crate::error::{AddEntryLogBatchSnafu, Error, ScanEntriesSnafu, WriteBatchSnafu};
+use crate::error::{AddEntryLogBatchSnafu, Error, RaftEngineSnafu};
 use crate::raft_engine::protos::logstore::{Entry, Namespace};
 
 const NAMESPACE_PREFIX: &str = "__sys_namespace_";
+const SYSTEM_NAMESPACE: u64 = 0;
 
 pub struct RaftEngineLogstore {
     engine: Arc<Engine>,
@@ -61,7 +61,7 @@ impl LogStore for RaftEngineLogstore {
             .context(AddEntryLogBatchSnafu)?;
         self.engine
             .write(&mut batch, false)
-            .context(WriteBatchSnafu)?;
+            .context(RaftEngineSnafu)?;
         Ok(AppendResponse { entry_id })
     }
 
@@ -77,7 +77,7 @@ impl LogStore for RaftEngineLogstore {
             .context(AddEntryLogBatchSnafu)?;
         self.engine
             .write(&mut batch, false)
-            .context(WriteBatchSnafu)?;
+            .context(RaftEngineSnafu)?;
         Ok(entry_ids)
     }
 
@@ -105,17 +105,20 @@ impl LogStore for RaftEngineLogstore {
                         Some(max_batch_size),
                         &mut vec,
                     )
-                    .context(ScanEntriesSnafu)
+                    .context(RaftEngineSnafu)
                 {
                     Ok(_) => {
                         if let Some(last_entry) = vec.last() {
                             start_idx = last_entry.id;
                         }
-                        tx.send(Ok(vec));
+                        // reader side closed, cancel following reads
+                        if let Err(_) = tx.send(Ok(vec)).await {
+                            break;
+                        }
                     }
                     Err(e) => {
-                        tx.send(Err(e));
-                        return;
+                        let _ = tx.send(Err(e)).await;
+                        break;
                     }
                 }
             }
@@ -130,27 +133,63 @@ impl LogStore for RaftEngineLogstore {
     }
 
     async fn create_namespace(&mut self, ns: &Self::Namespace) -> Result<(), Self::Error> {
-        todo!()
+        let key = format!("{}{}", NAMESPACE_PREFIX, ns.id).as_bytes().to_vec();
+        let mut batch = LogBatch::with_capacity(1);
+        batch
+            .put_message::<Namespace>(SYSTEM_NAMESPACE, key, ns)
+            .context(RaftEngineSnafu)?;
+        self.engine
+            .write(&mut batch, true)
+            .context(RaftEngineSnafu)?;
+        Ok(())
     }
 
     async fn delete_namespace(&mut self, ns: &Self::Namespace) -> Result<(), Self::Error> {
-        todo!()
+        let key = format!("{}{}", NAMESPACE_PREFIX, ns.id).as_bytes().to_vec();
+        let mut batch = LogBatch::with_capacity(1);
+        batch.delete(SYSTEM_NAMESPACE, key);
+        self.engine
+            .write(&mut batch, true)
+            .context(RaftEngineSnafu)?;
+        Ok(())
     }
 
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error> {
-        todo!()
+        let mut namespaces: Vec<Namespace> = vec![];
+        self.engine
+            .scan_messages::<Namespace, _>(
+                SYSTEM_NAMESPACE,
+                Some(NAMESPACE_PREFIX.as_bytes()),
+                None,
+                false,
+                |_k, v| {
+                    namespaces.push(v);
+                    true
+                },
+            )
+            .context(RaftEngineSnafu)?;
+        Ok(namespaces)
     }
 
     fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id, ns: Self::Namespace) -> Self::Entry {
-        todo!()
+        Entry {
+            id,
+            data: data.as_ref().to_vec(),
+            namespace_id: ns.id(),
+            ..Default::default()
+        }
     }
 
     fn namespace(&self, id: store_api::logstore::namespace::Id) -> Self::Namespace {
-        todo!()
+        Namespace {
+            id,
+            ..Default::default()
+        }
     }
 
     async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error> {
-        todo!()
+        self.engine.compact_to(namespace.id(), id);
+        Ok(())
     }
 }
 

@@ -21,7 +21,7 @@ use async_stream::stream;
 use common_telemetry::{debug, error, info, warn};
 use futures::{pin_mut, StreamExt};
 use snafu::{OptionExt, ResultExt};
-use store_api::logstore::entry::{Encode, Entry, Id};
+use store_api::logstore::entry::{Entry, Id};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::logstore::{AppendResponse, LogStore};

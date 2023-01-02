@@ -36,13 +36,9 @@ mod tests {
     use futures::StreamExt;
 
     use super::*;
-    use crate::logstore::entry::{Encode, Epoch, Id, Offset};
+    use crate::logstore::entry::{Encode, Id};
 
     pub struct SimpleEntry {
-        /// Offset of current entry
-        offset: Offset,
-        /// Epoch of current entry
-        epoch: Epoch,
         /// Binary data of current entry
         data: Vec<u8>,
     }
@@ -111,13 +107,9 @@ mod tests {
     }
 
     impl SimpleEntry {
-        pub fn new(data: impl AsRef<[u8]>, offset: Offset, epoch: u64) -> Self {
+        pub fn new(data: impl AsRef<[u8]>) -> Self {
             let data = data.as_ref().to_vec();
-            Self {
-                data,
-                offset,
-                epoch,
-            }
+            Self { data }
         }
     }
 
@@ -149,9 +141,8 @@ mod tests {
 
     #[tokio::test]
     pub async fn test_entry_stream() {
-        let stream = async_stream::stream!({
-            yield Ok(vec![SimpleEntry::new("test_entry".as_bytes(), 0, 128)])
-        });
+        let stream =
+            async_stream::stream!({ yield Ok(vec![SimpleEntry::new("test_entry".as_bytes())]) });
 
         let mut stream_impl = EntryStreamImpl {
             inner: Box::pin(stream),

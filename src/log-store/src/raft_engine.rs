@@ -84,12 +84,3 @@ impl EntryTrait for Entry {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::raft_engine::protos::logstore::LogStoreState;
-
-    #[test]
-    fn test_protos() {}
-}

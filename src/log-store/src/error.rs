@@ -118,14 +118,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to add entry to LogBatch, source: {}", source))]
-    WriteBatch {
-        source: raft_engine::Error,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to scan entries from raft-engine, source: {}", source))]
-    ScanEntries {
+    #[snafu(display("Failed to perform raft-engine operation, source: {}", source))]
+    RaftEngine {
         source: raft_engine::Error,
         backtrace: Backtrace,
     },
