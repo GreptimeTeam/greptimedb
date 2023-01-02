@@ -123,6 +123,8 @@ pub enum Error {
         source: raft_engine::Error,
         backtrace: Backtrace,
     },
+    #[snafu(display("Logstore not started yet"))]
+    IllegalState { backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {

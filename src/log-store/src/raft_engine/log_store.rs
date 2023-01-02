@@ -16,26 +16,38 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_stream::stream;
-use raft_engine::{Engine, LogBatch, MessageExt};
-use snafu::ResultExt;
+use common_telemetry::info;
+use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::Id;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Namespace as NamespaceTrait;
 use store_api::logstore::{AppendResponse, LogStore};
+use tokio::sync::RwLock;
 
-use crate::error::{AddEntryLogBatchSnafu, Error, RaftEngineSnafu};
+use crate::error::{AddEntryLogBatchSnafu, Error, IllegalStateSnafu, RaftEngineSnafu};
 use crate::raft_engine::protos::logstore::{Entry, Namespace};
 
 const NAMESPACE_PREFIX: &str = "__sys_namespace_";
 const SYSTEM_NAMESPACE: u64 = 0;
 
 pub struct RaftEngineLogstore {
-    engine: Arc<Engine>,
+    path: String,
+    engine: RwLock<Option<Arc<Engine>>>,
+}
+
+impl RaftEngineLogstore {
+    pub fn new(path: impl AsRef<str>) -> Self {
+        Self {
+            path: path.as_ref().to_string(),
+            engine: RwLock::new(None),
+        }
+    }
 }
 
 impl Debug for RaftEngineLogstore {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RaftEngineLogstore")
+        write!(f, "RaftEngineLogstore {{ path: {} }}", self.path)
     }
 }
 
@@ -46,11 +58,27 @@ impl LogStore for RaftEngineLogstore {
     type Entry = Entry;
 
     async fn start(&self) -> Result<(), Self::Error> {
-        todo!()
+        let mut engine = self.engine.write().await;
+        let config = Config {
+            dir: self.path.clone(),
+            purge_threshold: ReadableSize::gb(50), // TODO(hl): set according to available disk space
+            recovery_mode: RecoveryMode::TolerateTailCorruption,
+            batch_compression_threshold: ReadableSize::kb(8),
+            target_file_size: ReadableSize::gb(1),
+            ..Default::default()
+        };
+        *engine = Some(Arc::new(
+            Engine::open(config.clone()).context(RaftEngineSnafu)?,
+        ));
+        info!("RaftEngineLogstore started with config: {config:?}");
+        Ok(())
     }
 
     async fn stop(&self) -> Result<(), Self::Error> {
-        todo!()
+        let mut engine = self.engine.write().await;
+        *engine = None;
+        info!("RaftEngineLogstore stopped");
+        Ok(())
     }
 
     async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error> {
@@ -59,9 +87,9 @@ impl LogStore for RaftEngineLogstore {
         batch
             .add_entries::<MessageType>(e.namespace_id, &[e])
             .context(AddEntryLogBatchSnafu)?;
-        self.engine
-            .write(&mut batch, false)
-            .context(RaftEngineSnafu)?;
+        let guard = self.engine.read().await;
+        let engine = guard.as_ref().context(IllegalStateSnafu)?;
+        engine.write(&mut batch, false).context(RaftEngineSnafu)?;
         Ok(AppendResponse { entry_id })
     }
 
@@ -76,6 +104,10 @@ impl LogStore for RaftEngineLogstore {
             .add_entries::<MessageType>(ns.id, &entries)
             .context(AddEntryLogBatchSnafu)?;
         self.engine
+            .read()
+            .await
+            .as_ref()
+            .context(IllegalStateSnafu)?
             .write(&mut batch, false)
             .context(RaftEngineSnafu)?;
         Ok(entry_ids)
@@ -86,11 +118,16 @@ impl LogStore for RaftEngineLogstore {
         ns: &Self::Namespace,
         id: Id,
     ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>, Self::Error> {
-        let last_index = self.engine.last_index(ns.id).unwrap();
+        let engine = self
+            .engine
+            .read()
+            .await
+            .as_ref()
+            .context(IllegalStateSnafu)?
+            .clone();
+        let last_index = engine.last_index(ns.id).unwrap();
 
-        let engine = self.engine.clone();
         let max_batch_size = 128;
-
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
         let ns = ns.clone();
         common_runtime::spawn_read(async move {
@@ -139,6 +176,10 @@ impl LogStore for RaftEngineLogstore {
             .put_message::<Namespace>(SYSTEM_NAMESPACE, key, ns)
             .context(RaftEngineSnafu)?;
         self.engine
+            .read()
+            .await
+            .as_ref()
+            .context(IllegalStateSnafu)?
             .write(&mut batch, true)
             .context(RaftEngineSnafu)?;
         Ok(())
@@ -149,6 +190,10 @@ impl LogStore for RaftEngineLogstore {
         let mut batch = LogBatch::with_capacity(1);
         batch.delete(SYSTEM_NAMESPACE, key);
         self.engine
+            .read()
+            .await
+            .as_ref()
+            .context(IllegalStateSnafu)?
             .write(&mut batch, true)
             .context(RaftEngineSnafu)?;
         Ok(())
@@ -157,6 +202,10 @@ impl LogStore for RaftEngineLogstore {
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error> {
         let mut namespaces: Vec<Namespace> = vec![];
         self.engine
+            .read()
+            .await
+            .as_ref()
+            .context(IllegalStateSnafu)?
             .scan_messages::<Namespace, _>(
                 SYSTEM_NAMESPACE,
                 Some(NAMESPACE_PREFIX.as_bytes()),
@@ -188,7 +237,12 @@ impl LogStore for RaftEngineLogstore {
     }
 
     async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error> {
-        self.engine.compact_to(namespace.id(), id);
+        self.engine
+            .read()
+            .await
+            .as_ref()
+            .context(IllegalStateSnafu)?
+            .compact_to(namespace.id(), id);
         Ok(())
     }
 }
