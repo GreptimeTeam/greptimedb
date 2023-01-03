@@ -249,6 +249,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc::error::Error,
     },
+
+    #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
+    DatabaseNotFound { catalog: String, schema: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -306,6 +309,8 @@ impl ErrorExt for Error {
             | InvalidAuthorizationHeader { .. }
             | InvalidBase64Value { .. }
             | InvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
+
+            DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
         }
     }
 

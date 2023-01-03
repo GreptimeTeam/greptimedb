@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_telemetry::{error, trace};
 use opensrv_mysql::{
@@ -183,14 +184,21 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     }
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
-        let query = format!("USE {}", database.trim());
-        let output = self.do_query(&query).await.remove(0);
-        if let Err(e) = output {
-            w.error(ErrorKind::ER_UNKNOWN_ERROR, e.to_string().as_bytes())
-                .await
+        // TODO(sunng87): set catalog
+        if self
+            .query_handler
+            .is_valid_schema(DEFAULT_CATALOG_NAME, database)?
+        {
+            let context = self.session.context();
+            // TODO(sunng87): set catalog
+            context.set_current_schema(database);
+            w.ok().await.map_err(|e| e.into())
         } else {
-            w.ok().await
+            error::DatabaseNotFoundSnafu {
+                catalog: DEFAULT_CATALOG_NAME,
+                schema: database,
+            }
+            .fail()
         }
-        .map_err(|e| e.into())
     }
 }
