@@ -5052,13 +5052,14 @@ dependencies = [
  "futures",
  "promql-parser",
  "snafu",
+ "table",
  "tokio",
 ]
 
 [[package]]
 name = "promql-parser"
 version = "0.0.1"
-source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=71d8a90#71d8a90979304a7f128b3125f37a209384a81051"
+source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=9108344d0550e33b70a8a7de60bb6efb38ddc372#9108344d0550e33b70a8a7de60bb6efb38ddc372"
 dependencies = [
  "cfgrammar",
  "lazy_static",

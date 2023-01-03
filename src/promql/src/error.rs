@@ -16,20 +16,35 @@ use std::any::Any;
 
 use common_error::prelude::*;
 
-common_error::define_opaque_error!(Error);
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum InnerError {
+pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
+
+    #[snafu(display("DataFusion error: {}", source))]
+    DataFusion {
+        source: datafusion::error::DataFusionError,
+    },
+
+    #[snafu(display("Unexpected plan or expression: {}", desc))]
+    UnexpectedPlanExpr { desc: String, backtrace: Backtrace },
+
+    #[snafu(display("Unknown table type, downcast failed"))]
+    UnknownTable { backtrace: Backtrace },
+
+    #[snafu(display("Cannot find time index column"))]
+    NoTimeIndex { backtrace: Backtrace },
 }
 
-impl ErrorExt for InnerError {
+impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        use InnerError::*;
+        use Error::*;
         match self {
-            UnsupportedExpr { .. } => StatusCode::InvalidArguments,
+            NoTimeIndex { .. } | UnsupportedExpr { .. } => StatusCode::InvalidArguments,
+            UnknownTable { .. } | DataFusion { .. } | UnexpectedPlanExpr { .. } => {
+                StatusCode::Internal
+            }
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {
@@ -38,12 +53,6 @@ impl ErrorExt for InnerError {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-}
-
-impl From<InnerError> for Error {
-    fn from(e: InnerError) -> Error {
-        Error::new(e)
     }
 }
 
