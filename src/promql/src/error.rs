@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use promql_parser::parser::Expr as PromExpr;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -35,13 +36,31 @@ pub enum Error {
 
     #[snafu(display("Cannot find time index column"))]
     NoTimeIndex { backtrace: Backtrace },
+
+    #[snafu(display(
+        "Cannot accept multiple vector as function input, PromQL expr: {}",
+        expr
+    ))]
+    MultipleVector {
+        expr: PromExpr,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Expect a PromQL expr but not found, input expr: {}", expr))]
+    ExpectExpr {
+        expr: PromExpr,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            NoTimeIndex { .. } | UnsupportedExpr { .. } => StatusCode::InvalidArguments,
+            NoTimeIndex { .. }
+            | UnsupportedExpr { .. }
+            | MultipleVector { .. }
+            | ExpectExpr { .. } => StatusCode::InvalidArguments,
             UnknownTable { .. } | DataFusion { .. } | UnexpectedPlanExpr { .. } => {
                 StatusCode::Internal
             }

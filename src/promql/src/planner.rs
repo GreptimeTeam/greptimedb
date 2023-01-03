@@ -17,6 +17,7 @@ use std::sync::Arc;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder};
 use datafusion::prelude::Expr as DfExpr;
+use datafusion::scalar::ScalarValue;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::sql::TableReference;
 use datatypes::schema::SchemaRef;
@@ -26,7 +27,8 @@ use snafu::{OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    DataFusionSnafu, NoTimeIndexSnafu, Result, UnexpectedPlanExprSnafu, UnknownTableSnafu,
+    DataFusionSnafu, ExpectExprSnafu, MultipleVectorSnafu, NoTimeIndexSnafu, Result,
+    UnexpectedPlanExprSnafu, UnknownTableSnafu,
 };
 use crate::extension_plan::SeriesNormalize;
 
@@ -87,12 +89,17 @@ impl<S: ContextProvider> PromPlanner<S> {
                 vector_selector,
                 range,
             } => todo!(),
-            PromExpr::Call { func, args } => todo!(),
+            PromExpr::Call { func, args } => {
+                let args = self.create_function_args(args)?;
+                let input = self.prom_expr_to_plan(args.input.context(ExpectExprSnafu)?)?;
+
+                todo!()
+            }
         };
         Ok(res)
     }
 
-    fn vector_selector_to_series_normalize(&self, selector: &PromExpr) -> Result<LogicalPlan> {
+    fn vector_selector_to_series_normalize(&self, selector: PromExpr) -> Result<LogicalPlan> {
         if let PromExpr::VectorSelector {
             name,
             offset,
@@ -122,7 +129,7 @@ impl<S: ContextProvider> PromPlanner<S> {
         }
     }
 
-    fn matchers_to_expr(&self, label_matchers: &Matchers) -> Result<Vec<DfExpr>> {
+    fn matchers_to_expr(&self, label_matchers: Matchers) -> Result<Vec<DfExpr>> {
         todo!()
     }
 
@@ -157,4 +164,42 @@ impl<S: ContextProvider> PromPlanner<S> {
 
         Ok(table.schema())
     }
+
+    fn create_function_args(&self, args: Vec<PromExpr>) -> Result<FunctionArgs> {
+        let mut result = FunctionArgs::default();
+
+        for arg in args {
+            match arg {
+                PromExpr::AggregateExpr { .. }
+                | PromExpr::UnaryExpr { .. }
+                | PromExpr::BinaryExpr { .. }
+                | PromExpr::ParenExpr { .. }
+                | PromExpr::SubqueryExpr { .. }
+                | PromExpr::VectorSelector { .. }
+                | PromExpr::MatrixSelector { .. }
+                | PromExpr::Call { .. } => {
+                    if result.input.replace(arg.clone()).is_some() {
+                        MultipleVectorSnafu { expr: arg.clone() }.fail()
+                    }
+                }
+
+                PromExpr::NumberLiteral { val, .. } => {
+                    let scalar_value = ScalarValue::Float64(Some(val));
+                    result.literals.push(DfExpr::Literal(scalar_value));
+                }
+                PromExpr::StringLiteral { val, .. } => {
+                    let scalar_value = ScalarValue::Utf8(Some(val));
+                    result.literals.push(DfExpr::Literal(scalar_value));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+}
+
+#[derive(Default, Debug)]
+struct FunctionArgs {
+    input: Option<PromExpr>,
+    literals: Vec<DfExpr>,
 }
