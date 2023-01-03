@@ -16,19 +16,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, Peer};
+use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, NodeStat, Peer};
+use catalog::{region_number, CatalogManagerRef};
 use common_telemetry::{error, info, warn};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use snafu::ResultExt;
 
 use crate::error::{MetaClientInitSnafu, Result};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct HeartbeatTask {
     node_id: u64,
     server_addr: String,
     running: Arc<AtomicBool>,
     meta_client: Arc<MetaClient>,
+    catalog_manager: CatalogManagerRef,
     interval: u64,
 }
 
@@ -40,12 +42,18 @@ impl Drop for HeartbeatTask {
 
 impl HeartbeatTask {
     /// Create a new heartbeat task instance.
-    pub fn new(node_id: u64, server_addr: String, meta_client: Arc<MetaClient>) -> Self {
+    pub fn new(
+        node_id: u64,
+        server_addr: String,
+        meta_client: Arc<MetaClient>,
+        catalog_manager: CatalogManagerRef,
+    ) -> Self {
         Self {
             node_id,
             server_addr,
             running: Arc::new(AtomicBool::new(false)),
             meta_client,
+            catalog_manager,
             interval: 5_000, // default interval is set to 5 secs
         }
     }
@@ -93,15 +101,30 @@ impl HeartbeatTask {
         let meta_client = self.meta_client.clone();
 
         let mut tx = Self::create_streams(&meta_client, running.clone()).await?;
+        let catalog_manager_clone = self.catalog_manager.clone();
         common_runtime::spawn_bg(async move {
             while running.load(Ordering::Acquire) {
+                let region_num = match region_number(catalog_manager_clone.clone()) {
+                    Ok(region_num) => region_num,
+                    Err(e) => {
+                        error!("Failed to get region number, err: {e:?}");
+                        tokio::time::sleep(Duration::from_millis(interval)).await;
+                        continue;
+                    }
+                };
+
                 let req = HeartbeatRequest {
                     peer: Some(Peer {
                         id: node_id,
                         addr: server_addr.clone(),
                     }),
+                    node_stat: Some(NodeStat {
+                        region_num,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 };
+
                 if let Err(e) = tx.send(req).await {
                     error!("Failed to send heartbeat to metasrv, error: {:?}", e);
                     match Self::create_streams(&meta_client, running.clone()).await {
@@ -114,6 +137,7 @@ impl HeartbeatTask {
                         }
                     }
                 }
+
                 tokio::time::sleep(Duration::from_millis(interval)).await;
             }
         });

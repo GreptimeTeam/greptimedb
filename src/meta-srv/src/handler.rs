@@ -15,6 +15,7 @@
 pub(crate) mod check_leader;
 pub(crate) mod datanode_lease;
 pub(crate) mod response_header;
+pub(crate) mod status;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

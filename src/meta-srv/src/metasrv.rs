@@ -23,6 +23,7 @@ use crate::election::Election;
 use crate::handler::check_leader::CheckLeaderHandler;
 use crate::handler::datanode_lease::DatanodeLeaseHandler;
 use crate::handler::response_header::ResponseHeaderHandler;
+use crate::handler::status::StatusHandler;
 use crate::handler::HeartbeatHandlerGroup;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::Selector;
@@ -99,6 +100,7 @@ impl MetaSrv {
         handler_group.add_handler(ResponseHeaderHandler).await;
         handler_group.add_handler(CheckLeaderHandler).await;
         handler_group.add_handler(DatanodeLeaseHandler).await;
+        handler_group.add_handler(StatusHandler).await;
 
         Self {
             started,
