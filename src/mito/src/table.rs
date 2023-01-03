@@ -170,11 +170,9 @@ impl<R: Region> Table for MitoTable<R> {
 
         let mut new_info = TableInfo::clone(&*table_info);
         // setup new table info
-        match req.alter_kind {
-            AlterKind::RenameTable {
-                new_table_name: ref new_name,
-            } => {
-                new_info.name = new_name.clone();
+        match &req.alter_kind {
+            AlterKind::RenameTable { new_table_name } => {
+                new_info.name = new_table_name.clone();
             }
             AlterKind::AddColumns { .. } | AlterKind::DropColumns { .. } => {
                 let table_meta = &table_info.meta;
@@ -208,34 +206,31 @@ impl<R: Region> Table for MitoTable<R> {
             })
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;
-        if let AlterKind::RenameTable { .. } = &req.alter_kind {
-            // update memory metadata of the table
-            self.set_table_info(new_info);
-            return Ok(());
+
+        if let Some(alter_op) =
+            create_alter_operation(table_name, &req.alter_kind, &mut new_info.meta)?
+        {
+            // TODO(yingwen): Error handling. Maybe the region need to provide a method to
+            // validate the request first.
+            let region = self.region();
+            let region_meta = region.in_memory_metadata();
+            let alter_req = AlterRequest {
+                operation: alter_op,
+                version: region_meta.version(),
+            };
+            // Alter the region.
+            logging::debug!(
+                "start altering region {} of table {}, with request {:?}",
+                region.name(),
+                table_name,
+                alter_req,
+            );
+            region
+                .alter(alter_req)
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
         }
-
-        let alter_op = create_alter_operation(table_name, &req.alter_kind, &mut new_info.meta)?;
-        // TODO(yingwen): Error handling. Maybe the region need to provide a method to
-        // validate the request first.
-        let region = self.region();
-        let region_meta = region.in_memory_metadata();
-        let alter_req = AlterRequest {
-            operation: alter_op,
-            version: region_meta.version(),
-        };
-        // Alter the region.
-        logging::debug!(
-            "start altering region {} of table {}, with request {:?}",
-            region.name(),
-            table_name,
-            alter_req,
-        );
-        region
-            .alter(alter_req)
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
-
         // Update in memory metadata of the table.
         self.set_table_info(new_info);
 
@@ -446,16 +441,16 @@ fn create_alter_operation(
     table_name: &str,
     alter_kind: &AlterKind,
     table_meta: &mut TableMeta,
-) -> TableResult<AlterOperation> {
+) -> TableResult<Option<AlterOperation>> {
     match alter_kind {
         AlterKind::AddColumns { columns } => {
             create_add_columns_operation(table_name, columns, table_meta)
         }
-        AlterKind::DropColumns { names } => Ok(AlterOperation::DropColumns {
+        AlterKind::DropColumns { names } => Ok(Some(AlterOperation::DropColumns {
             names: names.to_vec(),
-        }),
+        })),
         // No need to build alter operation when reaming tables.
-        AlterKind::RenameTable { .. } => unreachable!(),
+        AlterKind::RenameTable { .. } => Ok(None),
     }
 }
 
@@ -463,7 +458,7 @@ fn create_add_columns_operation(
     table_name: &str,
     requests: &[AddColumnRequest],
     table_meta: &mut TableMeta,
-) -> TableResult<AlterOperation> {
+) -> TableResult<Option<AlterOperation>> {
     let columns = requests
         .iter()
         .map(|request| {
@@ -477,7 +472,7 @@ fn create_add_columns_operation(
         })
         .collect::<TableResult<Vec<_>>>()?;
 
-    Ok(AlterOperation::AddColumns { columns })
+    Ok(Some(AlterOperation::AddColumns { columns }))
 }
 
 #[cfg(test)]
