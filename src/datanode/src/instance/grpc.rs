@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{CreateDatabaseExpr, ObjectExpr, ObjectResult};
+use std::error::Error;
+
+use api::v1::{CreateDatabaseExpr, ObjectExpr, ObjectResult, ResultHeader};
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::Ticket;
 use async_trait::async_trait;
-use common_error::prelude::BoxedError;
+use common_error::prelude::{BoxedError, ErrorExt, StatusCode};
 use common_grpc::flight;
 use common_query::Output;
 use prost::Message;
@@ -28,13 +30,37 @@ use table::requests::CreateDatabaseRequest;
 use tonic::Request;
 
 use crate::error::{
-    DecodeLogicalPlanSnafu, ExecuteSqlSnafu, FlightGetSnafu, InvalidFlightDataSnafu, Result,
+    DecodeLogicalPlanSnafu, Error as DatanodeError, ExecuteSqlSnafu, InvalidFlightDataSnafu, Result,
 };
 use crate::instance::Instance;
 
 impl Instance {
     async fn boarding(&self, ticket: Request<Ticket>) -> Result<ObjectResult> {
-        let response = self.do_get(ticket).await.context(FlightGetSnafu)?;
+        let response = self.do_get(ticket).await;
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                let status_code = e
+                    .source()
+                    .and_then(|s| s.downcast_ref::<DatanodeError>())
+                    .map(|s| s.status_code())
+                    .unwrap_or(StatusCode::Internal);
+
+                let err_msg = e.source().map(|s| s.to_string()).unwrap_or(e.to_string());
+
+                // TODO(LFC): Further formalize error message when Arrow Flight adoption is done,
+                // and don't forget to change "test runner"'s error msg accordingly.
+                return Ok(ObjectResult {
+                    header: Some(ResultHeader {
+                        version: 1,
+                        code: status_code as _,
+                        err_msg,
+                    }),
+                    flight_data: vec![],
+                });
+            }
+        };
+
         flight::flight_data_to_object_result(response)
             .await
             .context(InvalidFlightDataSnafu)
