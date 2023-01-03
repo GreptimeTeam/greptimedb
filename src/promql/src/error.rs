@@ -21,6 +21,22 @@ use common_error::prelude::*;
 pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Illegal range: offset {}, length {}, array len {}",
+        offset,
+        length,
+        len
+    ))]
+    IllegalRange {
+        offset: u32,
+        length: u32,
+        len: usize,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Empty range is not expected"))]
+    EmptyRange { backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -28,6 +44,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             UnsupportedExpr { .. } => StatusCode::InvalidArguments,
+            IllegalRange { .. } | EmptyRange { .. } => StatusCode::Internal,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+bytemuck = "1.12"
 common-error = { path = "../common/error" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
