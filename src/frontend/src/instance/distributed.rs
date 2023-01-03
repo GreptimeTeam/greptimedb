@@ -204,6 +204,7 @@ impl DistInstance {
     /// Handles distributed database creation
     async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<()> {
         let key = SchemaKey {
+            // TODO(sunng87): custom catalog
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: expr.database_name,
         };
