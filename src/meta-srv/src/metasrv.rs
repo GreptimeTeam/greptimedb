@@ -32,6 +32,7 @@ use crate::service::store::kv::KvStoreRef;
 pub const TABLE_ID_SEQ: &str = "table_id";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MetaSrvOptions {
     pub bind_addr: String,
     pub server_addr: String,

@@ -46,6 +46,7 @@ impl Default for ObjectStoreConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DatanodeOptions {
     pub node_id: Option<u64>,
     pub rpc_addr: String,
