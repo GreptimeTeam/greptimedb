@@ -37,7 +37,7 @@ use crate::error::{EmptyRangeSnafu, IllegalRangeSnafu, Result};
 ///    Array    │ └────────────────────────────┘(Any Type)
 /// ```
 ///
-/// Because the i64 key array is reinterpretered into two i32 for offset and length
+/// Because the i64 key array is reinterpreted into two i32 for offset and length
 /// in [RangeArray] to represent a "range":
 ///
 /// ```text
@@ -47,7 +47,7 @@ use crate::error::{EmptyRangeSnafu, IllegalRangeSnafu, Result};
 /// └───────────────┼───────────────┘
 /// ```
 ///
-/// Then the [DictionaryArray] can be expand to serval ranges like this:
+/// Then the [DictionaryArray] can be expanded to serveral ranges like this:
 ///
 /// ```text
 /// Keys
@@ -165,7 +165,7 @@ impl RangeArray {
     {
         for (offset, length) in ranges.into_iter() {
             ensure!(
-                offset + length <= value_len as _,
+                offset as usize + length as usize <= value_len,
                 IllegalRangeSnafu {
                     offset,
                     length,
