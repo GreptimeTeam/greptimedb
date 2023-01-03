@@ -25,7 +25,7 @@ use crate::error::{EmptyRangeSnafu, IllegalRangeSnafu, Result};
 ///
 /// It's build on top of Arrow's [DictionaryArray]. [DictionaryArray] contains two
 /// sub-arrays, one for dictionary key and another for dictionary value. Both of them
-/// can be arbitrary types, but here the key array is fixed to i64 type.
+/// can be arbitrary types, but here the key array is fixed to u32 type.
 ///
 /// ```text
 ///             │ ┌─────┬─────┬─────┬─────┐
@@ -37,13 +37,13 @@ use crate::error::{EmptyRangeSnafu, IllegalRangeSnafu, Result};
 ///    Array    │ └────────────────────────────┘(Any Type)
 /// ```
 ///
-/// Because the i64 key array is reinterpreted into two i32 for offset and length
+/// Because the i64 key array is reinterpreted into two u32 for offset and length
 /// in [RangeArray] to represent a "range":
 ///
 /// ```text
 /// 63            32│31             0
 /// ┌───────────────┼───────────────┐
-/// │  offset (i32) │  length (i32) │
+/// │  offset (u32) │  length (u32) │
 /// └───────────────┼───────────────┘
 /// ```
 ///
