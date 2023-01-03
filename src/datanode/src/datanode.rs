@@ -34,6 +34,8 @@ pub enum ObjectStoreConfig {
         root: String,
         access_key_id: String,
         secret_access_key: String,
+        endpoint: Option<String>,
+        region: Option<String>,
     },
 }
 

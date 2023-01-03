@@ -37,10 +37,21 @@ mod tests {
     use crate::error::Result;
 
     #[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+    #[serde(default)]
     struct MockConfig {
         path: String,
         port: u32,
         host: String,
+    }
+
+    impl Default for MockConfig {
+        fn default() -> Self {
+            Self {
+                path: "test".to_string(),
+                port: 0,
+                host: "localhost".to_string(),
+            }
+        }
     }
 
     #[test]
@@ -62,6 +73,21 @@ mod tests {
 
         let loaded_config: MockConfig = from_file!(&test_file)?;
         assert_eq!(loaded_config, config);
+
+        // Only host in file
+        let mut file = File::create(&test_file).unwrap();
+        file.write_all("host='greptime.test'\n".as_bytes()).unwrap();
+
+        let loaded_config: MockConfig = from_file!(&test_file)?;
+        assert_eq!(loaded_config.host, "greptime.test");
+        assert_eq!(loaded_config.port, 0);
+        assert_eq!(loaded_config.path, "test");
+
+        // Truncate the file.
+        let file = File::create(&test_file).unwrap();
+        file.set_len(0).unwrap();
+        let loaded_config: MockConfig = from_file!(&test_file)?;
+        assert_eq!(loaded_config, MockConfig::default());
 
         Ok(())
     }
