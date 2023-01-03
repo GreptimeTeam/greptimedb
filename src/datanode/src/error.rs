@@ -398,7 +398,7 @@ impl ErrorExt for Error {
 
 impl From<Error> for tonic::Status {
     fn from(err: Error) -> Self {
-        tonic::Status::new(tonic::Code::Internal, err.to_string())
+        tonic::Status::from_error(Box::new(err))
     }
 }
 
