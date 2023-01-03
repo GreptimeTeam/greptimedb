@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,25 +31,19 @@ use tonic::{Request, Response, Status};
 
 use crate::error::{self, AlreadyStartedSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::grpc::handler::BatchHandler;
-use crate::query_handler::{GrpcAdminHandlerRef, GrpcQueryHandlerRef};
+use crate::query_handler::GrpcQueryHandlerRef;
 use crate::server::Server;
 
 pub struct GrpcServer {
     query_handler: GrpcQueryHandlerRef,
-    admin_handler: GrpcAdminHandlerRef,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     runtime: Arc<Runtime>,
 }
 
 impl GrpcServer {
-    pub fn new(
-        query_handler: GrpcQueryHandlerRef,
-        admin_handler: GrpcAdminHandlerRef,
-        runtime: Arc<Runtime>,
-    ) -> Self {
+    pub fn new(query_handler: GrpcQueryHandlerRef, runtime: Arc<Runtime>) -> Self {
         Self {
             query_handler,
-            admin_handler,
             shutdown_tx: Mutex::new(None),
             runtime,
         }
@@ -57,11 +51,7 @@ impl GrpcServer {
 
     pub fn create_service(&self) -> greptime_server::GreptimeServer<GrpcService> {
         let service = GrpcService {
-            handler: BatchHandler::new(
-                self.query_handler.clone(),
-                self.admin_handler.clone(),
-                self.runtime.clone(),
-            ),
+            handler: BatchHandler::new(self.query_handler.clone(), self.runtime.clone()),
         };
         greptime_server::GreptimeServer::new(service)
     }

@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -102,20 +102,6 @@ impl Client {
             .collect();
 
         self.inner.set_peers(urls);
-    }
-
-    pub async fn admin(&self, req: AdminRequest) -> Result<AdminResponse> {
-        let req = BatchRequest {
-            admins: vec![req],
-            ..Default::default()
-        };
-
-        let mut res = self.batch(req).await?;
-        res.admins.pop().context(error::MissingResultSnafu {
-            name: "admins",
-            expected: 1_usize,
-            actual: 0_usize,
-        })
     }
 
     pub async fn database(&self, req: DatabaseRequest) -> Result<DatabaseResponse> {

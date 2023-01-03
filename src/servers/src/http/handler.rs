@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,9 +24,8 @@ use common_error::status_code::StatusCode;
 use common_telemetry::metric;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use session::context::QueryContext;
+use session::context::{QueryContext, UserInfo};
 
-use crate::auth::UserInfo;
 use crate::http::{ApiState, JsonResponse};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]

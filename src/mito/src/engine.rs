@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,7 +31,7 @@ use table::engine::{EngineContext, TableEngine, TableReference};
 use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use table::table::TableRef;
-use table::{Result as TableResult, Table};
+use table::{error as table_error, Result as TableResult, Table};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
@@ -90,7 +90,11 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         ctx: &EngineContext,
         request: CreateTableRequest,
     ) -> TableResult<TableRef> {
-        Ok(self.inner.create_table(ctx, request).await?)
+        self.inner
+            .create_table(ctx, request)
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)
     }
 
     async fn open_table(
@@ -98,7 +102,11 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         ctx: &EngineContext,
         request: OpenTableRequest,
     ) -> TableResult<Option<TableRef>> {
-        Ok(self.inner.open_table(ctx, request).await?)
+        self.inner
+            .open_table(ctx, request)
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)
     }
 
     async fn alter_table(
@@ -106,7 +114,11 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         ctx: &EngineContext,
         req: AlterTableRequest,
     ) -> TableResult<TableRef> {
-        Ok(self.inner.alter_table(ctx, req).await?)
+        self.inner
+            .alter_table(ctx, req)
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)
     }
 
     fn get_table(
@@ -126,7 +138,11 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
         _ctx: &EngineContext,
         request: DropTableRequest,
     ) -> TableResult<bool> {
-        Ok(self.inner.drop_table(request).await?)
+        self.inner
+            .drop_table(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)
     }
 }
 
@@ -437,14 +453,17 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .open_region(&engine_ctx, &region_name, &opts)
                 .await
                 .map_err(BoxedError::new)
-                .context(error::OpenRegionSnafu { region_name })?
+                .context(table_error::TableOperationSnafu)?
             {
                 None => return Ok(None),
                 Some(region) => region,
             };
 
             let table = Arc::new(
-                MitoTable::open(table_name, &table_dir, region, self.object_store.clone()).await?,
+                MitoTable::open(table_name, &table_dir, region, self.object_store.clone())
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?,
             );
 
             self.tables

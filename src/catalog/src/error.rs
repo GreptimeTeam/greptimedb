@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -163,6 +163,9 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Failure during SchemaProvider operation, source: {}", source))]
+    SchemaProviderOperation { source: BoxedError },
+
     #[snafu(display("Failed to execute system catalog table scan, source: {}", source))]
     SystemCatalogTableScanExec {
         #[snafu(backtrace)]
@@ -240,7 +243,9 @@ impl ErrorExt for Error {
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableSchema { source, .. } => source.status_code(),
             Error::InvalidTableInfoInCatalog { .. } => StatusCode::Unexpected,
-            Error::Internal { source, .. } => source.status_code(),
+            Error::Internal { source, .. } | Error::SchemaProviderOperation { source } => {
+                source.status_code()
+            }
 
             Error::Unimplemented { .. } => StatusCode::Unsupported,
         }
@@ -263,7 +268,6 @@ impl From<Error> for DataFusionError {
 
 #[cfg(test)]
 mod tests {
-    use common_error::mock::MockError;
     use snafu::GenerateImplicitData;
 
     use super::*;
@@ -282,22 +286,6 @@ mod tests {
         assert_eq!(
             StatusCode::Unexpected,
             InvalidKeySnafu { key: None }.build().status_code()
-        );
-
-        assert_eq!(
-            StatusCode::StorageUnavailable,
-            Error::OpenSystemCatalog {
-                source: table::error::Error::new(MockError::new(StatusCode::StorageUnavailable))
-            }
-            .status_code()
-        );
-
-        assert_eq!(
-            StatusCode::StorageUnavailable,
-            Error::CreateSystemCatalog {
-                source: table::error::Error::new(MockError::new(StatusCode::StorageUnavailable))
-            }
-            .status_code()
         );
 
         assert_eq!(

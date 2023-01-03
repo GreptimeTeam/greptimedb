@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -93,8 +93,7 @@ pub(crate) async fn create_datanode_client(
 
     // create a mock datanode grpc service, see example here:
     // https://github.com/hyperium/tonic/blob/master/examples/src/mock/mock.rs
-    let datanode_service =
-        GrpcServer::new(datanode_instance.clone(), datanode_instance, runtime).create_service();
+    let datanode_service = GrpcServer::new(datanode_instance, runtime).create_service();
     tokio::spawn(async move {
         Server::builder()
             .add_service(datanode_service)

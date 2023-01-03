@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,18 +16,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::result::AdminResultBuilder;
-use api::v1::{
-    admin_expr, AdminExpr, AdminResult, AlterExpr, CreateDatabaseExpr, CreateTableExpr, ObjectExpr,
-    ObjectResult, TableId,
-};
+use api::result::ObjectResultBuilder;
+use api::v1::ddl_request::Expr as DdlExpr;
+use api::v1::object_expr::Request as GrpcRequest;
+use api::v1::{AlterExpr, CreateDatabaseExpr, CreateTableExpr, ObjectExpr, ObjectResult, TableId};
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use catalog::{CatalogList, CatalogManager};
 use chrono::DateTime;
-use client::admin::{admin_result_to_output, Admin};
+use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
+use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::Output;
 use common_telemetry::{debug, error, info};
 use datatypes::prelude::ConcreteDataType;
@@ -40,7 +40,7 @@ use meta_client::rpc::{
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
-use servers::query_handler::{GrpcAdminHandler, GrpcQueryHandler, SqlQueryHandler};
+use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -53,8 +53,8 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu, ColumnDataTypeSnafu,
-    PrimaryKeyNotFoundSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
-    TableNotFoundSnafu,
+    PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu,
+    StartMetaClientSnafu, TableNotFoundSnafu,
 };
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
 use crate::instance::parse_stmt;
@@ -120,7 +120,7 @@ impl DistInstance {
 
         for datanode in table_route.find_leaders() {
             let client = self.datanode_clients.get_client(&datanode).await;
-            let client = Admin::new("greptime", client);
+            let client = Database::new("greptime", client);
 
             let regions = table_route.find_leader_regions(&datanode);
             let mut create_expr_for_region = create_table.clone();
@@ -134,8 +134,7 @@ impl DistInstance {
             client
                 .create(create_expr_for_region)
                 .await
-                .and_then(admin_result_to_output)
-                .context(error::InvalidAdminResultSnafu)?;
+                .context(RequestDatanodeSnafu)?;
         }
 
         // Checked in real MySQL, it truly returns "0 rows affected".
@@ -221,7 +220,7 @@ impl DistInstance {
         Ok(())
     }
 
-    async fn handle_alter_table(&self, expr: AlterExpr) -> Result<AdminResult> {
+    async fn handle_alter_table(&self, expr: AlterExpr) -> Result<()> {
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME
         } else {
@@ -253,8 +252,7 @@ impl DistInstance {
             .as_any()
             .downcast_ref::<DistTable>()
             .expect("Table impl must be DistTable in distributed mode");
-        dist_table.alter_by_expr(expr).await?;
-        Ok(AdminResultBuilder::default().mutate_result(0, 0).build())
+        dist_table.alter_by_expr(expr).await
     }
 
     async fn create_table_in_meta(
@@ -368,32 +366,33 @@ impl SqlQueryHandler for DistInstance {
 
 #[async_trait]
 impl GrpcQueryHandler for DistInstance {
-    async fn do_query(&self, _: ObjectExpr) -> server_error::Result<ObjectResult> {
-        unimplemented!()
-    }
-}
-
-#[async_trait]
-impl GrpcAdminHandler for DistInstance {
-    async fn exec_admin_request(&self, query: AdminExpr) -> server_error::Result<AdminResult> {
-        let expr = query
-            .clone()
-            .expr
-            .context(server_error::InvalidQuerySnafu {
-                reason: "empty expr",
-            })?;
-        match expr {
-            admin_expr::Expr::CreateDatabase(create_database) => self
-                .handle_create_database(create_database)
-                .await
-                .map(|_| AdminResultBuilder::default().mutate_result(1, 0).build()),
-            admin_expr::Expr::Alter(alter) => self.handle_alter_table(alter).await,
-            _ => unimplemented!(),
+    async fn do_query(&self, expr: ObjectExpr) -> server_error::Result<ObjectResult> {
+        let request = expr.request.context(server_error::InvalidQuerySnafu {
+            reason: "empty expr",
+        })?;
+        match request {
+            GrpcRequest::Ddl(request) => {
+                let expr = request.expr.context(server_error::InvalidQuerySnafu {
+                    reason: "empty DDL expr",
+                })?;
+                match expr.clone() {
+                    DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr).await,
+                    DdlExpr::Alter(expr) => self.handle_alter_table(expr).await,
+                    DdlExpr::CreateTable(_) | DdlExpr::DropTable(_) => unimplemented!(),
+                }
+                .map_err(BoxedError::new)
+                .with_context(|_| server_error::ExecuteQuerySnafu {
+                    query: format!("{expr:?}"),
+                })?;
+                Ok(ObjectResultBuilder::new()
+                    .flight_data(vec![
+                        FlightEncoder::default().encode(FlightMessage::AffectedRows(1))
+                    ])
+                    .build())
+            }
+            // TODO(LFC): Implement Flight for DistInstance.
+            GrpcRequest::Query(_) | GrpcRequest::Insert(_) => unimplemented!(),
         }
-        .map_err(BoxedError::new)
-        .context(server_error::ExecuteQuerySnafu {
-            query: format!("{query:?}"),
-        })
     }
 }
 

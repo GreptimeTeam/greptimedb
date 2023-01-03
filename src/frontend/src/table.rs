@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,9 +20,9 @@ use std::sync::Arc;
 
 use api::v1::AlterExpr;
 use async_trait::async_trait;
-use client::admin::Admin;
 use client::{Database, RpcOutput};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_error::prelude::BoxedError;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
@@ -41,7 +41,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::{Peer, TableName};
 use snafu::prelude::*;
 use store_api::storage::RegionNumber;
-use table::error::Error as TableError;
+use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::requests::InsertRequest;
 use table::Table;
@@ -84,12 +84,23 @@ impl Table for DistTable {
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
-        let partition_rule = self.find_partition_rule().await.map_err(TableError::new)?;
+        let partition_rule = self
+            .find_partition_rule()
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
 
         let spliter = WriteSpliter::with_partition_rule(partition_rule);
-        let inserts = spliter.split(request).map_err(TableError::new)?;
+        let inserts = spliter
+            .split(request)
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
 
-        let output = self.dist_insert(inserts).await.map_err(TableError::new)?;
+        let output = self
+            .dist_insert(inserts)
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
         let RpcOutput::AffectedRows(rows) = output else { unreachable!() };
         Ok(rows)
     }
@@ -100,15 +111,21 @@ impl Table for DistTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> table::Result<PhysicalPlanRef> {
-        let partition_rule = self.find_partition_rule().await.map_err(TableError::new)?;
+        let partition_rule = self
+            .find_partition_rule()
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
 
         let regions = self
             .find_regions(partition_rule, filters)
-            .map_err(TableError::new)?;
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
         let datanodes = self
             .find_datanodes(regions)
             .await
-            .map_err(TableError::new)?;
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
 
         let mut partition_execs = Vec::with_capacity(datanodes.len());
         for (datanode, _regions) in datanodes.iter() {
@@ -367,15 +384,12 @@ impl DistTable {
             }
         );
         for datanode in leaders {
-            let admin = Admin::new(
+            let db = Database::new(
                 DEFAULT_CATALOG_NAME,
                 self.datanode_clients.get_client(&datanode).await,
             );
-            debug!("Sent alter table {:?} to {:?}", expr, admin);
-            let result = admin
-                .alter(expr.clone())
-                .await
-                .context(RequestDatanodeSnafu)?;
+            debug!("Sending {:?} to {:?}", expr, db);
+            let result = db.alter(expr.clone()).await.context(RequestDatanodeSnafu)?;
             debug!("Alter table result: {:?}", result);
             // TODO(hl): We should further check and track alter result in some global DDL task tracker
         }

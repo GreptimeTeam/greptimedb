@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,20 +19,12 @@ use common_recordbatch::error::Error as RecordBatchError;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 
-common_error::define_opaque_error!(Error);
-
 pub type Result<T> = std::result::Result<T, Error>;
-
-impl From<Error> for DataFusionError {
-    fn from(e: Error) -> Self {
-        Self::External(Box::new(e))
-    }
-}
 
 /// Default error implementation of table.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum InnerError {
+pub enum Error {
     #[snafu(display("Datafusion error: {}", source))]
     Datafusion {
         source: DataFusionError,
@@ -107,22 +99,26 @@ pub enum InnerError {
         column_name: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to operate table, source: {}", source))]
+    TableOperation { source: BoxedError },
 }
 
-impl ErrorExt for InnerError {
+impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            InnerError::Datafusion { .. }
-            | InnerError::PollStream { .. }
-            | InnerError::SchemaConversion { .. }
-            | InnerError::TableProjection { .. } => StatusCode::EngineExecuteQuery,
-            InnerError::RemoveColumnInIndex { .. } | InnerError::BuildColumnDescriptor { .. } => {
+            Error::Datafusion { .. }
+            | Error::PollStream { .. }
+            | Error::SchemaConversion { .. }
+            | Error::TableProjection { .. } => StatusCode::EngineExecuteQuery,
+            Error::RemoveColumnInIndex { .. } | Error::BuildColumnDescriptor { .. } => {
                 StatusCode::InvalidArguments
             }
-            InnerError::TablesRecordBatch { .. } => StatusCode::Unexpected,
-            InnerError::ColumnExists { .. } => StatusCode::TableColumnExists,
-            InnerError::SchemaBuild { source, .. } => source.status_code(),
-            InnerError::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
+            Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
+            Error::ColumnExists { .. } => StatusCode::TableColumnExists,
+            Error::SchemaBuild { source, .. } => source.status_code(),
+            Error::TableOperation { source } => source.status_code(),
+            Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
         }
     }
 
@@ -135,20 +131,14 @@ impl ErrorExt for InnerError {
     }
 }
 
-impl From<InnerError> for Error {
-    fn from(err: InnerError) -> Self {
-        Self::new(err)
-    }
-}
-
-impl From<InnerError> for DataFusionError {
-    fn from(e: InnerError) -> DataFusionError {
+impl From<Error> for DataFusionError {
+    fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
     }
 }
 
-impl From<InnerError> for RecordBatchError {
-    fn from(e: InnerError) -> RecordBatchError {
+impl From<Error> for RecordBatchError {
+    fn from(e: Error) -> RecordBatchError {
         RecordBatchError::External {
             source: BoxedError::new(e),
         }
@@ -163,7 +153,7 @@ mod tests {
         Err(DataFusionError::NotImplemented("table test".to_string())).context(DatafusionSnafu)?
     }
 
-    fn throw_column_exists_inner() -> std::result::Result<(), InnerError> {
+    fn throw_column_exists_inner() -> std::result::Result<(), Error> {
         ColumnExistsSnafu {
             column_name: "col",
             table_name: "test",
@@ -172,7 +162,7 @@ mod tests {
     }
 
     fn throw_missing_column() -> Result<()> {
-        Ok(throw_column_exists_inner()?)
+        throw_column_exists_inner()
     }
 
     fn throw_arrow() -> Result<()> {

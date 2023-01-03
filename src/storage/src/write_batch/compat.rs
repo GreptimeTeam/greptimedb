@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -110,6 +110,9 @@ mod tests {
     use super::*;
     use crate::error::Error;
 
+    // Test schema only has two row key columns: k0, ts.
+    const TEST_ROW_KEY_END: usize = 2;
+
     fn new_test_schema_builder(
         v0_constraint: Option<Option<ColumnDefaultConstraint>>,
     ) -> SchemaBuilder {
@@ -158,7 +161,7 @@ mod tests {
         // Mutation doesn't check schema version, so we don't have to bump the version here.
         let schema = new_test_schema(Some(Some(ColumnDefaultConstraint::null_value())));
         // Use WriteBatch to build a payload and its mutation.
-        let mut batch = WriteBatch::new(schema_old);
+        let mut batch = WriteBatch::new(schema_old, TEST_ROW_KEY_END);
         batch.put(put_data).unwrap();
 
         let mutation = &mut batch.payload.mutations[0];
@@ -171,7 +174,7 @@ mod tests {
     #[test]
     fn test_write_batch_compat_write() {
         let schema_old = new_test_schema(None);
-        let mut batch = WriteBatch::new(schema_old);
+        let mut batch = WriteBatch::new(schema_old, TEST_ROW_KEY_END);
         let put_data = new_put_data();
         batch.put(put_data).unwrap();
 
@@ -198,7 +201,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let mut batch = WriteBatch::new(schema_new);
+        let mut batch = WriteBatch::new(schema_new, TEST_ROW_KEY_END);
         let err = batch.compat_write(&schema_old).unwrap_err();
         assert!(
             matches!(err, Error::WriteToOldVersion { .. }),
@@ -209,14 +212,14 @@ mod tests {
     #[test]
     fn test_write_batch_skip_compat() {
         let schema = new_test_schema(None);
-        let mut batch = WriteBatch::new(schema.clone());
+        let mut batch = WriteBatch::new(schema.clone(), TEST_ROW_KEY_END);
         batch.compat_write(&schema).unwrap();
     }
 
     #[test]
     fn test_write_batch_compat_columns_not_in_schema() {
         let schema_has_column = new_test_schema(Some(None));
-        let mut batch = WriteBatch::new(schema_has_column);
+        let mut batch = WriteBatch::new(schema_has_column, TEST_ROW_KEY_END);
 
         let schema_no_column = Arc::new(new_test_schema_builder(None).version(1).build().unwrap());
         let err = batch.compat_write(&schema_no_column).unwrap_err();

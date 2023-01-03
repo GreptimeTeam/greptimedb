@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -232,12 +232,6 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to create table, source: {}", source))]
-    CreateTable {
-        #[snafu(backtrace)]
-        source: client::Error,
-    },
-
     #[snafu(display("Failed to create database: {}, source: {}", name, source))]
     CreateDatabase {
         name: String,
@@ -253,12 +247,6 @@ pub enum Error {
 
     #[snafu(display("Failed to create table on insertion, source: {}", source))]
     CreateTableOnInsertion {
-        #[snafu(backtrace)]
-        source: client::Error,
-    },
-
-    #[snafu(display("Failed to alter table on insertion, source: {}", source))]
-    AlterTableOnInsertion {
         #[snafu(backtrace)]
         source: client::Error,
     },
@@ -363,12 +351,6 @@ pub enum Error {
         table_name: String,
         err_msg: String,
         backtrace: Backtrace,
-    },
-
-    #[snafu(display("Invalid admin result, source: {}", source))]
-    InvalidAdminResult {
-        #[snafu(backtrace)]
-        source: client::Error,
     },
 
     #[snafu(display("Cannot find primary key column by name: {}", msg))]
@@ -476,9 +458,9 @@ impl ErrorExt for Error {
             | Error::VectorComputation { source }
             | Error::ConvertArrowSchema { source } => source.status_code(),
 
-            Error::ConnectDatanode { source, .. }
-            | Error::RequestDatanode { source }
-            | Error::InvalidAdminResult { source } => source.status_code(),
+            Error::ConnectDatanode { source, .. } | Error::RequestDatanode { source } => {
+                source.status_code()
+            }
 
             Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
                 source.status_code()
@@ -513,10 +495,8 @@ impl ErrorExt for Error {
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
             Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
-            Error::CreateTable { source, .. }
-            | Error::CreateDatabase { source, .. }
+            Error::CreateDatabase { source, .. }
             | Error::CreateTableOnInsertion { source, .. }
-            | Error::AlterTableOnInsertion { source, .. }
             | Error::Insert { source, .. } => source.status_code(),
             Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
             Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),

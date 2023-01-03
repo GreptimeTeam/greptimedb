@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,13 +27,13 @@ use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSe
 use datafusion::physical_plan::{
     DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream, SendableRecordBatchStream,
 };
-use datatypes::arrow::array::{ArrowPrimitiveType, TimestampMillisecondArray};
-use datatypes::arrow::datatypes::{SchemaRef, TimestampMillisecondType};
+use datatypes::arrow::array::TimestampMillisecondArray;
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{Stream, StreamExt};
 
-type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
+use crate::extension_plan::Millisecond;
 
 /// Normalize the input record batch. Notice that for simplicity, this method assumes
 /// the input batch only contains sample points from one time series.
@@ -67,7 +67,11 @@ impl UserDefinedLogicalNode for SeriesNormalize {
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "PromSeriesNormalize: offset=[{}]", self.offset)
+        write!(
+            f,
+            "PromSeriesNormalize: offset=[{}], time index=[{}]",
+            self.offset, self.time_index_column_name
+        )
     }
 
     fn from_template(
@@ -180,7 +184,11 @@ impl ExecutionPlan for SeriesNormalizeExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match t {
             DisplayFormatType::Default => {
-                write!(f, "PromSeriesNormalizeExec: offset=[{}]", self.offset)
+                write!(
+                    f,
+                    "PromSeriesNormalizeExec: offset=[{}], time index=[{}]",
+                    self.offset, self.time_index_column_name
+                )
             }
         }
     }
@@ -196,6 +204,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
 
 pub struct SeriesNormalizeStream {
     offset: Millisecond,
+    // Column index of TIME INDEX column's position in schema
     time_index: usize,
 
     schema: SchemaRef,
@@ -257,7 +266,9 @@ impl Stream for SeriesNormalizeStream {
 #[cfg(test)]
 mod test {
     use datafusion::arrow::array::Float64Array;
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::datatypes::{
+        ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
+    };
     use datafusion::from_slice::FromSlice;
     use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;

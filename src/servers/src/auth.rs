@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,13 +14,12 @@
 
 pub mod user_provider;
 
-pub const DEFAULT_USERNAME: &str = "greptime";
-
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
+use session::context::UserInfo;
 use snafu::{Backtrace, ErrorCompat, OptionExt, Snafu};
 
 use crate::auth::user_provider::StaticUserProvider;
@@ -50,31 +49,6 @@ pub enum Password<'a> {
     PlainText(&'a str),
     MysqlNativePassword(HashedPassword<'a>, Salt<'a>),
     PgMD5(HashedPassword<'a>, Salt<'a>),
-}
-
-#[derive(Clone, Debug)]
-pub struct UserInfo {
-    username: String,
-}
-
-impl Default for UserInfo {
-    fn default() -> Self {
-        Self {
-            username: DEFAULT_USERNAME.to_string(),
-        }
-    }
-}
-
-impl UserInfo {
-    pub fn user_name(&self) -> &str {
-        &self.username
-    }
-
-    pub fn new(username: impl Into<String>) -> Self {
-        Self {
-            username: username.into(),
-        }
-    }
 }
 
 pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
@@ -213,7 +187,7 @@ mod tests {
             )
             .await;
         assert!(auth_result.is_ok());
-        assert_eq!("greptime", auth_result.unwrap().user_name());
+        assert_eq!("greptime", auth_result.unwrap().username());
 
         // auth failed, unsupported password type
         let auth_result = user_provider

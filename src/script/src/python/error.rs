@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -227,20 +227,21 @@ pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
 
 #[cfg(test)]
 mod tests {
-    use common_error::mock::MockError;
     use snafu::ResultExt;
 
     use super::*;
 
     fn throw_query_error() -> query::error::Result<()> {
-        let mock_err = MockError::with_backtrace(StatusCode::TableColumnNotFound);
-        Err(query::error::Error::new(mock_err))
+        query::error::TableNotFoundSnafu {
+            table: String::new(),
+        }
+        .fail()
     }
 
     #[test]
     fn test_error() {
         let err = throw_query_error().context(DatabaseQuerySnafu).unwrap_err();
-        assert_eq!(StatusCode::TableColumnNotFound, err.status_code());
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
         assert!(err.backtrace_opt().is_some());
     }
 }

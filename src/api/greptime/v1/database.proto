@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package greptime.v1;
 
+import "greptime/v1/ddl.proto";
 import "greptime/v1/column.proto";
 import "greptime/v1/common.proto";
 
@@ -18,6 +19,7 @@ message ObjectExpr {
   oneof request {
     InsertRequest insert = 1;
     QueryRequest query = 2;
+    DdlRequest ddl = 3;
   }
 }
 

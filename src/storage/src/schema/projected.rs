@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,9 +18,10 @@ use std::sync::Arc;
 
 use common_base::BitVec;
 use common_error::prelude::*;
+use datatypes::prelude::ScalarVector;
 use datatypes::schema::{SchemaBuilder, SchemaRef};
-use datatypes::vectors::BooleanVector;
-use store_api::storage::{Chunk, ColumnId};
+use datatypes::vectors::{BooleanVector, UInt8Vector};
+use store_api::storage::{Chunk, ColumnId, OpType};
 
 use crate::error;
 use crate::metadata::{self, Result};
@@ -167,7 +168,9 @@ impl ProjectedSchema {
     /// Convert [Batch] into [Chunk].
     ///
     /// This will remove all internal columns. The input `batch` should has the
-    /// same schema as `self.schema_to_read()`.
+    /// same schema as [`self.schema_to_read()`](ProjectedSchema::schema_to_read).
+    /// The output [Chunk] has the same schema as
+    /// [`self.projected_user_schema()`](ProjectedSchema::projected_user_schema).
     pub fn batch_to_chunk(&self, batch: &Batch) -> Chunk {
         let columns = match &self.projection {
             Some(projection) => projection
@@ -329,6 +332,29 @@ impl BatchOp for ProjectedSchema {
             .collect::<error::Result<Vec<_>>>()?;
 
         Ok(Batch::new(columns))
+    }
+
+    fn unselect_deleted(&self, batch: &Batch, selected: &mut BitVec) {
+        let op_types = batch.column(self.schema_to_read.op_type_index());
+        // Safety: We expect the batch has the same schema as `self.schema_to_read`. The
+        // read procedure should guarantee this, otherwise this is a critical bug and it
+        // should be fine to panic.
+        let op_types = op_types
+            .as_any()
+            .downcast_ref::<UInt8Vector>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expect op_type (UInt8) column at index {}, given {:?}",
+                    self.schema_to_read.op_type_index(),
+                    op_types.data_type()
+                );
+            });
+
+        for (i, op_type) in op_types.iter_data().enumerate() {
+            if op_type == Some(OpType::Delete.as_u8()) {
+                selected.set(i, false);
+            }
+        }
     }
 }
 
@@ -525,5 +551,24 @@ mod tests {
         let res = schema.filter(&batch, &filter).unwrap();
         let expect: VectorRef = Arc::new(TimestampMillisecondVector::from_values([1000, 3000]));
         assert_eq!(expect, *res.column(0));
+    }
+
+    #[test]
+    fn test_unselect_deleted() {
+        let schema = read_util::new_projected_schema();
+        let batch = read_util::new_full_kv_batch(&[
+            (100, 1, 1000, OpType::Put),
+            (101, 1, 999, OpType::Delete),
+            (102, 1, 1000, OpType::Put),
+            (103, 1, 999, OpType::Put),
+            (104, 1, 1000, OpType::Delete),
+        ]);
+
+        let mut selected = BitVec::repeat(true, batch.num_rows());
+        schema.unselect_deleted(&batch, &mut selected);
+        assert_eq!(
+            BitVec::from_iter([true, false, true, true, false]),
+            selected
+        );
     }
 }

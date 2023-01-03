@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -312,20 +312,19 @@ mod tests {
 
         // v1
         assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![1234, 1234, 1234, 1234, 1234, 1234]))
-                as Arc<dyn Array>),
+            &(Arc::new(UInt64Array::from(vec![1234; 6])) as Arc<dyn Array>),
             chunk.column(3)
         );
 
         // sequence
         assert_eq!(
-            &(Arc::new(UInt64Array::from(vec![10, 10, 10, 10, 10, 10])) as Arc<dyn Array>),
+            &(Arc::new(UInt64Array::from(vec![10; 6])) as Arc<dyn Array>),
             chunk.column(4)
         );
 
         // op_type
         assert_eq!(
-            &(Arc::new(UInt8Array::from(vec![0, 0, 0, 0, 0, 0])) as Arc<dyn Array>),
+            &(Arc::new(UInt8Array::from(vec![1; 6])) as Arc<dyn Array>),
             chunk.column(5)
         );
     }

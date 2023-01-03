@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -66,8 +66,8 @@ impl<R> DedupReader<R> {
             .get_or_insert_with(Batch::default)
             .clone_from(&batch); // Use `clone_from` to reuse allocated memory if possible.
 
-        // TODO(yingwen): To support `DELETE`, we could find all rows whose op_types are equal
-        // to `OpType::Delete`, mark their `selected` to false, then filter the batch.
+        // Find all rows whose op_types are `OpType::Delete`, mark their `selected` to false.
+        self.schema.unselect_deleted(&batch, &mut self.selected);
 
         let filter = BooleanVector::from_iterator(self.selected.iter().by_vals());
         // Filter duplicate rows.

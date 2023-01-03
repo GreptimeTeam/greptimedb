@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::prometheus::remote::{ReadRequest, WriteRequest};
-use api::v1::{AdminExpr, AdminResult, ObjectExpr, ObjectResult};
+use api::v1::{ObjectExpr, ObjectResult};
 use async_trait::async_trait;
 use common_query::Output;
 use session::context::QueryContextRef;
@@ -38,7 +38,6 @@ use crate::prometheus::Metrics;
 
 pub type SqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
 pub type GrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler + Send + Sync>;
-pub type GrpcAdminHandlerRef = Arc<dyn GrpcAdminHandler + Send + Sync>;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PrometheusProtocolHandlerRef = Arc<dyn PrometheusProtocolHandler + Send + Sync>;
@@ -67,11 +66,6 @@ pub trait ScriptHandler {
 #[async_trait]
 pub trait GrpcQueryHandler {
     async fn do_query(&self, query: ObjectExpr) -> Result<ObjectResult>;
-}
-
-#[async_trait]
-pub trait GrpcAdminHandler {
-    async fn exec_admin_request(&self, expr: AdminExpr) -> Result<AdminResult>;
 }
 
 #[async_trait]

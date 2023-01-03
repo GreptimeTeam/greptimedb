@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -111,7 +111,7 @@ pub trait Vector: Send + Sync + Serializable + Debug + VectorOp {
     /// Returns whether row is null.
     fn is_null(&self, row: usize) -> bool;
 
-    /// If the only value vector can contain is NULL.
+    /// If the vector only contains NULL.
     fn only_null(&self) -> bool {
         self.null_count() == self.len()
     }

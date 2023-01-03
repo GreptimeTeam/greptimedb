@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,7 +25,6 @@ use arrow::array::{ArrayRef, PrimitiveArray, StringArray, TimestampNanosecondArr
 use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
 use clap::Parser;
-use client::admin::Admin;
 use client::api::v1::column::Values;
 use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertRequest, TableId};
 use client::{Client, Database};
@@ -362,13 +361,11 @@ fn query_set() -> HashMap<String, String> {
     ret
 }
 
-async fn do_write(args: &Args, client: &Client) {
-    let admin = Admin::new("admin", client.clone());
-
+async fn do_write(args: &Args, db: &Database) {
     let mut file_list = get_file_list(args.path.clone().expect("Specify data path in argument"));
     let mut write_jobs = JoinSet::new();
 
-    let create_table_result = admin.create(create_table_expr()).await;
+    let create_table_result = db.create(create_table_expr()).await;
     println!("Create table result: {create_table_result:?}");
 
     let progress_bar_style = ProgressStyle::with_template(
@@ -383,7 +380,7 @@ async fn do_write(args: &Args, client: &Client) {
     let batch_size = args.batch_size;
     for _ in 0..args.thread_num {
         if let Some(path) = file_list.pop() {
-            let db = Database::new(DATABASE_NAME, client.clone());
+            let db = db.clone();
             let mpb = multi_progress_bar.clone();
             let pb_style = progress_bar_style.clone();
             write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb, pb_style).await });
@@ -392,7 +389,7 @@ async fn do_write(args: &Args, client: &Client) {
     while write_jobs.join_next().await.is_some() {
         file_progress.inc(1);
         if let Some(path) = file_list.pop() {
-            let db = Database::new(DATABASE_NAME, client.clone());
+            let db = db.clone();
             let mpb = multi_progress_bar.clone();
             let pb_style = progress_bar_style.clone();
             write_jobs.spawn(async move { write_data(batch_size, &db, path, mpb, pb_style).await });
@@ -427,13 +424,13 @@ fn main() {
         .unwrap()
         .block_on(async {
             let client = Client::with_urls(vec![&args.endpoint]);
+            let db = Database::new(DATABASE_NAME, client);
 
             if !args.skip_write {
-                do_write(&args, &client).await;
+                do_write(&args, &db).await;
             }
 
             if !args.skip_read {
-                let db = Database::new(DATABASE_NAME, client.clone());
                 do_query(args.iter_num, &db).await;
             }
         })

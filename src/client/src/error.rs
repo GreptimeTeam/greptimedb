@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -51,9 +51,6 @@ pub enum Error {
         source: common_grpc::Error,
     },
 
-    #[snafu(display("Mutate result has failure {}", failure))]
-    MutateFailure { failure: u32, backtrace: Backtrace },
-
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
         #[snafu(backtrace)]
@@ -91,7 +88,6 @@ impl ErrorExt for Error {
             | Error::MissingHeader { .. }
             | Error::TonicStatus { .. }
             | Error::Datanode { .. }
-            | Error::MutateFailure { .. }
             | Error::ColumnDataType { .. }
             | Error::MissingField { .. } => StatusCode::Internal,
             Error::CreateChannel { source, .. } | Error::ConvertFlightData { source } => {

@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,11 +36,8 @@ pub enum Error {
         source: substrait::error::Error,
     },
 
-    #[snafu(display("Failed to execute physical plan, source: {}", source))]
-    ExecutePhysicalPlan {
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
+    #[snafu(display("Incorrect internal state: {}", state))]
+    IncorrectInternalState { state: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to create catalog list, source: {}", source))]
     NewCatalog {
@@ -325,7 +322,6 @@ impl ErrorExt for Error {
         match self {
             Error::ExecuteSql { source } => source.status_code(),
             Error::DecodeLogicalPlan { source } => source.status_code(),
-            Error::ExecutePhysicalPlan { source } => source.status_code(),
             Error::NewCatalog { source } => source.status_code(),
             Error::FindTable { source, .. } => source.status_code(),
             Error::CreateTable { source, .. }
@@ -373,7 +369,8 @@ impl ErrorExt for Error {
             | Error::Catalog { .. }
             | Error::MissingRequiredField { .. }
             | Error::FlightGet { .. }
-            | Error::InvalidFlightTicket { .. } => StatusCode::Internal,
+            | Error::InvalidFlightTicket { .. }
+            | Error::IncorrectInternalState { .. } => StatusCode::Internal,
 
             Error::InitBackend { .. } => StatusCode::StorageUnavailable,
             Error::OpenLogStore { source } => source.status_code(),
@@ -415,9 +412,10 @@ mod tests {
     use super::*;
 
     fn throw_query_error() -> std::result::Result<(), query::error::Error> {
-        Err(query::error::Error::new(MockError::with_backtrace(
-            StatusCode::Internal,
-        )))
+        query::error::CatalogNotFoundSnafu {
+            catalog: String::new(),
+        }
+        .fail()
     }
 
     fn throw_catalog_error() -> catalog::error::Result<()> {
@@ -431,6 +429,11 @@ mod tests {
         assert_eq!(StatusCode::Internal, err.status_code());
     }
 
+    fn assert_invalid_argument_error(err: &Error) {
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
     fn assert_tonic_internal_error(err: Error) {
         let s: tonic::Status = err.into();
         assert_eq!(s.code(), tonic::Code::Internal);
@@ -439,7 +442,7 @@ mod tests {
     #[test]
     fn test_error() {
         let err = throw_query_error().context(ExecuteSqlSnafu).err().unwrap();
-        assert_internal_error(&err);
+        assert_invalid_argument_error(&err);
         assert_tonic_internal_error(err);
         let err = throw_catalog_error()
             .context(NewCatalogSnafu)

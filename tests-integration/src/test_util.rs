@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -277,11 +277,7 @@ pub async fn setup_grpc_server(
 
     let fe_instance = frontend::instance::Instance::new_standalone(instance.clone());
     let fe_instance_ref = Arc::new(fe_instance);
-    let fe_grpc_server = Arc::new(GrpcServer::new(
-        fe_instance_ref.clone(),
-        fe_instance_ref,
-        runtime,
-    ));
+    let fe_grpc_server = Arc::new(GrpcServer::new(fe_instance_ref, runtime));
     let grpc_server_clone = fe_grpc_server.clone();
 
     let fe_grpc_addr_clone = fe_grpc_addr.clone();

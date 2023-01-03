@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -58,6 +58,7 @@ impl StoreSchema {
         self.schema.arrow_schema()
     }
 
+    // TODO(yingwen): Remove this method.
     pub fn batch_to_arrow_record_batch(
         &self,
         batch: &Batch,
@@ -68,6 +69,14 @@ impl StoreSchema {
             batch.columns().iter().map(|v| v.to_arrow_array()).collect(),
         )
         .context(NewRecordBatchSnafu)
+    }
+
+    /// Returns the ending index of row key columns.
+    ///
+    /// The ending index has the same value as the number of the row key columns.
+    #[inline]
+    pub fn row_key_end(&self) -> usize {
+        self.row_key_end
     }
 
     pub(crate) fn contains_column(&self, name: &str) -> bool {
@@ -164,11 +173,6 @@ impl StoreSchema {
     #[inline]
     pub(crate) fn num_columns(&self) -> usize {
         self.schema.num_columns()
-    }
-
-    #[inline]
-    pub(crate) fn row_key_end(&self) -> usize {
-        self.row_key_end
     }
 
     #[inline]

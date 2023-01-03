@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,6 +19,7 @@ use std::sync::Arc;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
+use crossbeam_utils::atomic::AtomicCell;
 use datatypes::arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int64Array, UInt64Array,
 };
@@ -30,13 +31,15 @@ use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::Value;
 use datatypes::value::{self, OrderedFloat};
 use datatypes::vectors::{Helper, NullVector, VectorRef};
+use once_cell::sync::Lazy;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr};
 use rustpython_vm::function::{Either, OptionalArg, PyComparisonValue};
 use rustpython_vm::protocol::{PyMappingMethods, PySequenceMethods};
 use rustpython_vm::sliceable::{SaturatedSlice, SequenceIndex, SequenceIndexOp};
 use rustpython_vm::types::{AsMapping, AsSequence, Comparable, PyComparisonOp};
 use rustpython_vm::{
-    pyclass, AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    atomic_func, pyclass, AsObject, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
+    VirtualMachine,
 };
 
 use crate::python::utils::{is_instance, PyVectorRef};
@@ -931,25 +934,33 @@ fn get_concrete_type(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Concret
 }
 
 impl AsMapping for PyVector {
-    const AS_MAPPING: PyMappingMethods = PyMappingMethods {
-        length: Some(|mapping, _vm| Ok(Self::mapping_downcast(mapping).len())),
-        subscript: Some(|mapping, needle, vm| Self::mapping_downcast(mapping)._getitem(needle, vm)),
-        ass_subscript: None,
-    };
+    fn as_mapping() -> &'static PyMappingMethods {
+        static AS_MAPPING: PyMappingMethods = PyMappingMethods {
+            length: atomic_func!(|mapping, _vm| Ok(PyVector::mapping_downcast(mapping).len())),
+            subscript: atomic_func!(
+                |mapping, needle, vm| PyVector::mapping_downcast(mapping)._getitem(needle, vm)
+            ),
+            ass_subscript: AtomicCell::new(None),
+        };
+        &AS_MAPPING
+    }
 }
 
 impl AsSequence for PyVector {
-    const AS_SEQUENCE: PySequenceMethods = PySequenceMethods {
-        length: Some(|seq, _vm| Ok(Self::sequence_downcast(seq).len())),
-        item: Some(|seq, i, vm| {
-            let zelf = Self::sequence_downcast(seq);
-            zelf.getitem_by_index(i, vm)
-        }),
-        ass_item: Some(|_seq, _i, _value, vm| {
-            Err(vm.new_type_error("PyVector object doesn't support item assigns".to_owned()))
-        }),
-        ..PySequenceMethods::NOT_IMPLEMENTED
-    };
+    fn as_sequence() -> &'static PySequenceMethods {
+        static AS_SEQUENCE: Lazy<PySequenceMethods> = Lazy::new(|| PySequenceMethods {
+            length: atomic_func!(|seq, _vm| Ok(PyVector::sequence_downcast(seq).len())),
+            item: atomic_func!(|seq, i, vm| {
+                let zelf = PyVector::sequence_downcast(seq);
+                zelf.getitem_by_index(i, vm)
+            }),
+            ass_item: atomic_func!(|_seq, _i, _value, vm| {
+                Err(vm.new_type_error("PyVector object doesn't support item assigns".to_owned()))
+            }),
+            ..PySequenceMethods::NOT_IMPLEMENTED
+        });
+        &AS_SEQUENCE
+    }
 }
 
 impl Comparable for PyVector {
@@ -1069,7 +1080,7 @@ pub mod tests {
             let a = PyVector::from(a);
             let a = a.into_pyobject(vm);
             assert!(PySequence::find_methods(&a, vm).is_some());
-            assert!(PySequence::new(&a, vm).is_some());
+            assert!(PySequence::try_protocol(&a, vm).is_ok());
         })
     }
 

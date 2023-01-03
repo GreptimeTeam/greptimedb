@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,144 +12,77 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use api::result::AdminResultBuilder;
-use api::v1::{AdminResult, AlterExpr, CreateTableExpr, DropTableExpr};
-use common_error::prelude::{ErrorExt, StatusCode};
+use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr};
 use common_grpc_expr::{alter_expr_to_request, create_expr_to_request};
 use common_query::Output;
-use common_telemetry::{error, info};
-use futures::TryFutureExt;
+use common_telemetry::info;
 use session::context::QueryContext;
 use snafu::prelude::*;
 use table::requests::DropTableRequest;
 
-use crate::error::{AlterExprToRequestSnafu, BumpTableIdSnafu, CreateExprToRequestSnafu};
+use crate::error::{
+    AlterExprToRequestSnafu, BumpTableIdSnafu, CreateExprToRequestSnafu,
+    IncorrectInternalStateSnafu, Result,
+};
 use crate::instance::Instance;
 use crate::sql::SqlRequest;
 
 impl Instance {
     /// Handle gRPC create table requests.
-    pub(crate) async fn handle_create(&self, expr: CreateTableExpr) -> AdminResult {
+    pub(crate) async fn handle_create(&self, expr: CreateTableExpr) -> Result<Output> {
+        let table_name = format!(
+            "{}.{}.{}",
+            expr.catalog_name, expr.schema_name, expr.table_name
+        );
+
+        // TODO(LFC): Revisit table id related feature, add more tests.
+        // Also merge this mod with mod instance::grpc.
+
         // Respect CreateExpr's table id and region ids if present, or allocate table id
         // from local table id provider and set region id to 0.
         let table_id = if let Some(table_id) = &expr.table_id {
             info!(
-                "Creating table {:?}.{:?}.{:?} with table id from frontend: {}",
-                expr.catalog_name, expr.schema_name, expr.table_name, table_id.id
+                "Creating table {table_name} with table id {} from Frontend",
+                table_id.id
             );
             table_id.id
         } else {
-            match self.table_id_provider.as_ref() {
-                None => {
-                    return AdminResultBuilder::default()
-                        .status_code(StatusCode::Internal as u32)
-                        .err_msg("Table id provider absent in standalone mode".to_string())
-                        .build();
-                }
-                Some(table_id_provider) => {
-                    match table_id_provider
-                        .next_table_id()
-                        .await
-                        .context(BumpTableIdSnafu)
-                    {
-                        Ok(table_id) => {
-                            info!(
-                        "Creating table {:?}.{:?}.{:?} with table id from catalog manager: {}",
-                        &expr.catalog_name, &expr.schema_name, expr.table_name, table_id
-                    );
-                            table_id
-                        }
-                        Err(e) => {
-                            error!(e;"Failed to create table id when creating table: {:?}.{:?}.{:?}", &expr.catalog_name, &expr.schema_name, expr.table_name);
-                            return AdminResultBuilder::default()
-                                .status_code(e.status_code() as u32)
-                                .err_msg(e.to_string())
-                                .build();
-                        }
-                    }
-                }
-            }
+            let provider =
+                self.table_id_provider
+                    .as_ref()
+                    .context(IncorrectInternalStateSnafu {
+                        state: "Table id provider absent in standalone mode",
+                    })?;
+            let table_id = provider.next_table_id().await.context(BumpTableIdSnafu)?;
+            info!("Creating table {table_name} with table id {table_id} from TableIdProvider");
+            table_id
         };
 
-        let request = create_expr_to_request(table_id, expr).context(CreateExprToRequestSnafu);
-        let result = futures::future::ready(request)
-            .and_then(|request| {
-                self.sql_handler().execute(
-                    SqlRequest::CreateTable(request),
-                    Arc::new(QueryContext::new()),
-                )
-            })
-            .await;
-        match result {
-            Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
-                .status_code(StatusCode::Success as u32)
-                .mutate_result(rows as u32, 0)
-                .build(),
-            // Unreachable because we are executing "CREATE TABLE"; otherwise it's an internal bug.
-            Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => unreachable!(),
-            Err(err) => AdminResultBuilder::default()
-                .status_code(err.status_code() as u32)
-                .err_msg(err.to_string())
-                .build(),
-        }
+        let request = create_expr_to_request(table_id, expr).context(CreateExprToRequestSnafu)?;
+
+        self.sql_handler()
+            .execute(SqlRequest::CreateTable(request), QueryContext::arc())
+            .await
     }
 
-    pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> AdminResult {
-        let request = match alter_expr_to_request(expr)
-            .context(AlterExprToRequestSnafu)
-            .transpose()
-        {
-            None => {
-                return AdminResultBuilder::default()
-                    .status_code(StatusCode::Success as u32)
-                    .mutate_result(0, 0)
-                    .build()
-            }
-            Some(req) => req,
-        };
+    pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
+        let request = alter_expr_to_request(expr).context(AlterExprToRequestSnafu)?;
+        let Some(request) = request else { return Ok(Output::AffectedRows(0)) };
 
-        let result = futures::future::ready(request)
-            .and_then(|request| {
-                self.sql_handler()
-                    .execute(SqlRequest::Alter(request), Arc::new(QueryContext::new()))
-            })
-            .await;
-        match result {
-            Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
-                .status_code(StatusCode::Success as u32)
-                .mutate_result(rows as u32, 0)
-                .build(),
-            Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => unreachable!(),
-            Err(err) => AdminResultBuilder::default()
-                .status_code(err.status_code() as u32)
-                .err_msg(err.to_string())
-                .build(),
-        }
+        self.sql_handler()
+            .execute(SqlRequest::Alter(request), QueryContext::arc())
+            .await
     }
 
-    pub(crate) async fn handle_drop_table(&self, expr: DropTableExpr) -> AdminResult {
+    pub(crate) async fn handle_drop_table(&self, expr: DropTableExpr) -> Result<Output> {
         let req = DropTableRequest {
             catalog_name: expr.catalog_name,
             schema_name: expr.schema_name,
             table_name: expr.table_name,
         };
-        let result = self
-            .sql_handler()
-            .execute(SqlRequest::DropTable(req), Arc::new(QueryContext::new()))
-            .await;
-        match result {
-            Ok(Output::AffectedRows(rows)) => AdminResultBuilder::default()
-                .status_code(StatusCode::Success as u32)
-                .mutate_result(rows as _, 0)
-                .build(),
-            Ok(Output::Stream(_)) | Ok(Output::RecordBatches(_)) => unreachable!(),
-            Err(err) => AdminResultBuilder::default()
-                .status_code(err.status_code() as u32)
-                .err_msg(err.to_string())
-                .build(),
-        }
+        self.sql_handler()
+            .execute(SqlRequest::DropTable(req), QueryContext::arc())
+            .await
     }
 }
 

@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -106,6 +106,10 @@ impl Tester {
     fn committed_sequence(&self) -> SequenceNumber {
         self.base().committed_sequence()
     }
+
+    async fn delete(&self, keys: &[i64]) -> WriteResponse {
+        self.base().delete(keys).await
+    }
 }
 
 #[tokio::test]
@@ -201,4 +205,65 @@ async fn test_scan_different_batch() {
         let output = tester.full_scan().await;
         assert_eq!(data, output);
     }
+}
+
+#[tokio::test]
+async fn test_put_delete_scan() {
+    let dir = TempDir::new("put-delete-scan").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+    let mut tester = Tester::new(REGION_NAME, store_dir).await;
+
+    let data = vec![
+        (1000, Some(100)),
+        (1001, Some(101)),
+        (1002, None),
+        (1003, None),
+        (1004, Some(104)),
+    ];
+
+    tester.put(&data).await;
+
+    let keys = [1001, 1003];
+
+    tester.delete(&keys).await;
+
+    let output = tester.full_scan().await;
+    let expect = vec![(1000, Some(100)), (1002, None), (1004, Some(104))];
+    assert_eq!(expect, output);
+
+    // Deletion is also persistent.
+    tester.try_reopen().await.unwrap();
+    let output = tester.full_scan().await;
+    assert_eq!(expect, output);
+}
+
+#[tokio::test]
+async fn test_put_delete_absent_key() {
+    let dir = TempDir::new("put-delete-scan").unwrap();
+    let store_dir = dir.path().to_str().unwrap();
+    let mut tester = Tester::new(REGION_NAME, store_dir).await;
+
+    let data = vec![
+        (1000, Some(100)),
+        (1001, Some(101)),
+        (1002, None),
+        (1003, None),
+        (1004, Some(104)),
+    ];
+
+    tester.put(&data).await;
+
+    // 999 and 1006 is absent.
+    let keys = [999, 1002, 1004, 1006];
+
+    tester.delete(&keys).await;
+
+    let output = tester.full_scan().await;
+    let expect = vec![(1000, Some(100)), (1001, Some(101)), (1003, None)];
+    assert_eq!(expect, output);
+
+    // Deletion is also persistent.
+    tester.try_reopen().await.unwrap();
+    let output = tester.full_scan().await;
+    assert_eq!(expect, output);
 }

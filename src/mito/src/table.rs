@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,7 +36,8 @@ use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, ChunkReader, ReadContext, Region, RegionMeta,
     ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
-use table::error::{Error as TableError, Result as TableResult};
+use table::error as table_error;
+use table::error::Result as TableResult;
 use table::metadata::{
     FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType,
 };
@@ -94,13 +95,17 @@ impl<R: Region> Table for MitoTable<R> {
             columns_values
         );
 
-        write_request.put(columns_values).map_err(TableError::new)?;
+        write_request
+            .put(columns_values)
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
 
         let _resp = self
             .region
             .write(&WriteContext::default(), write_request)
             .await
-            .map_err(TableError::new)?;
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
 
         Ok(rows_num)
     }
@@ -120,9 +125,16 @@ impl<R: Region> Table for MitoTable<R> {
         _limit: Option<usize>,
     ) -> TableResult<PhysicalPlanRef> {
         let read_ctx = ReadContext::default();
-        let snapshot = self.region.snapshot(&read_ctx).map_err(TableError::new)?;
+        let snapshot = self
+            .region
+            .snapshot(&read_ctx)
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
 
-        let projection = self.transform_projection(&self.region, projection.cloned())?;
+        let projection = self
+            .transform_projection(&self.region, projection.cloned())
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
         let filters = filters.into();
         let scan_request = ScanRequest {
             projection,
@@ -132,7 +144,8 @@ impl<R: Region> Table for MitoTable<R> {
         let mut reader = snapshot
             .scan(&read_ctx, scan_request)
             .await
-            .map_err(TableError::new)?
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?
             .reader;
 
         let schema = reader.schema().clone();
@@ -158,7 +171,9 @@ impl<R: Region> Table for MitoTable<R> {
         let mut new_meta = table_meta
             .builder_with_alter_kind(table_name, &req.alter_kind)?
             .build()
-            .context(error::BuildTableMetaSnafu { table_name })?;
+            .context(error::BuildTableMetaSnafu { table_name })
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
 
         let alter_op = create_alter_operation(table_name, &req.alter_kind, &mut new_meta)?;
 
@@ -182,7 +197,9 @@ impl<R: Region> Table for MitoTable<R> {
             .await
             .context(UpdateTableManifestSnafu {
                 table_name: &self.table_info().name,
-            })?;
+            })
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
 
         // TODO(yingwen): Error handling. Maybe the region need to provide a method to
         // validate the request first.
@@ -199,7 +216,11 @@ impl<R: Region> Table for MitoTable<R> {
             table_name,
             alter_req,
         );
-        region.alter(alter_req).await.map_err(TableError::new)?;
+        region
+            .alter(alter_req)
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
 
         // Update in memory metadata of the table.
         self.set_table_info(new_info);

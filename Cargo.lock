@@ -4318,9 +4318,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.16.0"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86f0b0d4bf799edbc74508c1e8bf170ff5f41238e5f8225603ca7caaae2b7860"
+checksum = "6f61fba1741ea2b3d6a1e3178721804bb716a68a6aeba1149b5d52e3d464ea66"
 
 [[package]]
 name = "oorandom"
@@ -5767,7 +5767,7 @@ dependencies = [
 [[package]]
 name = "rustpython-ast"
 version = "0.1.0"
-source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
 dependencies = [
  "num-bigint",
  "rustpython-common",
@@ -5777,9 +5777,10 @@ dependencies = [
 [[package]]
 name = "rustpython-codegen"
 version = "0.1.2"
-source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
 dependencies = [
  "ahash 0.7.6",
+ "bitflags",
  "indexmap",
  "itertools",
  "log",
@@ -5793,7 +5794,7 @@ dependencies = [
 [[package]]
 name = "rustpython-common"
 version = "0.0.0"
-source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
 dependencies = [
  "ascii",
  "cfg-if 1.0.0",
@@ -5816,7 +5817,7 @@ dependencies = [
 [[package]]
 name = "rustpython-compiler"
 version = "0.1.2"
-source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
 dependencies = [
  "rustpython-codegen",
  "rustpython-compiler-core",
@@ -5827,7 +5828,7 @@ dependencies = [
 [[package]]
 name = "rustpython-compiler-core"
 version = "0.1.2"
-source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
 dependencies = [
  "bincode 1.3.3",
  "bitflags",
@@ -5844,7 +5845,17 @@ dependencies = [
 [[package]]
 name = "rustpython-derive"
 version = "0.1.2"
-source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
+dependencies = [
+ "rustpython-compiler",
+ "rustpython-derive-impl",
+ "syn",
+]
+
+[[package]]
+name = "rustpython-derive-impl"
+version = "0.0.0"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
 dependencies = [
  "indexmap",
  "itertools",
@@ -5852,8 +5863,6 @@ dependencies = [
  "once_cell",
  "proc-macro2",
  "quote",
- "rustpython-codegen",
- "rustpython-compiler",
  "rustpython-compiler-core",
  "rustpython-doc",
  "syn",
@@ -5872,7 +5881,7 @@ dependencies = [
 [[package]]
 name = "rustpython-parser"
 version = "0.1.2"
-source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
 dependencies = [
  "ahash 0.7.6",
  "anyhow",
@@ -5884,6 +5893,7 @@ dependencies = [
  "num-traits",
  "phf 0.10.1",
  "phf_codegen 0.10.0",
+ "rustc-hash",
  "rustpython-ast",
  "rustpython-compiler-core",
  "thiserror",
@@ -5896,7 +5906,7 @@ dependencies = [
 [[package]]
 name = "rustpython-pylib"
 version = "0.1.0"
-source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
 dependencies = [
  "glob",
  "rustpython-compiler-core",
@@ -5906,7 +5916,7 @@ dependencies = [
 [[package]]
 name = "rustpython-stdlib"
 version = "0.1.2"
-source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
 dependencies = [
  "adler32",
  "ahash 0.7.6",
@@ -5934,6 +5944,7 @@ dependencies = [
  "num-bigint",
  "num-complex",
  "num-integer",
+ "num-rational",
  "num-traits",
  "num_enum",
  "once_cell",
@@ -5970,7 +5981,7 @@ dependencies = [
 [[package]]
 name = "rustpython-vm"
 version = "0.1.2"
-source = "git+https://github.com/discord9/RustPython?rev=183e8dab#183e8dabe0027e31630368e36c6be83b5f9cb3f8"
+source = "git+https://github.com/discord9/RustPython?rev=f89b1537#f89b1537b9c789ff566717d1c2ad3d0777cbf5d6"
 dependencies = [
  "adler32",
  "ahash 0.7.6",
@@ -6215,6 +6226,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "console",
+ "crossbeam-utils",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
@@ -6224,6 +6236,7 @@ dependencies = [
  "futures-util",
  "log-store",
  "mito",
+ "once_cell",
  "paste",
  "query",
  "ron",

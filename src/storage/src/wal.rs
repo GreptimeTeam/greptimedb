@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,10 @@ use store_api::logstore::{AppendResponse, LogStore};
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::codec::{Decoder, Encoder};
-use crate::error::{self, Error, MarkWalStableSnafu, Result};
+use crate::error::{
+    DecodeWalHeaderSnafu, EncodeWalHeaderSnafu, Error, MarkWalStableSnafu, ReadWalSnafu, Result,
+    WalDataCorruptedSnafu, WriteWalSnafu,
+};
 use crate::proto::wal::{self, WalHeader};
 use crate::write_batch::codec::{PayloadDecoder, PayloadEncoder};
 use crate::write_batch::Payload;
@@ -114,7 +117,7 @@ impl<S: LogStore> Wal<S> {
             encoder
                 .encode(p, &mut buf)
                 .map_err(BoxedError::new)
-                .context(error::WriteWalSnafu {
+                .context(WriteWalSnafu {
                     region_id: self.region_id(),
                 })?;
         }
@@ -129,7 +132,7 @@ impl<S: LogStore> Wal<S> {
             .read(&self.namespace, start_seq)
             .await
             .map_err(BoxedError::new)
-            .context(error::ReadWalSnafu {
+            .context(ReadWalSnafu {
                 region_id: self.region_id(),
             })?
             // Handle the error when reading from the stream.
@@ -155,7 +158,7 @@ impl<S: LogStore> Wal<S> {
             .append(e)
             .await
             .map_err(BoxedError::new)
-            .context(error::WriteWalSnafu {
+            .context(WriteWalSnafu {
                 region_id: self.region_id(),
             })?;
 
@@ -174,7 +177,7 @@ impl<S: LogStore> Wal<S> {
 
         ensure!(
             data_pos <= input.len(),
-            error::WalDataCorruptedSnafu {
+            WalDataCorruptedSnafu {
                 region_id: self.region_id(),
                 message: format!(
                     "Not enough input buffer, expected data position={}, actual buffer length={}",
@@ -192,7 +195,7 @@ impl<S: LogStore> Wal<S> {
         let payload = decoder
             .decode(&input[data_pos..])
             .map_err(BoxedError::new)
-            .context(error::ReadWalSnafu {
+            .context(ReadWalSnafu {
                 region_id: self.region_id(),
             })?;
 
@@ -209,7 +212,7 @@ impl Encoder for WalHeaderEncoder {
     fn encode(&self, item: &WalHeader, dst: &mut Vec<u8>) -> Result<()> {
         item.encode_length_delimited(dst)
             .map_err(|err| err.into())
-            .context(error::EncodeWalHeaderSnafu)
+            .context(EncodeWalHeaderSnafu)
     }
 }
 
@@ -222,12 +225,12 @@ impl Decoder for WalHeaderDecoder {
     fn decode(&self, src: &[u8]) -> Result<(usize, WalHeader)> {
         let mut data_pos = prost::decode_length_delimiter(src)
             .map_err(|err| err.into())
-            .context(error::DecodeWalHeaderSnafu)?;
+            .context(DecodeWalHeaderSnafu)?;
         data_pos += prost::length_delimiter_len(data_pos);
 
         let wal_header = WalHeader::decode_length_delimited(src)
             .map_err(|err| err.into())
-            .context(error::DecodeWalHeaderSnafu)?;
+            .context(DecodeWalHeaderSnafu)?;
 
         Ok((data_pos, wal_header))
     }

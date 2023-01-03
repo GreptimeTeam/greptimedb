@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,9 +16,10 @@ mod stream;
 
 use std::pin::Pin;
 
+use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::object_expr::Request as GrpcRequest;
 use api::v1::query_request::Query;
-use api::v1::{InsertRequest, ObjectExpr};
+use api::v1::{DdlRequest, InsertRequest, ObjectExpr};
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
@@ -85,13 +86,14 @@ impl FlightService for Instance {
             .request
             .context(MissingRequiredFieldSnafu { name: "request" })?;
         let output = match request {
+            GrpcRequest::Insert(request) => self.handle_insert(request).await?,
             GrpcRequest::Query(query_request) => {
                 let query = query_request
                     .query
                     .context(MissingRequiredFieldSnafu { name: "query" })?;
                 self.handle_query(query).await?
             }
-            GrpcRequest::Insert(request) => self.handle_insert(request).await?,
+            GrpcRequest::Ddl(request) => self.handle_ddl(request).await?,
         };
         let stream = to_flight_data_stream(output);
         Ok(Response::new(stream))
@@ -166,6 +168,18 @@ impl Instance {
             .context(InsertSnafu { table_name })?;
         Ok(Output::AffectedRows(affected_rows))
     }
+
+    async fn handle_ddl(&self, request: DdlRequest) -> Result<Output> {
+        let expr = request
+            .expr
+            .context(MissingRequiredFieldSnafu { name: "expr" })?;
+        match expr {
+            DdlExpr::CreateTable(expr) => self.handle_create(expr).await,
+            DdlExpr::Alter(expr) => self.handle_alter(expr).await,
+            DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr).await,
+            DdlExpr::DropTable(expr) => self.handle_drop_table(expr).await,
+        }
+    }
 }
 
 fn to_flight_data_stream(output: Output) -> TonicStream<FlightData> {
@@ -189,13 +203,214 @@ fn to_flight_data_stream(output: Output) -> TonicStream<FlightData> {
 
 #[cfg(test)]
 mod test {
-    use api::v1::QueryRequest;
+    use api::v1::column::{SemanticType, Values};
+    use api::v1::{
+        alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
+        CreateDatabaseExpr, CreateTableExpr, QueryRequest,
+    };
+    use client::RpcOutput;
     use common_grpc::flight;
-    use common_grpc::flight::FlightMessage;
+    use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
 
     use super::*;
     use crate::tests::test_util::{self, MockInstance};
+
+    async fn boarding(instance: &MockInstance, ticket: Request<Ticket>) -> RpcOutput {
+        let response = instance.inner().do_get(ticket).await.unwrap();
+        let result = flight::flight_data_to_object_result(response)
+            .await
+            .unwrap();
+        result.try_into().unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_handle_ddl() {
+        let instance = MockInstance::new("test_handle_ddl").await;
+
+        let ticket = Request::new(Ticket {
+            ticket: ObjectExpr {
+                request: Some(GrpcRequest::Ddl(DdlRequest {
+                    expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
+                        database_name: "my_database".to_string(),
+                    })),
+                })),
+            }
+            .encode_to_vec(),
+        });
+
+        let output = boarding(&instance, ticket).await;
+        assert!(matches!(output, RpcOutput::AffectedRows(1)));
+
+        let ticket = Request::new(Ticket {
+            ticket: ObjectExpr {
+                request: Some(GrpcRequest::Ddl(DdlRequest {
+                    expr: Some(DdlExpr::CreateTable(CreateTableExpr {
+                        catalog_name: "greptime".to_string(),
+                        schema_name: "my_database".to_string(),
+                        table_name: "my_table".to_string(),
+                        desc: "blabla".to_string(),
+                        column_defs: vec![
+                            ColumnDef {
+                                name: "a".to_string(),
+                                datatype: ColumnDataType::String as i32,
+                                is_nullable: true,
+                                default_constraint: vec![],
+                            },
+                            ColumnDef {
+                                name: "ts".to_string(),
+                                datatype: ColumnDataType::TimestampMillisecond as i32,
+                                is_nullable: false,
+                                default_constraint: vec![],
+                            },
+                        ],
+                        time_index: "ts".to_string(),
+                        ..Default::default()
+                    })),
+                })),
+            }
+            .encode_to_vec(),
+        });
+
+        let output = boarding(&instance, ticket).await;
+        assert!(matches!(output, RpcOutput::AffectedRows(1)));
+
+        let ticket = Request::new(Ticket {
+            ticket: ObjectExpr {
+                request: Some(GrpcRequest::Ddl(DdlRequest {
+                    expr: Some(DdlExpr::Alter(AlterExpr {
+                        catalog_name: "greptime".to_string(),
+                        schema_name: "my_database".to_string(),
+                        table_name: "my_table".to_string(),
+                        kind: Some(alter_expr::Kind::AddColumns(AddColumns {
+                            add_columns: vec![AddColumn {
+                                column_def: Some(ColumnDef {
+                                    name: "b".to_string(),
+                                    datatype: ColumnDataType::Int32 as i32,
+                                    is_nullable: true,
+                                    default_constraint: vec![],
+                                }),
+                                is_key: true,
+                            }],
+                        })),
+                    })),
+                })),
+            }
+            .encode_to_vec(),
+        });
+
+        let output = boarding(&instance, ticket).await;
+        assert!(matches!(output, RpcOutput::AffectedRows(0)));
+
+        let output = instance
+            .inner()
+            .execute_sql(
+                "INSERT INTO my_database.my_table (a, b, ts) VALUES ('s', 1, 1672384140000)",
+                QueryContext::arc(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(1)));
+
+        let output = instance
+            .inner()
+            .execute_sql(
+                "SELECT ts, a, b FROM my_database.my_table",
+                QueryContext::arc(),
+            )
+            .await
+            .unwrap();
+        let Output::Stream(stream) = output else { unreachable!() };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++---------------------+---+---+
+| ts                  | a | b |
++---------------------+---+---+
+| 2022-12-30T07:09:00 | s | 1 |
++---------------------+---+---+";
+        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_handle_insert() {
+        let instance = MockInstance::new("test_handle_insert").await;
+        test_util::create_test_table(
+            &instance,
+            ConcreteDataType::timestamp_millisecond_datatype(),
+        )
+        .await
+        .unwrap();
+
+        let insert = InsertRequest {
+            schema_name: "public".to_string(),
+            table_name: "demo".to_string(),
+            columns: vec![
+                Column {
+                    column_name: "host".to_string(),
+                    values: Some(Values {
+                        string_values: vec![
+                            "host1".to_string(),
+                            "host2".to_string(),
+                            "host3".to_string(),
+                        ],
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Tag as i32,
+                    datatype: ColumnDataType::String as i32,
+                    ..Default::default()
+                },
+                Column {
+                    column_name: "cpu".to_string(),
+                    values: Some(Values {
+                        f64_values: vec![1.0, 3.0],
+                        ..Default::default()
+                    }),
+                    null_mask: vec![2],
+                    semantic_type: SemanticType::Field as i32,
+                    datatype: ColumnDataType::Float64 as i32,
+                },
+                Column {
+                    column_name: "ts".to_string(),
+                    values: Some(Values {
+                        ts_millisecond_values: vec![1672384140000, 1672384141000, 1672384142000],
+                        ..Default::default()
+                    }),
+                    semantic_type: SemanticType::Timestamp as i32,
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    ..Default::default()
+                },
+            ],
+            row_count: 3,
+            ..Default::default()
+        };
+
+        let ticket = Request::new(Ticket {
+            ticket: ObjectExpr {
+                request: Some(GrpcRequest::Insert(insert)),
+            }
+            .encode_to_vec(),
+        });
+
+        let output = boarding(&instance, ticket).await;
+        assert!(matches!(output, RpcOutput::AffectedRows(3)));
+
+        let output = instance
+            .inner()
+            .execute_sql("SELECT ts, host, cpu FROM demo", QueryContext::arc())
+            .await
+            .unwrap();
+        let Output::Stream(stream) = output else { unreachable!() };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++---------------------+-------+-----+
+| ts                  | host  | cpu |
++---------------------+-------+-----+
+| 2022-12-30T07:09:00 | host1 | 1   |
+| 2022-12-30T07:09:01 | host2 |     |
+| 2022-12-30T07:09:02 | host3 | 3   |
++---------------------+-------+-----+";
+        assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_query() {
@@ -221,18 +436,8 @@ mod test {
             .encode_to_vec(),
         });
 
-        let response = instance.inner().do_get(ticket).await.unwrap();
-        let result = flight::flight_data_to_object_result(response)
-            .await
-            .unwrap();
-        let raw_data = result.flight_data;
-        let mut messages = flight::raw_flight_data_to_message(raw_data).unwrap();
-        assert_eq!(messages.len(), 1);
-
-        let message = messages.remove(0);
-        assert!(matches!(message, FlightMessage::AffectedRows(_)));
-        let FlightMessage::AffectedRows(affected_rows) = message else { unreachable!() };
-        assert_eq!(affected_rows, 2);
+        let output = boarding(&instance, ticket).await;
+        assert!(matches!(output, RpcOutput::AffectedRows(2)));
 
         let ticket = Request::new(Ticket {
             ticket: ObjectExpr {

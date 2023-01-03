@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -89,9 +89,7 @@ impl<'a> Decoder for PayloadDecoder<'a> {
             let record_batch = RecordBatch::try_from_df_record_batch(schema.clone(), record_batch)
                 .context(CreateRecordBatchSnafu)?;
             let op_type = match MutationType::from_i32(*mutation_type) {
-                Some(MutationType::Delete) => {
-                    unimplemented!("delete mutation is not implemented")
-                }
+                Some(MutationType::Delete) => OpType::Delete,
                 Some(MutationType::Put) => OpType::Put,
                 None => {
                     return BatchCorruptedSnafu {

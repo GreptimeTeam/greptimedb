@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,18 +20,17 @@ mod prometheus;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::result::{ObjectResultBuilder, PROTOCOL_VERSION};
+use api::result::ObjectResultBuilder;
 use api::v1::alter_expr::Kind;
+use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::object_expr::Request;
 use api::v1::{
-    admin_expr, AddColumns, AdminExpr, AdminResult, AlterExpr, Column, CreateDatabaseExpr,
-    CreateTableExpr, DropTableExpr, ExprHeader, InsertRequest, ObjectExpr,
-    ObjectResult as GrpcObjectResult,
+    AddColumns, AlterExpr, Column, CreateTableExpr, DdlRequest, DropTableExpr, InsertRequest,
+    ObjectExpr, ObjectResult as GrpcObjectResult,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManagerRef, CatalogProviderRef, SchemaProviderRef};
-use client::admin::admin_result_to_output;
 use client::RpcOutput;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
@@ -46,9 +45,9 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
 use servers::query_handler::{
-    GrpcAdminHandler, GrpcAdminHandlerRef, GrpcQueryHandler, GrpcQueryHandlerRef,
-    InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
-    ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
+    GrpcQueryHandler, GrpcQueryHandlerRef, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
+    PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
+    SqlQueryHandlerRef,
 };
 use servers::{error as server_error, Mode};
 use session::context::QueryContextRef;
@@ -63,20 +62,18 @@ use table::TableRef;
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, AlterTableOnInsertionSnafu, CatalogSnafu, CreateDatabaseSnafu, CreateTableSnafu,
-    FindNewColumnsOnInsertionSnafu, InsertSnafu, MissingMetasrvOptsSnafu, Result,
+    self, CatalogSnafu, FindNewColumnsOnInsertionSnafu, InsertSnafu, MissingMetasrvOptsSnafu,
+    RequestDatanodeSnafu, Result,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::sql::insert_to_request;
-use crate::table::insert::insert_request_to_insert_batch;
 use crate::table::route::TableRoutes;
 use crate::Plugins;
 
 #[async_trait]
 pub trait FrontendInstance:
-    GrpcAdminHandler
-    + GrpcQueryHandler
+    GrpcQueryHandler
     + SqlQueryHandler
     + OpentsdbProtocolHandler
     + InfluxdbLineProtocolHandler
@@ -107,7 +104,6 @@ pub struct Instance {
 
     sql_handler: SqlQueryHandlerRef,
     grpc_query_handler: GrpcQueryHandlerRef,
-    grpc_admin_handler: GrpcAdminHandlerRef,
 
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
@@ -140,8 +136,7 @@ impl Instance {
             mode: Mode::Distributed,
             dist_instance: Some(dist_instance),
             sql_handler: dist_instance_ref.clone(),
-            grpc_query_handler: dist_instance_ref.clone(),
-            grpc_admin_handler: dist_instance_ref,
+            grpc_query_handler: dist_instance_ref,
             plugins: Default::default(),
         })
     }
@@ -185,7 +180,6 @@ impl Instance {
             dist_instance: None,
             sql_handler: dn_instance.clone(),
             grpc_query_handler: dn_instance.clone(),
-            grpc_admin_handler: dn_instance,
             plugins: Default::default(),
         }
     }
@@ -211,38 +205,18 @@ impl Instance {
         if let Some(v) = &self.dist_instance {
             v.create_table(&mut expr, partitions).await
         } else {
-            let expr = AdminExpr {
-                header: Some(ExprHeader {
-                    version: PROTOCOL_VERSION,
-                }),
-                expr: Some(admin_expr::Expr::CreateTable(expr)),
-            };
             let result = self
-                .grpc_admin_handler
-                .exec_admin_request(expr)
+                .grpc_query_handler
+                .do_query(ObjectExpr {
+                    request: Some(Request::Ddl(DdlRequest {
+                        expr: Some(DdlExpr::CreateTable(expr)),
+                    })),
+                })
                 .await
                 .context(error::InvokeGrpcServerSnafu)?;
-            admin_result_to_output(result).context(CreateTableSnafu)
+            let output: RpcOutput = result.try_into().context(RequestDatanodeSnafu)?;
+            Ok(output.into())
         }
-    }
-
-    /// Handle create database expr.
-    pub async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
-        let database_name = expr.database_name.clone();
-        let expr = AdminExpr {
-            header: Some(ExprHeader {
-                version: PROTOCOL_VERSION,
-            }),
-            expr: Some(admin_expr::Expr::CreateDatabase(expr)),
-        };
-        let result = self
-            .grpc_admin_handler
-            .exec_admin_request(expr)
-            .await
-            .context(error::InvokeGrpcServerSnafu)?;
-        admin_result_to_output(result).context(CreateDatabaseSnafu {
-            name: database_name,
-        })
     }
 
     /// Handle batch inserts
@@ -369,18 +343,17 @@ impl Instance {
             kind: Some(Kind::AddColumns(add_columns)),
         };
 
-        let expr = AdminExpr {
-            header: Some(ExprHeader {
-                version: PROTOCOL_VERSION,
-            }),
-            expr: Some(admin_expr::Expr::Alter(expr)),
-        };
         let result = self
-            .grpc_admin_handler
-            .exec_admin_request(expr)
+            .grpc_query_handler
+            .do_query(ObjectExpr {
+                request: Some(Request::Ddl(DdlRequest {
+                    expr: Some(DdlExpr::Alter(expr)),
+                })),
+            })
             .await
             .context(error::InvokeGrpcServerSnafu)?;
-        admin_result_to_output(result).context(AlterTableOnInsertionSnafu)
+        let output: RpcOutput = result.try_into().context(RequestDatanodeSnafu)?;
+        Ok(output.into())
     }
 
     fn get_catalog(&self, catalog_name: &str) -> Result<CatalogProviderRef> {
@@ -430,19 +403,6 @@ impl Instance {
             .context(error::TableSnafu)
     }
 
-    fn stmt_to_insert_batch(
-        &self,
-        catalog: &str,
-        schema: &str,
-        insert: Box<Insert>,
-    ) -> Result<(Vec<Column>, u32)> {
-        let catalog_provider = self.get_catalog(catalog)?;
-        let schema_provider = Self::get_schema(catalog_provider, schema)?;
-
-        let insert_request = insert_to_request(&schema_provider, *insert)?;
-        insert_request_to_insert_batch(&insert_request)
-    }
-
     fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
         ensure!(
             self.catalog_manager
@@ -486,7 +446,7 @@ impl Instance {
     ) -> server_error::Result<Output> {
         // TODO(sunng87): provide a better form to log or track statement
         let query = &format!("{:?}", &stmt);
-        match stmt {
+        match stmt.clone() {
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
             | Statement::CreateTable(_)
@@ -498,27 +458,7 @@ impl Instance {
             }
             Statement::Insert(insert) => match self.mode {
                 Mode::Standalone => {
-                    let (catalog_name, schema_name, table_name) = insert
-                        .full_table_name()
-                        .context(error::ParseSqlSnafu)
-                        .map_err(BoxedError::new)
-                        .context(server_error::ExecuteInsertSnafu {
-                            msg: "Failed to get table name",
-                        })?;
-
-                    let (columns, row_count) = self
-                        .stmt_to_insert_batch(&catalog_name, &schema_name, insert)
-                        .map_err(BoxedError::new)
-                        .context(server_error::ExecuteQuerySnafu { query })?;
-
-                    let request = InsertRequest {
-                        schema_name,
-                        table_name,
-                        region_number: 0,
-                        columns,
-                        row_count,
-                    };
-                    self.handle_insert(request).await
+                    return self.sql_handler.do_statement_query(stmt, query_ctx).await
                 }
                 Mode::Distributed => {
                     let affected = self
@@ -535,14 +475,19 @@ impl Instance {
                 let expr = AlterExpr::try_from(alter_stmt)
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteAlterSnafu { query })?;
-                let expr = AdminExpr {
-                    header: Some(ExprHeader {
-                        version: PROTOCOL_VERSION,
-                    }),
-                    expr: Some(admin_expr::Expr::Alter(expr)),
-                };
-                let result = self.grpc_admin_handler.exec_admin_request(expr).await?;
-                admin_result_to_output(result).context(error::InvalidAdminResultSnafu)
+                let result = self
+                    .grpc_query_handler
+                    .do_query(ObjectExpr {
+                        request: Some(Request::Ddl(DdlRequest {
+                            expr: Some(DdlExpr::Alter(expr)),
+                        })),
+                    })
+                    .await?;
+                let output: RpcOutput = result
+                    .try_into()
+                    .map_err(BoxedError::new)
+                    .context(server_error::ExecuteQuerySnafu { query })?;
+                Ok(output.into())
             }
             Statement::DropTable(drop_stmt) => {
                 let expr = DropTableExpr {
@@ -550,14 +495,19 @@ impl Instance {
                     schema_name: drop_stmt.schema_name,
                     table_name: drop_stmt.table_name,
                 };
-                let expr = AdminExpr {
-                    header: Some(ExprHeader {
-                        version: PROTOCOL_VERSION,
-                    }),
-                    expr: Some(admin_expr::Expr::DropTable(expr)),
-                };
-                let result = self.grpc_admin_handler.exec_admin_request(expr).await?;
-                admin_result_to_output(result).context(error::InvalidAdminResultSnafu)
+                let result = self
+                    .grpc_query_handler
+                    .do_query(ObjectExpr {
+                        request: Some(Request::Ddl(DdlRequest {
+                            expr: Some(DdlExpr::DropTable(expr)),
+                        })),
+                    })
+                    .await?;
+                let output: RpcOutput = result
+                    .try_into()
+                    .map_err(BoxedError::new)
+                    .context(server_error::ExecuteQuerySnafu { query })?;
+                Ok(output.into())
             }
             Statement::ShowCreateTable(_) => {
                 return server_error::NotSupportedSnafu { feat: query }.fail();
@@ -699,29 +649,15 @@ impl GrpcQueryHandler for Instance {
     }
 }
 
-#[async_trait]
-impl GrpcAdminHandler for Instance {
-    async fn exec_admin_request(&self, mut expr: AdminExpr) -> server_error::Result<AdminResult> {
-        // Force the default to be `None` rather than `Some(0)` comes from gRPC decode.
-        // Related issue: #480
-        if let Some(api::v1::admin_expr::Expr::CreateTable(create)) = &mut expr.expr {
-            create.table_id = None;
-        }
-        self.grpc_admin_handler.exec_admin_request(expr).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::borrow::Cow;
     use std::iter;
     use std::sync::atomic::AtomicU32;
 
     use api::v1::column::SemanticType;
     use api::v1::{
-        admin_expr, admin_result, column, query_request, Column, ColumnDataType,
-        ColumnDef as GrpcColumnDef, ExprHeader, MutateResult, QueryRequest,
+        column, query_request, Column, ColumnDataType, ColumnDef as GrpcColumnDef, QueryRequest,
     };
     use common_grpc::flight::{raw_flight_data_to_message, FlightMessage};
     use common_recordbatch::RecordBatch;
@@ -879,21 +815,18 @@ mod tests {
         };
 
         // create
-        let create_expr = create_expr();
-        let admin_expr = AdminExpr {
-            header: Some(ExprHeader::default()),
-            expr: Some(admin_expr::Expr::CreateTable(create_expr)),
-        };
-        let result = GrpcAdminHandler::exec_admin_request(&*instance, admin_expr)
-            .await
-            .unwrap();
-        assert_matches!(
-            result.result,
-            Some(admin_result::Result::Mutate(MutateResult {
-                success: 1,
-                failure: 0
-            }))
-        );
+        let result = GrpcQueryHandler::do_query(
+            &*instance,
+            ObjectExpr {
+                request: Some(Request::Ddl(DdlRequest {
+                    expr: Some(DdlExpr::CreateTable(create_expr())),
+                })),
+            },
+        )
+        .await
+        .unwrap();
+        let output: RpcOutput = result.try_into().unwrap();
+        assert!(matches!(output, RpcOutput::AffectedRows(1)));
 
         // insert
         let columns = vec![

@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -292,9 +292,9 @@ mod test {
         let stmt = DescribeTable::new("unknown".to_string(), schema_name, table_name.to_string());
 
         let err = describe_table(stmt, catalog_manager).err().unwrap();
-        let err = err.as_any().downcast_ref::<error::InnerError>().unwrap();
+        let err = err.as_any().downcast_ref::<error::Error>().unwrap();
 
-        if let error::InnerError::CatalogNotFound { catalog, .. } = err {
+        if let error::Error::CatalogNotFound { catalog, .. } = err {
             assert_eq!(catalog, "unknown");
         } else {
             panic!("describe table returned incorrect error");
@@ -320,9 +320,9 @@ mod test {
         let stmt = DescribeTable::new(catalog_name, "unknown".to_string(), table_name.to_string());
 
         let err = describe_table(stmt, catalog_manager).err().unwrap();
-        let err = err.as_any().downcast_ref::<error::InnerError>().unwrap();
+        let err = err.as_any().downcast_ref::<error::Error>().unwrap();
 
-        if let error::InnerError::SchemaNotFound { schema, .. } = err {
+        if let error::Error::SchemaNotFound { schema, .. } = err {
             assert_eq!(schema, "unknown");
         } else {
             panic!("describe table returned incorrect error");
@@ -348,9 +348,9 @@ mod test {
         let stmt = DescribeTable::new(catalog_name, schema_name, "unknown".to_string());
 
         let err = describe_table(stmt, catalog_manager).err().unwrap();
-        let err = err.as_any().downcast_ref::<error::InnerError>().unwrap();
+        let err = err.as_any().downcast_ref::<error::Error>().unwrap();
 
-        if let error::InnerError::TableNotFound { table, .. } = err {
+        if let error::Error::TableNotFound { table, .. } = err {
             assert_eq!(table, "unknown");
         } else {
             panic!("describe table returned incorrect error");

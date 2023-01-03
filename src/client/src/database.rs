@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::{
-    object_expr, query_request, DatabaseRequest, InsertRequest, ObjectExpr,
-    ObjectResult as GrpcObjectResult, QueryRequest,
+    object_expr, query_request, AlterExpr, CreateTableExpr, DatabaseRequest, DdlRequest,
+    DropTableExpr, InsertRequest, ObjectExpr, ObjectResult as GrpcObjectResult, QueryRequest,
 };
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{
@@ -26,8 +27,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{ConvertFlightDataSnafu, DatanodeSnafu, IllegalFlightMessagesSnafu};
 use crate::{error, Client, Result};
-
-pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Clone, Debug)]
 pub struct Database {
@@ -75,6 +74,33 @@ impl Database {
 
         let obj_result = self.object(expr).await?;
         obj_result.try_into()
+    }
+
+    pub async fn create(&self, expr: CreateTableExpr) -> Result<RpcOutput> {
+        let expr = ObjectExpr {
+            request: Some(object_expr::Request::Ddl(DdlRequest {
+                expr: Some(DdlExpr::CreateTable(expr)),
+            })),
+        };
+        self.object(expr).await?.try_into()
+    }
+
+    pub async fn alter(&self, expr: AlterExpr) -> Result<RpcOutput> {
+        let expr = ObjectExpr {
+            request: Some(object_expr::Request::Ddl(DdlRequest {
+                expr: Some(DdlExpr::Alter(expr)),
+            })),
+        };
+        self.object(expr).await?.try_into()
+    }
+
+    pub async fn drop_table(&self, expr: DropTableExpr) -> Result<RpcOutput> {
+        let expr = ObjectExpr {
+            request: Some(object_expr::Request::Ddl(DdlRequest {
+                expr: Some(DdlExpr::DropTable(expr)),
+            })),
+        };
+        self.object(expr).await?.try_into()
     }
 
     pub async fn object(&self, expr: ObjectExpr) -> Result<GrpcObjectResult> {

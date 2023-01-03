@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,13 +23,6 @@ use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
 pub enum Error {
     #[snafu(display("Failed to create region, source: {}", source))]
     CreateRegion {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
-    #[snafu(display("Failed to open region, region: {}, source: {}", region_name, source))]
-    OpenRegion {
-        region_name: String,
         #[snafu(backtrace)]
         source: BoxedError,
     },
@@ -179,12 +172,6 @@ pub enum Error {
     },
 }
 
-impl From<Error> for table::error::Error {
-    fn from(e: Error) -> Self {
-        table::error::Error::new(e)
-    }
-}
-
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
@@ -192,7 +179,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateRegion { source, .. } | OpenRegion { source, .. } => source.status_code(),
+            CreateRegion { source, .. } => source.status_code(),
 
             AlterTable { source, .. } => source.status_code(),
 
@@ -242,13 +229,5 @@ mod tests {
             .unwrap();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
         assert!(err.backtrace_opt().is_some());
-    }
-
-    #[test]
-    pub fn test_opaque_error() {
-        let error = throw_create_table(StatusCode::InvalidSyntax).err().unwrap();
-        let table_engine_error: table::error::Error = error.into();
-        assert!(table_engine_error.backtrace_opt().is_some());
-        assert_eq!(StatusCode::InvalidSyntax, table_engine_error.status_code());
     }
 }
