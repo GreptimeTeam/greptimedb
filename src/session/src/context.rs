@@ -22,8 +22,8 @@ pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
 pub struct QueryContext {
-    current_schema: ArcSwapOption<String>,
     current_catalog: ArcSwapOption<String>,
+    current_schema: ArcSwapOption<String>,
 }
 
 impl Default for QueryContext {
@@ -39,15 +39,15 @@ impl QueryContext {
 
     pub fn new() -> Self {
         Self {
-            current_schema: ArcSwapOption::new(None),
             current_catalog: ArcSwapOption::new(None),
+            current_schema: ArcSwapOption::new(None),
         }
     }
 
     pub fn with(catalog: String, schema: String) -> Self {
         Self {
-            current_schema: ArcSwapOption::new(Some(Arc::new(schema))),
             current_catalog: ArcSwapOption::new(Some(Arc::new(catalog))),
+            current_schema: ArcSwapOption::new(Some(Arc::new(schema))),
         }
     }
 
