@@ -29,6 +29,25 @@ pub mod protos {
     include!(concat!(env!("OUT_DIR"), concat!("/", "protos/", "mod.rs")));
 }
 
+impl Entry {
+    pub fn create(id: u64, ns: u64, data: Vec<u8>) -> Self {
+        Self {
+            id,
+            namespace_id: ns,
+            data,
+            ..Default::default()
+        }
+    }
+}
+impl Namespace {
+    pub fn with_id(id: Id) -> Self {
+        Self {
+            id,
+            ..Default::default()
+        }
+    }
+}
+
 impl Hash for Namespace {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);

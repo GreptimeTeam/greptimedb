@@ -30,8 +30,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{
-    CreateDirSnafu, DuplicateFileSnafu, Error, FileNameIllegalSnafu, InternalSnafu,
-    InvalidStateSnafu, IoSnafu, ReadPathSnafu, Result, WaitGcTaskStopSnafu,
+    CreateDirSnafu, DuplicateFileSnafu, Error, FileNameIllegalSnafu, IllegalStateSnafu,
+    InternalSnafu, IoSnafu, ReadPathSnafu, Result, WaitGcTaskStopSnafu,
 };
 use crate::fs::config::LogConfig;
 use crate::fs::entry::EntryImpl;
@@ -285,17 +285,13 @@ impl LogStore for LocalFileLogStore {
             .lock()
             .await
             .take()
-            .context(InvalidStateSnafu {
-                msg: "Logstore gc task not spawned",
-            })?;
+            .context(IllegalStateSnafu)?;
         let token = self
             .cancel_token
             .lock()
             .await
             .take()
-            .context(InvalidStateSnafu {
-                msg: "Logstore gc task not spawned",
-            })?;
+            .context(IllegalStateSnafu)?;
         token.cancel();
         Ok(handle.await.context(WaitGcTaskStopSnafu)?)
     }

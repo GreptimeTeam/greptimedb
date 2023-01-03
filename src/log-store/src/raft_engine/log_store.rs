@@ -14,18 +14,23 @@
 
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_stream::stream;
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::Id;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Namespace as NamespaceTrait;
 use store_api::logstore::{AppendResponse, LogStore};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
-use crate::error::{AddEntryLogBatchSnafu, Error, IllegalStateSnafu, RaftEngineSnafu};
+use crate::error::{
+    AddEntryLogBatchSnafu, Error, IllegalStateSnafu, RaftEngineSnafu, WaitGcTaskStopSnafu,
+};
 use crate::raft_engine::protos::logstore::{Entry, Namespace};
 
 const NAMESPACE_PREFIX: &str = "__sys_namespace_";
@@ -34,6 +39,8 @@ const SYSTEM_NAMESPACE: u64 = 0;
 pub struct RaftEngineLogstore {
     path: String,
     engine: RwLock<Option<Arc<Engine>>>,
+    cancel_token: Mutex<Option<CancellationToken>>,
+    gc_task_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl RaftEngineLogstore {
@@ -41,13 +48,27 @@ impl RaftEngineLogstore {
         Self {
             path: path.as_ref().to_string(),
             engine: RwLock::new(None),
+            cancel_token: Mutex::new(None),
+            gc_task_handle: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_with_engine(engine: Arc<Engine>) -> Self {
+        Self {
+            path: "".to_string(),
+            engine: RwLock::new(Some(engine.clone())),
+            cancel_token: Mutex::new(None),
+            gc_task_handle: Mutex::new(None),
         }
     }
 }
 
 impl Debug for RaftEngineLogstore {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RaftEngineLogstore {{ path: {} }}", self.path)
+        f.debug_struct("RaftEngineLogstore")
+            .field("path", &self.path)
+            .finish()
     }
 }
 
@@ -59,24 +80,58 @@ impl LogStore for RaftEngineLogstore {
 
     async fn start(&self) -> Result<(), Self::Error> {
         let mut engine = self.engine.write().await;
-        let config = Config {
-            dir: self.path.clone(),
-            purge_threshold: ReadableSize::gb(50), // TODO(hl): set according to available disk space
-            recovery_mode: RecoveryMode::TolerateTailCorruption,
-            batch_compression_threshold: ReadableSize::kb(8),
-            target_file_size: ReadableSize::gb(1),
-            ..Default::default()
-        };
-        *engine = Some(Arc::new(
-            Engine::open(config.clone()).context(RaftEngineSnafu)?,
-        ));
-        info!("RaftEngineLogstore started with config: {config:?}");
+        if engine.is_none() {
+            let config = Config {
+                dir: self.path.clone(),
+                purge_threshold: ReadableSize::gb(50), // TODO(hl): set according to available disk space
+                recovery_mode: RecoveryMode::TolerateTailCorruption,
+                batch_compression_threshold: ReadableSize::kb(8),
+                target_file_size: ReadableSize::gb(1),
+                ..Default::default()
+            };
+            *engine = Some(Arc::new(
+                Engine::open(config.clone()).context(RaftEngineSnafu)?,
+            ));
+            info!("RaftEngineLogstore started with config: {config:?}");
+        }
+        let engine_clone = engine.as_ref().unwrap().clone(); // Safety: engine's presence is checked above
+        let interval = Duration::from_secs(60 * 10);
+        let token = CancellationToken::new();
+        let child = token.child_token();
+        let handle = common_runtime::spawn_bg(async move {
+            loop {
+                if let Err(e) = engine_clone.purge_expired_files().context(RaftEngineSnafu) {
+                    error!(e; "Failed to purge files in logstore");
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = child.cancelled() => {
+                        info!("LogStore gc task has been cancelled");
+                        return;
+                    }
+                }
+            }
+        });
+        *self.cancel_token.lock().await = Some(token);
+        *self.gc_task_handle.lock().await = Some(handle);
         Ok(())
     }
 
     async fn stop(&self) -> Result<(), Self::Error> {
-        let mut engine = self.engine.write().await;
-        *engine = None;
+        let handle = self
+            .gc_task_handle
+            .lock()
+            .await
+            .take()
+            .context(IllegalStateSnafu)?;
+        let token = self
+            .cancel_token
+            .lock()
+            .await
+            .take()
+            .context(IllegalStateSnafu)?;
+        token.cancel();
+        handle.await.context(WaitGcTaskStopSnafu)?;
         info!("RaftEngineLogstore stopped");
         Ok(())
     }
@@ -132,7 +187,7 @@ impl LogStore for RaftEngineLogstore {
         let ns = ns.clone();
         common_runtime::spawn_read(async move {
             let mut start_idx = id;
-            while start_idx < last_index {
+            loop {
                 let mut vec = Vec::with_capacity(max_batch_size);
                 match engine
                     .fetch_entries_to::<MessageType>(
@@ -146,7 +201,7 @@ impl LogStore for RaftEngineLogstore {
                 {
                     Ok(_) => {
                         if let Some(last_entry) = vec.last() {
-                            start_idx = last_entry.id;
+                            start_idx = last_entry.id + 1;
                         }
                         // reader side closed, cancel following reads
                         if let Err(_) = tx.send(Ok(vec)).await {
@@ -157,6 +212,10 @@ impl LogStore for RaftEngineLogstore {
                         let _ = tx.send(Err(e)).await;
                         break;
                     }
+                }
+
+                if start_idx >= last_index {
+                    break;
                 }
             }
         });
@@ -255,5 +314,150 @@ impl MessageExt for MessageType {
 
     fn index(e: &Self::Entry) -> u64 {
         e.id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use futures_util::StreamExt;
+    use raft_engine::{Config, Engine, ReadableSize};
+    use store_api::logstore::namespace::Namespace as NamespaceTrait;
+    use store_api::logstore::LogStore;
+    use tempdir::TempDir;
+
+    use crate::raft_engine::log_store::RaftEngineLogstore;
+    use crate::raft_engine::protos::logstore::{Entry, Namespace};
+
+    #[tokio::test]
+    async fn test_open_logstore() {
+        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+        let logstore = RaftEngineLogstore::new(dir.path().to_str().unwrap());
+        logstore.start().await.unwrap();
+        let namespaces = logstore.list_namespaces().await.unwrap();
+        assert_eq!(0, namespaces.len());
+    }
+
+    #[tokio::test]
+    async fn test_manage_namespace() {
+        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+        let mut logstore = RaftEngineLogstore::new(dir.path().to_str().unwrap());
+        logstore.start().await.unwrap();
+        assert!(logstore.list_namespaces().await.unwrap().is_empty());
+
+        logstore
+            .create_namespace(&Namespace::with_id(42))
+            .await
+            .unwrap();
+        let namespaces = logstore.list_namespaces().await.unwrap();
+        assert_eq!(1, namespaces.len());
+        assert_eq!(Namespace::with_id(42), namespaces[0]);
+
+        logstore
+            .delete_namespace(&Namespace::with_id(42))
+            .await
+            .unwrap();
+        assert!(logstore.list_namespaces().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_create_namespace_and_reopen_logstore() {
+        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+        {
+            let mut logstore = RaftEngineLogstore::new(dir.path().to_str().unwrap());
+            logstore.start().await.unwrap();
+            assert!(logstore.list_namespaces().await.unwrap().is_empty());
+
+            logstore
+                .create_namespace(&Namespace::with_id(42))
+                .await
+                .unwrap();
+            let namespaces = logstore.list_namespaces().await.unwrap();
+            assert_eq!(1, namespaces.len());
+            assert_eq!(Namespace::with_id(42), namespaces[0]);
+        }
+        let logstore = RaftEngineLogstore::new(dir.path().to_str().unwrap());
+        logstore.start().await.unwrap();
+        assert_eq!(
+            &Namespace::with_id(42),
+            logstore.list_namespaces().await.unwrap().first().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_append_and_read() {
+        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+        let logstore = RaftEngineLogstore::new(dir.path().to_str().unwrap());
+        logstore.start().await.unwrap();
+
+        let namespace = Namespace::with_id(1);
+        let cnt = 1024;
+        for i in 0..cnt {
+            let response = logstore
+                .append(Entry::create(
+                    i,
+                    namespace.id,
+                    i.to_string().as_bytes().to_vec(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(i, response.entry_id);
+        }
+        let mut entries = HashSet::with_capacity(1024);
+        let mut s = logstore.read(&Namespace::with_id(1), 0).await.unwrap();
+        while let Some(r) = s.next().await {
+            let vec = r.unwrap();
+            entries.extend(vec.into_iter().map(|e| e.id));
+        }
+        assert_eq!(cnt as usize, entries.len());
+    }
+
+    async fn wal_dir_usage(path: impl AsRef<str>) -> usize {
+        let mut size: usize = 0;
+        let mut read_dir = tokio::fs::read_dir(path.as_ref()).await.unwrap();
+        while let Ok(dir_entry) = read_dir.next_entry().await {
+            let Some(entry) = dir_entry else {
+                break;
+            };
+            if entry.file_type().await.unwrap().is_file() {
+                size += entry.metadata().await.unwrap().len() as usize;
+            }
+        }
+        size
+    }
+
+    #[tokio::test]
+    async fn test_compaction() {
+        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+        let engine = Arc::new(
+            Engine::open(Config {
+                dir: dir.path().to_str().unwrap().to_string(),
+                target_file_size: ReadableSize::mb(2),
+                purge_threshold: ReadableSize::mb(4),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let logstore = RaftEngineLogstore::new_with_engine(engine.clone());
+        let namespace = Namespace::with_id(42);
+
+        for id in 0..4096 {
+            let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
+            logstore.append(entry).await.unwrap();
+        }
+
+        println!(
+            "usage: {:?}\n",
+            wal_dir_usage(dir.path().to_str().unwrap()).await
+        );
+        logstore.obsolete(namespace, 4000).await.unwrap();
+        engine.purge_expired_files().unwrap();
+
+        println!(
+            "usage: {:?}\n",
+            wal_dir_usage(dir.path().to_str().unwrap()).await
+        );
     }
 }
