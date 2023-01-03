@@ -21,6 +21,7 @@ mod planner;
 use std::sync::Arc;
 
 use catalog::CatalogListRef;
+use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
@@ -33,14 +34,14 @@ use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{IntoError, OptionExt, ResultExt};
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 use crate::datafusion::planner::{DfContextProviderAdapter, DfPlanner};
-use crate::error::Result;
+use crate::error::{QueryExecutionSnafu, Result};
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
 use crate::physical_optimizer::PhysicalOptimizer;
@@ -71,9 +72,16 @@ impl QueryEngine for DatafusionQueryEngine {
 
     fn sql_to_statement(&self, sql: &str) -> Result<Statement> {
         let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
-            .context(error::ParseSqlSnafu)?;
-        ensure!(1 == statement.len(), error::MultipleStatementsSnafu { sql });
-        Ok(statement.remove(0))
+            .context(error::ParseSqlSnafu)
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)?;
+        if statement.len() != 1 {
+            Err(QueryExecutionSnafu {}.into_error(BoxedError::new(
+                error::MultipleStatementsSnafu { sql }.build(),
+            )))
+        } else {
+            Ok(statement.remove(0))
+        }
     }
 
     fn statement_to_plan(
@@ -138,12 +146,14 @@ impl LogicalOptimizer for DatafusionQueryEngine {
         let _timer = timer!(metric::METRIC_OPTIMIZE_LOGICAL_ELAPSED);
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
-                let optimized_plan =
-                    self.state
-                        .optimize(df_plan)
-                        .context(error::DatafusionSnafu {
-                            msg: "Fail to optimize logical plan",
-                        })?;
+                let optimized_plan = self
+                    .state
+                    .optimize(df_plan)
+                    .context(error::DatafusionSnafu {
+                        msg: "Fail to optimize logical plan",
+                    })
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
 
                 Ok(LogicalPlan::DfPlan(optimized_plan))
             }
@@ -161,18 +171,24 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         let _timer = timer!(metric::METRIC_CREATE_PHYSICAL_ELAPSED);
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
-                let physical_plan = self.state.create_physical_plan(df_plan).await.context(
-                    error::DatafusionSnafu {
+                let physical_plan = self
+                    .state
+                    .create_physical_plan(df_plan)
+                    .await
+                    .context(error::DatafusionSnafu {
                         msg: "Fail to create physical plan",
-                    },
-                )?;
+                    })
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
 
                 Ok(Arc::new(PhysicalPlanAdapter::new(
                     Arc::new(
                         physical_plan
                             .schema()
                             .try_into()
-                            .context(error::ConvertSchemaSnafu)?,
+                            .context(error::ConvertSchemaSnafu)
+                            .map_err(BoxedError::new)
+                            .context(QueryExecutionSnafu)?,
                     ),
                     physical_plan,
                 )))
@@ -192,15 +208,19 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
         let new_plan = plan
             .as_any()
             .downcast_ref::<PhysicalPlanAdapter>()
-            .context(error::PhysicalPlanDowncastSnafu)?
+            .context(error::PhysicalPlanDowncastSnafu)
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)?
             .df_plan();
 
-        let new_plan =
-            self.state
-                .optimize_physical_plan(new_plan)
-                .context(error::DatafusionSnafu {
-                    msg: "Fail to optimize physical plan",
-                })?;
+        let new_plan = self
+            .state
+            .optimize_physical_plan(new_plan)
+            .context(error::DatafusionSnafu {
+                msg: "Fail to optimize physical plan",
+            })
+            .map_err(BoxedError::new)
+            .context(QueryExecutionSnafu)?;
         Ok(Arc::new(PhysicalPlanAdapter::new(plan.schema(), new_plan)))
     }
 }
@@ -217,20 +237,26 @@ impl QueryExecutor for DatafusionQueryEngine {
             0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
             1 => Ok(plan
                 .execute(0, ctx.state().task_ctx())
-                .context(error::ExecutePhysicalPlanSnafu)?),
+                .context(error::ExecutePhysicalPlanSnafu)
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu))?,
             _ => {
                 // merge into a single partition
                 let plan =
                     CoalescePartitionsExec::new(Arc::new(DfPhysicalPlanAdapter(plan.clone())));
                 // CoalescePartitionsExec must produce a single partition
                 assert_eq!(1, plan.output_partitioning().partition_count());
-                let df_stream =
-                    plan.execute(0, ctx.state().task_ctx())
-                        .context(error::DatafusionSnafu {
-                            msg: "Failed to execute DataFusion merge exec",
-                        })?;
+                let df_stream = plan
+                    .execute(0, ctx.state().task_ctx())
+                    .context(error::DatafusionSnafu {
+                        msg: "Failed to execute DataFusion merge exec",
+                    })
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
                 let stream = RecordBatchStreamAdapter::try_new(df_stream)
-                    .context(error::ConvertDfRecordBatchStreamSnafu)?;
+                    .context(error::ConvertDfRecordBatchStreamSnafu)
+                    .map_err(BoxedError::new)
+                    .context(QueryExecutionSnafu)?;
                 Ok(Box::pin(stream))
             }
         }

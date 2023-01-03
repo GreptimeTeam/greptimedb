@@ -18,11 +18,9 @@ use common_error::prelude::*;
 use datafusion::error::DataFusionError;
 use snafu::{Backtrace, ErrorCompat, Snafu};
 
-common_error::define_opaque_error!(Error);
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
-pub enum InnerError {
+pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
 
@@ -58,11 +56,17 @@ pub enum InnerError {
         #[snafu(backtrace)]
         source: common_recordbatch::error::Error,
     },
+
+    #[snafu(display("Failure during query execution, source: {}", source))]
+    QueryExecution { source: BoxedError },
+
+    #[snafu(display("Failure during query planning, source: {}", source))]
+    QueryPlan { source: BoxedError },
 }
 
-impl ErrorExt for InnerError {
+impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
-        use InnerError::*;
+        use Error::*;
 
         match self {
             UnsupportedExpr { .. }
@@ -72,6 +76,7 @@ impl ErrorExt for InnerError {
             Catalog { source } => source.status_code(),
             VectorComputation { source } => source.status_code(),
             CreateRecordBatch { source } => source.status_code(),
+            QueryExecution { source } | QueryPlan { source } => source.status_code(),
         }
     }
 
@@ -84,22 +89,10 @@ impl ErrorExt for InnerError {
     }
 }
 
-impl From<InnerError> for Error {
-    fn from(e: InnerError) -> Error {
-        Error::new(e)
-    }
-}
-
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
-    }
-}
-
-impl From<catalog::error::Error> for Error {
-    fn from(e: catalog::error::Error) -> Self {
-        Error::new(e)
     }
 }

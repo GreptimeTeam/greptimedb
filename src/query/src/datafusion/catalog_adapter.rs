@@ -17,10 +17,11 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use catalog::error::Error;
+use catalog::error::{self as catalog_error, Error};
 use catalog::{
     CatalogListRef, CatalogProvider, CatalogProviderRef, SchemaProvider, SchemaProviderRef,
 };
+use common_error::prelude::BoxedError;
 use datafusion::catalog::catalog::{
     CatalogList as DfCatalogList, CatalogProvider as DfCatalogProvider,
 };
@@ -224,7 +225,9 @@ impl SchemaProvider for SchemaProviderAdapter {
             .register_table(name, table_provider)
             .context(error::DatafusionSnafu {
                 msg: "Fail to register table to datafusion",
-            })?
+            })
+            .map_err(BoxedError::new)
+            .context(catalog_error::SchemaProviderOperationSnafu)?
             .map(|_| table))
     }
 
@@ -233,9 +236,14 @@ impl SchemaProvider for SchemaProviderAdapter {
             .deregister_table(name)
             .context(error::DatafusionSnafu {
                 msg: "Fail to deregister table from datafusion",
-            })?
+            })
+            .map_err(BoxedError::new)
+            .context(catalog_error::SchemaProviderOperationSnafu)?
             .map(|table| {
-                let adapter = TableAdapter::new(table).context(error::TableSchemaMismatchSnafu)?;
+                let adapter = TableAdapter::new(table)
+                    .context(error::TableSchemaMismatchSnafu)
+                    .map_err(BoxedError::new)
+                    .context(catalog_error::SchemaProviderOperationSnafu)?;
                 Ok(Arc::new(adapter) as _)
             })
             .transpose()

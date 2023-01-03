@@ -33,72 +33,60 @@ pub trait ErrorExt: std::error::Error {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// A helper macro to define a opaque boxed error based on errors that implement [ErrorExt] trait.
-#[macro_export]
-macro_rules! define_opaque_error {
-    ($Error:ident) => {
-        /// An error behaves like `Box<dyn Error>`.
-        ///
-        /// Define this error as a new type instead of using `Box<dyn Error>` directly so we can implement
-        /// more methods or traits for it.
-        pub struct $Error {
-            inner: Box<dyn $crate::ext::ErrorExt + Send + Sync>,
-        }
-
-        impl $Error {
-            pub fn new<E: $crate::ext::ErrorExt + Send + Sync + 'static>(err: E) -> Self {
-                Self {
-                    inner: Box::new(err),
-                }
-            }
-        }
-
-        impl std::fmt::Debug for $Error {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                // Use the pretty debug format of inner error for opaque error.
-                let debug_format = $crate::format::DebugFormat::new(&*self.inner);
-                debug_format.fmt(f)
-            }
-        }
-
-        impl std::fmt::Display for $Error {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}", self.inner)
-            }
-        }
-
-        impl std::error::Error for $Error {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                self.inner.source()
-            }
-        }
-
-        impl $crate::ext::ErrorExt for $Error {
-            fn status_code(&self) -> $crate::status_code::StatusCode {
-                self.inner.status_code()
-            }
-
-            fn backtrace_opt(&self) -> Option<&$crate::snafu::Backtrace> {
-                self.inner.backtrace_opt()
-            }
-
-            fn as_any(&self) -> &dyn std::any::Any {
-                self.inner.as_any()
-            }
-        }
-
-        // Implement ErrorCompat for this opaque error so the backtrace is also available
-        // via `ErrorCompat::backtrace()`.
-        impl $crate::snafu::ErrorCompat for $Error {
-            fn backtrace(&self) -> Option<&$crate::snafu::Backtrace> {
-                self.inner.backtrace_opt()
-            }
-        }
-    };
+/// An opaque boxed error based on errors that implement [ErrorExt] trait.
+pub struct BoxedError {
+    inner: Box<dyn crate::ext::ErrorExt + Send + Sync>,
 }
 
-// Define a general boxed error.
-define_opaque_error!(BoxedError);
+impl BoxedError {
+    pub fn new<E: crate::ext::ErrorExt + Send + Sync + 'static>(err: E) -> Self {
+        Self {
+            inner: Box::new(err),
+        }
+    }
+}
+
+impl std::fmt::Debug for BoxedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Use the pretty debug format of inner error for opaque error.
+        let debug_format = crate::format::DebugFormat::new(&*self.inner);
+        debug_format.fmt(f)
+    }
+}
+
+impl std::fmt::Display for BoxedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+impl std::error::Error for BoxedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.inner.source()
+    }
+}
+
+impl crate::ext::ErrorExt for BoxedError {
+    fn status_code(&self) -> crate::status_code::StatusCode {
+        self.inner.status_code()
+    }
+
+    fn backtrace_opt(&self) -> Option<&crate::snafu::Backtrace> {
+        self.inner.backtrace_opt()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self.inner.as_any()
+    }
+}
+
+// Implement ErrorCompat for this opaque error so the backtrace is also available
+// via `ErrorCompat::backtrace()`.
+impl crate::snafu::ErrorCompat for BoxedError {
+    fn backtrace(&self) -> Option<&crate::snafu::Backtrace> {
+        self.inner.backtrace_opt()
+    }
+}
 
 #[cfg(test)]
 mod tests {

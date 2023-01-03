@@ -22,6 +22,7 @@ use api::v1::AlterExpr;
 use async_trait::async_trait;
 use client::{Database, RpcOutput};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_error::prelude::BoxedError;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
@@ -40,7 +41,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::{Peer, TableName};
 use snafu::prelude::*;
 use store_api::storage::RegionNumber;
-use table::error::Error as TableError;
+use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::requests::InsertRequest;
 use table::Table;
@@ -83,12 +84,23 @@ impl Table for DistTable {
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
-        let partition_rule = self.find_partition_rule().await.map_err(TableError::new)?;
+        let partition_rule = self
+            .find_partition_rule()
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
 
         let spliter = WriteSpliter::with_partition_rule(partition_rule);
-        let inserts = spliter.split(request).map_err(TableError::new)?;
+        let inserts = spliter
+            .split(request)
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
 
-        let output = self.dist_insert(inserts).await.map_err(TableError::new)?;
+        let output = self
+            .dist_insert(inserts)
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
         let RpcOutput::AffectedRows(rows) = output else { unreachable!() };
         Ok(rows)
     }
@@ -99,15 +111,21 @@ impl Table for DistTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> table::Result<PhysicalPlanRef> {
-        let partition_rule = self.find_partition_rule().await.map_err(TableError::new)?;
+        let partition_rule = self
+            .find_partition_rule()
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
 
         let regions = self
             .find_regions(partition_rule, filters)
-            .map_err(TableError::new)?;
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
         let datanodes = self
             .find_datanodes(regions)
             .await
-            .map_err(TableError::new)?;
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)?;
 
         let mut partition_execs = Vec::with_capacity(datanodes.len());
         for (datanode, _regions) in datanodes.iter() {
