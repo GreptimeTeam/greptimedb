@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod instant_manipulate;
 mod normalize;
 
+use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
+pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantManipulateStream};
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
+
+type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
