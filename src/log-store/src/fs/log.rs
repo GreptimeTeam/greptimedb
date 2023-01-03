@@ -712,6 +712,7 @@ mod tests {
             max_log_file_size: 4096,
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             gc_interval: Duration::from_millis(100),
+            ..Default::default()
         };
         let logstore = LocalFileLogStore::open(&config).await.unwrap();
         logstore.start().await.unwrap();

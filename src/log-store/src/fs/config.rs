@@ -20,6 +20,7 @@ pub struct LogConfig {
     pub max_log_file_size: usize,
     pub log_file_dir: String,
     pub gc_interval: Duration,
+    pub purge_threshold: usize,
 }
 
 impl Default for LogConfig {
@@ -31,6 +32,7 @@ impl Default for LogConfig {
             max_log_file_size: 1024 * 1024 * 1024,
             log_file_dir: "/tmp/greptimedb".to_string(),
             gc_interval: Duration::from_secs(10 * 60),
+            purge_threshold: 1024 * 1024 * 1024 * 50,
         }
     }
 }
@@ -49,5 +51,6 @@ mod tests {
         assert_eq!(1024 * 1024 * 1024, default.max_log_file_size);
         assert_eq!(128, default.append_buffer_size);
         assert_eq!(Duration::from_secs(600), default.gc_interval);
+        assert_eq!(1024 * 1024 * 1024 * 50, default.purge_threshold);
     }
 }

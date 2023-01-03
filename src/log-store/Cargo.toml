@@ -32,3 +32,4 @@ protobuf = { version = "2", features=["bytes"] }
 
 [dev-dependencies]
 rand = "0.8"
+fs2 = "0.4"
