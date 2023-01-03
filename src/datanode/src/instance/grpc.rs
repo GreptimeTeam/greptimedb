@@ -46,10 +46,7 @@ impl Instance {
                     .map(|s| s.status_code())
                     .unwrap_or(StatusCode::Internal);
 
-                let err_msg = e
-                    .source()
-                    .map(|s| s.to_string())
-                    .unwrap_or(e.to_string());
+                let err_msg = e.source().map(|s| s.to_string()).unwrap_or(e.to_string());
 
                 // TODO(LFC): Further formalize error message when Arrow Flight adoption is done,
                 // and don't forget to change "test runner"'s error msg accordingly.
