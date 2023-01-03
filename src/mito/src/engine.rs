@@ -453,8 +453,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 .open_region(&engine_ctx, &region_name, &opts)
                 .await
                 .map_err(BoxedError::new)
-                .context(error::OpenRegionSnafu { region_name })
-                .map_err(BoxedError::new)
                 .context(table_error::TableOperationSnafu)?
             {
                 None => return Ok(None),

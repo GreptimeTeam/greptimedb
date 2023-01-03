@@ -27,13 +27,6 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to open region, region: {}, source: {}", region_name, source))]
-    OpenRegion {
-        region_name: String,
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
     #[snafu(display(
         "Failed to build table meta for table: {}, source: {}",
         table_name,
@@ -186,7 +179,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateRegion { source, .. } | OpenRegion { source, .. } => source.status_code(),
+            CreateRegion { source, .. } => source.status_code(),
 
             AlterTable { source, .. } => source.status_code(),
 
