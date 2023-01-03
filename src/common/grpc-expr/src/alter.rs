@@ -28,7 +28,7 @@ use crate::error::{
 };
 
 /// Convert an [`AlterExpr`] to an optional [`AlterTableRequest`]
-pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest>> {
+pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
     let catalog_name = if expr.catalog_name.is_empty() {
         None
     } else {
@@ -39,8 +39,9 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
     } else {
         Some(expr.schema_name)
     };
-    match expr.kind {
-        Some(Kind::AddColumns(add_columns)) => {
+    let kind = expr.kind.context(MissingFieldSnafu { field: "kind" })?;
+    match kind {
+        Kind::AddColumns(add_columns) => {
             let add_column_requests = add_columns
                 .add_columns
                 .into_iter()
@@ -72,9 +73,9 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
                 table_name: expr.table_name,
                 alter_kind,
             };
-            Ok(Some(request))
+            Ok(request)
         }
-        Some(Kind::DropColumns(DropColumns { drop_columns })) => {
+        Kind::DropColumns(DropColumns { drop_columns }) => {
             let alter_kind = AlterKind::DropColumns {
                 names: drop_columns.into_iter().map(|c| c.name).collect(),
             };
@@ -85,9 +86,9 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
                 table_name: expr.table_name,
                 alter_kind,
             };
-            Ok(Some(request))
+            Ok(request)
         }
-        Some(Kind::RenameTable(RenameTable { new_table_name })) => {
+        Kind::RenameTable(RenameTable { new_table_name }) => {
             let alter_kind = AlterKind::RenameTable { new_table_name };
             let request = AlterTableRequest {
                 catalog_name,
@@ -95,9 +96,8 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<Option<AlterTableRequest
                 table_name: expr.table_name,
                 alter_kind,
             };
-            Ok(Some(request))
+            Ok(request)
         }
-        None => Ok(None),
     }
 }
 
@@ -218,7 +218,7 @@ mod tests {
             })),
         };
 
-        let alter_request = alter_expr_to_request(expr).unwrap().unwrap();
+        let alter_request = alter_expr_to_request(expr).unwrap();
         assert_eq!(None, alter_request.catalog_name);
         assert_eq!(None, alter_request.schema_name);
         assert_eq!("monitor".to_string(), alter_request.table_name);
@@ -249,7 +249,7 @@ mod tests {
             })),
         };
 
-        let alter_request = alter_expr_to_request(expr).unwrap().unwrap();
+        let alter_request = alter_expr_to_request(expr).unwrap();
         assert_eq!(Some("test_catalog".to_string()), alter_request.catalog_name);
         assert_eq!(Some("test_schema".to_string()), alter_request.schema_name);
         assert_eq!("monitor".to_string(), alter_request.table_name);

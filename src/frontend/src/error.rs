@@ -106,9 +106,9 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to execute OpenTSDB put, reason: {}", reason))]
-    ExecOpentsdbPut {
-        reason: String,
+    #[snafu(display("Invalid Flight ticket, source: {}", source))]
+    InvalidFlightTicket {
+        source: api::DecodeError,
         backtrace: Backtrace,
     },
 
@@ -263,8 +263,11 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display("Failed to deserialize insert batching: {}", source))]
-    DeserializeInsertBatch {
+    #[snafu(display(
+        "Failed to convert GRPC InsertRequest to table InsertRequest, source: {}",
+        source
+    ))]
+    ToTableInsertRequest {
         #[snafu(backtrace)]
         source: common_grpc_expr::error::Error,
     },
@@ -424,6 +427,32 @@ pub enum Error {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
+
+    #[snafu(display("Failed to do Flight get, source: {}", source))]
+    FlightGet {
+        source: tonic::Status,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid FlightData, source: {}", source))]
+    InvalidFlightData {
+        #[snafu(backtrace)]
+        source: common_grpc::Error,
+    },
+
+    #[snafu(display("Not found context value: {}", key))]
+    NotFoundContextValue { key: String, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Failed to build table meta for table: {}, source: {}",
+        table_name,
+        source
+    ))]
+    BuildTableMeta {
+        table_name: String,
+        source: table::metadata::TableMetaBuilderError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -439,7 +468,8 @@ impl ErrorExt for Error {
             | Error::FindPartitionColumn { .. }
             | Error::ColumnValuesNumberMismatch { .. }
             | Error::CatalogManager { .. }
-            | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
+            | Error::RegionKeysSize { .. }
+            | Error::InvalidFlightTicket { .. } => StatusCode::InvalidArguments,
 
             Error::RuntimeResource { source, .. } => source.status_code(),
 
@@ -475,12 +505,13 @@ impl ErrorExt for Error {
             | Error::FindLeaderPeer { .. }
             | Error::FindRegionPartition { .. }
             | Error::IllegalTableRoutesData { .. }
-            | Error::BuildDfLogicalPlan { .. } => StatusCode::Internal,
+            | Error::BuildDfLogicalPlan { .. }
+            | Error::FlightGet { .. }
+            | Error::BuildTableMeta { .. } => StatusCode::Internal,
 
-            Error::IllegalFrontendState { .. } | Error::IncompleteGrpcResult { .. } => {
-                StatusCode::Unexpected
-            }
-            Error::ExecOpentsdbPut { .. } => StatusCode::Internal,
+            Error::IllegalFrontendState { .. }
+            | Error::IncompleteGrpcResult { .. }
+            | Error::NotFoundContextValue { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
@@ -500,7 +531,7 @@ impl ErrorExt for Error {
             | Error::Insert { source, .. } => source.status_code(),
             Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
             Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
-            Error::DeserializeInsertBatch { source, .. } => source.status_code(),
+            Error::ToTableInsertRequest { source, .. } => source.status_code(),
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
             Error::ExecuteStatement { source, .. } => source.status_code(),
@@ -511,6 +542,7 @@ impl ErrorExt for Error {
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
             Error::BuildVector { source, .. } => source.status_code(),
+            Error::InvalidFlightData { source } => source.status_code(),
         }
     }
 
@@ -520,5 +552,11 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl From<Error> for tonic::Status {
+    fn from(err: Error) -> Self {
+        tonic::Status::new(tonic::Code::Internal, err.to_string())
     }
 }

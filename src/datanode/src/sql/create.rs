@@ -106,7 +106,7 @@ impl SqlHandler {
             .context(InsertSystemCatalogSnafu)?;
         info!("Successfully created table: {:?}", table_name);
         // TODO(hl): maybe support create multiple tables
-        Ok(Output::AffectedRows(1))
+        Ok(Output::AffectedRows(0))
     }
 
     /// Converts [CreateTable] to [SqlRequest::CreateTable].

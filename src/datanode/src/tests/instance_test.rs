@@ -41,7 +41,7 @@ async fn test_create_database_and_insert_query() {
 )"#,
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    assert!(matches!(output, Output::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
@@ -89,7 +89,7 @@ async fn test_issue477_same_table_name_in_different_databases() {
 )"#,
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    assert!(matches!(output, Output::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
@@ -100,7 +100,7 @@ async fn test_issue477_same_table_name_in_different_databases() {
 )"#,
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    assert!(matches!(output, Output::AffectedRows(0)));
 
     // Insert different data into a.demo and b.demo
     let output = execute_sql(
@@ -351,7 +351,7 @@ pub async fn test_execute_create() {
                         ) engine=mito with(regions=1);"#,
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    assert!(matches!(output, Output::AffectedRows(0)));
 }
 
 async fn check_output_stream(output: Output, expected: String) {
@@ -458,7 +458,7 @@ async fn test_insert_with_default_value_for_type(type_name: &str) {
     ) engine=mito with(regions=1);"#,
     );
     let output = execute_sql(&instance, &create_sql).await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    assert!(matches!(output, Output::AffectedRows(0)));
 
     // Insert with ts.
     let output = execute_sql(
@@ -508,7 +508,7 @@ async fn test_use_database() {
         "db1",
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    assert!(matches!(output, Output::AffectedRows(0)));
 
     let output = execute_sql_in_db(&instance, "show tables", "db1").await;
     let expected = "\

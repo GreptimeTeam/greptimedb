@@ -28,6 +28,8 @@ use crate::error::Result;
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
 use crate::requests::{AlterTableRequest, InsertRequest};
 
+pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
+
 /// Table abstraction.
 #[async_trait]
 pub trait Table: Send + Sync {
@@ -69,7 +71,7 @@ pub trait Table: Send + Sync {
         Ok(FilterPushDownType::Unsupported)
     }
 
-    async fn alter(&self, request: AlterTableRequest) -> Result<()> {
+    async fn alter(&self, _context: AlterContext, request: AlterTableRequest) -> Result<()> {
         let _ = request;
         unimplemented!()
     }

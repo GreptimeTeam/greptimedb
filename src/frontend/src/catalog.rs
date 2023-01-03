@@ -118,11 +118,15 @@ impl CatalogManager for FrontendCatalogManager {
 
     fn table(
         &self,
-        _catalog: &str,
-        _schema: &str,
-        _table_name: &str,
+        catalog: &str,
+        schema: &str,
+        table_name: &str,
     ) -> catalog::error::Result<Option<TableRef>> {
-        unimplemented!()
+        self.schema(catalog, schema)?
+            .context(catalog::error::SchemaNotFoundSnafu {
+                schema_info: schema,
+            })?
+            .table(table_name)
     }
 }
 
@@ -302,6 +306,7 @@ impl SchemaProvider for FrontendSchemaProvider {
                     ),
                     table_routes,
                     datanode_clients,
+                    backend,
                 ));
                 Ok(Some(table as _))
             })

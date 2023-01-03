@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anymap = "1.0.0-beta.2"
+arrow-flight.workspace = true
 api = { path = "../api" }
 async-stream.workspace = true
 async-trait = "0.1"
@@ -21,7 +22,6 @@ common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
-common-time = { path = "../common/time" }
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
@@ -45,12 +45,12 @@ sql = { path = "../sql" }
 store-api = { path = "../store-api" }
 substrait = { path = "../common/substrait" }
 table = { path = "../table" }
-tokio = { version = "1.18", features = ["full"] }
+tokio.workspace = true
+tonic.workspace = true
 
 [dev-dependencies]
 datanode = { path = "../datanode" }
 futures = "0.3"
 meta-srv = { path = "../meta-srv", features = ["mock"] }
 tempdir = "0.3"
-tonic = "0.8"
 tower = "0.4"

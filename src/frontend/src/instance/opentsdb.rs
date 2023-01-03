@@ -72,7 +72,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_exec() {
-        let (instance, _guard) = tests::create_frontend_instance("test_exec").await;
+        let (instance, _guard) = tests::create_standalone_instance("test_exec").await;
         instance
             .exec(
                 &DataPoint::try_create(
@@ -91,7 +91,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_insert_opentsdb_metric() {
         let (instance, _guard) =
-            tests::create_frontend_instance("test_insert_opentsdb_metric").await;
+            tests::create_standalone_instance("test_insert_opentsdb_metric").await;
 
         let data_point1 = DataPoint::new(
             "my_metric_1".to_string(),

@@ -67,8 +67,6 @@ impl Instance {
 
     pub(crate) async fn handle_alter(&self, expr: AlterExpr) -> Result<Output> {
         let request = alter_expr_to_request(expr).context(AlterExprToRequestSnafu)?;
-        let Some(request) = request else { return Ok(Output::AffectedRows(0)) };
-
         self.sql_handler()
             .execute(SqlRequest::Alter(request), QueryContext::arc())
             .await
