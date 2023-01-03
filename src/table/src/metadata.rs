@@ -132,6 +132,8 @@ impl TableMeta {
         match alter_kind {
             AlterKind::AddColumns { columns } => self.add_columns(table_name, columns),
             AlterKind::DropColumns { names } => self.remove_columns(table_name, names),
+            // No need to rebuild table meta when renaming tables.
+            AlterKind::RenameTable { .. } => Ok(TableMetaBuilder::default()),
         }
     }
 

@@ -80,6 +80,7 @@ pub struct AddColumnRequest {
 pub enum AlterKind {
     AddColumns { columns: Vec<AddColumnRequest> },
     DropColumns { names: Vec<String> },
+    RenameTable { new_table_name: String },
 }
 
 /// Drop table request
