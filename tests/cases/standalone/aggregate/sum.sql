@@ -18,7 +18,6 @@ CREATE TABLE doubles(n DOUBLE, ts BIGINT TIME INDEX);
 
 INSERT INTO doubles (n, ts) VALUES (9007199254740992, 1), (1, 2), (1, 3), (0, 4);
 
--- returns wrong result, https://github.com/GreptimeTeam/greptimedb/issues/829 --
 SELECT sum(n) from doubles;
 
 DROP TABLE bigints;
