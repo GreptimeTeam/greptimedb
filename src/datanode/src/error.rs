@@ -404,6 +404,7 @@ impl From<Error> for tonic::Status {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as StdError;
     use std::str::FromStr;
 
     use common_error::ext::BoxedError;
@@ -435,8 +436,15 @@ mod tests {
     }
 
     fn assert_tonic_internal_error(err: Error) {
+        let status_code = err.status_code();
+        let err_string = err.to_string();
+
         let s: tonic::Status = err.into();
-        assert_eq!(s.code(), tonic::Code::Internal);
+        assert_eq!(s.code(), tonic::Code::Unknown);
+
+        let source = s.source().unwrap().downcast_ref::<Error>().unwrap();
+        assert_eq!(source.status_code(), status_code);
+        assert_eq!(source.to_string(), err_string);
     }
 
     #[test]
