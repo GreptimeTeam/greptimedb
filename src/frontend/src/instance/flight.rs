@@ -517,7 +517,7 @@ CREATE TABLE {table_name} (
         let table = table.as_any().downcast_ref::<DistTable>().unwrap();
 
         let TableGlobalValue { regions_id_map, .. } = table
-            .table_global_value(TableGlobalKey {
+            .table_global_value(&TableGlobalKey {
                 catalog_name: "greptime".to_string(),
                 schema_name: "public".to_string(),
                 table_name: table_name.to_string(),

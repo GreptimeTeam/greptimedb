@@ -385,7 +385,10 @@ impl DistTable {
         Ok(partition_rule)
     }
 
-    async fn table_global_value(&self, key: &TableGlobalKey) -> Result<Option<TableGlobalValue>> {
+    pub(crate) async fn table_global_value(
+        &self,
+        key: &TableGlobalKey,
+    ) -> Result<Option<TableGlobalValue>> {
         let raw = self
             .backend
             .get(key.to_string().as_bytes())
