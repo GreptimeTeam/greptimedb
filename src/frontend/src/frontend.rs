@@ -33,6 +33,7 @@ use crate::server::Services;
 use crate::Plugins;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FrontendOptions {
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,

@@ -398,12 +398,13 @@ impl ErrorExt for Error {
 
 impl From<Error> for tonic::Status {
     fn from(err: Error) -> Self {
-        tonic::Status::new(tonic::Code::Internal, err.to_string())
+        tonic::Status::from_error(Box::new(err))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as StdError;
     use std::str::FromStr;
 
     use common_error::ext::BoxedError;
@@ -435,8 +436,15 @@ mod tests {
     }
 
     fn assert_tonic_internal_error(err: Error) {
+        let status_code = err.status_code();
+        let err_string = err.to_string();
+
         let s: tonic::Status = err.into();
-        assert_eq!(s.code(), tonic::Code::Internal);
+        assert_eq!(s.code(), tonic::Code::Unknown);
+
+        let source = s.source().unwrap().downcast_ref::<Error>().unwrap();
+        assert_eq!(source.status_code(), status_code);
+        assert_eq!(source.to_string(), err_string);
     }
 
     #[test]

@@ -76,13 +76,9 @@ impl SqlHandler {
             AlterTableOperation::DropColumn { name } => AlterKind::DropColumns {
                 names: vec![name.value.clone()],
             },
-            AlterTableOperation::RenameTable { .. } => {
-                // TODO update proto to support alter table name
-                return error::InvalidSqlSnafu {
-                    msg: "rename table not unsupported yet".to_string(),
-                }
-                .fail();
-            }
+            AlterTableOperation::RenameTable { new_table_name } => AlterKind::RenameTable {
+                new_table_name: new_table_name.clone(),
+            },
         };
         Ok(AlterTableRequest {
             catalog_name: Some(table_ref.catalog.to_string()),
@@ -145,9 +141,21 @@ mod tests {
     async fn test_alter_to_request_with_renaming_table() {
         let handler = create_mock_sql_handler().await;
         let alter_table = parse_sql("ALTER TABLE test_table RENAME table_t;");
-        let err = handler
+        let req = handler
             .alter_to_request(alter_table, TableReference::bare("test_table"))
-            .unwrap_err();
-        assert_matches!(err, crate::error::Error::InvalidSql { .. });
+            .unwrap();
+        assert_eq!(req.catalog_name, Some("greptime".to_string()));
+        assert_eq!(req.schema_name, Some("public".to_string()));
+        assert_eq!(req.table_name, "test_table");
+
+        let alter_kind = req.alter_kind;
+        assert_matches!(alter_kind, AlterKind::RenameTable { .. });
+
+        match alter_kind {
+            AlterKind::RenameTable { new_table_name } => {
+                assert_eq!(new_table_name, "table_t");
+            }
+            _ => unreachable!(),
+        }
     }
 }

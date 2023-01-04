@@ -63,6 +63,7 @@ impl SubCommand {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StandaloneOptions {
     pub http_options: Option<HttpOptions>,
     pub grpc_options: Option<GrpcOptions>,

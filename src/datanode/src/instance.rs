@@ -202,28 +202,45 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
 }
 
 pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
-    let (root, secret_key, key_id, bucket) = match store_config {
+    let (root, secret_key, key_id, bucket, endpoint, region) = match store_config {
         ObjectStoreConfig::S3 {
             bucket,
             root,
             access_key_id,
             secret_access_key,
-        } => (root, secret_access_key, access_key_id, bucket),
+            endpoint,
+            region,
+        } => (
+            root,
+            secret_access_key,
+            access_key_id,
+            bucket,
+            endpoint,
+            region,
+        ),
         _ => unreachable!(),
     };
 
     let root = util::normalize_dir(root);
     info!("The s3 storage bucket is: {}, root is: {}", bucket, &root);
 
-    let accessor = S3Builder::default()
+    let mut builder = S3Builder::default();
+    let mut builder = builder
         .root(&root)
         .bucket(bucket)
         .access_key_id(key_id)
-        .secret_access_key(secret_key)
-        .build()
-        .with_context(|_| error::InitBackendSnafu {
-            config: store_config.clone(),
-        })?;
+        .secret_access_key(secret_key);
+
+    if let Some(endpoint) = endpoint {
+        builder = builder.endpoint(endpoint);
+    }
+    if let Some(region) = region {
+        builder = builder.region(region);
+    }
+
+    let accessor = builder.build().with_context(|_| error::InitBackendSnafu {
+        config: store_config.clone(),
+    })?;
 
     Ok(ObjectStore::new(accessor))
 }

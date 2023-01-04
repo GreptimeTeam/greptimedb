@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+bytemuck = "1.12"
 catalog = { path = "../catalog" }
 common-error = { path = "../common/error" }
 common-catalog = { path = "../common/catalog" }

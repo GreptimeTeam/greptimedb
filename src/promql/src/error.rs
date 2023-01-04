@@ -51,6 +51,21 @@ pub enum Error {
         expr: PromExpr,
         backtrace: Backtrace,
     },
+    #[snafu(display(
+        "Illegal range: offset {}, length {}, array len {}",
+        offset,
+        length,
+        len
+    ))]
+    IllegalRange {
+        offset: u32,
+        length: u32,
+        len: usize,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Empty range is not expected"))]
+    EmptyRange { backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -61,9 +76,11 @@ impl ErrorExt for Error {
             | UnsupportedExpr { .. }
             | MultipleVector { .. }
             | ExpectExpr { .. } => StatusCode::InvalidArguments,
-            UnknownTable { .. } | DataFusion { .. } | UnexpectedPlanExpr { .. } => {
-                StatusCode::Internal
-            }
+            UnknownTable { .. }
+            | DataFusion { .. }
+            | UnexpectedPlanExpr { .. }
+            | IllegalRange { .. }
+            | EmptyRange { .. } => StatusCode::Internal,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {
