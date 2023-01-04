@@ -99,6 +99,8 @@ fn get_test_store_config(
                 bucket,
                 access_key_id: key_id,
                 secret_access_key: secret_key,
+                endpoint: None,
+                region: None,
             };
 
             let store = ObjectStore::new(accessor);
