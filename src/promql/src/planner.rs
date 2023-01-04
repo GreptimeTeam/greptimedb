@@ -456,9 +456,14 @@ mod test {
     // 		},
     // 	},
     // },
-    async fn do_single_instant_function_call(func: Function, op_name: &str) {
+    async fn do_single_instant_function_call(fn_name: &'static str, plan_name: &str) {
         let prom_expr = PromExpr::Call {
-            func,
+            func: Function {
+                name: fn_name,
+                arg_types: vec![ValueType::Vector],
+                variadic: false,
+                return_type: ValueType::Vector,
+            },
             args: vec![Box::new(PromExpr::VectorSelector {
                 name: Some("some_metric".to_owned()),
                 offset: None,
@@ -490,319 +495,157 @@ mod test {
             \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      TableScan: some_metric, unsupported_filters=[tag_0 != Utf8(\"bar\")] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
-        ).replace("TEMPLATE", op_name);
+        ).replace("TEMPLATE", plan_name);
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
 
     #[tokio::test]
     async fn single_abs() {
-        let func = Function {
-            name: "abs",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "abs").await;
+        do_single_instant_function_call("abs", "abs").await;
     }
 
     #[tokio::test]
-    #[should_panic] // absent is not supported.
+    #[should_panic]
     async fn single_absent() {
-        let func = Function {
-            name: "absent",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "").await;
+        do_single_instant_function_call("absent", "").await;
     }
 
     #[tokio::test]
     async fn single_ceil() {
-        let func = Function {
-            name: "ceil",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "ceil").await;
+        do_single_instant_function_call("ceil", "ceil").await;
     }
 
     #[tokio::test]
     async fn single_exp() {
-        let func = Function {
-            name: "exp",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "exp").await;
+        do_single_instant_function_call("exp", "exp").await;
     }
 
     #[tokio::test]
     async fn single_ln() {
-        let func = Function {
-            name: "ln",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "ln").await;
+        do_single_instant_function_call("ln", "ln").await;
     }
 
     #[tokio::test]
     async fn single_log2() {
-        let func = Function {
-            name: "log2",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "log2").await;
+        do_single_instant_function_call("log2", "log2").await;
     }
 
     #[tokio::test]
     async fn single_log10() {
-        let func = Function {
-            name: "log10",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "log10").await;
+        do_single_instant_function_call("log10", "log10").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_scalar() {
-        let func = Function {
-            name: "scalar",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "").await;
+        do_single_instant_function_call("scalar", "").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_sgn() {
-        let func = Function {
-            name: "sgn",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "").await;
+        do_single_instant_function_call("sgn", "").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_sort() {
-        let func = Function {
-            name: "sort",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "").await;
+        do_single_instant_function_call("sort", "").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_sort_desc() {
-        let func = Function {
-            name: "sort_desc",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "").await;
+        do_single_instant_function_call("sort_desc", "").await;
     }
 
     #[tokio::test]
     async fn single_sqrt() {
-        let func = Function {
-            name: "sqrt",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "sqrt").await;
+        do_single_instant_function_call("sqrt", "sqrt").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_timestamp() {
-        let func = Function {
-            name: "timestamp",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "").await;
+        do_single_instant_function_call("timestamp", "").await;
     }
 
     #[tokio::test]
     async fn single_acos() {
-        let func = Function {
-            name: "acos",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "acos").await;
+        do_single_instant_function_call("acos", "acos").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_acosh() {
-        let func = Function {
-            name: "acosh",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "acosh").await;
+        do_single_instant_function_call("acosh", "").await;
     }
 
     #[tokio::test]
     async fn single_asin() {
-        let func = Function {
-            name: "asin",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "asin").await;
+        do_single_instant_function_call("asin", "asin").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_asinh() {
-        let func = Function {
-            name: "asinh",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "asinh").await;
+        do_single_instant_function_call("asinh", "").await;
     }
 
     #[tokio::test]
     async fn single_atan() {
-        let func = Function {
-            name: "atan",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "atan").await;
+        do_single_instant_function_call("atan", "atan").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_atanh() {
-        let func = Function {
-            name: "atanh",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "atanh").await;
+        do_single_instant_function_call("atanh", "").await;
     }
 
     #[tokio::test]
     async fn single_cos() {
-        let func = Function {
-            name: "cos",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "cos").await;
+        do_single_instant_function_call("cos", "cos").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_cosh() {
-        let func = Function {
-            name: "cosh",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "cosh").await;
+        do_single_instant_function_call("cosh", "").await;
     }
 
     #[tokio::test]
     async fn single_sin() {
-        let func = Function {
-            name: "sin",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "sin").await;
+        do_single_instant_function_call("sin", "sin").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_sinh() {
-        let func = Function {
-            name: "sinh",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "sinh").await;
+        do_single_instant_function_call("sinh", "").await;
     }
 
     #[tokio::test]
     async fn single_tan() {
-        let func = Function {
-            name: "tan",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "tan").await;
+        do_single_instant_function_call("tan", "tan").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_tanh() {
-        let func = Function {
-            name: "tanh",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "tanh").await;
+        do_single_instant_function_call("tanh", "").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_deg() {
-        let func = Function {
-            name: "deg",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "").await;
+        do_single_instant_function_call("deg", "").await;
     }
 
     #[tokio::test]
     #[should_panic]
     async fn single_rad() {
-        let func = Function {
-            name: "rad",
-            arg_types: vec![ValueType::Vector],
-            variadic: false,
-            return_type: ValueType::Vector,
-        };
-        do_single_instant_function_call(func, "").await;
+        do_single_instant_function_call("rad", "").await;
     }
 }
