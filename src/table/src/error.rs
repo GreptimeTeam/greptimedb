@@ -119,12 +119,14 @@ impl ErrorExt for Error {
             Error::RemoveColumnInIndex { .. } | Error::BuildColumnDescriptor { .. } => {
                 StatusCode::InvalidArguments
             }
-            InnerError::TablesRecordBatch { .. } => StatusCode::Unexpected,
-            InnerError::ColumnExists { .. } => StatusCode::TableColumnExists,
-            InnerError::SchemaBuild { source, .. } => source.status_code(),
+            Error::TablesRecordBatch { .. } => StatusCode::Unexpected,
+            Error::ColumnExists { .. } => StatusCode::TableColumnExists,
+            Error::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
-            InnerError::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
+            Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
+            Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
+            Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
         }
     }

@@ -28,21 +28,18 @@ use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream};
 use common_telemetry::logging;
-use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::vectors::VectorRef;
+use datatypes::schema::Schema;
 use futures::task::{Context, Poll};
 use futures::Stream;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::manifest::{self, Manifest, ManifestVersion, MetaActionIterator};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, ChunkReader, PutOperation, ReadContext, Region,
-    RegionMeta, RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
+    AddColumn, AlterOperation, AlterRequest, ChunkReader, ReadContext, Region, RegionMeta,
+    RegionNumber, ScanRequest, SchemaRef, Snapshot, WriteContext, WriteRequest,
 };
 use table::error as table_error;
-use table::error::{
-    Error as TableError, MissingColumnSnafu, RegionSchemaMismatchSnafu, Result as TableResult,
-};
+use table::error::{RegionSchemaMismatchSnafu, Result as TableResult, TableOperationSnafu};
 use table::metadata::{
     FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType,
 };
@@ -53,11 +50,10 @@ use table::table::scan::SimpleTableScan;
 use table::table::{AlterContext, Table};
 use tokio::sync::Mutex;
 
+use crate::error;
 use crate::error::{
-    self, self, ColumnsNotExistSnafu, ProjectedColumnNotFoundSnafu, ProjectedColumnNotFoundSnafu,
-    RegionNotFoundSnafu, Result, Result, ScanTableManifestSnafu, ScanTableManifestSnafu,
-    TableInfoNotFoundSnafu, TableInfoNotFoundSnafu, UnsupportedDefaultConstraintSnafu,
-    UpdateTableManifestSnafu, UpdateTableManifestSnafu,
+    ProjectedColumnNotFoundSnafu, RegionNotFoundSnafu, Result, ScanTableManifestSnafu,
+    TableInfoNotFoundSnafu, UpdateTableManifestSnafu,
 };
 use crate::manifest::action::*;
 use crate::manifest::TableManifest;
@@ -92,16 +88,18 @@ impl<R: Region> Table for MitoTable<R> {
             return Ok(0);
         }
 
-        let region =
-            self.regions
-                .get(&request.region_number)
-                .with_context(|| RegionNotFoundSnafu {
-                    table: format!(
-                        "{}.{}.{}",
-                        request.catalog_name, request.schema_name, request.table_name
-                    ),
-                    region: request.region_number,
-                })?;
+        let region = self
+            .regions
+            .get(&request.region_number)
+            .with_context(|| RegionNotFoundSnafu {
+                table: format!(
+                    "{}.{}.{}",
+                    request.catalog_name, request.schema_name, request.table_name
+                ),
+                region: request.region_number,
+            })
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
         let mut write_request = region.write_request();
 
         let columns_values = request.columns_values;
@@ -143,11 +141,6 @@ impl<R: Region> Table for MitoTable<R> {
         _limit: Option<usize>,
     ) -> TableResult<PhysicalPlanRef> {
         let read_ctx = ReadContext::default();
-        let snapshot = self
-            .region
-            .snapshot(&read_ctx)
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
         let mut readers = Vec::with_capacity(self.regions.len());
         let mut first_schema: Option<Arc<Schema>> = None;
 
@@ -155,7 +148,10 @@ impl<R: Region> Table for MitoTable<R> {
         // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
         // can carry filtered region info to avoid scanning all regions on datanode.
         for region in self.regions.values() {
-            let snapshot = region.snapshot(&read_ctx).map_err(TableError::new)?;
+            let snapshot = region
+                .snapshot(&read_ctx)
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
             let projection = self
                 .transform_projection(region, projection.cloned())
                 .map_err(BoxedError::new)
@@ -275,7 +271,11 @@ impl<R: Region> Table for MitoTable<R> {
                     table_name,
                     alter_req,
                 );
-                region.alter(alter_req).await.map_err(TableError::new)?;
+                region
+                    .alter(alter_req)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(TableOperationSnafu)?;
             }
         }
         // Update in memory metadata of the table.
