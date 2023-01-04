@@ -29,7 +29,9 @@ use store_api::storage::{
 };
 use table::engine::{EngineContext, TableEngine, TableReference};
 use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
-use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::requests::{
+    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+};
 use table::table::{AlterContext, TableRef};
 use table::{error as table_error, Result as TableResult, Table};
 use tokio::sync::Mutex;
@@ -491,7 +493,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let schema_name = req.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = &req.table_name.clone();
 
-        let table_ref = TableReference {
+        let mut table_ref = TableReference {
             catalog: catalog_name,
             schema: schema_name,
             table: table_name,
@@ -502,9 +504,16 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         logging::info!("start altering table {} with request {:?}", table_name, req);
         table
-            .alter(AlterContext::new(), req)
+            .alter(AlterContext::new(), &req)
             .await
             .context(error::AlterTableSnafu { table_name })?;
+
+        if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
+            table_ref.table = new_table_name.as_str();
+            let mut tables = self.tables.write().unwrap();
+            tables.remove(&table_ref.to_string());
+            tables.insert(table_ref.to_string(), table.clone());
+        }
         Ok(table)
     }
 

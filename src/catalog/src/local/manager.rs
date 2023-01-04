@@ -47,7 +47,8 @@ use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
     CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
+    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest, SchemaProvider,
+    SchemaProviderRef,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -377,6 +378,11 @@ impl CatalogManager for LocalCatalogManager {
                 Ok(true)
             }
         }
+    }
+
+    async fn rename_table(&self, _request: RenameTableRequest) -> Result<bool> {
+        // todo impl rename_table for catalog manager
+        todo!()
     }
 
     async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {

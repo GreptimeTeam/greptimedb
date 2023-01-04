@@ -71,13 +71,13 @@ pub struct AlterTableRequest {
 }
 
 /// Add column request
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AddColumnRequest {
     pub column_schema: ColumnSchema,
     pub is_key: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AlterKind {
     AddColumns { columns: Vec<AddColumnRequest> },
     DropColumns { names: Vec<String> },

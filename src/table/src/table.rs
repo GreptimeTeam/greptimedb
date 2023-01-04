@@ -77,7 +77,7 @@ pub trait Table: Send + Sync {
     }
 
     /// Alter table.
-    async fn alter(&self, _context: AlterContext, _request: AlterTableRequest) -> Result<()> {
+    async fn alter(&self, _context: AlterContext, _request: &AlterTableRequest) -> Result<()> {
         UnsupportedSnafu {
             operation: "ALTER TABLE",
         }

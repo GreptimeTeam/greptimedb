@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use catalog::RenameTableRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::prelude::*;
@@ -28,11 +29,11 @@ impl SqlHandler {
         let ctx = EngineContext {};
         let catalog_name = req.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
         let schema_name = req.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
-        let table_name = &req.table_name.to_string();
+        let table_name = req.table_name.clone();
         let table_ref = TableReference {
             catalog: catalog_name,
             schema: schema_name,
-            table: table_name,
+            table: &table_name,
         };
 
         let full_table_name = table_ref.to_string();
@@ -43,12 +44,29 @@ impl SqlHandler {
                 table_name: &full_table_name,
             }
         );
-        self.table_engine
-            .alter_table(&ctx, req)
-            .await
-            .context(error::AlterTableSnafu {
-                table_name: full_table_name,
-            })?;
+        let kind = req.alter_kind.clone();
+        let table =
+            self.table_engine
+                .alter_table(&ctx, req)
+                .await
+                .context(error::AlterTableSnafu {
+                    table_name: full_table_name,
+                })?;
+        let table_info = &table.table_info();
+        if let AlterKind::RenameTable { .. } = kind {
+            let rename_table_req = RenameTableRequest {
+                catalog: table_info.catalog_name.clone(),
+                schema: table_info.schema_name.clone(),
+                table_name,
+                new_table_name: table_info.name.clone(),
+                table_id: table_info.ident.table_id,
+                table,
+            };
+            self.catalog_manager
+                .rename_table(rename_table_req)
+                .await
+                .context(error::RenameTableSnafu)?;
+        }
         // Tried in MySQL, it really prints "Affected Rows: 0".
         Ok(Output::AffectedRows(0))
     }
