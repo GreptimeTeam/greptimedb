@@ -27,7 +27,7 @@ use crate::error::{
     MissingTimestampColumnSnafu, Result,
 };
 
-/// Convert an [`AlterExpr`] to an optional [`AlterTableRequest`]
+/// Convert an [`AlterExpr`] to an [`AlterTableRequest`]
 pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
     let catalog_name = if expr.catalog_name.is_empty() {
         None
