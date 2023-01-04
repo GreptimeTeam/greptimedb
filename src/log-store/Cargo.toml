@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [build-dependencies]
-protobuf-build = { version = "0.14", default-features = false, features= ["protobuf-codec"] }
+protobuf-build = { version = "0.14", default-features = false, features = [
+    "protobuf-codec",
+] }
 
 [dependencies]
 async-trait.workspace = true
@@ -28,7 +30,7 @@ store-api = { path = "../store-api" }
 tempdir = "0.3"
 tokio = { version = "1.18", features = ["full"] }
 tokio-util = "0.7"
-protobuf = { version = "2", features=["bytes"] }
+protobuf = { version = "2", features = ["bytes"] }
 
 [dev-dependencies]
 rand = "0.8"
