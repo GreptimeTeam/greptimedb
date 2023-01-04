@@ -35,3 +35,6 @@ benchmarks/data
 
 # dotenv
 .env
+
+# Integration test output
+**/*.output
