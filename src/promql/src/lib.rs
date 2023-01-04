@@ -15,4 +15,4 @@
 pub mod engine;
 pub mod error;
 pub mod extension_plan;
-mod planner;
+pub mod planner;

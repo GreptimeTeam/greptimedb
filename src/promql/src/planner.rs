@@ -24,7 +24,6 @@ use datafusion::prelude::{Column, Expr as DfExpr};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::sql::TableReference;
-use datatypes::schema::SchemaRef;
 use promql_parser::label::{MatchOp, Matchers};
 use promql_parser::parser::{EvalStmt, Expr as PromExpr, Function};
 use snafu::{OptionExt, ResultExt};
@@ -77,37 +76,39 @@ impl<S: ContextProvider> PromPlanner<S> {
 
     pub fn prom_expr_to_plan(&mut self, prom_expr: PromExpr) -> Result<LogicalPlan> {
         let res = match &prom_expr {
-            PromExpr::AggregateExpr {
-                op,
-                expr,
-                param,
-                grouping,
-                without,
-            } => todo!(),
-            PromExpr::UnaryExpr { op, expr } => todo!(),
-            PromExpr::BinaryExpr {
-                op,
-                lhs,
-                rhs,
-                matching,
-                return_bool,
-            } => {
-                let left_input = self.prom_expr_to_plan(*lhs.clone())?;
-                let right_input = self.prom_expr_to_plan(*rhs.clone())?;
-
-                todo!()
+            PromExpr::AggregateExpr { .. } => UnsupportedExprSnafu {
+                name: "Prom Aggregate",
             }
-            PromExpr::ParenExpr { expr } => todo!(),
-            PromExpr::SubqueryExpr {
-                expr,
-                range,
-                offset,
-                timestamp,
-                start_or_end,
-                step,
-            } => todo!(),
-            PromExpr::NumberLiteral { val, span } => todo!(),
-            PromExpr::StringLiteral { val, span } => todo!(),
+            .fail()?,
+            PromExpr::UnaryExpr { .. } => UnsupportedExprSnafu {
+                name: "Prom Unary Expr",
+            }
+            .fail()?,
+            PromExpr::BinaryExpr { lhs, rhs, .. } => {
+                let _left_input = self.prom_expr_to_plan(*lhs.clone())?;
+                let _right_input = self.prom_expr_to_plan(*rhs.clone())?;
+
+                UnsupportedExprSnafu {
+                    name: "Prom Binary Expr",
+                }
+                .fail()?
+            }
+            PromExpr::ParenExpr { .. } => UnsupportedExprSnafu {
+                name: "Prom Paren Expr",
+            }
+            .fail()?,
+            PromExpr::SubqueryExpr { .. } => UnsupportedExprSnafu {
+                name: "Prom Subquery",
+            }
+            .fail()?,
+            PromExpr::NumberLiteral { .. } => UnsupportedExprSnafu {
+                name: "Prom Aggregate",
+            }
+            .fail()?,
+            PromExpr::StringLiteral { .. } => UnsupportedExprSnafu {
+                name: "Prom Aggregate",
+            }
+            .fail()?,
             PromExpr::VectorSelector {
                 name,
                 offset,
@@ -117,11 +118,8 @@ impl<S: ContextProvider> PromPlanner<S> {
                 // This `name` should not be optional
                 let name = name.as_ref().unwrap().clone();
                 self.setup_context(&name)?;
-                let normalize = self.selector_to_series_normalize_plan(
-                    &name,
-                    offset.clone(),
-                    label_matchers.clone(),
-                )?;
+                let normalize =
+                    self.selector_to_series_normalize_plan(&name, *offset, label_matchers.clone())?;
                 let manipulate = InstantManipulate::new(
                     self.ctx.start,
                     self.ctx.end,
@@ -137,10 +135,10 @@ impl<S: ContextProvider> PromPlanner<S> {
                     node: Arc::new(manipulate),
                 })
             }
-            PromExpr::MatrixSelector {
-                vector_selector,
-                range,
-            } => todo!(),
+            PromExpr::MatrixSelector { .. } => UnsupportedExprSnafu {
+                name: "Prom Matrix Selector",
+            }
+            .fail()?,
             PromExpr::Call { func, args } => {
                 let args = self.create_function_args(args)?;
                 let input =
@@ -167,7 +165,7 @@ impl<S: ContextProvider> PromPlanner<S> {
     ) -> Result<LogicalPlan> {
         // TODO(ruihang): add time range filter
         let filter = self.matchers_to_expr(label_matchers)?;
-        let table_scan = self.create_relation(&table_name, filter)?;
+        let table_scan = self.create_relation(table_name, filter)?;
         let offset = offset.unwrap_or_default();
 
         let series_normalize = SeriesNormalize::new(
@@ -257,25 +255,6 @@ impl<S: ContextProvider> PromPlanner<S> {
         self.ctx.value_columns = values;
 
         Ok(())
-    }
-
-    /// Get [SchemaRef] of GreptimeDB (rather than DataFusion's).
-    fn get_schema(&self, table_name: &str) -> Result<SchemaRef> {
-        let table_ref = TableReference::Bare { table: table_name };
-        let table = self
-            .schema_provider
-            .get_table_provider(table_ref)
-            .context(DataFusionSnafu)?
-            .as_any()
-            .downcast_ref::<DefaultTableSource>()
-            .context(UnknownTableSnafu)?
-            .table_provider
-            .as_any()
-            .downcast_ref::<DfTableProviderAdapter>()
-            .context(UnknownTableSnafu)?
-            .table();
-
-        Ok(table.schema())
     }
 
     // TODO(ruihang): insert column expr
@@ -394,7 +373,7 @@ mod test {
         }
         columns.push(
             ColumnSchema::new(
-                format!("timestamp"),
+                "timestamp".to_string(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             )
@@ -435,10 +414,7 @@ mod test {
 
         let query_engine_state = QueryEngineState::new(catalog_list);
         let query_context = QueryContext::new();
-        let context_provider =
-            DfContextProviderAdapter::new(query_engine_state, query_context.into());
-
-        context_provider
+        DfContextProviderAdapter::new(query_engine_state, query_context.into())
     }
 
     // {
