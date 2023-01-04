@@ -282,10 +282,6 @@ pub fn build_create_expr_from_insertion(
 }
 
 // TODO(hl): handle region id in request
-pub fn to_table_insert_request(
-    request: GrpcInsertRequest,
-    schema: SchemaRef,
-) -> Result<InsertRequest> {
 pub fn to_table_insert_request(request: GrpcInsertRequest) -> Result<InsertRequest> {
     let catalog_name = DEFAULT_CATALOG_NAME;
     let schema_name = &request.schema_name;
@@ -458,6 +454,7 @@ fn is_null(null_mask: &BitVec, idx: usize) -> Option<bool> {
 mod tests {
     use std::any::Any;
     use std::sync::Arc;
+    use std::{assert_eq, unimplemented, vec};
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::column::{self, SemanticType, Values};
