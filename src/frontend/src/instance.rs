@@ -13,6 +13,8 @@
 // limitations under the License.
 
 pub(crate) mod distributed;
+mod flight;
+mod grpc;
 mod influxdb;
 mod opentsdb;
 mod prometheus;
@@ -20,13 +22,12 @@ mod prometheus;
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::result::ObjectResultBuilder;
 use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::object_expr::Request;
 use api::v1::{
     AddColumns, AlterExpr, Column, CreateTableExpr, DdlRequest, DropTableExpr, InsertRequest,
-    ObjectExpr, ObjectResult as GrpcObjectResult,
+    ObjectExpr,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
@@ -35,10 +36,9 @@ use client::RpcOutput;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::{debug, info};
+use common_telemetry::logging::{debug, info};
 use datanode::instance::InstanceRef as DnInstanceRef;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -91,6 +91,8 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 #[derive(Clone)]
 pub struct Instance {
     catalog_manager: CatalogManagerRef,
+
+    // TODO(LFC): Revisit script_handler here, maybe merge with sql_handler?
     /// Script handler is None in distributed mode, only works on standalone mode.
     script_handler: Option<ScriptHandlerRef>,
     create_expr_factory: CreateExprFactoryRef,
@@ -100,7 +102,7 @@ pub struct Instance {
     mode: Mode,
 
     // TODO(LFC): Remove `dist_instance` together with Arrow Flight adoption refactor.
-    dist_instance: Option<DistInstance>,
+    pub(crate) dist_instance: Option<DistInstance>,
 
     sql_handler: SqlQueryHandlerRef,
     grpc_query_handler: GrpcQueryHandlerRef,
@@ -184,6 +186,21 @@ impl Instance {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_distributed(dist_instance: DistInstance) -> Self {
+        let dist_instance_ref = Arc::new(dist_instance.clone());
+        Instance {
+            catalog_manager: dist_instance.catalog_manager(),
+            script_handler: None,
+            create_expr_factory: Arc::new(DefaultCreateExprFactory),
+            mode: Mode::Distributed,
+            dist_instance: Some(dist_instance),
+            sql_handler: dist_instance_ref.clone(),
+            grpc_query_handler: dist_instance_ref,
+            plugins: Default::default(),
+        }
+    }
+
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
@@ -231,8 +248,6 @@ impl Instance {
         Ok(Output::AffectedRows(success))
     }
 
-    // TODO(LFC): Revisit GRPC insertion feature, check if the "create/alter table on demand" functionality is broken.
-    // Should be supplied with enough tests.
     async fn handle_insert(&self, request: InsertRequest) -> Result<Output> {
         let schema_name = &request.schema_name;
         let table_name = &request.table_name;
@@ -616,39 +631,6 @@ impl ScriptHandler for Instance {
     }
 }
 
-#[async_trait]
-impl GrpcQueryHandler for Instance {
-    async fn do_query(&self, query: ObjectExpr) -> server_error::Result<GrpcObjectResult> {
-        let request = query
-            .clone()
-            .request
-            .context(server_error::InvalidQuerySnafu {
-                reason: "empty expr",
-            })?;
-        match request {
-            Request::Insert(request) => {
-                let output = self
-                    .handle_insert(request.clone())
-                    .await
-                    .map_err(BoxedError::new)
-                    .with_context(|_| server_error::ExecuteQuerySnafu {
-                        query: format!("{request:?}"),
-                    })?;
-                let object_result = match output {
-                    Output::AffectedRows(rows) => ObjectResultBuilder::default()
-                        .flight_data(vec![
-                            FlightEncoder::default().encode(FlightMessage::AffectedRows(rows))
-                        ])
-                        .build(),
-                    _ => unreachable!(),
-                };
-                Ok(object_result)
-            }
-            _ => GrpcQueryHandler::do_query(&*self.grpc_query_handler, query).await,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
@@ -674,7 +656,7 @@ mod tests {
     async fn test_execute_sql() {
         let query_ctx = Arc::new(QueryContext::new());
 
-        let (instance, _guard) = tests::create_frontend_instance("test_execute_sql").await;
+        let (instance, _guard) = tests::create_standalone_instance("test_execute_sql").await;
 
         let sql = r#"CREATE TABLE demo(
                             host STRING,
@@ -690,7 +672,7 @@ mod tests {
             .remove(0)
             .unwrap();
         match output {
-            Output::AffectedRows(rows) => assert_eq!(rows, 1),
+            Output::AffectedRows(rows) => assert_eq!(rows, 0),
             _ => unreachable!(),
         }
 
@@ -767,7 +749,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_execute_grpc() {
-        let (instance, _guard) = tests::create_frontend_instance("test_execute_grpc").await;
+        let (instance, _guard) = tests::create_standalone_instance("test_execute_grpc").await;
 
         // testing data:
         let expected_host_col = Column {
@@ -826,7 +808,7 @@ mod tests {
         .await
         .unwrap();
         let output: RpcOutput = result.try_into().unwrap();
-        assert!(matches!(output, RpcOutput::AffectedRows(1)));
+        assert!(matches!(output, RpcOutput::AffectedRows(0)));
 
         // insert
         let columns = vec![
@@ -1023,7 +1005,7 @@ mod tests {
                 self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 match &mut output {
                     Output::AffectedRows(rows) => {
-                        assert_eq!(*rows, 1);
+                        assert_eq!(*rows, 0);
                         // update output result
                         *rows = 10;
                     }
@@ -1034,7 +1016,7 @@ mod tests {
         }
 
         let query_ctx = Arc::new(QueryContext::new());
-        let (mut instance, _guard) = tests::create_frontend_instance("test_hook").await;
+        let (mut instance, _guard) = tests::create_standalone_instance("test_hook").await;
 
         let mut plugins = Plugins::new();
         let counter_hook = Arc::new(AssertionHook::default());
@@ -1090,7 +1072,7 @@ mod tests {
         }
 
         let query_ctx = Arc::new(QueryContext::new());
-        let (mut instance, _guard) = tests::create_frontend_instance("test_db_hook").await;
+        let (mut instance, _guard) = tests::create_standalone_instance("test_db_hook").await;
 
         let mut plugins = Plugins::new();
         let hook = Arc::new(DisableDBOpHook::default());
@@ -1112,7 +1094,7 @@ mod tests {
             .unwrap();
 
         match output {
-            Output::AffectedRows(rows) => assert_eq!(rows, 1),
+            Output::AffectedRows(rows) => assert_eq!(rows, 0),
             _ => unreachable!(),
         }
 

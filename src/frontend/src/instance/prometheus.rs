@@ -179,7 +179,7 @@ mod tests {
     async fn test_prometheus_remote_write_and_read() {
         common_telemetry::init_default_ut_logging();
         let (instance, _guard) =
-            tests::create_frontend_instance("test_prometheus_remote_write_and_read").await;
+            tests::create_standalone_instance("test_prometheus_remote_write_and_read").await;
 
         let write_request = WriteRequest {
             timeseries: prometheus::mock_timeseries(),

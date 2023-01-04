@@ -29,9 +29,9 @@ regex = "1.6"
 serde = "1.0"
 serde_json = "1.0"
 snafu.workspace = true
-tokio = { version = "1.0", features = ["full"] }
+tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
-tonic = "0.8"
+tonic.workspace = true
 tower = "0.4"
 url = "2.3"
 

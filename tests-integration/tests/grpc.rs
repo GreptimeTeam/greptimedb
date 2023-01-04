@@ -136,7 +136,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     // create
     let expr = testing_create_expr();
     let result = db.create(expr).await.unwrap();
-    assert!(matches!(result, RpcOutput::AffectedRows(1)));
+    assert!(matches!(result, RpcOutput::AffectedRows(0)));
 
     //alter
     let add_column = ColumnDef {

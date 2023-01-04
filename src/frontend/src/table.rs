@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use api::v1::AlterExpr;
 use async_trait::async_trait;
+use catalog::helper::{TableGlobalKey, TableGlobalValue};
+use catalog::remote::KvBackendRef;
 use client::{Database, RpcOutput};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
@@ -42,13 +44,17 @@ use meta_client::rpc::{Peer, TableName};
 use snafu::prelude::*;
 use store_api::storage::RegionNumber;
 use table::error::TableOperationSnafu;
-use table::metadata::{FilterPushDownType, TableInfoRef};
-use table::requests::InsertRequest;
+use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
+use table::requests::{AlterTableRequest, InsertRequest};
+use table::table::AlterContext;
 use table::Table;
 use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Error, LeaderNotFoundSnafu, RequestDatanodeSnafu, Result};
+use crate::error::{
+    self, BuildTableMetaSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ContextValueNotFoundSnafu,
+    Error, LeaderNotFoundSnafu, RequestDatanodeSnafu, Result, TableNotFoundSnafu, TableSnafu,
+};
 use crate::partitioning::columns::RangeColumnsPartitionRule;
 use crate::partitioning::range::RangePartitionRule;
 use crate::partitioning::{
@@ -67,6 +73,7 @@ pub struct DistTable {
     table_info: TableInfoRef,
     table_routes: Arc<TableRoutes>,
     datanode_clients: Arc<DatanodeClients>,
+    backend: KvBackendRef,
 }
 
 #[async_trait]
@@ -154,6 +161,13 @@ impl Table for DistTable {
     fn supports_filter_pushdown(&self, _filter: &Expr) -> table::Result<FilterPushDownType> {
         Ok(FilterPushDownType::Inexact)
     }
+
+    async fn alter(&self, context: AlterContext, request: AlterTableRequest) -> table::Result<()> {
+        self.handle_alter(context, request)
+            .await
+            .map_err(BoxedError::new)
+            .context(TableOperationSnafu)
+    }
 }
 
 impl DistTable {
@@ -162,12 +176,14 @@ impl DistTable {
         table_info: TableInfoRef,
         table_routes: Arc<TableRoutes>,
         datanode_clients: Arc<DatanodeClients>,
+        backend: KvBackendRef,
     ) -> Self {
         Self {
             table_name,
             table_info,
             table_routes,
             datanode_clients,
+            backend,
         }
     }
 
@@ -369,9 +385,73 @@ impl DistTable {
         Ok(partition_rule)
     }
 
+    async fn table_global_value(&self, key: &TableGlobalKey) -> Result<Option<TableGlobalValue>> {
+        let raw = self
+            .backend
+            .get(key.to_string().as_bytes())
+            .await
+            .context(CatalogSnafu)?;
+        Ok(if let Some(raw) = raw {
+            Some(TableGlobalValue::from_bytes(raw.1).context(CatalogEntrySerdeSnafu)?)
+        } else {
+            None
+        })
+    }
+
+    async fn set_table_global_value(
+        &self,
+        key: TableGlobalKey,
+        value: TableGlobalValue,
+    ) -> Result<()> {
+        let value = value.as_bytes().context(CatalogEntrySerdeSnafu)?;
+        self.backend
+            .set(key.to_string().as_bytes(), &value)
+            .await
+            .context(CatalogSnafu)
+    }
+
+    async fn handle_alter(&self, context: AlterContext, request: AlterTableRequest) -> Result<()> {
+        let alter_expr = context
+            .get::<AlterExpr>()
+            .context(ContextValueNotFoundSnafu { key: "AlterExpr" })?;
+
+        self.alter_by_expr(alter_expr).await?;
+
+        let table_info = self.table_info();
+        let table_name = &table_info.name;
+        let new_meta = table_info
+            .meta
+            .builder_with_alter_kind(table_name, &request.alter_kind)
+            .context(TableSnafu)?
+            .build()
+            .context(BuildTableMetaSnafu {
+                table_name: table_name.clone(),
+            })?;
+
+        let mut new_info = TableInfo::clone(&*table_info);
+        new_info.ident.version = table_info.ident.version + 1;
+        new_info.meta = new_meta;
+
+        let key = TableGlobalKey {
+            catalog_name: alter_expr.catalog_name.clone(),
+            schema_name: alter_expr.schema_name.clone(),
+            table_name: alter_expr.table_name.clone(),
+        };
+        let mut value = self
+            .table_global_value(&key)
+            .await?
+            .context(TableNotFoundSnafu {
+                table_name: alter_expr.table_name.clone(),
+            })?;
+
+        value.table_info = new_info.into();
+
+        self.set_table_global_value(key, value).await
+    }
+
     /// Define a `alter_by_expr` instead of impl [`Table::alter`] to avoid redundant conversion between
     /// [`table::requests::AlterTableRequest`] and [`AlterExpr`].
-    pub(crate) async fn alter_by_expr(&self, expr: AlterExpr) -> Result<()> {
+    async fn alter_by_expr(&self, expr: &AlterExpr) -> Result<()> {
         let table_routes = self.table_routes.get_route(&self.table_name).await?;
         let leaders = table_routes.find_leaders();
         ensure!(
@@ -522,6 +602,8 @@ impl PartitionExec {
 mod test {
     use api::v1::column::SemanticType;
     use api::v1::{column, Column, ColumnDataType, InsertRequest};
+    use catalog::error::Result;
+    use catalog::remote::{KvBackend, ValueIter};
     use common_query::physical_plan::DfPhysicalPlanAdapter;
     use common_recordbatch::adapter::RecordBatchStreamAdapter;
     use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -548,6 +630,35 @@ mod test {
     use super::*;
     use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
     use crate::partitioning::range::RangePartitionRule;
+
+    struct DummyKvBackend;
+
+    #[async_trait]
+    impl KvBackend for DummyKvBackend {
+        fn range<'a, 'b>(&'a self, _key: &[u8]) -> ValueIter<'b, catalog::error::Error>
+        where
+            'a: 'b,
+        {
+            unimplemented!()
+        }
+
+        async fn set(&self, _key: &[u8], _val: &[u8]) -> Result<()> {
+            unimplemented!()
+        }
+
+        async fn compare_and_set(
+            &self,
+            _key: &[u8],
+            _expect: &[u8],
+            _val: &[u8],
+        ) -> Result<std::result::Result<(), Option<Vec<u8>>>> {
+            unimplemented!()
+        }
+
+        async fn delete_range(&self, _key: &[u8], _end: &[u8]) -> Result<()> {
+            unimplemented!()
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_find_partition_rule() {
@@ -577,6 +688,7 @@ mod test {
             table_info: Arc::new(table_info),
             table_routes: table_routes.clone(),
             datanode_clients: Arc::new(DatanodeClients::new()),
+            backend: Arc::new(DummyKvBackend),
         };
 
         let table_route = TableRoute {
@@ -748,7 +860,7 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_dist_table_scan() {
         common_telemetry::init_default_ut_logging();
-        let table = Arc::new(new_dist_table().await);
+        let table = Arc::new(new_dist_table("test_dist_table_scan").await);
         // should scan all regions
         // select a, row_id from numbers
         let projection = Some(vec![1, 2]);
@@ -906,7 +1018,7 @@ mod test {
         assert_eq!(recordbatches.pretty_print().unwrap(), expected_output);
     }
 
-    async fn new_dist_table() -> DistTable {
+    async fn new_dist_table(test_name: &str) -> DistTable {
         let column_schemas = vec![
             ColumnSchema::new("ts", ConcreteDataType::int64_datatype(), false),
             ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
@@ -914,7 +1026,10 @@ mod test {
         ];
         let schema = Arc::new(Schema::new(column_schemas.clone()));
 
-        let (dist_instance, datanode_instances) = crate::tests::create_dist_instance().await;
+        let instance = crate::tests::create_distributed_instance(test_name).await;
+        let dist_instance = instance.frontend.dist_instance.as_ref().unwrap();
+        let datanode_instances = instance.datanodes;
+
         let catalog_manager = dist_instance.catalog_manager();
         let table_routes = catalog_manager.table_routes();
         let datanode_clients = catalog_manager.datanode_clients();
@@ -997,6 +1112,7 @@ mod test {
             table_info: Arc::new(table_info),
             table_routes,
             datanode_clients,
+            backend: catalog_manager.backend(),
         }
     }
 
@@ -1071,6 +1187,7 @@ mod test {
             table_info: Arc::new(table_info),
             table_routes: Arc::new(TableRoutes::new(Arc::new(MetaClient::default()))),
             datanode_clients: Arc::new(DatanodeClients::new()),
+            backend: Arc::new(DummyKvBackend),
         };
 
         // PARTITION BY RANGE (a) (

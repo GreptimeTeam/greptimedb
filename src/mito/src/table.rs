@@ -43,7 +43,7 @@ use table::metadata::{
 };
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
 use table::table::scan::SimpleTableScan;
-use table::table::Table;
+use table::table::{AlterContext, Table};
 use tokio::sync::Mutex;
 
 use crate::error::{
@@ -162,7 +162,7 @@ impl<R: Region> Table for MitoTable<R> {
     }
 
     /// Alter table changes the schemas of the table.
-    async fn alter(&self, req: AlterTableRequest) -> TableResult<()> {
+    async fn alter(&self, _context: AlterContext, req: AlterTableRequest) -> TableResult<()> {
         let _lock = self.alter_lock.lock().await;
 
         let table_info = self.table_info();

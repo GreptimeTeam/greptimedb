@@ -2600,6 +2600,7 @@ version = "0.1.0"
 dependencies = [
  "anymap",
  "api",
+ "arrow-flight",
  "async-stream",
  "async-trait",
  "catalog",
@@ -2614,7 +2615,6 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
- "common-time",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
@@ -3914,6 +3914,7 @@ dependencies = [
 name = "mito"
 version = "0.1.0"
 dependencies = [
+ "anymap",
  "arc-swap",
  "async-stream",
  "async-trait",
@@ -7039,6 +7040,7 @@ dependencies = [
 name = "table"
 version = "0.1.0"
 dependencies = [
+ "anymap",
  "async-trait",
  "chrono",
  "common-catalog",

@@ -9,6 +9,7 @@ default = []
 test = ["tempdir"]
 
 [dependencies]
+anymap = "1.0.0-beta.2"
 arc-swap = "1.0"
 async-stream.workspace = true
 async-trait = "0.1"

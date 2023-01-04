@@ -20,7 +20,7 @@ enum_dispatch = "0.3"
 parking_lot = "0.12"
 rand = "0.8"
 snafu.workspace = true
-tonic = "0.8"
+tonic.workspace = true
 
 [dev-dependencies]
 datanode = { path = "../datanode" }

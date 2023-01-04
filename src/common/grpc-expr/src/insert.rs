@@ -34,8 +34,8 @@ use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
 
 use crate::error::{
-    ColumnDataTypeSnafu, ColumnNotFoundSnafu, CreateVectorSnafu, DuplicatedTimestampColumnSnafu,
-    IllegalInsertDataSnafu, InvalidColumnProtoSnafu, MissingTimestampColumnSnafu, Result,
+    ColumnDataTypeSnafu, CreateVectorSnafu, DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu,
+    InvalidColumnProtoSnafu, MissingTimestampColumnSnafu, Result,
 };
 const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
 const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
@@ -281,10 +281,7 @@ pub fn build_create_expr_from_insertion(
     Ok(expr)
 }
 
-pub fn to_table_insert_request(
-    request: GrpcInsertRequest,
-    schema: SchemaRef,
-) -> Result<InsertRequest> {
+pub fn to_table_insert_request(request: GrpcInsertRequest) -> Result<InsertRequest> {
     let catalog_name = DEFAULT_CATALOG_NAME;
     let schema_name = &request.schema_name;
     let table_name = &request.table_name;
@@ -295,19 +292,17 @@ pub fn to_table_insert_request(
         column_name,
         values,
         null_mask,
+        datatype,
         ..
     } in request.columns
     {
         let Some(values) = values else { continue };
 
-        let vector_builder = &mut schema
-            .column_schema_by_name(&column_name)
-            .context(ColumnNotFoundSnafu {
-                column_name: &column_name,
-                table_name,
-            })?
-            .data_type
-            .create_mutable_vector(row_count);
+        let datatype: ConcreteDataType = ColumnDataTypeWrapper::try_new(datatype)
+            .context(ColumnDataTypeSnafu)?
+            .into();
+
+        let vector_builder = &mut datatype.create_mutable_vector(row_count);
 
         add_values_to_builder(vector_builder, values, row_count, null_mask)?;
 
@@ -620,8 +615,6 @@ mod tests {
 
     #[test]
     fn test_to_table_insert_request() {
-        let table: Arc<dyn Table> = Arc::new(DemoTable {});
-
         let (columns, row_count) = mock_insert_batch();
         let request = GrpcInsertRequest {
             schema_name: "public".to_string(),
@@ -630,7 +623,7 @@ mod tests {
             row_count,
             region_number: 0,
         };
-        let insert_req = to_table_insert_request(request, table.schema()).unwrap();
+        let insert_req = to_table_insert_request(request).unwrap();
 
         assert_eq!("greptime", insert_req.catalog_name);
         assert_eq!("public", insert_req.schema_name);

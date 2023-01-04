@@ -51,9 +51,9 @@ storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 substrait = { path = "../common/substrait" }
 table = { path = "../table" }
-tokio = { version = "1.18", features = ["full"] }
+tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
-tonic = "0.8"
+tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
 

@@ -19,7 +19,10 @@ use api::helper::ColumnDataTypeWrapper;
 use api::result::ObjectResultBuilder;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::object_expr::Request as GrpcRequest;
-use api::v1::{AlterExpr, CreateDatabaseExpr, CreateTableExpr, ObjectExpr, ObjectResult, TableId};
+use api::v1::{
+    AlterExpr, CreateDatabaseExpr, CreateTableExpr, InsertRequest, ObjectExpr, ObjectResult,
+    TableId,
+};
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use catalog::{CatalogList, CatalogManager};
@@ -48,18 +51,19 @@ use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
+use table::table::AlterContext;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu, ColumnDataTypeSnafu,
-    PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu,
-    StartMetaClientSnafu, TableNotFoundSnafu,
+    self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
+    ColumnDataTypeSnafu, PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result,
+    SchemaNotFoundSnafu, StartMetaClientSnafu, TableNotFoundSnafu, TableSnafu,
+    ToTableInsertRequestSnafu,
 };
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
 use crate::instance::parse_stmt;
 use crate::partitioning::{PartitionBound, PartitionDef};
-use crate::table::DistTable;
 
 #[derive(Clone)]
 pub(crate) struct DistInstance {
@@ -248,11 +252,13 @@ impl DistInstance {
                 table_name: format!("{catalog_name}.{schema_name}.{table_name}"),
             })?;
 
-        let dist_table = table
-            .as_any()
-            .downcast_ref::<DistTable>()
-            .expect("Table impl must be DistTable in distributed mode");
-        dist_table.alter_by_expr(expr).await
+        let request = common_grpc_expr::alter_expr_to_request(expr.clone())
+            .context(AlterExprToRequestSnafu)?;
+
+        let mut context = AlterContext::with_capacity(1);
+        context.insert(expr);
+
+        table.alter(context, request).await.context(TableSnafu)
     }
 
     async fn create_table_in_meta(
@@ -322,6 +328,25 @@ impl DistInstance {
         Ok(())
     }
 
+    // TODO(LFC): Refactor insertion implementation for DistTable,
+    // GRPC InsertRequest to Table InsertRequest, than split Table InsertRequest, than assemble each GRPC InsertRequest, is rather inefficient,
+    // should operate on GRPC InsertRequest directly.
+    // Also remember to check the "region_number" carried in InsertRequest, too.
+    async fn handle_dist_insert(&self, request: InsertRequest) -> Result<usize> {
+        let table_name = &request.table_name;
+        // TODO(LFC): InsertRequest should carry catalog name, too.
+        let table = self
+            .catalog_manager
+            .table(DEFAULT_CATALOG_NAME, &request.schema_name, table_name)
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu { table_name })?;
+
+        let request = common_grpc_expr::insert::to_table_insert_request(request)
+            .context(ToTableInsertRequestSnafu)?;
+
+        table.insert(request).await.context(TableSnafu)
+    }
+
     #[cfg(test)]
     pub(crate) fn catalog_manager(&self) -> Arc<FrontendCatalogManager> {
         self.catalog_manager.clone()
@@ -367,32 +392,42 @@ impl SqlQueryHandler for DistInstance {
 #[async_trait]
 impl GrpcQueryHandler for DistInstance {
     async fn do_query(&self, expr: ObjectExpr) -> server_error::Result<ObjectResult> {
-        let request = expr.request.context(server_error::InvalidQuerySnafu {
-            reason: "empty expr",
-        })?;
-        match request {
+        let request = expr
+            .clone()
+            .request
+            .context(server_error::InvalidQuerySnafu {
+                reason: "empty expr",
+            })?;
+        let flight_messages = match request {
             GrpcRequest::Ddl(request) => {
                 let expr = request.expr.context(server_error::InvalidQuerySnafu {
                     reason: "empty DDL expr",
                 })?;
-                match expr.clone() {
+                let result = match expr {
                     DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr).await,
                     DdlExpr::Alter(expr) => self.handle_alter_table(expr).await,
                     DdlExpr::CreateTable(_) | DdlExpr::DropTable(_) => unimplemented!(),
-                }
-                .map_err(BoxedError::new)
-                .with_context(|_| server_error::ExecuteQuerySnafu {
-                    query: format!("{expr:?}"),
-                })?;
-                Ok(ObjectResultBuilder::new()
-                    .flight_data(vec![
-                        FlightEncoder::default().encode(FlightMessage::AffectedRows(1))
-                    ])
-                    .build())
+                };
+                result.map(|_| vec![FlightMessage::AffectedRows(1)])
             }
+            GrpcRequest::Insert(request) => self
+                .handle_dist_insert(request)
+                .await
+                .map(|x| vec![FlightMessage::AffectedRows(x)]),
             // TODO(LFC): Implement Flight for DistInstance.
-            GrpcRequest::Query(_) | GrpcRequest::Insert(_) => unimplemented!(),
+            GrpcRequest::Query(_) => unimplemented!(),
         }
+        .map_err(BoxedError::new)
+        .with_context(|_| server_error::ExecuteQuerySnafu {
+            query: format!("{expr:?}"),
+        })?;
+
+        let encoder = FlightEncoder::default();
+        let flight_data = flight_messages
+            .into_iter()
+            .map(|x| encoder.encode(x))
+            .collect();
+        Ok(ObjectResultBuilder::new().flight_data(flight_data).build())
     }
 }
 
@@ -594,7 +629,6 @@ mod test {
 
     use super::*;
     use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
-    use crate::tests::create_dist_instance;
 
     #[tokio::test]
     async fn test_parse_partitions() {
@@ -642,7 +676,8 @@ ENGINE=mito",
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_show_databases() {
-        let (dist_instance, _) = create_dist_instance().await;
+        let instance = crate::tests::create_distributed_instance("test_show_databases").await;
+        let dist_instance = instance.frontend.dist_instance.as_ref().unwrap();
 
         let sql = "create database test_show_databases";
         let output = dist_instance
@@ -692,7 +727,9 @@ ENGINE=mito",
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_show_tables() {
-        let (dist_instance, datanode_instances) = create_dist_instance().await;
+        let instance = crate::tests::create_distributed_instance("test_show_tables").await;
+        let dist_instance = instance.frontend.dist_instance.as_ref().unwrap();
+        let datanode_instances = instance.datanodes;
 
         let sql = "create database test_show_tables";
         dist_instance
@@ -740,7 +777,7 @@ ENGINE=mito",
             }
         }
 
-        assert_show_tables(Arc::new(dist_instance)).await;
+        assert_show_tables(Arc::new(dist_instance.clone())).await;
 
         // Asserts that new table is created in Datanode as well.
         for x in datanode_instances.values() {

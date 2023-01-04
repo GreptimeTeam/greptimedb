@@ -30,7 +30,7 @@ use store_api::storage::{
 use table::engine::{EngineContext, TableEngine, TableReference};
 use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
 use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
-use table::table::TableRef;
+use table::table::{AlterContext, TableRef};
 use table::{error as table_error, Result as TableResult, Table};
 use tokio::sync::Mutex;
 
@@ -502,7 +502,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         logging::info!("start altering table {} with request {:?}", table_name, req);
         table
-            .alter(req)
+            .alter(AlterContext::new(), req)
             .await
             .context(error::AlterTableSnafu { table_name })?;
         Ok(table)

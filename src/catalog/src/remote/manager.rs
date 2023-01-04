@@ -418,7 +418,8 @@ impl CatalogManager for RemoteCatalogManager {
             catalog_provider
                 .schema(&schema_name)?
                 .with_context(|| SchemaNotFoundSnafu {
-                    schema_info: format!("{}.{}", &catalog_name, &schema_name),
+                    catalog: &catalog_name,
+                    schema: &schema_name,
                 })?;
         if schema_provider.table_exist(&request.table_name)? {
             return TableExistsSnafu {
@@ -474,7 +475,8 @@ impl CatalogManager for RemoteCatalogManager {
         let schema = catalog
             .schema(schema_name)?
             .with_context(|| SchemaNotFoundSnafu {
-                schema_info: format!("{catalog_name}.{schema_name}"),
+                catalog: catalog_name,
+                schema: schema_name,
             })?;
         schema.table(table_name)
     }

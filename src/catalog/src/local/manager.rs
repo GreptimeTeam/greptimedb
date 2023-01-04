@@ -241,7 +241,8 @@ impl LocalCatalogManager {
         let schema = catalog
             .schema(&t.schema_name)?
             .context(SchemaNotFoundSnafu {
-                schema_info: format!("{}.{}", &t.catalog_name, &t.schema_name),
+                catalog: &t.catalog_name,
+                schema: &t.schema_name,
             })?;
 
         let context = EngineContext {};
@@ -338,7 +339,8 @@ impl CatalogManager for LocalCatalogManager {
         let schema = catalog
             .schema(schema_name)?
             .with_context(|| SchemaNotFoundSnafu {
-                schema_info: format!("{catalog_name}.{schema_name}"),
+                catalog: catalog_name,
+                schema: schema_name,
             })?;
 
         {
@@ -452,7 +454,8 @@ impl CatalogManager for LocalCatalogManager {
         let schema = catalog
             .schema(schema_name)?
             .with_context(|| SchemaNotFoundSnafu {
-                schema_info: format!("{catalog_name}.{schema_name}"),
+                catalog: catalog_name,
+                schema: schema_name,
             })?;
         schema.table(table_name)
     }

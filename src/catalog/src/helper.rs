@@ -91,6 +91,7 @@ pub fn build_table_regional_prefix(
 }
 
 /// Table global info has only one key across all datanodes so it does not have `node_id` field.
+#[derive(Clone)]
 pub struct TableGlobalKey {
     pub catalog_name: String,
     pub schema_name: String,

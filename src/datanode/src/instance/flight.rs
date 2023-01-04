@@ -159,8 +159,8 @@ impl Instance {
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu { table_name })?;
 
-        let request = common_grpc_expr::insert::to_table_insert_request(request, table.schema())
-            .context(InsertDataSnafu)?;
+        let request =
+            common_grpc_expr::insert::to_table_insert_request(request).context(InsertDataSnafu)?;
 
         let affected_rows = table
             .insert(request)
@@ -182,7 +182,7 @@ impl Instance {
     }
 }
 
-fn to_flight_data_stream(output: Output) -> TonicStream<FlightData> {
+pub fn to_flight_data_stream(output: Output) -> TonicStream<FlightData> {
     match output {
         Output::Stream(stream) => {
             let stream = FlightRecordBatchStream::new(stream);
@@ -273,7 +273,7 @@ mod test {
         });
 
         let output = boarding(&instance, ticket).await;
-        assert!(matches!(output, RpcOutput::AffectedRows(1)));
+        assert!(matches!(output, RpcOutput::AffectedRows(0)));
 
         let ticket = Request::new(Ticket {
             ticket: ObjectExpr {
