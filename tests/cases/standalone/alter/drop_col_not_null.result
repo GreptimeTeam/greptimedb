@@ -1,39 +1,39 @@
 CREATE TABLE test(i BIGINT TIME INDEX, j INTEGER NOT NULL);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 INSERT INTO test VALUES (1, 1), (2, 2);
 
-MutateResult { success: 2, failure: 0 }
+Affected Rows: 2
 
 SELECT * FROM test;
 
-+-----------------------+-------------------+
-| i, #Timestamp, #Int64 | j, #Field, #Int32 |
-+-----------------------+-------------------+
-| 1                     | 1                 |
-| 2                     | 2                 |
-+-----------------------+-------------------+
++---+---+
+| i | j |
++---+---+
+| 1 | 1 |
+| 2 | 2 |
++---+---+
 
 ALTER TABLE test DROP COLUMN j;
 
-MutateResult { success: 0, failure: 0 }
+Affected Rows: 0
 
 INSERT INTO test VALUES (3);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 SELECT * FROM test;
 
-+-----------------------+
-| i, #Timestamp, #Int64 |
-+-----------------------+
-| 1                     |
-| 2                     |
-| 3                     |
-+-----------------------+
++---+
+| i |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
 
 DROP TABLE test;
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 

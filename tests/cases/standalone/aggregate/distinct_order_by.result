@@ -1,64 +1,64 @@
 CREATE TABLE integers(i BIGINT TIME INDEX);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 INSERT INTO integers VALUES (1), (2), (3);
 
-MutateResult { success: 3, failure: 0 }
+Affected Rows: 3
 
 SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 
-+---------------------------------------+
-| integers.i % Int64(2), #Field, #Int64 |
-+---------------------------------------+
-| 0                                     |
-| 1                                     |
-+---------------------------------------+
++-----------------------+
+| integers.i % Int64(2) |
++-----------------------+
+| 0                     |
+| 1                     |
++-----------------------+
 
 SELECT DISTINCT i % 2 FROM integers WHERE i<3 ORDER BY i;
 
-+---------------------------------------+
-| integers.i % Int64(2), #Field, #Int64 |
-+---------------------------------------+
-| 1                                     |
-| 0                                     |
-+---------------------------------------+
++-----------------------+
+| integers.i % Int64(2) |
++-----------------------+
+| 1                     |
+| 0                     |
++-----------------------+
 
 SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;
 
-Failed to execute, error: Datanode { code: 1001, msg: "Failed to execute sql, source: Cannot parse SQL, source: SQL statement is not supported:  SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;, keyword: %" }
+Failed to execute, error: Datanode { code: 1001, msg: "Failed to execute sql, source: Failure during query execution, source: Cannot parse SQL, source: SQL statement is not supported:  SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;, keyword: %" }
 
 SELECT DISTINCT integers.i FROM integers ORDER BY i DESC;
 
-+-------------------+
-| i, #Field, #Int64 |
-+-------------------+
-| 3                 |
-| 2                 |
-| 1                 |
-+-------------------+
++---+
+| i |
++---+
+| 3 |
+| 2 |
+| 1 |
++---+
 
 SELECT DISTINCT i FROM integers ORDER BY integers.i DESC;
 
-+-------------------+
-| i, #Field, #Int64 |
-+-------------------+
-| 3                 |
-| 2                 |
-| 1                 |
-+-------------------+
++---+
+| i |
++---+
+| 3 |
+| 2 |
+| 1 |
++---+
 
 SELECT DISTINCT integers.i FROM integers ORDER BY integers.i DESC;
 
-+-------------------+
-| i, #Field, #Int64 |
-+-------------------+
-| 3                 |
-| 2                 |
-| 1                 |
-+-------------------+
++---+
+| i |
++---+
+| 3 |
+| 2 |
+| 1 |
++---+
 
 DROP TABLE integers;
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 

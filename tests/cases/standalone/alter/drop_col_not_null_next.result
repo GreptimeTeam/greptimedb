@@ -1,43 +1,43 @@
 CREATE TABLE test(i BIGINT TIME INDEX, j INTEGER, k INTEGER NOT NULL);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 INSERT INTO test VALUES (1, 1, 11), (2, 2, 12);
 
-MutateResult { success: 2, failure: 0 }
+Affected Rows: 2
 
 SELECT * FROM test;
 
-+-----------------------+-------------------+-------------------+
-| i, #Timestamp, #Int64 | j, #Field, #Int32 | k, #Field, #Int32 |
-+-----------------------+-------------------+-------------------+
-| 1                     | 1                 | 11                |
-| 2                     | 2                 | 12                |
-+-----------------------+-------------------+-------------------+
++---+---+----+
+| i | j | k  |
++---+---+----+
+| 1 | 1 | 11 |
+| 2 | 2 | 12 |
++---+---+----+
 
 ALTER TABLE test DROP COLUMN j;
 
-MutateResult { success: 0, failure: 0 }
+Affected Rows: 0
 
 INSERT INTO test VALUES (3, NULL);
 
-Failed to execute, error: Datanode { code: 1004, msg: "Failed to insert value to table: greptime.public.test, source: Column k is not null but input has null" }
+Failed to execute, error: Datanode { code: 1004, msg: "Failed to insert value to table: greptime.public.test, source: Failed to operate table, source: Column k is not null but input has null" }
 
 INSERT INTO test VALUES (3, 13);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 SELECT * FROM test;
 
-+-----------------------+-------------------+
-| i, #Timestamp, #Int64 | k, #Field, #Int32 |
-+-----------------------+-------------------+
-| 1                     | 11                |
-| 2                     | 12                |
-| 3                     | 13                |
-+-----------------------+-------------------+
++---+----+
+| i | k  |
++---+----+
+| 1 | 11 |
+| 2 | 12 |
+| 3 | 13 |
++---+----+
 
 DROP TABLE test;
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 

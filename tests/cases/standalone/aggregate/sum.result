@@ -1,80 +1,80 @@
 SELECT SUM(number) FROM numbers;
 
-+--------------------------------------+
-| SUM(numbers.number), #Field, #Uint64 |
-+--------------------------------------+
-| 4950                                 |
-+--------------------------------------+
++---------------------+
+| SUM(numbers.number) |
++---------------------+
+| 4950                |
++---------------------+
 
 SELECT SUM(1) FROM numbers;
 
-+-------------------------------+
-| SUM(Int64(1)), #Field, #Int64 |
-+-------------------------------+
-| 100                           |
-+-------------------------------+
++---------------+
+| SUM(Int64(1)) |
++---------------+
+| 100           |
++---------------+
 
 SELECT SUM(-1) FROM numbers;
 
-+--------------------------------+
-| SUM(Int64(-1)), #Field, #Int64 |
-+--------------------------------+
-| -100                           |
-+--------------------------------+
++----------------+
+| SUM(Int64(-1)) |
++----------------+
+| -100           |
++----------------+
 
 SELECT SUM(-1) FROM numbers WHERE number=-1;
 
-+--------------------------------+
-| SUM(Int64(-1)), #Field, #Int64 |
-+--------------------------------+
-| NULL                           |
-+--------------------------------+
++----------------+
+| SUM(Int64(-1)) |
++----------------+
+|                |
++----------------+
 
 SELECT SUM(-1) FROM numbers WHERE number>10000 limit 1000;
 
-+--------------------------------+
-| SUM(Int64(-1)), #Field, #Int64 |
-+--------------------------------+
-| NULL                           |
-+--------------------------------+
++----------------+
+| SUM(Int64(-1)) |
++----------------+
+|                |
++----------------+
 
 CREATE TABLE bigints(b BIGINT TIME INDEX);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 INSERT INTO bigints values (4611686018427387904), (4611686018427388904), (1);
 
-MutateResult { success: 3, failure: 0 }
+Affected Rows: 3
 
 SELECT SUM(b) FROM bigints;
 
-+--------------------------------+
-| SUM(bigints.b), #Field, #Int64 |
-+--------------------------------+
-| -9223372036854774807           |
-+--------------------------------+
++----------------------+
+| SUM(bigints.b)       |
++----------------------+
+| -9223372036854774807 |
++----------------------+
 
 CREATE TABLE doubles(n DOUBLE, ts BIGINT TIME INDEX);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 INSERT INTO doubles (n, ts) VALUES (9007199254740992, 1), (1, 2), (1, 3), (0, 4);
 
-MutateResult { success: 4, failure: 0 }
+Affected Rows: 4
 
 SELECT sum(n) from doubles;
 
-+----------------------------------+
-| SUM(doubles.n), #Field, #Float64 |
-+----------------------------------+
-| 9007199254740992                 |
-+----------------------------------+
++------------------+
+| SUM(doubles.n)   |
++------------------+
+| 9007199254740992 |
++------------------+
 
 DROP TABLE bigints;
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 DROP TABLE doubles;
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 

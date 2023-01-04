@@ -1,10 +1,10 @@
 CREATE TABLE strings(i STRING, t BIGINT, time index(t));
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 INSERT INTO strings VALUES ('â‚(', 1);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 INSERT INTO strings VALUES (3, 4);
 
@@ -12,19 +12,19 @@ Failed to execute, error: Datanode { code: 2000, msg: "Failed to parse sql value
 
 SELECT * FROM strings WHERE i = 'â‚(';
 
-+--------------------+-----------------------+
-| i, #Field, #String | t, #Timestamp, #Int64 |
-+--------------------+-----------------------+
-| â‚(                | 1                     |
-+--------------------+-----------------------+
++-----+---+
+| i   | t |
++-----+---+
+| â‚( | 1 |
++-----+---+
 
 CREATE TABLE a(i integer, j BIGINT, time index(j));
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 INSERT INTO a VALUES (1, 2);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 INSERT INTO a VALUES (1);
 

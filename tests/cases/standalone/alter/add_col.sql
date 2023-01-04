@@ -1,25 +1,9 @@
 CREATE TABLE test(i INTEGER, j BIGINT TIME INDEX);
 
-Affected Rows: 1
-
 INSERT INTO test VALUES (1, 1), (2, 2);
-
-Affected Rows: 2
 
 ALTER TABLE test ADD COLUMN k INTEGER;
 
-Affected Rows: 0
-
 SELECT * FROM test;
 
-+---+---+---+
-| i | j | k |
-+---+---+---+
-| 1 | 1 |   |
-| 2 | 2 |   |
-+---+---+---+
-
 DROP TABLE test;
-
-Affected Rows: 1
-

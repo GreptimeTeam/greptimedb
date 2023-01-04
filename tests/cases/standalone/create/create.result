@@ -1,10 +1,14 @@
+CREATE TABLE integers (i BIGINT);
+
+Failed to execute, error: Datanode { code: 2000, msg: "Failed to execute sql, source: Failure during query execution, source: Cannot parse SQL, source: Unexpected token while parsing SQL statement:  CREATE TABLE integers (i BIGINT);, expected: 'TIME INDEX', found: ), source: sql parser error: Expected TIME, found: )" }
+
 CREATE TABLE integers (i BIGINT TIME INDEX);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 CREATE TABLE IF NOT EXISTS integers (i BIGINT TIME INDEX);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 CREATE TABLE test1 (i INTEGER, j INTEGER);
 
@@ -12,47 +16,51 @@ Failed to execute, error: Datanode { code: 1004, msg: "Missing timestamp column 
 
 CREATE TABLE test1 (i INTEGER, j BIGINT TIME INDEX NOT NULL);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX NULL);
 
-Failed to execute, error: Datanode { code: 2000, msg: "Failed to execute sql, source: Cannot parse SQL, source: Unexpected token while parsing SQL statement:  CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX NULL);, expected: 'NOT NULL', found: NULL, source: sql parser error: Expected NOT, found: NULL" }
+Failed to execute, error: Datanode { code: 2000, msg: "Failed to execute sql, source: Failure during query execution, source: Cannot parse SQL, source: Unexpected token while parsing SQL statement:  CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX NULL);, expected: 'NOT NULL', found: NULL, source: sql parser error: Expected NOT, found: NULL" }
 
 CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX);
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
-DESC TABLE INTEGERS;
+DESC TABLE integers;
 
-Failed to execute, error: Datanode { code: 1004, msg: "Failed to execute sql, source: Table not found: INTEGERS" }
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int64 | NO   |         | TIME INDEX    |
++-------+-------+------+---------+---------------+
 
 DESC TABLE test1;
 
-+------------------------+-----------------------+-----------------------+--------------------------+--------------------------------+
-| Field, #Field, #String | Type, #Field, #String | Null, #Field, #String | Default, #Field, #String | Semantic Type, #Field, #String |
-+------------------------+-----------------------+-----------------------+--------------------------+--------------------------------+
-| i                      | Int32                 | YES                   |                          | VALUE                          |
-| j                      | Int64                 | NO                    |                          | TIME INDEX                     |
-+------------------------+-----------------------+-----------------------+--------------------------+--------------------------------+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int32 | YES  |         | VALUE         |
+| j     | Int64 | NO   |         | TIME INDEX    |
++-------+-------+------+---------+---------------+
 
 DESC TABLE test2;
 
-+------------------------+-----------------------+-----------------------+--------------------------+--------------------------------+
-| Field, #Field, #String | Type, #Field, #String | Null, #Field, #String | Default, #Field, #String | Semantic Type, #Field, #String |
-+------------------------+-----------------------+-----------------------+--------------------------+--------------------------------+
-| i                      | Int32                 | YES                   |                          | VALUE                          |
-| j                      | Int64                 | NO                    |                          | TIME INDEX                     |
-+------------------------+-----------------------+-----------------------+--------------------------+--------------------------------+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int32 | YES  |         | VALUE         |
+| j     | Int64 | NO   |         | TIME INDEX    |
++-------+-------+------+---------+---------------+
 
 DROP TABLE integers;
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 DROP TABLE test1;
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
 DROP TABLE test2;
 
-MutateResult { success: 1, failure: 0 }
+Affected Rows: 1
 
