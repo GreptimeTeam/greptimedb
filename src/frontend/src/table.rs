@@ -52,8 +52,8 @@ use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, BuildTableMetaSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, Error, LeaderNotFoundSnafu,
-    NotFoundContextValueSnafu, RequestDatanodeSnafu, Result, TableNotFoundSnafu, TableSnafu,
+    self, BuildTableMetaSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ContextValueNotFoundSnafu,
+    Error, LeaderNotFoundSnafu, RequestDatanodeSnafu, Result, TableNotFoundSnafu, TableSnafu,
 };
 use crate::partitioning::columns::RangeColumnsPartitionRule;
 use crate::partitioning::range::RangePartitionRule;
@@ -385,7 +385,7 @@ impl DistTable {
         Ok(partition_rule)
     }
 
-    async fn table_global_value(&self, key: TableGlobalKey) -> Result<Option<TableGlobalValue>> {
+    async fn table_global_value(&self, key: &TableGlobalKey) -> Result<Option<TableGlobalValue>> {
         let raw = self
             .backend
             .get(key.to_string().as_bytes())
@@ -413,7 +413,7 @@ impl DistTable {
     async fn handle_alter(&self, context: AlterContext, request: AlterTableRequest) -> Result<()> {
         let alter_expr = context
             .get::<AlterExpr>()
-            .context(NotFoundContextValueSnafu { key: "AlterExpr" })?;
+            .context(ContextValueNotFoundSnafu { key: "AlterExpr" })?;
 
         self.alter_by_expr(alter_expr).await?;
 
@@ -437,12 +437,12 @@ impl DistTable {
             schema_name: alter_expr.schema_name.clone(),
             table_name: alter_expr.table_name.clone(),
         };
-        let mut value =
-            self.table_global_value(key.clone())
-                .await?
-                .context(TableNotFoundSnafu {
-                    table_name: alter_expr.table_name.clone(),
-                })?;
+        let mut value = self
+            .table_global_value(&key)
+            .await?
+            .context(TableNotFoundSnafu {
+                table_name: alter_expr.table_name.clone(),
+            })?;
 
         value.table_info = new_info.into();
 

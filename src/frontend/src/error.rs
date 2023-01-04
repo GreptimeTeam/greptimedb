@@ -440,8 +440,8 @@ pub enum Error {
         source: common_grpc::Error,
     },
 
-    #[snafu(display("Not found context value: {}", key))]
-    NotFoundContextValue { key: String, backtrace: Backtrace },
+    #[snafu(display("Failed to found context value: {}", key))]
+    ContextValueNotFound { key: String, backtrace: Backtrace },
 
     #[snafu(display(
         "Failed to build table meta for table: {}, source: {}",
@@ -511,7 +511,7 @@ impl ErrorExt for Error {
 
             Error::IllegalFrontendState { .. }
             | Error::IncompleteGrpcResult { .. }
-            | Error::NotFoundContextValue { .. } => StatusCode::Unexpected,
+            | Error::ContextValueNotFound { .. } => StatusCode::Unexpected,
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,

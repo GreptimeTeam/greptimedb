@@ -329,7 +329,7 @@ impl DistInstance {
     }
 
     async fn handle_dist_insert(&self, request: InsertRequest) -> Result<usize> {
-        let table_name = &request.table_name.clone();
+        let table_name = &request.table_name;
         // TODO(LFC): InsertRequest should carry catalog name, too.
         let table = self
             .catalog_manager
