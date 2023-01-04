@@ -3567,7 +3567,6 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "crc",
- "fs2",
  "futures",
  "futures-util",
  "hex",

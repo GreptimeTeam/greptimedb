@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Formatter};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_stream::stream;
@@ -41,6 +42,7 @@ pub struct RaftEngineLogstore {
     engine: RwLock<Option<Arc<Engine>>>,
     cancel_token: Mutex<Option<CancellationToken>>,
     gc_task_handle: Mutex<Option<JoinHandle<()>>>,
+    started: AtomicBool,
 }
 
 impl RaftEngineLogstore {
@@ -50,6 +52,7 @@ impl RaftEngineLogstore {
             engine: RwLock::new(None),
             cancel_token: Mutex::new(None),
             gc_task_handle: Mutex::new(None),
+            started: AtomicBool::new(false),
         }
     }
 }
@@ -58,6 +61,7 @@ impl Debug for RaftEngineLogstore {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RaftEngineLogstore")
             .field("config", &self.config)
+            .field("started", &self.started.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -115,6 +119,7 @@ impl LogStore for RaftEngineLogstore {
         });
         *self.cancel_token.lock().await = Some(token);
         *self.gc_task_handle.lock().await = Some(handle);
+        self.started.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -134,6 +139,7 @@ impl LogStore for RaftEngineLogstore {
         token.cancel();
         handle.await.context(WaitGcTaskStopSnafu)?;
         *self.engine.write().await = None;
+        self.started.store(false, Ordering::Relaxed);
         info!("RaftEngineLogstore stopped");
         Ok(())
     }
@@ -189,7 +195,7 @@ impl LogStore for RaftEngineLogstore {
             .clone();
         let last_index = engine.last_index(ns.id).unwrap();
 
-        let max_batch_size = 128;
+        let max_batch_size = self.config.read_batch_size;
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
         let ns = ns.clone();
         common_runtime::spawn_read(async move {
@@ -310,7 +316,11 @@ impl LogStore for RaftEngineLogstore {
             .as_ref()
             .context(IllegalStateSnafu)?
             .compact_to(namespace.id(), id);
-        info!("Namespace obsoleted {} entries", obsoleted);
+        info!(
+            "Namespace {} obsoleted {} entries",
+            namespace.id(),
+            obsoleted
+        );
         Ok(())
     }
 }
@@ -409,7 +419,7 @@ mod tests {
             let vec = r.unwrap();
             entries.extend(vec.into_iter().map(|e| e.id));
         }
-        assert_eq!(cnt as usize, entries.len());
+        assert_eq!((0..cnt).into_iter().collect::<HashSet<_>>(), entries);
     }
 
     async fn collect_entries(mut s: SendableEntryStream<'_, Entry, Error>) -> Vec<Entry> {
