@@ -5052,9 +5052,9 @@ dependencies = [
 name = "promql"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "catalog",
  "common-catalog",
- "bytemuck",
  "common-error",
  "datafusion",
  "datatypes",
