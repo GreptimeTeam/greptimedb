@@ -271,12 +271,6 @@ pub enum Error {
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display("Failed to deserialize insert batching: {}", source))]
-    InsertBatchToRequest {
-        #[snafu(backtrace)]
-        source: common_grpc_expr::error::Error,
-    },
-
     #[snafu(display("Failed to find catalog by name: {}", catalog_name))]
     CatalogNotFound {
         catalog_name: String,
@@ -534,7 +528,6 @@ impl ErrorExt for Error {
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteSql { source, .. } => source.status_code(),
             Error::ExecuteStatement { source, .. } => source.status_code(),
-            Error::InsertBatchToRequest { source, .. } => source.status_code(),
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,

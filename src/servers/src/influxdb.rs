@@ -18,14 +18,13 @@ use api::v1::InsertRequest as GrpcInsertRequest;
 use common_grpc::writer::{LinesWriter, Precision};
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
-use table::requests::InsertRequest;
 
 use crate::error::{Error, InfluxdbLineProtocolSnafu, InfluxdbLinesWriteSnafu};
-use crate::line_writer::LineWriter;
 
 pub const INFLUXDB_TIMESTAMP_COLUMN_NAME: &str = "ts";
 pub const DEFAULT_TIME_PRECISION: Precision = Precision::Nanosecond;
 
+#[derive(Debug)]
 pub struct InfluxdbRequest {
     pub precision: Option<Precision>,
     pub db: String,
@@ -34,58 +33,6 @@ pub struct InfluxdbRequest {
 
 type TableName = String;
 
-impl TryFrom<&InfluxdbRequest> for Vec<InsertRequest> {
-    type Error = Error;
-
-    fn try_from(value: &InfluxdbRequest) -> Result<Self, Self::Error> {
-        let lines = parse_lines(&value.lines)
-            .collect::<influxdb_line_protocol::Result<Vec<_>>>()
-            .context(InfluxdbLineProtocolSnafu)?;
-        let line_len = lines.len();
-        let mut writers: HashMap<TableName, LineWriter> = HashMap::new();
-        let db = &value.db;
-
-        for line in lines {
-            let table_name = line.series.measurement;
-            let writer = writers
-                .entry(table_name.to_string())
-                .or_insert_with(|| LineWriter::with_lines(db, table_name, line_len));
-
-            let tags = line.series.tag_set;
-            if let Some(tags) = tags {
-                for (k, v) in tags {
-                    writer.write_tag(k.as_str(), v.as_str());
-                }
-            }
-
-            let fields = line.field_set;
-            for (k, v) in fields {
-                let column_name = k.as_str();
-                match v {
-                    FieldValue::I64(value) => writer.write_i64(column_name, value),
-                    FieldValue::U64(value) => writer.write_u64(column_name, value),
-                    FieldValue::F64(value) => writer.write_f64(column_name, value),
-                    FieldValue::String(value) => writer.write_string(column_name, value.as_str()),
-                    FieldValue::Boolean(value) => writer.write_bool(column_name, value),
-                }
-            }
-
-            if let Some(timestamp) = line.timestamp {
-                let precision = if let Some(val) = &value.precision {
-                    *val
-                } else {
-                    DEFAULT_TIME_PRECISION
-                };
-                writer.write_ts(INFLUXDB_TIMESTAMP_COLUMN_NAME, (timestamp, precision));
-            }
-
-            writer.commit();
-        }
-        Ok(writers.into_values().map(|x| x.finish()).collect())
-    }
-}
-
-// TODO(fys): will remove in the future.
 impl TryFrom<&InfluxdbRequest> for Vec<GrpcInsertRequest> {
     type Error = Error;
 
@@ -177,48 +124,15 @@ impl TryFrom<&InfluxdbRequest> for Vec<GrpcInsertRequest> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use api::v1::column::{SemanticType, Values};
     use api::v1::{Column, ColumnDataType};
     use common_base::BitVec;
-    use common_time::timestamp::TimeUnit;
-    use common_time::Timestamp;
-    use datatypes::value::Value;
-    use datatypes::vectors::Vector;
-    use table::requests::InsertRequest;
 
     use super::*;
     use crate::influxdb::InfluxdbRequest;
 
     #[test]
     fn test_convert_influxdb_lines() {
-        let lines = r"
-monitor1,host=host1 cpu=66.6,memory=1024 1663840496100023100
-monitor1,host=host2 memory=1027 1663840496400340001
-monitor2,host=host3 cpu=66.5 1663840496100023102
-monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
-
-        let influxdb_req = &InfluxdbRequest {
-            db: "influxdb".to_string(),
-            precision: None,
-            lines: lines.to_string(),
-        };
-        let insert_reqs: Vec<InsertRequest> = influxdb_req.try_into().unwrap();
-
-        for insert_req in insert_reqs {
-            assert_eq!("influxdb", insert_req.schema_name);
-            match &insert_req.table_name[..] {
-                "monitor1" => assert_table_1(&insert_req),
-                "monitor2" => assert_table_2(&insert_req),
-                _ => panic!(),
-            }
-        }
-    }
-
-    // TODO(fys): will remove in the future.
-    #[test]
-    fn test_convert_influxdb_lines_1() {
         let lines = r"
 monitor1,host=host1 cpu=66.6,memory=1024 1663840496100023100
 monitor1,host=host2 memory=1027 1663840496400340001
@@ -241,77 +155,6 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
                 "monitor2" => assert_monitor_2(&request.columns),
                 _ => panic!(),
             }
-        }
-    }
-
-    fn assert_table_1(insert_req: &InsertRequest) {
-        let table_name = &insert_req.table_name;
-        assert_eq!("monitor1", table_name);
-
-        let columns = &insert_req.columns_values;
-
-        let host = columns.get("host").unwrap();
-        let expected: Vec<Value> = vec!["host1".into(), "host2".into()];
-        assert_vector(&expected, host);
-
-        let cpu = columns.get("cpu").unwrap();
-        let expected: Vec<Value> = vec![66.6.into(), Value::Null];
-        assert_vector(&expected, cpu);
-
-        let memory = columns.get("memory").unwrap();
-        let expected: Vec<Value> = vec![1024.0.into(), 1027.0.into()];
-        assert_vector(&expected, memory);
-
-        let ts = columns.get("ts").unwrap();
-        let expected: Vec<Value> = vec![
-            datatypes::prelude::Value::Timestamp(Timestamp::new(
-                1663840496100,
-                TimeUnit::Millisecond,
-            )),
-            datatypes::prelude::Value::Timestamp(Timestamp::new(
-                1663840496400,
-                TimeUnit::Millisecond,
-            )),
-        ];
-        assert_vector(&expected, ts);
-    }
-
-    fn assert_table_2(insert_req: &InsertRequest) {
-        let table_name = &insert_req.table_name;
-        assert_eq!("monitor2", table_name);
-
-        let columns = &insert_req.columns_values;
-
-        let host = columns.get("host").unwrap();
-        let expected: Vec<Value> = vec!["host3".into(), "host4".into()];
-        assert_vector(&expected, host);
-
-        let cpu = columns.get("cpu").unwrap();
-        let expected: Vec<Value> = vec![66.5.into(), 66.3.into()];
-        assert_vector(&expected, cpu);
-
-        let memory = columns.get("memory").unwrap();
-        let expected: Vec<Value> = vec![Value::Null, 1029.0.into()];
-        assert_vector(&expected, memory);
-
-        let ts = columns.get("ts").unwrap();
-        let expected: Vec<Value> = vec![
-            datatypes::prelude::Value::Timestamp(Timestamp::new(
-                1663840496100,
-                TimeUnit::Millisecond,
-            )),
-            datatypes::prelude::Value::Timestamp(Timestamp::new(
-                1663840496400,
-                TimeUnit::Millisecond,
-            )),
-        ];
-        assert_vector(&expected, ts);
-    }
-
-    fn assert_vector(expected: &[Value], vector: &Arc<dyn Vector>) {
-        for (idx, expected) in expected.iter().enumerate() {
-            let val = vector.get(idx);
-            assert_eq!(*expected, val);
         }
     }
 

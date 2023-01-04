@@ -23,8 +23,7 @@ use common_telemetry::logging;
 use prost::Message;
 use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
-use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
-use servers::Mode;
+use servers::query_handler::{GrpcQueryHandler, PrometheusProtocolHandler, PrometheusResponse};
 use snafu::{OptionExt, ResultExt};
 
 use crate::instance::Instance;
@@ -89,7 +88,6 @@ impl Instance {
                 })),
             };
             let object_result = self
-                .grpc_query_handler
                 .do_query(query)
                 .await?
                 .try_into()
@@ -106,24 +104,12 @@ impl Instance {
 impl PrometheusProtocolHandler for Instance {
     async fn write(&self, database: &str, request: WriteRequest) -> ServerResult<()> {
         let requests = prometheus::to_grpc_insert_requests(database, request.clone())?;
-        match self.mode {
-            Mode::Standalone => {
-                self.handle_inserts(requests)
-                    .await
-                    .map_err(BoxedError::new)
-                    .with_context(|_| error::ExecuteInsertSnafu {
-                        msg: format!("{request:?}"),
-                    })?;
-            }
-            Mode::Distributed => {
-                self.dist_insert(requests)
-                    .await
-                    .map_err(BoxedError::new)
-                    .with_context(|_| error::ExecuteInsertSnafu {
-                        msg: format!("{request:?}"),
-                    })?;
-            }
-        }
+        self.handle_inserts(requests)
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| error::ExecuteInsertSnafu {
+                msg: format!("{request:?}"),
+            })?;
         Ok(())
     }
 
@@ -167,6 +153,8 @@ impl PrometheusProtocolHandler for Instance {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::prometheus::remote::label_matcher::Type as MatcherType;
     use api::prometheus::remote::{Label, LabelMatcher, Sample};
     use servers::query_handler::SqlQueryHandler;
@@ -176,11 +164,24 @@ mod tests {
     use crate::tests;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_prometheus_remote_write_and_read() {
+    async fn test_standalone_prometheus_remote_rw() {
         let standalone =
-            tests::create_standalone_instance("test_prometheus_remote_write_and_read").await;
-        let instance = standalone.instance;
+            tests::create_standalone_instance("test_standalone_prometheus_remote_rw").await;
+        let instance = &standalone.instance;
 
+        test_prometheus_remote_rw(instance).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_distributed_prometheus_remote_rw() {
+        let distributed =
+            tests::create_distributed_instance("test_distributed_prometheus_remote_rw").await;
+        let instance = &distributed.frontend;
+
+        test_prometheus_remote_rw(instance).await;
+    }
+
+    async fn test_prometheus_remote_rw(instance: &Arc<Instance>) {
         let write_request = WriteRequest {
             timeseries: prometheus::mock_timeseries(),
             ..Default::default()
@@ -188,12 +189,15 @@ mod tests {
 
         let db = "prometheus";
 
-        assert!(instance
-            .do_query("CREATE DATABASE prometheus", QueryContext::arc())
-            .await
-            .get(0)
-            .unwrap()
-            .is_ok());
+        assert!(SqlQueryHandler::do_query(
+            instance.as_ref(),
+            "CREATE DATABASE prometheus",
+            QueryContext::arc()
+        )
+        .await
+        .get(0)
+        .unwrap()
+        .is_ok());
 
         instance.write(db, write_request).await.unwrap();
 
