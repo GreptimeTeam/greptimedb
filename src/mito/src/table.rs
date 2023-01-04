@@ -255,7 +255,7 @@ impl<R: Region> Table for MitoTable<R> {
         let rows_num = key_column_values.values().next().unwrap().len();
 
         logging::trace!(
-            "Insert into table {} with data: {:?}",
+            "Delete from table {} where key_columns are: {:?}",
             self.table_info().name,
             key_column_values
         );
