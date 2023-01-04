@@ -99,13 +99,13 @@ where
     }
 }
 
-pub(crate) struct DfContextProviderAdapter {
+pub struct DfContextProviderAdapter {
     state: QueryEngineState,
     query_ctx: QueryContextRef,
 }
 
 impl DfContextProviderAdapter {
-    pub(crate) fn new(state: QueryEngineState, query_ctx: QueryContextRef) -> Self {
+    pub fn new(state: QueryEngineState, query_ctx: QueryContextRef) -> Self {
         Self { state, query_ctx }
     }
 }

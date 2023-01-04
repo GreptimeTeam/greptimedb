@@ -26,6 +26,7 @@ pub mod planner;
 pub mod query_engine;
 pub mod sql;
 
+pub use crate::datafusion::DfContextProviderAdapter;
 pub use crate::query_engine::{
     QueryEngine, QueryEngineContext, QueryEngineFactory, QueryEngineRef,
 };

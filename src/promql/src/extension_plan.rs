@@ -19,4 +19,4 @@ use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType}
 pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantManipulateStream};
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
 
-type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
+pub(crate) type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;

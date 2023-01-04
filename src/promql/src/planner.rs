@@ -12,37 +12,71 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 use datafusion::datasource::DefaultTableSource;
-use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder};
-use datafusion::prelude::Expr as DfExpr;
+use datafusion::logical_expr::{
+    BinaryExpr, BuiltinScalarFunction, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
+};
+use datafusion::prelude::{Column, Expr as DfExpr};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::sql::TableReference;
 use datatypes::schema::SchemaRef;
-use promql_parser::label::Matchers;
-use promql_parser::parser::{EvalStmt, Expr as PromExpr};
+use promql_parser::label::{MatchOp, Matchers};
+use promql_parser::parser::{EvalStmt, Expr as PromExpr, Function};
 use snafu::{OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
     DataFusionSnafu, ExpectExprSnafu, MultipleVectorSnafu, NoTimeIndexSnafu, Result,
-    UnexpectedPlanExprSnafu, UnknownTableSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu,
 };
-use crate::extension_plan::SeriesNormalize;
+use crate::extension_plan::{InstantManipulate, Millisecond, SeriesNormalize};
+
+#[derive(Default, Debug, Clone)]
+struct PromPlannerContext {
+    // query parameters
+    start: Millisecond,
+    end: Millisecond,
+    interval: Millisecond,
+    lookback_delta: Millisecond,
+
+    // planner states
+    time_index_column: Option<String>,
+    value_columns: Vec<String>,
+}
+
+impl PromPlannerContext {
+    fn from_eval_stmt(stmt: &EvalStmt) -> Self {
+        Self {
+            start: stmt.start.duration_since(UNIX_EPOCH).unwrap().as_millis() as _,
+            end: stmt.end.duration_since(UNIX_EPOCH).unwrap().as_millis() as _,
+            interval: stmt.interval.as_millis() as _,
+            lookback_delta: stmt.lookback_delta.as_millis() as _,
+            ..Default::default()
+        }
+    }
+}
 
 pub struct PromPlanner<S: ContextProvider> {
     schema_provider: S,
+    ctx: PromPlannerContext,
 }
 
 impl<S: ContextProvider> PromPlanner<S> {
-    pub fn stmt_to_plan(stmt: EvalStmt) -> Result<LogicalPlan> {
-        todo!()
+    pub fn stmt_to_plan(stmt: EvalStmt, schema_provider: S) -> Result<LogicalPlan> {
+        let mut planner = Self {
+            schema_provider,
+            ctx: PromPlannerContext::from_eval_stmt(&stmt),
+        };
+        planner.prom_expr_to_plan(stmt.expr)
     }
 
-    pub fn prom_expr_to_plan(&self, prom_expr: PromExpr) -> Result<LogicalPlan> {
-        let res = match prom_expr {
+    pub fn prom_expr_to_plan(&mut self, prom_expr: PromExpr) -> Result<LogicalPlan> {
+        let res = match &prom_expr {
             PromExpr::AggregateExpr {
                 op,
                 expr,
@@ -58,8 +92,8 @@ impl<S: ContextProvider> PromPlanner<S> {
                 matching,
                 return_bool,
             } => {
-                let left_input = self.prom_expr_to_plan(*lhs)?;
-                let right_input = self.prom_expr_to_plan(*rhs)?;
+                let left_input = self.prom_expr_to_plan(*lhs.clone())?;
+                let right_input = self.prom_expr_to_plan(*rhs.clone())?;
 
                 todo!()
             }
@@ -77,13 +111,31 @@ impl<S: ContextProvider> PromPlanner<S> {
             PromExpr::VectorSelector {
                 name,
                 offset,
-                start_or_end,
+                start_or_end: _,
                 label_matchers,
             } => {
-                let series_normalize =
-                    self.vector_selector_to_series_normalize(prom_expr.clone())?;
-
-                todo!()
+                // This `name` should not be optional
+                let name = name.as_ref().unwrap().clone();
+                self.setup_context(&name)?;
+                let normalize = self.selector_to_series_normalize_plan(
+                    &name,
+                    offset.clone(),
+                    label_matchers.clone(),
+                )?;
+                let manipulate = InstantManipulate::new(
+                    self.ctx.start,
+                    self.ctx.end,
+                    self.ctx.lookback_delta,
+                    self.ctx.interval,
+                    self.ctx
+                        .time_index_column
+                        .clone()
+                        .context(NoTimeIndexSnafu)?,
+                    normalize,
+                );
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(manipulate),
+                })
             }
             PromExpr::MatrixSelector {
                 vector_selector,
@@ -91,46 +143,71 @@ impl<S: ContextProvider> PromPlanner<S> {
             } => todo!(),
             PromExpr::Call { func, args } => {
                 let args = self.create_function_args(args)?;
-                let input = self.prom_expr_to_plan(args.input.context(ExpectExprSnafu)?)?;
-
-                todo!()
+                let input =
+                    self.prom_expr_to_plan(args.input.with_context(|| ExpectExprSnafu {
+                        expr: prom_expr.clone(),
+                    })?)?;
+                let mut func_exprs = self.create_function_expr(func, args.literals)?;
+                func_exprs.insert(0, self.create_time_index_column_expr()?);
+                LogicalPlanBuilder::from(input)
+                    .project(func_exprs)
+                    .context(DataFusionSnafu)?
+                    .build()
+                    .context(DataFusionSnafu)?
             }
         };
         Ok(res)
     }
 
-    fn vector_selector_to_series_normalize(&self, selector: PromExpr) -> Result<LogicalPlan> {
-        if let PromExpr::VectorSelector {
-            name,
-            offset,
-            start_or_end,
-            label_matchers,
-        } = selector
-        {
-            // This `name` should not be optional
-            let name = name.unwrap().clone();
-            // TODO(ruihang): add time range filter
-            let filter = self.matchers_to_expr(label_matchers)?;
-            let table_scan = self.create_relation(&name, filter)?;
-            let offset = offset.unwrap_or_default();
+    fn selector_to_series_normalize_plan(
+        &self,
+        table_name: &str,
+        offset: Option<Duration>,
+        label_matchers: Matchers,
+    ) -> Result<LogicalPlan> {
+        // TODO(ruihang): add time range filter
+        let filter = self.matchers_to_expr(label_matchers)?;
+        let table_scan = self.create_relation(&table_name, filter)?;
+        let offset = offset.unwrap_or_default();
 
-            let schema = self.get_schema(&name)?;
-            let time_index = schema.timestamp_column().context(NoTimeIndexSnafu)?.name;
-            let series_normalize = SeriesNormalize::new(offset, time_index, table_scan);
-            let logical_plan = LogicalPlan::Extension(Extension {
-                node: Arc::new(series_normalize),
-            });
-            Ok(logical_plan)
-        } else {
-            UnexpectedPlanExprSnafu {
-                desc: format!("{:?}", selector),
-            }
-            .fail()
-        }
+        let series_normalize = SeriesNormalize::new(
+            offset,
+            self.ctx
+                .time_index_column
+                .clone()
+                .context(NoTimeIndexSnafu)?,
+            table_scan,
+        );
+        let logical_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(series_normalize),
+        });
+        Ok(logical_plan)
     }
 
+    // TODO(ruihang): ignore `MetricNameLabel` (`__name__`) matcher
     fn matchers_to_expr(&self, label_matchers: Matchers) -> Result<Vec<DfExpr>> {
-        todo!()
+        let mut exprs = Vec::with_capacity(label_matchers.matchers.len());
+        for matcher in label_matchers.matchers {
+            let col = DfExpr::Column(Column::new(None::<String>, matcher.name));
+            let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)));
+            let expr = match matcher.op {
+                MatchOp::Equal => col.eq(lit),
+                MatchOp::NotEqual => col.not_eq(lit),
+                MatchOp::Re(_) => DfExpr::BinaryExpr(BinaryExpr {
+                    left: Box::new(col),
+                    op: Operator::RegexMatch,
+                    right: Box::new(lit),
+                }),
+                MatchOp::NotRe(_) => DfExpr::BinaryExpr(BinaryExpr {
+                    left: Box::new(col),
+                    op: Operator::RegexNotMatch,
+                    right: Box::new(lit),
+                }),
+            };
+            exprs.push(expr);
+        }
+
+        Ok(exprs)
     }
 
     fn create_relation(&self, table_name: &str, filter: Vec<DfExpr>) -> Result<LogicalPlan> {
@@ -139,11 +216,47 @@ impl<S: ContextProvider> PromPlanner<S> {
             .schema_provider
             .get_table_provider(table_ref)
             .context(DataFusionSnafu)?;
-        let result = LogicalPlanBuilder::scan(table_name, provider, None)
+        let result = LogicalPlanBuilder::scan_with_filters(table_name, provider, None, filter)
             .context(DataFusionSnafu)?
             .build()
             .context(DataFusionSnafu)?;
         Ok(result)
+    }
+
+    /// Setup [PromPlannerContext]'s state fields.
+    fn setup_context(&mut self, table_name: &str) -> Result<()> {
+        let table = self
+            .schema_provider
+            .get_table_provider(TableReference::Bare { table: table_name })
+            .context(DataFusionSnafu)?
+            .as_any()
+            .downcast_ref::<DefaultTableSource>()
+            .context(UnknownTableSnafu)?
+            .table_provider
+            .as_any()
+            .downcast_ref::<DfTableProviderAdapter>()
+            .context(UnknownTableSnafu)?
+            .table();
+
+        // set time index column name
+        let time_index = table
+            .schema()
+            .timestamp_column()
+            .context(NoTimeIndexSnafu)?
+            .name
+            .clone();
+        self.ctx.time_index_column = Some(time_index);
+
+        // set values column
+        let values = table
+            .table_info()
+            .meta
+            .value_column_names()
+            .cloned()
+            .collect();
+        self.ctx.value_columns = values;
+
+        Ok(())
     }
 
     /// Get [SchemaRef] of GreptimeDB (rather than DataFusion's).
@@ -165,11 +278,12 @@ impl<S: ContextProvider> PromPlanner<S> {
         Ok(table.schema())
     }
 
-    fn create_function_args(&self, args: Vec<PromExpr>) -> Result<FunctionArgs> {
+    // TODO(ruihang): insert column expr
+    fn create_function_args(&self, args: &[Box<PromExpr>]) -> Result<FunctionArgs> {
         let mut result = FunctionArgs::default();
 
         for arg in args {
-            match arg {
+            match *arg.clone() {
                 PromExpr::AggregateExpr { .. }
                 | PromExpr::UnaryExpr { .. }
                 | PromExpr::BinaryExpr { .. }
@@ -178,8 +292,8 @@ impl<S: ContextProvider> PromPlanner<S> {
                 | PromExpr::VectorSelector { .. }
                 | PromExpr::MatrixSelector { .. }
                 | PromExpr::Call { .. } => {
-                    if result.input.replace(arg.clone()).is_some() {
-                        MultipleVectorSnafu { expr: arg.clone() }.fail()
+                    if result.input.replace(*arg.clone()).is_some() {
+                        MultipleVectorSnafu { expr: *arg.clone() }.fail()?;
                     }
                 }
 
@@ -196,10 +310,192 @@ impl<S: ContextProvider> PromPlanner<S> {
 
         Ok(result)
     }
+
+    fn create_function_expr(
+        &self,
+        func: &Function,
+        mut other_input_exprs: Vec<DfExpr>,
+    ) -> Result<Vec<DfExpr>> {
+        // TODO(ruihang): check function args list
+
+        // TODO(ruihang): set this according to in-param list
+        let vector_pos = 0;
+        let scalar_func = BuiltinScalarFunction::from_str(func.name).map_err(|_| {
+            UnsupportedExprSnafu {
+                name: func.name.to_string(),
+            }
+            .build()
+        })?;
+
+        // TODO(ruihang): handle those functions doesn't require input
+        let mut exprs = Vec::with_capacity(self.ctx.value_columns.len());
+        for value in &self.ctx.value_columns {
+            let col_expr = DfExpr::Column(Column::new(None::<String>, value));
+            other_input_exprs.insert(vector_pos, col_expr);
+            let fn_expr = DfExpr::ScalarFunction {
+                fun: scalar_func.clone(),
+                args: other_input_exprs.clone(),
+            };
+            exprs.push(fn_expr);
+            other_input_exprs.remove(vector_pos);
+        }
+
+        Ok(exprs)
+    }
+
+    fn create_time_index_column_expr(&self) -> Result<DfExpr> {
+        Ok(DfExpr::Column(Column::new(
+            None::<String>,
+            self.ctx
+                .time_index_column
+                .clone()
+                .context(NoTimeIndexSnafu)?,
+        )))
+    }
 }
 
 #[derive(Default, Debug)]
 struct FunctionArgs {
     input: Option<PromExpr>,
     literals: Vec<DfExpr>,
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::UNIX_EPOCH;
+
+    use catalog::local::MemoryCatalogManager;
+    use catalog::{CatalogManager, RegisterTableRequest};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use promql_parser::label::Matcher;
+    use promql_parser::parser::ValueType;
+    use query::query_engine::QueryEngineState;
+    use query::DfContextProviderAdapter;
+    use session::context::QueryContext;
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::test_util::EmptyTable;
+
+    use super::*;
+
+    async fn build_test_context_provider(
+        table_name: String,
+        num_tag: usize,
+        num_field: usize,
+    ) -> Arc<MemoryCatalogManager> {
+        let mut columns = vec![];
+        for i in 0..num_tag {
+            columns.push(ColumnSchema::new(
+                format!("tag_{i}"),
+                ConcreteDataType::string_datatype(),
+                false,
+            ));
+        }
+        columns.push(
+            ColumnSchema::new(
+                format!("timestamp"),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        for i in 0..num_field {
+            columns.push(ColumnSchema::new(
+                format!("field_{i}"),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+        }
+        let schema = Arc::new(Schema::new(columns));
+        let table_meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices((0..num_tag).collect())
+            .value_indices((num_tag + 1..num_tag + 1 + num_field).collect())
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(&table_name)
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        let table = Arc::new(EmptyTable::from_table_info(&table_info));
+        let catalog_list = Arc::new(MemoryCatalogManager::default());
+        catalog_list
+            .register_table(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name,
+                table_id: 1024,
+                table,
+            })
+            .await
+            .unwrap();
+
+        catalog_list
+    }
+
+    // {
+    // 	input: `abs(some_metric{foo!="bar"})`,
+    // 	expected: &Call{
+    // 		Func: MustGetFunction("abs"),
+    // 		Args: Expressions{
+    // 			&VectorSelector{
+    // 				Name: "some_metric",
+    // 				LabelMatchers: []*labels.Matcher{
+    // 					MustLabelMatcher(labels.MatchNotEqual, "foo", "bar"),
+    // 					MustLabelMatcher(labels.MatchEqual, model.MetricNameLabel, "some_metric"),
+    // 				},
+    // 			},
+    // 		},
+    // 	},
+    // },
+    #[tokio::test]
+    async fn simple_abs_fn_call() {
+        let prom_expr = PromExpr::Call {
+            func: Function {
+                name: "abs",
+                arg_types: vec![ValueType::Vector],
+                variadic: false,
+                return_type: ValueType::Vector,
+            },
+            args: vec![Box::new(PromExpr::VectorSelector {
+                name: Some("some_metric".to_owned()),
+                offset: None,
+                start_or_end: None,
+                label_matchers: Matchers {
+                    matchers: vec![Matcher {
+                        op: MatchOp::NotEqual,
+                        name: "tag_0".to_string(),
+                        value: "bar".to_string(),
+                    }],
+                },
+            })],
+        };
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let catalog_list = build_test_context_provider("some_metric".to_string(), 1, 1).await;
+        let query_engine_state = QueryEngineState::new(catalog_list);
+        let query_context = QueryContext::new();
+        let context_provider =
+            DfContextProviderAdapter::new(query_engine_state, query_context.into());
+        let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
+
+        let expected = String::from(
+            "Projection: some_metric.timestamp, abs(some_metric.field_0) [timestamp:Timestamp(Millisecond, None), abs(some_metric.field_0):Float64;N]\
+            \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n    PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n      TableScan: some_metric, unsupported_filters=[tag_0 != Utf8(\"bar\")] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]",
+        );
+        assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
 }

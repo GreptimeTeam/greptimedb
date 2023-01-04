@@ -38,7 +38,7 @@ pub enum Error {
     NoTimeIndex { backtrace: Backtrace },
 
     #[snafu(display(
-        "Cannot accept multiple vector as function input, PromQL expr: {}",
+        "Cannot accept multiple vector as function input, PromQL expr: {:?}",
         expr
     ))]
     MultipleVector {
@@ -46,7 +46,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Expect a PromQL expr but not found, input expr: {}", expr))]
+    #[snafu(display("Expect a PromQL expr but not found, input expr: {:?}", expr))]
     ExpectExpr {
         expr: PromExpr,
         backtrace: Backtrace,

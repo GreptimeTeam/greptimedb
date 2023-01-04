@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use common_query::physical_plan::PhysicalPlanRef;
 use common_recordbatch::EmptyRecordBatchStream;
 
-use crate::metadata::{TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
+use crate::metadata::{TableInfo, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
 use crate::requests::{CreateTableRequest, InsertRequest};
 use crate::table::scan::SimpleTableScan;
 use crate::{Result, Table};
@@ -47,6 +47,12 @@ impl EmptyTable {
 
         Self {
             info: Arc::new(table_info),
+        }
+    }
+
+    pub fn from_table_info(info: &TableInfo) -> Self {
+        Self {
+            info: Arc::new(info.clone()),
         }
     }
 }

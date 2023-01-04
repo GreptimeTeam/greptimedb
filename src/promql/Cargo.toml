@@ -5,11 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+catalog = { path = "../catalog" }
 common-error = { path = "../common/error" }
+common-catalog = { path = "../common/catalog" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
-promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "9108344d0550e33b70a8a7de60bb6efb38ddc372" }
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "488cc2603ba513eed795c0167f24633e55b82eb2" }
+query = { path = "../query" }
+session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 table = { path = "../table" }
 
