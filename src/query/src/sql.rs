@@ -93,7 +93,9 @@ pub fn show_databases(stmt: ShowDatabases, catalog_manager: CatalogManagerRef) -
         .context(error::CatalogNotFoundSnafu {
             catalog: DEFAULT_CATALOG_NAME,
         })?;
-    let databases = catalog.schema_names().context(error::CatalogSnafu)?;
+    let mut databases = catalog.schema_names().context(error::CatalogSnafu)?;
+    // TODO(dennis): Specify the order of the results in catalog manager API
+    databases.sort();
 
     let databases = if let ShowKind::Like(ident) = stmt.kind {
         Helper::like_utf8(databases, &ident.value).context(error::VectorComputationSnafu)?
@@ -138,7 +140,9 @@ pub fn show_tables(
         .schema(catalog, &schema)
         .context(error::CatalogSnafu)?
         .context(error::SchemaNotFoundSnafu { schema })?;
-    let tables = schema.table_names().context(error::CatalogSnafu)?;
+    let mut tables = schema.table_names().context(error::CatalogSnafu)?;
+    // TODO(dennis): Specify the order of the results in schema provider API
+    tables.sort();
 
     let tables = if let ShowKind::Like(ident) = stmt.kind {
         Helper::like_utf8(tables, &ident.value).context(error::VectorComputationSnafu)?

@@ -7,8 +7,8 @@ SHOW DATABASES;
 +---------+
 | Schemas |
 +---------+
-| test    |
 | public  |
+| test    |
 +---------+
 
 CREATE TABLE test.hello(i BIGINT TIME INDEX);
