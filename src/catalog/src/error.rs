@@ -86,9 +86,10 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Cannot find schema, schema info: {}", schema_info))]
+    #[snafu(display("Cannot find schema {} in catalog {}", schema, catalog))]
     SchemaNotFound {
-        schema_info: String,
+        catalog: String,
+        schema: String,
         backtrace: Backtrace,
     },
 

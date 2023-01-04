@@ -328,6 +328,10 @@ impl DistInstance {
         Ok(())
     }
 
+    // TODO(LFC): Refactor insertion implementation for DistTable,
+    // GRPC InsertRequest to Table InsertRequest, than split Table InsertRequest, than assemble each GRPC InsertRequest, is rather inefficient,
+    // should operate on GRPC InsertRequest directly.
+    // Also remember to check the "region_number" carried in InsertRequest, too.
     async fn handle_dist_insert(&self, request: InsertRequest) -> Result<usize> {
         let table_name = &request.table_name;
         // TODO(LFC): InsertRequest should carry catalog name, too.

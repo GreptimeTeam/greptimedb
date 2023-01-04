@@ -123,9 +123,7 @@ impl CatalogManager for FrontendCatalogManager {
         table_name: &str,
     ) -> catalog::error::Result<Option<TableRef>> {
         self.schema(catalog, schema)?
-            .context(catalog::error::SchemaNotFoundSnafu {
-                schema_info: schema,
-            })?
+            .context(catalog::error::SchemaNotFoundSnafu { catalog, schema })?
             .table(table_name)
     }
 }
