@@ -31,8 +31,10 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     type Namespace: Namespace;
     type Entry: Entry;
 
+    /// Start the components and background tasks of logstore.
     async fn start(&self) -> Result<(), Self::Error>;
 
+    /// Stop components of logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
 
     /// Append an `Entry` to WAL with given namespace

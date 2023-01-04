@@ -138,6 +138,7 @@ impl LogStore for RaftEngineLogstore {
         Ok(())
     }
 
+    /// Append an entry to logstore. Currently of existence of entry's namespace is not checked.
     async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error> {
         let entry_id = e.id;
         let mut batch = LogBatch::with_capacity(1);
@@ -150,6 +151,8 @@ impl LogStore for RaftEngineLogstore {
         Ok(AppendResponse { entry_id })
     }
 
+    /// Append a batch of entries to logstore. `RaftEngineLogstore` assures the atomicity of
+    /// batch append.
     async fn append_batch(
         &self,
         ns: &Self::Namespace,
@@ -170,6 +173,8 @@ impl LogStore for RaftEngineLogstore {
         Ok(entry_ids)
     }
 
+    /// Create a stream of entries from logstore in the given namespace. The end of stream is
+    /// determined by the current "last index" of the namespace.
     async fn read(
         &self,
         ns: &Self::Namespace,

@@ -23,7 +23,7 @@ use crate::error::{Error, Result};
 #[derive(Debug, Default)]
 pub struct NoopLogStore;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct EntryImpl;
 
 #[derive(Debug, Clone, Default, Hash, PartialEq)]
@@ -93,7 +93,7 @@ impl LogStore for NoopLogStore {
     }
 
     async fn append_batch(&self, _ns: &Self::Namespace, _e: Vec<Self::Entry>) -> Result<Vec<Id>> {
-        todo!()
+        Ok(vec![])
     }
 
     async fn read(
@@ -106,15 +106,15 @@ impl LogStore for NoopLogStore {
     }
 
     async fn create_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
-        todo!()
+        Ok(())
     }
 
     async fn delete_namespace(&mut self, _ns: &Self::Namespace) -> Result<()> {
-        todo!()
+        Ok(())
     }
 
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
-        todo!()
+        Ok(vec![])
     }
 
     fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id, ns: Self::Namespace) -> Self::Entry {
@@ -137,5 +137,46 @@ impl LogStore for NoopLogStore {
         let _ = namespace;
         let _ = id;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mock_entry() {
+        let e = EntryImpl::default();
+        assert_eq!(0, e.data().len());
+        assert_eq!(0, e.id());
+        e.encode_to(&mut vec![]).unwrap();
+
+        assert_eq!(
+            EntryImpl::default(),
+            EntryImpl::decode(&mut (&[] as &[u8])).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_noop_logstore() {
+        let mut store = NoopLogStore::default();
+        store.start().await.unwrap();
+        let e = store.entry("".as_bytes(), 1, NamespaceImpl::default());
+        store.append(e.clone()).await.unwrap();
+        store
+            .append_batch(&NamespaceImpl::default(), vec![e])
+            .await
+            .unwrap();
+        store
+            .create_namespace(&NamespaceImpl::default())
+            .await
+            .unwrap();
+        assert_eq!(0, store.list_namespaces().await.unwrap().len());
+        store
+            .delete_namespace(&NamespaceImpl::default())
+            .await
+            .unwrap();
+        assert_eq!(NamespaceImpl::default(), store.namespace(0));
+        store.obsolete(NamespaceImpl::default(), 1).await.unwrap();
     }
 }
