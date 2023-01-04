@@ -23,9 +23,8 @@ use store_api::storage::RegionId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to connect Datanode at {}, source: {}", addr, source))]
-    ConnectDatanode {
-        addr: String,
+    #[snafu(display("Invalid ObjectResult, source: {}", source))]
+    InvalidObjectResult {
         #[snafu(backtrace)]
         source: client::Error,
     },
@@ -488,7 +487,7 @@ impl ErrorExt for Error {
             | Error::VectorComputation { source }
             | Error::ConvertArrowSchema { source } => source.status_code(),
 
-            Error::ConnectDatanode { source, .. } | Error::RequestDatanode { source } => {
+            Error::InvalidObjectResult { source, .. } | Error::RequestDatanode { source } => {
                 source.status_code()
             }
 

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use catalog::SchemaProviderRef;
 use common_error::snafu::ensure;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{ConcreteDataType, MutableVector};
@@ -21,26 +20,18 @@ use sql::ast::Value as SqlValue;
 use sql::statements;
 use sql::statements::insert::Insert;
 use table::requests::InsertRequest;
+use table::TableRef;
 
 use crate::error::{self, BuildVectorSnafu, Result};
 
 // TODO(fys): Extract the common logic in datanode and frontend in the future.
 #[allow(dead_code)]
-pub(crate) fn insert_to_request(
-    schema_provider: &SchemaProviderRef,
-    stmt: Insert,
-) -> Result<InsertRequest> {
+pub(crate) fn insert_to_request(table: &TableRef, stmt: Insert) -> Result<InsertRequest> {
     let columns = stmt.columns();
     let values = stmt.values().context(error::ParseSqlSnafu)?;
     let (catalog_name, schema_name, table_name) =
         stmt.full_table_name().context(error::ParseSqlSnafu)?;
 
-    let table = schema_provider
-        .table(&table_name)
-        .context(error::CatalogSnafu)?
-        .context(error::TableNotFoundSnafu {
-            table_name: &table_name,
-        })?;
     let schema = table.schema();
     let columns_num = if columns.is_empty() {
         schema.column_schemas().len()

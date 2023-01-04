@@ -1027,7 +1027,7 @@ mod test {
         let schema = Arc::new(Schema::new(column_schemas.clone()));
 
         let instance = crate::tests::create_distributed_instance(test_name).await;
-        let dist_instance = instance.frontend.dist_instance.as_ref().unwrap();
+        let dist_instance = &instance.dist_instance;
         let datanode_instances = instance.datanodes;
 
         let catalog_manager = dist_instance.catalog_manager();

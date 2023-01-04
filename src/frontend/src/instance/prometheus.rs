@@ -177,9 +177,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_prometheus_remote_write_and_read() {
-        common_telemetry::init_default_ut_logging();
-        let (instance, _guard) =
+        let standalone =
             tests::create_standalone_instance("test_prometheus_remote_write_and_read").await;
+        let instance = standalone.instance;
 
         let write_request = WriteRequest {
             timeseries: prometheus::mock_timeseries(),

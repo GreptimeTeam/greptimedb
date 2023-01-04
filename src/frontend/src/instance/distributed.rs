@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod flight;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::result::ObjectResultBuilder;
-use api::v1::ddl_request::Expr as DdlExpr;
-use api::v1::object_expr::Request as GrpcRequest;
 use api::v1::{
     AlterExpr, CreateDatabaseExpr, CreateTableExpr, InsertRequest, ObjectExpr, ObjectResult,
     TableId,
 };
+use arrow_flight::flight_service_server::FlightService;
+use arrow_flight::Ticket;
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use catalog::{CatalogList, CatalogManager};
@@ -30,7 +31,7 @@ use chrono::DateTime;
 use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
-use common_grpc::flight::{FlightEncoder, FlightMessage};
+use common_grpc::flight::flight_data_to_object_result;
 use common_query::Output;
 use common_telemetry::{debug, error, info};
 use datatypes::prelude::ConcreteDataType;
@@ -40,6 +41,7 @@ use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
     TableName, TableRoute,
 };
+use prost::Message;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
@@ -52,18 +54,20 @@ use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::table::AlterContext;
+use tonic::Request;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    ColumnDataTypeSnafu, PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result,
-    SchemaNotFoundSnafu, StartMetaClientSnafu, TableNotFoundSnafu, TableSnafu,
-    ToTableInsertRequestSnafu,
+    ColumnDataTypeSnafu, FlightGetSnafu, InvalidFlightDataSnafu, ParseSqlSnafu,
+    PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu,
+    StartMetaClientSnafu, TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
 use crate::instance::parse_stmt;
 use crate::partitioning::{PartitionBound, PartitionDef};
+use crate::sql::insert_to_request;
 
 #[derive(Clone)]
 pub(crate) struct DistInstance {
@@ -162,8 +166,7 @@ impl DistInstance {
                 let expr = CreateDatabaseExpr {
                     database_name: stmt.name.to_string(),
                 };
-                self.handle_create_database(expr).await?;
-                Ok(Output::AffectedRows(1))
+                Ok(self.handle_create_database(expr).await?)
             }
             Statement::CreateTable(stmt) => {
                 let create_expr = &mut DefaultCreateExprFactory.create_expr_by_stmt(&stmt).await?;
@@ -176,6 +179,21 @@ impl DistInstance {
             Statement::DescribeTable(stmt) => describe_table(stmt, self.catalog_manager.clone()),
             Statement::Explain(stmt) => {
                 explain(Box::new(stmt), self.query_engine.clone(), query_ctx).await
+            }
+            Statement::Insert(insert) => {
+                let (catalog, schema, table) = insert.full_table_name().context(ParseSqlSnafu)?;
+
+                let table = self
+                    .catalog_manager
+                    .table(&catalog, &schema, &table)
+                    .context(CatalogSnafu)?
+                    .context(TableNotFoundSnafu { table_name: table })?;
+
+                let insert_request = insert_to_request(&table, *insert)?;
+
+                return Ok(Output::AffectedRows(
+                    table.insert(insert_request).await.context(TableSnafu)?,
+                ));
             }
             _ => unreachable!(),
         }
@@ -206,7 +224,7 @@ impl DistInstance {
     }
 
     /// Handles distributed database creation
-    async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<()> {
+    async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
         let key = SchemaKey {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: expr.database_name,
@@ -221,10 +239,11 @@ impl DistInstance {
             .with_key(key.to_string())
             .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
         client.put(request.into()).await.context(RequestMetaSnafu)?;
-        Ok(())
+
+        Ok(Output::AffectedRows(1))
     }
 
-    async fn handle_alter_table(&self, expr: AlterExpr) -> Result<()> {
+    async fn handle_alter_table(&self, expr: AlterExpr) -> Result<Output> {
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME
         } else {
@@ -258,7 +277,9 @@ impl DistInstance {
         let mut context = AlterContext::with_capacity(1);
         context.insert(expr);
 
-        table.alter(context, request).await.context(TableSnafu)
+        table.alter(context, request).await.context(TableSnafu)?;
+
+        Ok(Output::AffectedRows(0))
     }
 
     async fn create_table_in_meta(
@@ -344,7 +365,15 @@ impl DistInstance {
         let request = common_grpc_expr::insert::to_table_insert_request(request)
             .context(ToTableInsertRequestSnafu)?;
 
-        table.insert(request).await.context(TableSnafu)
+        let affected_rows = table.insert(request).await.context(TableSnafu)?;
+        Ok(Output::AffectedRows(affected_rows))
+    }
+
+    async fn boarding(&self, ticket: Request<Ticket>) -> Result<ObjectResult> {
+        let response = self.do_get(ticket).await.context(FlightGetSnafu)?;
+        flight_data_to_object_result(response)
+            .await
+            .context(InvalidFlightDataSnafu)
     }
 
     #[cfg(test)]
@@ -391,43 +420,17 @@ impl SqlQueryHandler for DistInstance {
 
 #[async_trait]
 impl GrpcQueryHandler for DistInstance {
-    async fn do_query(&self, expr: ObjectExpr) -> server_error::Result<ObjectResult> {
-        let request = expr
-            .clone()
-            .request
-            .context(server_error::InvalidQuerySnafu {
-                reason: "empty expr",
-            })?;
-        let flight_messages = match request {
-            GrpcRequest::Ddl(request) => {
-                let expr = request.expr.context(server_error::InvalidQuerySnafu {
-                    reason: "empty DDL expr",
-                })?;
-                let result = match expr {
-                    DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr).await,
-                    DdlExpr::Alter(expr) => self.handle_alter_table(expr).await,
-                    DdlExpr::CreateTable(_) | DdlExpr::DropTable(_) => unimplemented!(),
-                };
-                result.map(|_| vec![FlightMessage::AffectedRows(1)])
-            }
-            GrpcRequest::Insert(request) => self
-                .handle_dist_insert(request)
-                .await
-                .map(|x| vec![FlightMessage::AffectedRows(x)]),
-            // TODO(LFC): Implement Flight for DistInstance.
-            GrpcRequest::Query(_) => unimplemented!(),
-        }
-        .map_err(BoxedError::new)
-        .with_context(|_| server_error::ExecuteQuerySnafu {
-            query: format!("{expr:?}"),
-        })?;
-
-        let encoder = FlightEncoder::default();
-        let flight_data = flight_messages
-            .into_iter()
-            .map(|x| encoder.encode(x))
-            .collect();
-        Ok(ObjectResultBuilder::new().flight_data(flight_data).build())
+    async fn do_query(&self, query: ObjectExpr) -> server_error::Result<ObjectResult> {
+        let ticket = Request::new(Ticket {
+            ticket: query.encode_to_vec(),
+        });
+        // TODO(LFC): Temporarily use old GRPC interface here, will get rid of them near the end of Arrow Flight adoption.
+        self.boarding(ticket)
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| servers::error::ExecuteQuerySnafu {
+                query: format!("{query:?}"),
+            })
     }
 }
 
@@ -677,7 +680,7 @@ ENGINE=mito",
     #[tokio::test(flavor = "multi_thread")]
     async fn test_show_databases() {
         let instance = crate::tests::create_distributed_instance("test_show_databases").await;
-        let dist_instance = instance.frontend.dist_instance.as_ref().unwrap();
+        let dist_instance = &instance.dist_instance;
 
         let sql = "create database test_show_databases";
         let output = dist_instance
@@ -728,7 +731,7 @@ ENGINE=mito",
     #[tokio::test(flavor = "multi_thread")]
     async fn test_show_tables() {
         let instance = crate::tests::create_distributed_instance("test_show_tables").await;
-        let dist_instance = instance.frontend.dist_instance.as_ref().unwrap();
+        let dist_instance = &instance.dist_instance;
         let datanode_instances = instance.datanodes;
 
         let sql = "create database test_show_tables";
@@ -777,7 +780,7 @@ ENGINE=mito",
             }
         }
 
-        assert_show_tables(Arc::new(dist_instance.clone())).await;
+        assert_show_tables(dist_instance.clone()).await;
 
         // Asserts that new table is created in Datanode as well.
         for x in datanode_instances.values() {
