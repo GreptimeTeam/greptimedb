@@ -21,8 +21,8 @@ use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
-use log_store::fs::config::LogConfig;
-use log_store::fs::log::LocalFileLogStore;
+use log_store::raft_engine::log_store::RaftEngineLogstore;
+use log_store::LogConfig;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use mito::config::EngineConfig as TableEngineConfig;
@@ -53,7 +53,7 @@ mod grpc;
 mod script;
 mod sql;
 
-pub(crate) type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
+pub(crate) type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogstore>>;
 
 // An abstraction to read/write services.
 pub struct Instance {
@@ -63,7 +63,7 @@ pub struct Instance {
     pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
-    pub(crate) logstore: Arc<LocalFileLogStore>,
+    pub(crate) logstore: Arc<RaftEngineLogstore>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -295,7 +295,7 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Resul
 
 pub(crate) async fn create_local_file_log_store(
     path: impl AsRef<str>,
-) -> Result<LocalFileLogStore> {
+) -> Result<RaftEngineLogstore> {
     let path = path.as_ref();
     // create WAL directory
     fs::create_dir_all(path::Path::new(path)).context(error::CreateDirSnafu { dir: path })?;
@@ -307,9 +307,6 @@ pub(crate) async fn create_local_file_log_store(
         ..Default::default()
     };
 
-    let log_store = LocalFileLogStore::open(&log_config)
-        .await
-        .context(error::OpenLogStoreSnafu)?;
-
-    Ok(log_store)
+    let logstore = RaftEngineLogstore::new(log_config);
+    Ok(logstore)
 }

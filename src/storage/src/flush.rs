@@ -245,7 +245,7 @@ impl<S: LogStore> Job for FlushJob<S> {
 
 #[cfg(test)]
 mod tests {
-    use log_store::fs::noop::NoopLogStore;
+    use log_store::NoopLogStore;
     use regex::Regex;
 
     use super::*;

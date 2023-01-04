@@ -77,6 +77,12 @@ impl<S: LogStore> Wal<S> {
     pub fn region_id(&self) -> RegionId {
         self.region_id
     }
+
+    #[cfg(test)]
+    pub async fn close(&self) -> Result<()> {
+        let _ = self.store.stop().await;
+        Ok(())
+    }
 }
 
 impl<S: LogStore> Wal<S> {

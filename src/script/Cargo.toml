@@ -73,3 +73,4 @@ storage = { path = "../storage" }
 tempdir = "0.3"
 tokio = { version = "1.18", features = ["full"] }
 tokio-test = "0.4"
+store-api = {path = "../store-api"}

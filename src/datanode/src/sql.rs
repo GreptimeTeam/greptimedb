@@ -125,7 +125,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
-    use log_store::fs::noop::NoopLogStore;
+    use log_store::NoopLogStore;
     use mito::config::EngineConfig as TableEngineConfig;
     use mito::engine::MitoEngine;
     use object_store::services::fs::Builder;

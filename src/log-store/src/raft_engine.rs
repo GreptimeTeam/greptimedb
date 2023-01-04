@@ -47,6 +47,7 @@ impl Namespace {
     }
 }
 
+#[allow(clippy::derive_hash_xor_eq)]
 impl Hash for Namespace {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);

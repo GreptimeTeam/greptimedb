@@ -6406,6 +6406,7 @@ dependencies = [
  "snafu",
  "sql",
  "storage",
+ "store-api",
  "table",
  "tempdir",
  "tokio",

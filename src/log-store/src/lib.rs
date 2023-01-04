@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod config;
 pub mod error;
-pub mod fs;
+mod noop;
 pub mod raft_engine;
 pub mod test_util;
+
+pub use config::LogConfig;
+pub use noop::NoopLogStore;

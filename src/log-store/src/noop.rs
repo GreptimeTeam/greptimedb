@@ -12,23 +12,72 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use store_api::logstore::entry::Id;
-use store_api::logstore::namespace::Id as NamespaceId;
+use common_base::buffer::{Buffer, BufferMut};
+use store_api::logstore::entry::{Encode, Entry, Id};
+use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::logstore::{AppendResponse, LogStore};
 
 use crate::error::{Error, Result};
-use crate::fs::entry::EntryImpl;
-use crate::fs::namespace::LocalNamespace;
 
 /// A noop log store which only for test
-// TODO: Add a test feature
 #[derive(Debug, Default)]
 pub struct NoopLogStore;
+
+#[derive(Debug, Default, Clone)]
+pub struct EntryImpl;
+
+#[derive(Debug, Clone, Default, Hash, PartialEq)]
+pub struct NamespaceImpl;
+
+impl Namespace for NamespaceImpl {
+    fn id(&self) -> NamespaceId {
+        0
+    }
+}
+
+impl Encode for EntryImpl {
+    type Error = Error;
+
+    fn encode_to<T: BufferMut>(&self, buf: &mut T) -> std::result::Result<usize, Self::Error> {
+        let _ = buf;
+        Ok(0)
+    }
+
+    fn decode<T: Buffer>(buf: &mut T) -> std::result::Result<Self, Self::Error> {
+        let _ = buf;
+        Ok(Default::default())
+    }
+
+    fn encoded_size(&self) -> usize {
+        0
+    }
+}
+
+impl Entry for EntryImpl {
+    type Error = Error;
+    type Namespace = NamespaceImpl;
+
+    fn data(&self) -> &[u8] {
+        &[]
+    }
+
+    fn id(&self) -> Id {
+        0
+    }
+
+    fn set_id(&mut self, id: Id) {
+        let _ = id;
+    }
+
+    fn namespace(&self) -> Self::Namespace {
+        Default::default()
+    }
+}
 
 #[async_trait::async_trait]
 impl LogStore for NoopLogStore {
     type Error = Error;
-    type Namespace = LocalNamespace;
+    type Namespace = NamespaceImpl;
     type Entry = EntryImpl;
 
     async fn start(&self) -> Result<()> {
@@ -69,11 +118,15 @@ impl LogStore for NoopLogStore {
     }
 
     fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id, ns: Self::Namespace) -> Self::Entry {
-        EntryImpl::new(data, id, ns)
+        let _ = data;
+        let _ = id;
+        let _ = ns;
+        EntryImpl::default()
     }
 
     fn namespace(&self, id: NamespaceId) -> Self::Namespace {
-        LocalNamespace::new(id)
+        let _ = id;
+        NamespaceImpl::default()
     }
 
     async fn obsolete(
