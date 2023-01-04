@@ -1,6 +1,5 @@
 CREATE TABLE integers(i BIGINT TIME INDEX);
 
-
 INSERT INTO integers VALUES (1), (2), (3);
 
 SELECT DISTINCT i%2 FROM integers ORDER BY 1;

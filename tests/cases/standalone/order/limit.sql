@@ -39,7 +39,6 @@ SELECT * FROM integers as int OFFSET (SELECT MIN(integers.i) FROM integers);
 
 SELECT * FROM integers as int LIMIT (SELECT MAX(integers.i) FROM integers) OFFSET (SELECT MIN(integers.i) FROM integers);
 
-
 SELECT * FROM integers as int LIMIT (SELECT max(integers.i) FROM integers where i > 5);
 
 SELECT * FROM integers as int LIMIT (SELECT max(integers.i) FROM integers where i > 5);

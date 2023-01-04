@@ -2,6 +2,15 @@ CREATE SCHEMA test;
 
 Affected Rows: 1
 
+SHOW DATABASES;
+
++---------+
+| Schemas |
++---------+
+| test    |
+| public  |
++---------+
+
 CREATE TABLE test.hello(i BIGINT TIME INDEX);
 
 Affected Rows: 1
@@ -35,6 +44,22 @@ SELECT * FROM test.hello;
 | 3 |
 | 4 |
 +---+
+
+SHOW TABLES;
+
++---------+
+| Tables  |
++---------+
+| numbers |
++---------+
+
+SHOW TABLES FROM test;
+
++--------+
+| Tables |
++--------+
+| hello  |
++--------+
 
 DROP TABLE test.hello;
 
