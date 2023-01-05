@@ -72,6 +72,11 @@ pub enum Error {
 
     #[snafu(display("Empty range is not expected"))]
     EmptyRange { backtrace: Backtrace },
+
+    #[snafu(display(
+        "Table (metric) name not found, this indicates a procedure error in PromQL planner"
+    ))]
+    TableNameNotFound { backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -87,7 +92,8 @@ impl ErrorExt for Error {
             | DataFusionPlanning { .. }
             | UnexpectedPlanExpr { .. }
             | IllegalRange { .. }
-            | EmptyRange { .. } => StatusCode::Internal,
+            | EmptyRange { .. }
+            | TableNameNotFound { .. } => StatusCode::Internal,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

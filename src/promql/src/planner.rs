@@ -24,14 +24,14 @@ use datafusion::prelude::{Column, Expr as DfExpr};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::sql::TableReference;
-use promql_parser::label::{MatchOp, Matchers};
+use promql_parser::label::{MatchOp, Matchers, METRIC_NAME};
 use promql_parser::parser::{EvalStmt, Expr as PromExpr, Function};
 use snafu::{OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    DataFusionPlanningSnafu, ExpectExprSnafu, MultipleVectorSnafu, Result, TableNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    DataFusionPlanningSnafu, ExpectExprSnafu, MultipleVectorSnafu, Result, TableNameNotFoundSnafu,
+    TableNotFoundSnafu, TimeIndexNotFoundSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
 };
 use crate::extension_plan::{InstantManipulate, Millisecond, SeriesNormalize};
 
@@ -44,6 +44,7 @@ struct PromPlannerContext {
     lookback_delta: Millisecond,
 
     // planner states
+    table_name: Option<String>,
     time_index_column: Option<String>,
     value_columns: Vec<String>,
 }
@@ -110,16 +111,14 @@ impl<S: ContextProvider> PromPlanner<S> {
             }
             .fail()?,
             PromExpr::VectorSelector {
-                name,
+                name: _,
                 offset,
                 start_or_end: _,
                 label_matchers,
             } => {
-                // This `name` should not be optional
-                let name = name.as_ref().unwrap().clone();
-                self.setup_context(&name)?;
-                let normalize =
-                    self.selector_to_series_normalize_plan(&name, *offset, label_matchers.clone())?;
+                let matchers = self.preprocess_label_matchers(label_matchers)?;
+                self.setup_context()?;
+                let normalize = self.selector_to_series_normalize_plan(*offset, matchers)?;
                 let manipulate = InstantManipulate::new(
                     self.ctx.start,
                     self.ctx.end,
@@ -157,15 +156,31 @@ impl<S: ContextProvider> PromPlanner<S> {
         Ok(res)
     }
 
+    /// Extract metric name from `__name__` matcher and set it into [PromPlannerContext].
+    /// Returns a new [Matchers] that doesn't contains metric name matcher.
+    fn preprocess_label_matchers(&mut self, label_matchers: &Matchers) -> Result<Matchers> {
+        let mut matchers = Vec::with_capacity(label_matchers.matchers.len());
+        for matcher in &label_matchers.matchers {
+            // TODO(ruihang): support other metric match ops
+            if matcher.name == METRIC_NAME && matches!(matcher.op, MatchOp::Equal) {
+                self.ctx.table_name = Some(matcher.value.clone());
+            } else {
+                matchers.push(matcher.clone());
+            }
+        }
+
+        Ok(Matchers { matchers })
+    }
+
     fn selector_to_series_normalize_plan(
         &self,
-        table_name: &str,
         offset: Option<Duration>,
         label_matchers: Matchers,
     ) -> Result<LogicalPlan> {
+        let table_name = self.ctx.table_name.clone().unwrap();
         // TODO(ruihang): add time range filter
         let filter = self.matchers_to_expr(label_matchers)?;
-        let table_scan = self.create_table_scan_plan(table_name, filter)?;
+        let table_scan = self.create_table_scan_plan(&table_name, filter)?;
         let offset = offset.unwrap_or_default();
 
         let series_normalize = SeriesNormalize::new(
@@ -222,10 +237,15 @@ impl<S: ContextProvider> PromPlanner<S> {
     }
 
     /// Setup [PromPlannerContext]'s state fields.
-    fn setup_context(&mut self, table_name: &str) -> Result<()> {
+    fn setup_context(&mut self) -> Result<()> {
+        let table_name = self
+            .ctx
+            .table_name
+            .clone()
+            .context(TableNameNotFoundSnafu)?;
         let table = self
             .schema_provider
-            .get_table_provider(TableReference::Bare { table: table_name })
+            .get_table_provider(TableReference::Bare { table: &table_name })
             .context(DataFusionPlanningSnafu)?
             .as_any()
             .downcast_ref::<DefaultTableSource>()
@@ -444,11 +464,18 @@ mod test {
                 offset: None,
                 start_or_end: None,
                 label_matchers: Matchers {
-                    matchers: vec![Matcher {
-                        op: MatchOp::NotEqual,
-                        name: "tag_0".to_string(),
-                        value: "bar".to_string(),
-                    }],
+                    matchers: vec![
+                        Matcher {
+                            op: MatchOp::NotEqual,
+                            name: "tag_0".to_string(),
+                            value: "bar".to_string(),
+                        },
+                        Matcher {
+                            op: MatchOp::Equal,
+                            name: METRIC_NAME.to_string(),
+                            value: "some_metric".to_string(),
+                        },
+                    ],
                 },
             })],
         };
