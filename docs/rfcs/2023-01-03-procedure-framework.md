@@ -36,7 +36,11 @@ The `ProcedureManager` keeps calling `Procedure::execute()` until the Procedure 
 trait Procedure {
     fn execute(&mut self, ctx: &Context) -> Result<Status>;
 
+    fn dump(&self) -> Result<String>;
+
     fn restore(&mut self, data: &str) -> Result<()>;
+
+    // other methods...
 }
 ```
 
@@ -53,29 +57,23 @@ A call to `execute()` can result in the following possibilities:
 - `Ok(Status::Done)`: we are done
 - `Ok(Status::Executing)`: there are remaining steps to do
 - `Ok(Status::Suspend)`: execution is suspended and can be resumed later
-- `Err(e)`: error occurs during execution and the procedure is unable to proceed anymore
+- `Err(e)`: error occurs during execution and the procedure is unable to proceed anymore.
 
-
-The Procedure can persist its state into the ProcedureStore via Context::store, so can control when and whether to store its state. The framework assigns a unique id for each procedure and the procedure can get this id via the `Context`.
+The framework assigns a unique id for each procedure and the procedure can get this id via the `Context`.
 
 ```rust
 struct Context {
     id: ProcedureId,
-    procedure_store: Arc<dyn ProcedureStore>,
     // other fields ...
-}
-
-impl Context {
-    fn store(&self, data: &str) -> Result<()> {
-        // Stores the data into `procedure_store`
-    }
 }
 ```
 
-After restart, the framework can restore the procedure's state by calling `Procedure::restore()`.
+The framework calls `Procedure::dump()` to serialize the internal state of the procedure and writes to the `ProcedureStore`. The procedure can return an empty string to skip persistence.
+
+After restart, the framework can restore the procedure's state by invoking `Procedure::restore()`.
 
 ## ProcedureStore
-We may need to provide two different ProcedureStore implementations:
+We might need to provide two different ProcedureStore implementations:
 - `LocalProcedureStore`, for standalone mode, stores data on the local disk.
 - `RemoteProcedureStore`, for distributed mode, stores data on the meta server or the object store service.
 
@@ -84,12 +82,12 @@ These implementations should share the same storage structure. They store each p
 ```
 Sample paths:
 
-/procedures/{PROCEDURE_ID}-000001.json
-/procedures/{PROCEDURE_ID}-000002.json
+/procedures/{PROCEDURE_ID}-000001.step
+/procedures/{PROCEDURE_ID}-000002.step
 /procedures/{PROCEDURE_ID}-000003.commit
 ```
 
-`ProcedureStore` behaves like a WAL. Before performing each step, the procedure can store its current state in the ProcedureStore. The `000001` in the path is the number of the step. After the procedure is done, the framework should put a `.commit` file to indicate the procedure is finished (committed).
+`ProcedureStore` behaves like a WAL. Before performing each step, the framework can write the procedure's current state to the ProcedureStore, which stores the state in the `.step` file. The `000001` in the path is a monotonic increasing sequence of the step. After the procedure is done, the framework puts a `.commit` file to indicate the procedure is finished (committed).
 
 The framework can remove the procedure's files once the procedure is done, but it needs to leave the `.commit` as the last file to remove in case of failure during removal.
 
@@ -102,16 +100,30 @@ trait ProcedureManager {
 
     fn create(&self, name: &str) -> Result<Box<dyn Procedure>>;
 
-    fn submit(&self, procedure: Box<dyn Procedure>) -> Result<ProcedureId>;
+    fn submit(&self, procedure: Box<dyn Procedure>) -> Result<Handle>;
 }
 ```
 
 It supports the following operations:
 - Register a `ProcedureBuilder` by name. We can build a new `Procedure` instance by calling `ProcedureBuilder::build()`.
 - Create a new `Procedure` instance by the registered builder name.
-- Submit a `Procedure` to the manager and execute it.
+- Submit a `Procedure` to the manager and execute it. The returned `Handle` provides a `join()` method that can be used to join the `Procedure`.
 
 When `ProcedureManager` starts, it loads procedures from the `ProcedureStore`, and restores their states by calling `Procedure::restore()`.
+
+## Rollback
+The rollback step is supposed to clean up the resources created during the execute() step. When a procedure has failed, the framework puts a `rollback` file and calls the `Procedure::rollback()` method.
+
+
+```text
+/procedures/{PROCEDURE_ID}-000001.step
+/procedures/{PROCEDURE_ID}-000002.rollback
+```
+
+Rollback is complicated to implement so some procedures might not support rollback or only provide a best-efforts approach.
+
+## Locking
+The procedure framework can provide a locking mechanism that gives a procedure read/write access to a database object such as a table so other procedures are unable to modify the same table while the current one is executing.
 
 # Drawbacks
 The `Procedure` framework introduces additional complexity and overhead to our database.
