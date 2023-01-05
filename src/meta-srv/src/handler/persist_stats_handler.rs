@@ -26,12 +26,14 @@ impl HeartbeatHandler for PersistStatsHandler {
         &self,
         _req: &HeartbeatRequest,
         ctx: &Context,
-        _acc: &mut HeartbeatAccumulator,
+        acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
-        if ctx.is_skip_all() {
+        if ctx.is_skip_all() || acc.stats.is_empty() {
             return Ok(());
         }
 
-        todo!()
+        // TODO: remove stats from `acc` and persist to store
+
+        Ok(())
     }
 }
