@@ -122,6 +122,8 @@ Rollback is complicated to implement so some procedures might not support rollba
 ## Locking
 The procedure framework can provide a locking mechanism that gives a procedure read/write access to a database object such as a table so other procedures are unable to modify the same table while the current one is executing.
 
+## Sub-procedures
+A procedure may need to create some sub-procedures to process its subtasks. For example, creating a distributed table with multiple regions (partitions) needs to set up the regions in each node, thus the parent procedure should instantiate a sub-procedure for each region. The framework makes sure that the parent procedure does not proceed till all sub-procedures are successfully finished.
 
 # Drawbacks
 The `Procedure` framework introduces additional complexity and overhead to our database.
