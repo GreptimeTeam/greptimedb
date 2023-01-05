@@ -38,8 +38,6 @@ trait Procedure {
 
     fn dump(&self) -> Result<String>;
 
-    fn restore(&mut self, data: &str) -> Result<()>;
-
     // other methods...
 }
 ```
@@ -70,8 +68,6 @@ struct Context {
 
 The framework calls `Procedure::dump()` to serialize the internal state of the procedure and writes to the `ProcedureStore`. The procedure can return an empty string to skip persistence.
 
-After restart, the framework can restore the procedure's state by invoking `Procedure::restore()`.
-
 ## ProcedureStore
 We might need to provide two different ProcedureStore implementations:
 - `LocalProcedureStore`, for standalone mode, stores data on the local disk.
@@ -96,20 +92,21 @@ The framework can remove the procedure's files once the procedure is done, but i
 
 ```rust
 trait ProcedureManager {
-    fn register_builder(&self, name: &str, procedure_builder: Box<dyn ProcedureBuilder>) -> Result<()>;
-
-    fn create(&self, name: &str) -> Result<Box<dyn Procedure>>;
+    fn register_loader(&self, name: &str, loader: Box<dyn ProcedureLoader>) -> Result<()>;
 
     fn submit(&self, procedure: Box<dyn Procedure>) -> Result<Handle>;
 }
 ```
 
 It supports the following operations:
-- Register a `ProcedureBuilder` by name. We can build a new `Procedure` instance by calling `ProcedureBuilder::build()`.
-- Create a new `Procedure` instance by the registered builder name.
+- Register a `ProcedureLoader` by the type name of the `Procedure`.
 - Submit a `Procedure` to the manager and execute it. The returned `Handle` provides a `join()` method that can be used to join the `Procedure`.
 
-When `ProcedureManager` starts, it loads procedures from the `ProcedureStore`, and restores their states by calling `Procedure::restore()`.
+When `ProcedureManager` starts, it loads procedures from the `ProcedureStore` and restores the procedures by the `ProcedureLoader`. The manager stores the type name from `Procedure::type_name()` with the data from `Procedure::dump()` in the `.step` file and uses the type name to find a `ProcedureLoader` to recover the procedure from its data.
+
+```rust
+type ProcedureLoader = Fn(&str) -> Result<Box<dyn Procedure>>;
+```
 
 ## Rollback
 The rollback step is supposed to clean up the resources created during the execute() step. When a procedure has failed, the framework puts a `rollback` file and calls the `Procedure::rollback()` method.
@@ -124,6 +121,7 @@ Rollback is complicated to implement so some procedures might not support rollba
 
 ## Locking
 The procedure framework can provide a locking mechanism that gives a procedure read/write access to a database object such as a table so other procedures are unable to modify the same table while the current one is executing.
+
 
 # Drawbacks
 The `Procedure` framework introduces additional complexity and overhead to our database.
