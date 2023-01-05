@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_stream::stream;
-use common_telemetry::tracing::log::debug;
 use common_telemetry::{error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -126,8 +125,12 @@ impl LogStore for RaftEngineLogstore {
     }
 
     async fn stop(&self) -> Result<(), Self::Error> {
-        ensure!(self.started(), IllegalStateSnafu);
-        self.started.store(false, Ordering::Relaxed);
+        ensure!(
+            self.started
+                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok(),
+            IllegalStateSnafu
+        );
         let handle = self
             .gc_task_handle
             .lock()
@@ -193,7 +196,6 @@ impl LogStore for RaftEngineLogstore {
         let last_index = engine.last_index(ns.id).unwrap_or(0);
         let mut start_index = id.max(engine.first_index(ns.id).unwrap_or(last_index + 1));
 
-        debug!("Start index: {}, last index: {}", start_index, last_index);
         let max_batch_size = self.config.read_batch_size;
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
         let ns = ns.clone();
