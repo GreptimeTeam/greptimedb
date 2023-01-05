@@ -102,11 +102,11 @@ impl<S: ContextProvider> PromPlanner<S> {
             }
             .fail()?,
             PromExpr::NumberLiteral { .. } => UnsupportedExprSnafu {
-                name: "Prom Aggregate",
+                name: "Prom Number Literal",
             }
             .fail()?,
             PromExpr::StringLiteral { .. } => UnsupportedExprSnafu {
-                name: "Prom Aggregate",
+                name: "Prom String Literal",
             }
             .fail()?,
             PromExpr::VectorSelector {
@@ -128,7 +128,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     self.ctx
                         .time_index_column
                         .clone()
-                        .with_context(|| TimeIndexNotFoundSnafu { table: name })?,
+                        .expect("time index should be set in `setup_context`"),
                     normalize,
                 );
                 LogicalPlan::Extension(Extension {
@@ -186,7 +186,7 @@ impl<S: ContextProvider> PromPlanner<S> {
     fn matchers_to_expr(&self, label_matchers: Matchers) -> Result<Vec<DfExpr>> {
         let mut exprs = Vec::with_capacity(label_matchers.matchers.len());
         for matcher in label_matchers.matchers {
-            let col = DfExpr::Column(Column::new(None::<String>, matcher.name));
+            let col = DfExpr::Column(Column::from_name(matcher.name));
             let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)));
             let expr = match matcher.op {
                 MatchOp::Equal => col.eq(lit),
@@ -298,7 +298,7 @@ impl<S: ContextProvider> PromPlanner<S> {
         // TODO(ruihang): check function args list
 
         // TODO(ruihang): set this according to in-param list
-        let vector_pos = 0;
+        let value_column_pos = 0;
         let scalar_func = BuiltinScalarFunction::from_str(func.name).map_err(|_| {
             UnsupportedExprSnafu {
                 name: func.name.to_string(),
@@ -309,22 +309,21 @@ impl<S: ContextProvider> PromPlanner<S> {
         // TODO(ruihang): handle those functions doesn't require input
         let mut exprs = Vec::with_capacity(self.ctx.value_columns.len());
         for value in &self.ctx.value_columns {
-            let col_expr = DfExpr::Column(Column::new(None::<String>, value));
-            other_input_exprs.insert(vector_pos, col_expr);
+            let col_expr = DfExpr::Column(Column::from_name(value));
+            other_input_exprs.insert(value_column_pos, col_expr);
             let fn_expr = DfExpr::ScalarFunction {
                 fun: scalar_func.clone(),
                 args: other_input_exprs.clone(),
             };
             exprs.push(fn_expr);
-            other_input_exprs.remove(vector_pos);
+            other_input_exprs.remove(value_column_pos);
         }
 
         Ok(exprs)
     }
 
     fn create_time_index_column_expr(&self) -> Result<DfExpr> {
-        Ok(DfExpr::Column(Column::new(
-            None::<String>,
+        Ok(DfExpr::Column(Column::from_name(
             self.ctx
                 .time_index_column
                 .clone()
