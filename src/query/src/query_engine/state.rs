@@ -55,7 +55,7 @@ impl fmt::Debug for QueryEngineState {
 }
 
 impl QueryEngineState {
-    pub(crate) fn new(catalog_list: CatalogListRef) -> Self {
+    pub fn new(catalog_list: CatalogListRef) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new()
             .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);

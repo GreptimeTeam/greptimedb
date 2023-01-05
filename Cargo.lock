@@ -5054,19 +5054,24 @@ name = "promql"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "catalog",
+ "common-catalog",
  "common-error",
  "datafusion",
  "datatypes",
  "futures",
  "promql-parser",
+ "query",
+ "session",
  "snafu",
+ "table",
  "tokio",
 ]
 
 [[package]]
 name = "promql-parser"
 version = "0.0.1"
-source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=71d8a90#71d8a90979304a7f128b3125f37a209384a81051"
+source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=488cc2603ba513eed795c0167f24633e55b82eb2#488cc2603ba513eed795c0167f24633e55b82eb2"
 dependencies = [
  "cfgrammar",
  "lazy_static",

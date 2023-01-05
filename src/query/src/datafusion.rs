@@ -40,7 +40,8 @@ use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
-use crate::datafusion::planner::{DfContextProviderAdapter, DfPlanner};
+pub use crate::datafusion::planner::DfContextProviderAdapter;
+use crate::datafusion::planner::DfPlanner;
 use crate::error::{QueryExecutionSnafu, Result};
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;

@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use promql_parser::parser::Expr as PromExpr;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -22,6 +23,40 @@ pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
 
+    #[snafu(display("Internal error during build DataFusion plan, error: {}", source))]
+    DataFusionPlanning {
+        source: datafusion::error::DataFusionError,
+    },
+
+    #[snafu(display("Unexpected plan or expression: {}", desc))]
+    UnexpectedPlanExpr { desc: String, backtrace: Backtrace },
+
+    #[snafu(display("Unknown table type, downcast failed"))]
+    UnknownTable { backtrace: Backtrace },
+
+    #[snafu(display("Cannot find time index column in table {}", table))]
+    TimeIndexNotFound { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Cannot find the table {}", table))]
+    TableNotFound {
+        table: String,
+        source: datafusion::error::DataFusionError,
+    },
+
+    #[snafu(display(
+        "Cannot accept multiple vector as function input, PromQL expr: {:?}",
+        expr
+    ))]
+    MultipleVector {
+        expr: PromExpr,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Expect a PromQL expr but not found, input expr: {:?}", expr))]
+    ExpectExpr {
+        expr: PromExpr,
+        backtrace: Backtrace,
+    },
     #[snafu(display(
         "Illegal range: offset {}, length {}, array len {}",
         offset,
@@ -37,14 +72,28 @@ pub enum Error {
 
     #[snafu(display("Empty range is not expected"))]
     EmptyRange { backtrace: Backtrace },
+
+    #[snafu(display(
+        "Table (metric) name not found, this indicates a procedure error in PromQL planner"
+    ))]
+    TableNameNotFound { backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            UnsupportedExpr { .. } => StatusCode::InvalidArguments,
-            IllegalRange { .. } | EmptyRange { .. } => StatusCode::Internal,
+            TimeIndexNotFound { .. }
+            | UnsupportedExpr { .. }
+            | MultipleVector { .. }
+            | ExpectExpr { .. } => StatusCode::InvalidArguments,
+            UnknownTable { .. }
+            | TableNotFound { .. }
+            | DataFusionPlanning { .. }
+            | UnexpectedPlanExpr { .. }
+            | IllegalRange { .. }
+            | EmptyRange { .. }
+            | TableNameNotFound { .. } => StatusCode::Internal,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {
