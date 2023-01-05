@@ -36,18 +36,13 @@ mod tests {
     use futures::StreamExt;
 
     use super::*;
-    use crate::logstore::entry::{Encode, Epoch, Id, Offset};
+    pub use crate::logstore::entry::Id;
 
     pub struct SimpleEntry {
-        /// Offset of current entry
-        offset: Offset,
-        /// Epoch of current entry
-        epoch: Epoch,
         /// Binary data of current entry
         data: Vec<u8>,
     }
 
-    use common_base::buffer::{Buffer, BufferMut};
     use common_error::prelude::{ErrorExt, Snafu};
     use snafu::{Backtrace, ErrorCompat};
 
@@ -74,23 +69,6 @@ mod tests {
         }
     }
 
-    impl Encode for SimpleEntry {
-        type Error = Error;
-
-        fn encode_to<T: BufferMut>(&self, buf: &mut T) -> Result<usize, Self::Error> {
-            buf.write_from_slice(self.data.as_slice()).unwrap();
-            Ok(self.data.as_slice().len())
-        }
-
-        fn decode<T: Buffer>(_buf: &mut T) -> Result<Self, Self::Error> {
-            unimplemented!()
-        }
-
-        fn encoded_size(&self) -> usize {
-            self.data.as_slice().len()
-        }
-    }
-
     impl Entry for SimpleEntry {
         type Error = Error;
         type Namespace = Namespace;
@@ -103,37 +81,15 @@ mod tests {
             0u64
         }
 
-        fn offset(&self) -> Offset {
-            self.offset
-        }
-
-        fn set_id(&mut self, _id: Id) {}
-
-        fn epoch(&self) -> Epoch {
-            self.epoch
-        }
-
-        fn len(&self) -> usize {
-            self.data.len()
-        }
-
-        fn is_empty(&self) -> bool {
-            self.data.is_empty()
-        }
-
         fn namespace(&self) -> Self::Namespace {
             Namespace {}
         }
     }
 
     impl SimpleEntry {
-        pub fn new(data: impl AsRef<[u8]>, offset: Offset, epoch: u64) -> Self {
+        pub fn new(data: impl AsRef<[u8]>) -> Self {
             let data = data.as_ref().to_vec();
-            Self {
-                data,
-                offset,
-                epoch,
-            }
+            Self { data }
         }
     }
 
@@ -165,9 +121,8 @@ mod tests {
 
     #[tokio::test]
     pub async fn test_entry_stream() {
-        let stream = async_stream::stream!({
-            yield Ok(vec![SimpleEntry::new("test_entry".as_bytes(), 0, 128)])
-        });
+        let stream =
+            async_stream::stream!({ yield Ok(vec![SimpleEntry::new("test_entry".as_bytes())]) });
 
         let mut stream_impl = EntryStreamImpl {
             inner: Box::pin(stream),

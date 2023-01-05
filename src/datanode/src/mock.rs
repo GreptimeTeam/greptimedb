@@ -29,7 +29,7 @@ use table::table::TableIdProvider;
 use crate::datanode::DatanodeOptions;
 use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
-use crate::instance::{create_local_file_log_store, new_object_store, DefaultEngine, Instance};
+use crate::instance::{create_log_store, new_object_store, DefaultEngine, Instance};
 use crate::script::ScriptExecutor;
 use crate::sql::SqlHandler;
 
@@ -41,7 +41,7 @@ impl Instance {
 
     pub async fn with_mock_meta_server(opts: &DatanodeOptions, meta_srv: MockInfo) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
-        let logstore = Arc::new(create_local_file_log_store(&opts.wal_dir).await?);
+        let logstore = Arc::new(create_log_store(&opts.wal_dir).await?);
         let meta_client = Arc::new(mock_meta_client(meta_srv, opts.node_id.unwrap_or(42)).await);
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),

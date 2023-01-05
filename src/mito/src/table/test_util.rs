@@ -20,7 +20,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::VectorRef;
-use log_store::fs::noop::NoopLogStore;
+use log_store::NoopLogStore;
 use object_store::services::fs::Builder;
 use object_store::ObjectStore;
 use storage::config::EngineConfig as StorageEngineConfig;

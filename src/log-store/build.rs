@@ -12,27 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use store_api::logstore::namespace::{Id, Namespace};
+use protobuf_build::Builder;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct LocalNamespace {
-    pub(crate) id: Id,
-}
-
-impl Default for LocalNamespace {
-    fn default() -> Self {
-        LocalNamespace::new(0)
-    }
-}
-
-impl LocalNamespace {
-    pub(crate) fn new(id: Id) -> Self {
-        Self { id }
-    }
-}
-
-impl Namespace for LocalNamespace {
-    fn id(&self) -> Id {
-        self.id
-    }
+fn main() {
+    let base = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    Builder::new()
+        .search_dir_for_protos(&format!("{base}/proto"))
+        .includes(&[format!("{base}/include"), format!("{base}/proto")])
+        .include_google_protos()
+        .generate()
 }

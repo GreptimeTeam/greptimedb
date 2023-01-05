@@ -19,8 +19,8 @@ use common_error::prelude::BoxedError;
 use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
-use store_api::logstore::entry::Entry;
-use store_api::logstore::{AppendResponse, LogStore};
+use store_api::logstore::entry::{Entry, Id};
+use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::codec::{Decoder, Encoder};
@@ -74,6 +74,12 @@ impl<S: LogStore> Wal<S> {
     pub fn region_id(&self) -> RegionId {
         self.region_id
     }
+
+    #[cfg(test)]
+    pub async fn close(&self) -> Result<()> {
+        let _ = self.store.stop().await;
+        Ok(())
+    }
 }
 
 impl<S: LogStore> Wal<S> {
@@ -96,7 +102,7 @@ impl<S: LogStore> Wal<S> {
         seq: SequenceNumber,
         mut header: WalHeader,
         payload: Option<&Payload>,
-    ) -> Result<(u64, usize)> {
+    ) -> Result<Id> {
         if let Some(p) = payload {
             header.mutation_types = wal::gen_mutation_types(p);
         }
@@ -147,10 +153,10 @@ impl<S: LogStore> Wal<S> {
         Ok(Box::pin(stream))
     }
 
-    async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<(u64, usize)> {
+    async fn write(&self, seq: SequenceNumber, bytes: &[u8]) -> Result<u64> {
         let e = self.store.entry(bytes, seq, self.namespace.clone());
 
-        let res = self
+        let response = self
             .store
             .append(e)
             .await
@@ -159,7 +165,7 @@ impl<S: LogStore> Wal<S> {
                 region_id: self.region_id(),
             })?;
 
-        Ok((res.entry_id(), res.offset()))
+        Ok(response.entry_id)
     }
 
     fn decode_entry<E: Entry>(
@@ -247,13 +253,9 @@ mod tests {
 
         let res = wal.write(0, b"test1").await.unwrap();
 
-        assert_eq!(0, res.0);
-        assert_eq!(0, res.1);
-
+        assert_eq!(0, res);
         let res = wal.write(1, b"test2").await.unwrap();
-
-        assert_eq!(1, res.0);
-        assert_eq!(5 + 32, res.1);
+        assert_eq!(1, res);
     }
 
     #[tokio::test]
@@ -263,18 +265,15 @@ mod tests {
             test_util::log_store_util::create_tmp_local_file_log_store("wal_test").await;
         let wal = Wal::new(0, Arc::new(log_store));
         let header = WalHeader::with_last_manifest_version(111);
-        let (seq_num, _) = wal.write_to_wal(3, header, None).await?;
-
-        assert_eq!(3, seq_num);
+        let seq_num = 3;
+        wal.write_to_wal(seq_num, header, None).await?;
 
         let mut stream = wal.read_from_wal(seq_num).await?;
         let mut data = vec![];
         while let Some((seq_num, header, write_batch)) = stream.try_next().await? {
             data.push((seq_num, header, write_batch));
         }
-
         assert_eq!(1, data.len());
-        assert_eq!(seq_num, data[0].0);
         assert_eq!(111, data[0].1.last_manifest_version);
         assert!(data[0].2.is_none());
 

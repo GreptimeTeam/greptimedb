@@ -17,7 +17,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use log_store::fs::log::LocalFileLogStore;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{OpenOptions, WriteResponse};
 use tempdir::TempDir;
 
@@ -34,7 +34,7 @@ async fn create_region_for_flush(
     store_dir: &str,
     enable_version_column: bool,
     flush_strategy: FlushStrategyRef,
-) -> RegionImpl<LocalFileLogStore> {
+) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(REGION_NAME, enable_version_column);
 
     let mut store_config = config_util::new_store_config(REGION_NAME, store_dir).await;
@@ -63,6 +63,9 @@ impl FlushTester {
 
     async fn reopen(&mut self) {
         // Close the old region.
+        if let Some(base) = self.base.as_ref() {
+            base.close().await;
+        }
         self.base = None;
         // Reopen the region.
         let mut store_config = config_util::new_store_config(REGION_NAME, &self.store_dir).await;

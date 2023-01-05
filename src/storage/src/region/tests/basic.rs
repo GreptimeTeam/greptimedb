@@ -1,10 +1,10 @@
-// Copyright 2022 Greptime Team
+// Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,7 +14,8 @@
 
 //! Region read/write tests.
 
-use log_store::fs::log::LocalFileLogStore;
+use common_telemetry::info;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{OpenOptions, SequenceNumber, WriteResponse};
 use tempdir::TempDir;
 
@@ -30,7 +31,7 @@ async fn create_region_for_basic(
     region_name: &str,
     store_dir: &str,
     enable_version_column: bool,
-) -> RegionImpl<LocalFileLogStore> {
+) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(region_name, enable_version_column);
 
     let store_config = config_util::new_store_config(region_name, store_dir).await;
@@ -70,6 +71,11 @@ impl Tester {
 
     async fn try_reopen(&mut self) -> Result<bool> {
         // Close the old region.
+        if let Some(base) = self.base.as_ref() {
+            info!("Reopen tester base");
+            base.close().await;
+        }
+
         self.base = None;
         // Reopen the region.
         let store_config = config_util::new_store_config(&self.region_name, &self.store_dir).await;
