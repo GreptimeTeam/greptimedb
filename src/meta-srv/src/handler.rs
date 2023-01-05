@@ -14,14 +14,14 @@
 
 pub use check_leader_handler::CheckLeaderHandler;
 pub use collect_stats_handler::CollectStatsHandler;
-pub use datanode_lease_handler::DatanodeLeaseHandler;
+pub use keep_lease_handler::KeepLeaseHandler;
 pub use persist_stats_handler::PersistStatsHandler;
 pub use response_header_handler::ResponseHeaderHandler;
 
 mod check_leader_handler;
 mod collect_stats_handler;
-mod datanode_lease_handler;
 mod instruction;
+mod keep_lease_handler;
 mod node_stat;
 mod persist_stats_handler;
 mod response_header_handler;

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::election::Election;
 use crate::handler::{
-    CheckLeaderHandler, CollectStatsHandler, DatanodeLeaseHandler, HeartbeatHandlerGroup,
+    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
     PersistStatsHandler, ResponseHeaderHandler,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
@@ -102,8 +102,12 @@ impl MetaSrv {
             None => {
                 let hg = HeartbeatHandlerGroup::default();
                 hg.add_handler(ResponseHeaderHandler).await;
+                // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
+                // because even if the current meta server node is no longer the leader it can
+                // still help the data node to keep lease.
+                hg.add_handler(KeepLeaseHandler::new(kv_store.clone()))
+                    .await;
                 hg.add_handler(CheckLeaderHandler).await;
-                hg.add_handler(DatanodeLeaseHandler).await;
                 hg.add_handler(CollectStatsHandler::default()).await;
                 hg.add_handler(PersistStatsHandler).await;
                 hg
