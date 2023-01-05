@@ -12,18 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::convert::TryFrom;
-use std::fs::File;
+use protobuf_build::Builder;
 
-use snafu::ResultExt;
-
-use crate::error::Error;
-
-// TODO(hl): Implement pread/pwrite for non-Unix platforms
-pub fn pread_exact(file: &File, _buf: &mut [u8], _offset: u64) -> Result<(), Error> {
-    unimplemented!()
-}
-
-pub fn pwrite_all(file: &File, _buf: &[u8], _offset: u64) -> Result<(), Error> {
-    unimplemented!()
+fn main() {
+    let base = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    Builder::new()
+        .search_dir_for_protos(&format!("{base}/proto"))
+        .includes(&[format!("{base}/include"), format!("{base}/proto")])
+        .include_google_protos()
+        .generate()
 }

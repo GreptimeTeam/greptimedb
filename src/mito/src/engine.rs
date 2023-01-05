@@ -546,7 +546,7 @@ mod tests {
     use datatypes::vectors::{
         Float64Vector, Int32Vector, StringVector, TimestampMillisecondVector, VectorRef,
     };
-    use log_store::fs::noop::NoopLogStore;
+    use log_store::NoopLogStore;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use store_api::manifest::Manifest;

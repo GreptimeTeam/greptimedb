@@ -4,10 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[build-dependencies]
+protobuf-build = { version = "0.14", default-features = false, features = [
+    "protobuf-codec",
+] }
+
 [dependencies]
-async-trait.workspace = true
 arc-swap = "1.5"
 async-stream.workspace = true
+async-trait.workspace = true
 base64 = "0.13"
 byteorder = "1.4"
 bytes = "1.1"
@@ -16,9 +21,11 @@ common-error = { path = "../common/error" }
 common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 crc = "3.0"
-futures.workspace = true
 futures-util = "0.3"
+futures.workspace = true
 hex = "0.4"
+protobuf = { version = "2", features = ["bytes"] }
+raft-engine = "0.3"
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
 tempdir = "0.3"

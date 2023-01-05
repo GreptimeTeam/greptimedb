@@ -367,7 +367,7 @@ pub struct TableEntryValue {
 
 #[cfg(test)]
 mod tests {
-    use log_store::fs::noop::NoopLogStore;
+    use log_store::NoopLogStore;
     use mito::config::EngineConfig;
     use mito::engine::MitoEngine;
     use object_store::ObjectStore;
