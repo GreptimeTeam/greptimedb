@@ -166,11 +166,11 @@ impl Instance {
     }
 
     pub async fn start(&self) -> Result<()> {
+        self.logstore.start().await.context(StartLogStoreSnafu)?;
         self.catalog_manager
             .start()
             .await
             .context(NewCatalogSnafu)?;
-        self.logstore.start().await.context(StartLogStoreSnafu)?;
         if let Some(task) = &self.heartbeat_task {
             task.start().await?;
         }
