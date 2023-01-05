@@ -30,8 +30,8 @@ use snafu::{OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    DataFusionSnafu, ExpectExprSnafu, MultipleVectorSnafu, NoTimeIndexSnafu, Result,
-    UnknownTableSnafu, UnsupportedExprSnafu,
+    DataFusionPlanningSnafu, ExpectExprSnafu, MultipleVectorSnafu, Result, TableNotFoundSnafu,
+    TimeIndexNotFoundSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
 };
 use crate::extension_plan::{InstantManipulate, Millisecond, SeriesNormalize};
 
@@ -128,7 +128,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     self.ctx
                         .time_index_column
                         .clone()
-                        .context(NoTimeIndexSnafu)?,
+                        .with_context(|| TimeIndexNotFoundSnafu { table: name })?,
                     normalize,
                 );
                 LogicalPlan::Extension(Extension {
@@ -149,9 +149,9 @@ impl<S: ContextProvider> PromPlanner<S> {
                 func_exprs.insert(0, self.create_time_index_column_expr()?);
                 LogicalPlanBuilder::from(input)
                     .project(func_exprs)
-                    .context(DataFusionSnafu)?
+                    .context(DataFusionPlanningSnafu)?
                     .build()
-                    .context(DataFusionSnafu)?
+                    .context(DataFusionPlanningSnafu)?
             }
         };
         Ok(res)
@@ -165,7 +165,7 @@ impl<S: ContextProvider> PromPlanner<S> {
     ) -> Result<LogicalPlan> {
         // TODO(ruihang): add time range filter
         let filter = self.matchers_to_expr(label_matchers)?;
-        let table_scan = self.create_relation(table_name, filter)?;
+        let table_scan = self.create_table_scan_plan(table_name, filter)?;
         let offset = offset.unwrap_or_default();
 
         let series_normalize = SeriesNormalize::new(
@@ -173,7 +173,7 @@ impl<S: ContextProvider> PromPlanner<S> {
             self.ctx
                 .time_index_column
                 .clone()
-                .context(NoTimeIndexSnafu)?,
+                .with_context(|| TimeIndexNotFoundSnafu { table: table_name })?,
             table_scan,
         );
         let logical_plan = LogicalPlan::Extension(Extension {
@@ -208,16 +208,16 @@ impl<S: ContextProvider> PromPlanner<S> {
         Ok(exprs)
     }
 
-    fn create_relation(&self, table_name: &str, filter: Vec<DfExpr>) -> Result<LogicalPlan> {
+    fn create_table_scan_plan(&self, table_name: &str, filter: Vec<DfExpr>) -> Result<LogicalPlan> {
         let table_ref = TableReference::Bare { table: table_name };
         let provider = self
             .schema_provider
             .get_table_provider(table_ref)
-            .context(DataFusionSnafu)?;
+            .context(TableNotFoundSnafu { table: table_name })?;
         let result = LogicalPlanBuilder::scan_with_filters(table_name, provider, None, filter)
-            .context(DataFusionSnafu)?
+            .context(DataFusionPlanningSnafu)?
             .build()
-            .context(DataFusionSnafu)?;
+            .context(DataFusionPlanningSnafu)?;
         Ok(result)
     }
 
@@ -226,7 +226,7 @@ impl<S: ContextProvider> PromPlanner<S> {
         let table = self
             .schema_provider
             .get_table_provider(TableReference::Bare { table: table_name })
-            .context(DataFusionSnafu)?
+            .context(DataFusionPlanningSnafu)?
             .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
@@ -240,7 +240,7 @@ impl<S: ContextProvider> PromPlanner<S> {
         let time_index = table
             .schema()
             .timestamp_column()
-            .context(NoTimeIndexSnafu)?
+            .with_context(|| TimeIndexNotFoundSnafu { table: table_name })?
             .name
             .clone();
         self.ctx.time_index_column = Some(time_index);
@@ -328,7 +328,7 @@ impl<S: ContextProvider> PromPlanner<S> {
             self.ctx
                 .time_index_column
                 .clone()
-                .context(NoTimeIndexSnafu)?,
+                .with_context(|| TimeIndexNotFoundSnafu { table: "unknown" })?,
         )))
     }
 }

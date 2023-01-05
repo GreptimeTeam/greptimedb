@@ -23,8 +23,8 @@ pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
 
-    #[snafu(display("DataFusion error: {}", source))]
-    DataFusion {
+    #[snafu(display("Internal error during build DataFusion plan, error: {}", source))]
+    DataFusionPlanning {
         source: datafusion::error::DataFusionError,
     },
 
@@ -34,8 +34,14 @@ pub enum Error {
     #[snafu(display("Unknown table type, downcast failed"))]
     UnknownTable { backtrace: Backtrace },
 
-    #[snafu(display("Cannot find time index column"))]
-    NoTimeIndex { backtrace: Backtrace },
+    #[snafu(display("Cannot find time index column in table {}", table))]
+    TimeIndexNotFound { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Cannot find the table {}", table))]
+    TableNotFound {
+        table: String,
+        source: datafusion::error::DataFusionError,
+    },
 
     #[snafu(display(
         "Cannot accept multiple vector as function input, PromQL expr: {:?}",
@@ -72,12 +78,13 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            NoTimeIndex { .. }
+            TimeIndexNotFound { .. }
             | UnsupportedExpr { .. }
             | MultipleVector { .. }
             | ExpectExpr { .. } => StatusCode::InvalidArguments,
             UnknownTable { .. }
-            | DataFusion { .. }
+            | TableNotFound { .. }
+            | DataFusionPlanning { .. }
             | UnexpectedPlanExpr { .. }
             | IllegalRange { .. }
             | EmptyRange { .. } => StatusCode::Internal,
