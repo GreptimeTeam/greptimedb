@@ -51,7 +51,7 @@ pub async fn new_store_config(
         log_file_dir: log_store_dir(store_dir),
         ..Default::default()
     };
-    let log_store = Arc::new(RaftEngineLogstore::new(log_config));
+    let log_store = Arc::new(RaftEngineLogstore::try_new(log_config).unwrap());
     log_store.start().await.unwrap();
 
     StoreConfig {

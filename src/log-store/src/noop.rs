@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_base::buffer::{Buffer, BufferMut};
-use store_api::logstore::entry::{Encode, Entry, Id};
+use store_api::logstore::entry::{Entry, Id};
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::logstore::{AppendResponse, LogStore};
 
@@ -31,24 +30,6 @@ pub struct NamespaceImpl;
 
 impl Namespace for NamespaceImpl {
     fn id(&self) -> NamespaceId {
-        0
-    }
-}
-
-impl Encode for EntryImpl {
-    type Error = Error;
-
-    fn encode_to<T: BufferMut>(&self, buf: &mut T) -> std::result::Result<usize, Self::Error> {
-        let _ = buf;
-        Ok(0)
-    }
-
-    fn decode<T: Buffer>(buf: &mut T) -> std::result::Result<Self, Self::Error> {
-        let _ = buf;
-        Ok(Default::default())
-    }
-
-    fn encoded_size(&self) -> usize {
         0
     }
 }
@@ -149,12 +130,6 @@ mod tests {
         let e = EntryImpl::default();
         assert_eq!(0, e.data().len());
         assert_eq!(0, e.id());
-        e.encode_to(&mut vec![]).unwrap();
-
-        assert_eq!(
-            EntryImpl::default(),
-            EntryImpl::decode(&mut (&[] as &[u8])).unwrap()
-        );
     }
 
     #[tokio::test]

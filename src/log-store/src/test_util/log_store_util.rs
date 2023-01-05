@@ -29,7 +29,7 @@ pub async fn create_tmp_local_file_log_store(dir: &str) -> (RaftEngineLogstore, 
         ..Default::default()
     };
 
-    let logstore = RaftEngineLogstore::new(cfg);
+    let logstore = RaftEngineLogstore::try_new(cfg).unwrap();
     logstore.start().await.unwrap();
     (logstore, dir)
 }

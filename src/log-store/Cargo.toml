@@ -25,7 +25,6 @@ futures-util = "0.3"
 futures.workspace = true
 hex = "0.4"
 protobuf = { version = "2", features = ["bytes"] }
-
 raft-engine = "0.3"
 snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }

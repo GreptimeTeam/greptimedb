@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_base::buffer::{Buffer, BufferMut};
 use common_error::ext::ErrorExt;
 
 use crate::logstore::namespace::Namespace;
@@ -22,7 +21,7 @@ pub type Epoch = u64;
 pub type Id = u64;
 
 /// Entry is the minimal data storage unit in `LogStore`.
-pub trait Entry: Encode + Send + Sync {
+pub trait Entry: Send + Sync {
     type Error: ErrorExt + Send + Sync;
     type Namespace: Namespace;
 
@@ -35,19 +34,4 @@ pub trait Entry: Encode + Send + Sync {
     fn set_id(&mut self, id: Id);
 
     fn namespace(&self) -> Self::Namespace;
-}
-
-pub trait Encode: Sized {
-    type Error: ErrorExt + Send + Sync + 'static;
-
-    /// Encodes item to given byte slice and return encoded size on success;
-    /// # Panics
-    /// If given buffer is not large enough to hold the encoded item.
-    fn encode_to<T: BufferMut>(&self, buf: &mut T) -> Result<usize, Self::Error>;
-
-    /// Decodes item from given buffer.
-    fn decode<T: Buffer>(buf: &mut T) -> Result<Self, Self::Error>;
-
-    /// Return the size in bytes of the encoded item;
-    fn encoded_size(&self) -> usize;
 }

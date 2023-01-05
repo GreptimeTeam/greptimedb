@@ -122,7 +122,7 @@ mod tests {
             ..Default::default()
         };
 
-        let log_store = RaftEngineLogstore::new(log_config);
+        let log_store = RaftEngineLogstore::try_new(log_config).unwrap();
         log_store.start().await.unwrap();
 
         let mock_engine = Arc::new(DefaultEngine::new(

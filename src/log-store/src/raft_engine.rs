@@ -13,13 +13,10 @@
 // limitations under the License.
 use std::hash::{Hash, Hasher};
 
-use common_base::buffer::{Buffer, BufferMut};
-use protobuf::Message;
-use snafu::ResultExt;
-use store_api::logstore::entry::{Encode, Entry as EntryTrait, Id};
+use store_api::logstore::entry::{Entry as EntryTrait, Id};
 use store_api::logstore::namespace::Namespace as NamespaceTrait;
 
-use crate::error::{DecodeProtobufSnafu, EncodeProtobufSnafu, EncodeSnafu, Error};
+use crate::error::Error;
 use crate::raft_engine::protos::logstore::{Entry, Namespace};
 
 pub mod log_store;
@@ -57,26 +54,6 @@ impl Hash for Namespace {
 impl NamespaceTrait for Namespace {
     fn id(&self) -> store_api::logstore::namespace::Id {
         self.id
-    }
-}
-
-impl Encode for Entry {
-    type Error = Error;
-
-    fn encode_to<T: BufferMut>(&self, buf: &mut T) -> Result<usize, Self::Error> {
-        let bytes = self.write_to_bytes().context(EncodeProtobufSnafu)?;
-        buf.write_from_slice(&bytes).context(EncodeSnafu)?;
-        Ok(bytes.len())
-    }
-
-    fn decode<T: Buffer>(buf: &mut T) -> Result<Self, Self::Error> {
-        let mut bytes = Vec::with_capacity(buf.remaining_size());
-        buf.read_to_slice(&mut bytes).context(EncodeSnafu)?;
-        Entry::parse_from_bytes(&bytes).context(DecodeProtobufSnafu)
-    }
-
-    fn encoded_size(&self) -> usize {
-        self.compute_size() as usize
     }
 }
 
