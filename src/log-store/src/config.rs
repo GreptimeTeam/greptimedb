@@ -22,6 +22,7 @@ pub struct LogConfig {
     pub gc_interval: Duration,
     pub purge_threshold: usize,
     pub read_batch_size: usize,
+    pub sync_write: bool,
 }
 
 impl Default for LogConfig {
@@ -35,6 +36,7 @@ impl Default for LogConfig {
             gc_interval: Duration::from_secs(10 * 60),
             purge_threshold: 1024 * 1024 * 1024 * 50,
             read_batch_size: 128,
+            sync_write: false,
         }
     }
 }
@@ -55,5 +57,6 @@ mod tests {
         assert_eq!(Duration::from_secs(600), default.gc_interval);
         assert_eq!(1024 * 1024 * 1024 * 50, default.purge_threshold);
         assert_eq!(128, default.read_batch_size);
+        assert!(!default.sync_write);
     }
 }

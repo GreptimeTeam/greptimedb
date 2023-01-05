@@ -50,6 +50,23 @@ pub enum Error {
 
     #[snafu(display("Namespace is illegal: {}", ns))]
     IllegalNamespace { ns: u64, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Failed to fetch entries from namespace: {}, start: {}, end: {}, max size: {}, source: {}",
+        start,
+        end,
+        max_size,
+        source,
+        ns
+    ))]
+    FetchEntry {
+        ns: u64,
+        start: u64,
+        end: u64,
+        max_size: usize,
+        source: raft_engine::Error,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {

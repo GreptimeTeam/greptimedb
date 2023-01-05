@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_stream::stream;
+use common_telemetry::tracing::log::debug;
 use common_telemetry::{error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -30,8 +31,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::LogConfig;
 use crate::error::{
-    AddEntryLogBatchSnafu, Error, IllegalNamespaceSnafu, IllegalStateSnafu, RaftEngineSnafu,
-    WaitGcTaskStopSnafu,
+    AddEntryLogBatchSnafu, Error, FetchEntrySnafu, IllegalNamespaceSnafu, IllegalStateSnafu,
+    RaftEngineSnafu, WaitGcTaskStopSnafu,
 };
 use crate::raft_engine::protos::logstore::{Entry, Namespace};
 
@@ -92,6 +93,7 @@ impl LogStore for RaftEngineLogstore {
         let interval = self.config.gc_interval;
         let token = CancellationToken::new();
         let child = token.child_token();
+        // TODO(hl): Maybe spawn to a blocking runtime.
         let handle = common_runtime::spawn_bg(async move {
             loop {
                 tokio::select! {
@@ -154,7 +156,7 @@ impl LogStore for RaftEngineLogstore {
             .context(AddEntryLogBatchSnafu)?;
 
         self.engine
-            .write(&mut batch, false)
+            .write(&mut batch, self.config.sync_write)
             .context(RaftEngineSnafu)?;
         Ok(AppendResponse { entry_id })
     }
@@ -173,7 +175,7 @@ impl LogStore for RaftEngineLogstore {
             .add_entries::<MessageType>(ns.id, &entries)
             .context(AddEntryLogBatchSnafu)?;
         self.engine
-            .write(&mut batch, false)
+            .write(&mut batch, self.config.sync_write)
             .context(RaftEngineSnafu)?;
         Ok(entry_ids)
     }
@@ -187,28 +189,34 @@ impl LogStore for RaftEngineLogstore {
     ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>, Self::Error> {
         ensure!(self.started(), IllegalStateSnafu);
         let engine = self.engine.clone();
-        let last_index = engine.last_index(ns.id).unwrap();
 
+        let last_index = engine.last_index(ns.id).unwrap_or(0);
+        let mut start_index = id.max(engine.first_index(ns.id).unwrap_or(last_index + 1));
+
+        debug!("Start index: {}, last index: {}", start_index, last_index);
         let max_batch_size = self.config.read_batch_size;
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
         let ns = ns.clone();
         common_runtime::spawn_read(async move {
-            let mut start_idx = id;
-            loop {
+            while start_index <= last_index {
                 let mut vec = Vec::with_capacity(max_batch_size);
                 match engine
                     .fetch_entries_to::<MessageType>(
                         ns.id,
-                        start_idx,
+                        start_index,
                         last_index + 1,
                         Some(max_batch_size),
                         &mut vec,
                     )
-                    .context(RaftEngineSnafu)
-                {
+                    .context(FetchEntrySnafu {
+                        ns: ns.id,
+                        start: start_index,
+                        end: last_index,
+                        max_size: max_batch_size,
+                    }) {
                     Ok(_) => {
                         if let Some(last_entry) = vec.last() {
-                            start_idx = last_entry.id + 1;
+                            start_index = last_entry.id + 1;
                         }
                         // reader side closed, cancel following reads
                         if tx.send(Ok(vec)).await.is_err() {
@@ -219,10 +227,6 @@ impl LogStore for RaftEngineLogstore {
                         let _ = tx.send(Err(e)).await;
                         break;
                     }
-                }
-
-                if start_idx > last_index {
-                    break;
                 }
             }
         });
@@ -276,7 +280,7 @@ impl LogStore for RaftEngineLogstore {
                 Some(NAMESPACE_PREFIX.as_bytes()),
                 None,
                 false,
-                |_k, v| {
+                |_, v| {
                     namespaces.push(v);
                     true
                 },
@@ -303,7 +307,7 @@ impl LogStore for RaftEngineLogstore {
 
     async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error> {
         ensure!(self.started(), IllegalStateSnafu);
-        let obsoleted = self.engine.compact_to(namespace.id(), id);
+        let obsoleted = self.engine.compact_to(namespace.id(), id + 1);
         info!(
             "Namespace {} obsoleted {} entries",
             namespace.id(),
@@ -496,7 +500,6 @@ mod tests {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
             logstore.append(entry).await.unwrap();
         }
-        debug!("Append finished");
 
         let before_purge = wal_dir_usage(dir.path().to_str().unwrap()).await;
         logstore.obsolete(namespace, 4000).await.unwrap();
@@ -508,5 +511,35 @@ mod tests {
             before_purge, after_purge
         );
         assert!(before_purge > after_purge);
+    }
+
+    #[tokio::test]
+    async fn test_obsolete() {
+        common_telemetry::init_default_ut_logging();
+        let dir = TempDir::new("raft-engine-logstore-test").unwrap();
+
+        let config = LogConfig {
+            log_file_dir: dir.path().to_str().unwrap().to_string(),
+            max_log_file_size: ReadableSize::mb(2).0 as usize,
+            purge_threshold: ReadableSize::mb(4).0 as usize,
+            gc_interval: Duration::from_secs(5),
+            ..Default::default()
+        };
+
+        let logstore = RaftEngineLogstore::try_new(config).unwrap();
+        logstore.start().await.unwrap();
+        let namespace = Namespace::with_id(42);
+        for id in 0..1024 {
+            let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
+            logstore.append(entry).await.unwrap();
+        }
+
+        logstore.obsolete(namespace.clone(), 100).await.unwrap();
+        assert_eq!(101, logstore.engine.first_index(namespace.id).unwrap());
+
+        let res = logstore.read(&namespace, 100).await.unwrap();
+        let mut vec = collect_entries(res).await;
+        vec.sort_by(|a, b| a.id.partial_cmp(&b.id).unwrap());
+        assert_eq!(101, vec.first().unwrap().id);
     }
 }
