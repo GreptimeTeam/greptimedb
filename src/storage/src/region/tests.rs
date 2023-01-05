@@ -26,7 +26,7 @@ use datatypes::prelude::{ScalarVector, WrapperType};
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
-use log_store::raft_engine::log_store::RaftEngineLogstore;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::NoopLogStore;
 use object_store::backend::fs;
 use object_store::ObjectStore;
@@ -141,7 +141,7 @@ impl<S: LogStore> TesterBase<S> {
     }
 }
 
-pub type FileTesterBase = TesterBase<RaftEngineLogstore>;
+pub type FileTesterBase = TesterBase<RaftEngineLogStore>;
 
 fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     if enable_version_column {

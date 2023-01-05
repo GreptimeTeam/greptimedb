@@ -46,10 +46,6 @@ impl Entry for EntryImpl {
         0
     }
 
-    fn set_id(&mut self, id: Id) {
-        let _ = id;
-    }
-
     fn namespace(&self) -> Self::Namespace {
         Default::default()
     }

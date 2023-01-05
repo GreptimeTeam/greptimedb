@@ -18,7 +18,7 @@ use std::sync::Arc;
 use datatypes::prelude::*;
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
-use log_store::raft_engine::log_store::RaftEngineLogstore;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{
     AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
     ColumnDescriptorBuilder, ColumnId, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot,
@@ -34,7 +34,7 @@ use crate::test_util::descriptor_util::RegionDescBuilder;
 
 const REGION_NAME: &str = "region-alter-0";
 
-async fn create_region_for_alter(store_dir: &str) -> RegionImpl<RaftEngineLogstore> {
+async fn create_region_for_alter(store_dir: &str) -> RegionImpl<RaftEngineLogStore> {
     // Always disable version column in this test.
     let metadata = tests::new_metadata(REGION_NAME, false);
 

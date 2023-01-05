@@ -19,7 +19,7 @@ use common_error::prelude::BoxedError;
 use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
-use store_api::logstore::entry::Entry;
+use store_api::logstore::entry::{Entry, Id};
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
 
@@ -105,7 +105,7 @@ impl<S: LogStore> Wal<S> {
         seq: SequenceNumber,
         mut header: WalHeader,
         payload: Option<&Payload>,
-    ) -> Result<u64> {
+    ) -> Result<Id> {
         if let Some(p) = payload {
             header.mutation_types = wal::gen_mutation_types(p);
         }

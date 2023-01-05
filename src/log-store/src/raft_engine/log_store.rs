@@ -33,12 +33,12 @@ use crate::error::{
     AddEntryLogBatchSnafu, Error, FetchEntrySnafu, IllegalNamespaceSnafu, IllegalStateSnafu,
     RaftEngineSnafu, WaitGcTaskStopSnafu,
 };
-use crate::raft_engine::protos::logstore::{Entry, Namespace};
+use crate::raft_engine::protos::logstore::{EntryImpl as Entry, NamespaceImpl as Namespace};
 
 const NAMESPACE_PREFIX: &str = "__sys_namespace_";
 const SYSTEM_NAMESPACE: u64 = 0;
 
-pub struct RaftEngineLogstore {
+pub struct RaftEngineLogStore {
     config: LogConfig,
     engine: Arc<Engine>,
     cancel_token: Mutex<Option<CancellationToken>>,
@@ -46,7 +46,7 @@ pub struct RaftEngineLogstore {
     started: AtomicBool,
 }
 
-impl RaftEngineLogstore {
+impl RaftEngineLogStore {
     pub fn try_new(config: LogConfig) -> Result<Self, Error> {
         // TODO(hl): set according to available disk space
         let raft_engine_config = Config {
@@ -72,9 +72,9 @@ impl RaftEngineLogstore {
     }
 }
 
-impl Debug for RaftEngineLogstore {
+impl Debug for RaftEngineLogStore {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RaftEngineLogstore")
+        f.debug_struct("RaftEngineLogsStore")
             .field("config", &self.config)
             .field("started", &self.started.load(Ordering::Relaxed))
             .finish()
@@ -82,7 +82,7 @@ impl Debug for RaftEngineLogstore {
 }
 
 #[async_trait::async_trait]
-impl LogStore for RaftEngineLogstore {
+impl LogStore for RaftEngineLogStore {
     type Error = Error;
     type Namespace = Namespace;
     type Entry = Entry;
@@ -120,7 +120,7 @@ impl LogStore for RaftEngineLogstore {
         *self.cancel_token.lock().await = Some(token);
         *self.gc_task_handle.lock().await = Some(handle);
         self.started.store(true, Ordering::Relaxed);
-        info!("RaftEngineLogstore started with config: {:?}", self.config);
+        info!("RaftEngineLogStore started with config: {:?}", self.config);
         Ok(())
     }
 
@@ -145,7 +145,7 @@ impl LogStore for RaftEngineLogstore {
             .context(IllegalStateSnafu)?;
         token.cancel();
         handle.await.context(WaitGcTaskStopSnafu)?;
-        info!("RaftEngineLogstore stopped");
+        info!("RaftEngineLogStore stopped");
         Ok(())
     }
 
@@ -164,7 +164,7 @@ impl LogStore for RaftEngineLogstore {
         Ok(AppendResponse { entry_id })
     }
 
-    /// Append a batch of entries to logstore. `RaftEngineLogstore` assures the atomicity of
+    /// Append a batch of entries to logstore. `RaftEngineLogStore` assures the atomicity of
     /// batch append.
     async fn append_batch(
         &self,
@@ -345,13 +345,13 @@ mod tests {
 
     use crate::config::LogConfig;
     use crate::error::Error;
-    use crate::raft_engine::log_store::RaftEngineLogstore;
-    use crate::raft_engine::protos::logstore::{Entry, Namespace};
+    use crate::raft_engine::log_store::RaftEngineLogStore;
+    use crate::raft_engine::protos::logstore::{EntryImpl as Entry, NamespaceImpl as Namespace};
 
     #[tokio::test]
     async fn test_open_logstore() {
         let dir = TempDir::new("raft-engine-logstore-test").unwrap();
-        let logstore = RaftEngineLogstore::try_new(LogConfig {
+        let logstore = RaftEngineLogStore::try_new(LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         })
@@ -364,7 +364,7 @@ mod tests {
     #[tokio::test]
     async fn test_manage_namespace() {
         let dir = TempDir::new("raft-engine-logstore-test").unwrap();
-        let mut logstore = RaftEngineLogstore::try_new(LogConfig {
+        let mut logstore = RaftEngineLogStore::try_new(LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         })
@@ -390,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn test_append_and_read() {
         let dir = TempDir::new("raft-engine-logstore-test").unwrap();
-        let logstore = RaftEngineLogstore::try_new(LogConfig {
+        let logstore = RaftEngineLogStore::try_new(LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         })
@@ -431,7 +431,7 @@ mod tests {
     async fn test_reopen() {
         let dir = TempDir::new("raft-engine-logstore-reopen-test").unwrap();
         {
-            let logstore = RaftEngineLogstore::try_new(LogConfig {
+            let logstore = RaftEngineLogStore::try_new(LogConfig {
                 log_file_dir: dir.path().to_str().unwrap().to_string(),
                 ..Default::default()
             })
@@ -451,7 +451,7 @@ mod tests {
             logstore.stop().await.unwrap();
         }
 
-        let logstore = RaftEngineLogstore::try_new(LogConfig {
+        let logstore = RaftEngineLogStore::try_new(LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         })
@@ -495,7 +495,7 @@ mod tests {
             ..Default::default()
         };
 
-        let logstore = RaftEngineLogstore::try_new(config).unwrap();
+        let logstore = RaftEngineLogStore::try_new(config).unwrap();
         logstore.start().await.unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..4096 {
@@ -528,7 +528,7 @@ mod tests {
             ..Default::default()
         };
 
-        let logstore = RaftEngineLogstore::try_new(config).unwrap();
+        let logstore = RaftEngineLogStore::try_new(config).unwrap();
         logstore.start().await.unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..1024 {

@@ -14,11 +14,11 @@
 
 use std::hash::{Hash, Hasher};
 
-use store_api::logstore::entry::{Entry as EntryTrait, Id};
-use store_api::logstore::namespace::Namespace as NamespaceTrait;
+use store_api::logstore::entry::{Entry, Id};
+use store_api::logstore::namespace::Namespace;
 
 use crate::error::Error;
-use crate::raft_engine::protos::logstore::{Entry, Namespace};
+use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl};
 
 pub mod log_store;
 
@@ -26,7 +26,7 @@ pub mod protos {
     include!(concat!(env!("OUT_DIR"), concat!("/", "protos/", "mod.rs")));
 }
 
-impl Entry {
+impl EntryImpl {
     pub fn create(id: u64, ns: u64, data: Vec<u8>) -> Self {
         Self {
             id,
@@ -36,7 +36,7 @@ impl Entry {
         }
     }
 }
-impl Namespace {
+impl NamespaceImpl {
     pub fn with_id(id: Id) -> Self {
         Self {
             id,
@@ -46,21 +46,21 @@ impl Namespace {
 }
 
 #[allow(clippy::derive_hash_xor_eq)]
-impl Hash for Namespace {
+impl Hash for NamespaceImpl {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);
     }
 }
 
-impl NamespaceTrait for Namespace {
+impl Namespace for NamespaceImpl {
     fn id(&self) -> store_api::logstore::namespace::Id {
         self.id
     }
 }
 
-impl EntryTrait for Entry {
+impl Entry for EntryImpl {
     type Error = Error;
-    type Namespace = Namespace;
+    type Namespace = NamespaceImpl;
 
     fn data(&self) -> &[u8] {
         self.data.as_slice()
@@ -70,12 +70,8 @@ impl EntryTrait for Entry {
         self.id
     }
 
-    fn set_id(&mut self, id: Id) {
-        self.id = id
-    }
-
     fn namespace(&self) -> Self::Namespace {
-        Namespace {
+        NamespaceImpl {
             id: self.namespace_id,
             ..Default::default()
         }

@@ -39,7 +39,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Logstore not started yet"))]
+    #[snafu(display("Log store not started yet"))]
     IllegalState { backtrace: Backtrace },
 
     #[snafu(display("Namespace is illegal: {}", ns))]

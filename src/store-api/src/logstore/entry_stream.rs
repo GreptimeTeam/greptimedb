@@ -81,8 +81,6 @@ mod tests {
             0u64
         }
 
-        fn set_id(&mut self, _id: Id) {}
-
         fn namespace(&self) -> Self::Namespace {
             Namespace {}
         }

@@ -17,7 +17,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use log_store::raft_engine::log_store::RaftEngineLogstore;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{OpenOptions, WriteResponse};
 use tempdir::TempDir;
 
@@ -34,7 +34,7 @@ async fn create_region_for_flush(
     store_dir: &str,
     enable_version_column: bool,
     flush_strategy: FlushStrategyRef,
-) -> RegionImpl<RaftEngineLogstore> {
+) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(REGION_NAME, enable_version_column);
 
     let mut store_config = config_util::new_store_config(REGION_NAME, store_dir).await;

@@ -15,12 +15,12 @@
 use store_api::logstore::LogStore;
 use tempdir::TempDir;
 
-use crate::raft_engine::log_store::RaftEngineLogstore;
+use crate::raft_engine::log_store::RaftEngineLogStore;
 use crate::LogConfig;
 
 /// Create a tmp directory for write log, used for test.
 // TODO: Add a test feature
-pub async fn create_tmp_local_file_log_store(dir: &str) -> (RaftEngineLogstore, TempDir) {
+pub async fn create_tmp_local_file_log_store(dir: &str) -> (RaftEngineLogStore, TempDir) {
     let dir = TempDir::new(dir).unwrap();
     let cfg = LogConfig {
         append_buffer_size: 128,
@@ -29,7 +29,7 @@ pub async fn create_tmp_local_file_log_store(dir: &str) -> (RaftEngineLogstore, 
         ..Default::default()
     };
 
-    let logstore = RaftEngineLogstore::try_new(cfg).unwrap();
+    let logstore = RaftEngineLogStore::try_new(cfg).unwrap();
     logstore.start().await.unwrap();
     (logstore, dir)
 }

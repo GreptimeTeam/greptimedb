@@ -31,7 +31,5 @@ pub trait Entry: Send + Sync {
     /// Return entry id that monotonically increments.
     fn id(&self) -> Id;
 
-    fn set_id(&mut self, id: Id);
-
     fn namespace(&self) -> Self::Namespace;
 }

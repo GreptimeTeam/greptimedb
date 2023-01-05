@@ -101,8 +101,8 @@ mod tests {
     use query::QueryEngineFactory;
 
     use super::*;
-    type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogstore>>;
-    use log_store::raft_engine::log_store::RaftEngineLogstore;
+    type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
+    use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::LogConfig;
     use mito::engine::MitoEngine;
     use storage::config::EngineConfig as StorageEngineConfig;
@@ -122,7 +122,7 @@ mod tests {
             ..Default::default()
         };
 
-        let log_store = RaftEngineLogstore::try_new(log_config).unwrap();
+        let log_store = RaftEngineLogStore::try_new(log_config).unwrap();
         log_store.start().await.unwrap();
 
         let mock_engine = Arc::new(DefaultEngine::new(

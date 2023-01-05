@@ -15,7 +15,7 @@
 //! Region read/write tests.
 
 use common_telemetry::info;
-use log_store::raft_engine::log_store::RaftEngineLogstore;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{OpenOptions, SequenceNumber, WriteResponse};
 use tempdir::TempDir;
 
@@ -31,7 +31,7 @@ async fn create_region_for_basic(
     region_name: &str,
     store_dir: &str,
     enable_version_column: bool,
-) -> RegionImpl<RaftEngineLogstore> {
+) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(region_name, enable_version_column);
 
     let store_config = config_util::new_store_config(region_name, store_dir).await;
