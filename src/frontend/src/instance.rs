@@ -26,8 +26,7 @@ use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::object_expr::Request;
 use api::v1::{
-    AddColumns, AlterExpr, Column, CreateTableExpr, DdlRequest, DropTableExpr, InsertRequest,
-    ObjectExpr,
+    AddColumns, AlterExpr, Column, DdlRequest, DropTableExpr, InsertRequest, ObjectExpr,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
@@ -54,20 +53,16 @@ use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
-use sql::statements::create::Partitions;
-use sql::statements::insert::Insert;
 use sql::statements::statement::Statement;
-use table::TableRef;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, CatalogSnafu, FindNewColumnsOnInsertionSnafu, InsertSnafu, MissingMetasrvOptsSnafu,
-    RequestDatanodeSnafu, Result,
+    self, CatalogSnafu, FindNewColumnsOnInsertionSnafu, InsertSnafu, InvalidObjectResultSnafu,
+    InvokeGrpcServerSnafu, MissingMetasrvOptsSnafu, Result,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
-use crate::sql::insert_to_request;
 use crate::table::route::TableRoutes;
 use crate::Plugins;
 
@@ -92,20 +87,16 @@ pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 pub struct Instance {
     catalog_manager: CatalogManagerRef,
 
-    // TODO(LFC): Revisit script_handler here, maybe merge with sql_handler?
     /// Script handler is None in distributed mode, only works on standalone mode.
     script_handler: Option<ScriptHandlerRef>,
+    sql_handler: SqlQueryHandlerRef,
+    grpc_query_handler: GrpcQueryHandlerRef,
+
     create_expr_factory: CreateExprFactoryRef,
     // TODO(fys): it should be a trait that corresponds to two implementations:
     // Standalone and Distributed, then the code behind it doesn't need to use so
     // many match statements.
     mode: Mode,
-
-    // TODO(LFC): Remove `dist_instance` together with Arrow Flight adoption refactor.
-    pub(crate) dist_instance: Option<DistInstance>,
-
-    sql_handler: SqlQueryHandlerRef,
-    grpc_query_handler: GrpcQueryHandlerRef,
 
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
@@ -129,16 +120,15 @@ impl Instance {
 
         let dist_instance =
             DistInstance::new(meta_client, catalog_manager.clone(), datanode_clients);
-        let dist_instance_ref = Arc::new(dist_instance.clone());
+        let dist_instance = Arc::new(dist_instance);
 
         Ok(Instance {
             catalog_manager,
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             mode: Mode::Distributed,
-            dist_instance: Some(dist_instance),
-            sql_handler: dist_instance_ref.clone(),
-            grpc_query_handler: dist_instance_ref,
+            sql_handler: dist_instance.clone(),
+            grpc_query_handler: dist_instance,
             plugins: Default::default(),
         })
     }
@@ -179,7 +169,6 @@ impl Instance {
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             mode: Mode::Standalone,
-            dist_instance: None,
             sql_handler: dn_instance.clone(),
             grpc_query_handler: dn_instance.clone(),
             plugins: Default::default(),
@@ -187,16 +176,14 @@ impl Instance {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_distributed(dist_instance: DistInstance) -> Self {
-        let dist_instance_ref = Arc::new(dist_instance.clone());
+    pub(crate) fn new_distributed(dist_instance: Arc<DistInstance>) -> Self {
         Instance {
             catalog_manager: dist_instance.catalog_manager(),
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             mode: Mode::Distributed,
-            dist_instance: Some(dist_instance),
-            sql_handler: dist_instance_ref.clone(),
-            grpc_query_handler: dist_instance_ref,
+            sql_handler: dist_instance.clone(),
+            grpc_query_handler: dist_instance,
             plugins: Default::default(),
         }
     }
@@ -211,29 +198,6 @@ impl Instance {
             "Script handler can be set only once!"
         );
         self.script_handler = Some(handler);
-    }
-
-    /// Handle create expr.
-    pub async fn handle_create_table(
-        &self,
-        mut expr: CreateTableExpr,
-        partitions: Option<Partitions>,
-    ) -> Result<Output> {
-        if let Some(v) = &self.dist_instance {
-            v.create_table(&mut expr, partitions).await
-        } else {
-            let result = self
-                .grpc_query_handler
-                .do_query(ObjectExpr {
-                    request: Some(Request::Ddl(DdlRequest {
-                        expr: Some(DdlExpr::CreateTable(expr)),
-                    })),
-                })
-                .await
-                .context(error::InvokeGrpcServerSnafu)?;
-            let output: RpcOutput = result.try_into().context(RequestDatanodeSnafu)?;
-            Ok(output.into())
-        }
     }
 
     /// Handle batch inserts
@@ -263,7 +227,7 @@ impl Instance {
         };
         let result = GrpcQueryHandler::do_query(&*self.grpc_query_handler, query)
             .await
-            .context(error::InvokeGrpcServerSnafu)?;
+            .context(InvokeGrpcServerSnafu)?;
         let result: RpcOutput = result.try_into().context(InsertSnafu)?;
         Ok(result.into())
     }
@@ -278,7 +242,11 @@ impl Instance {
         table_name: &str,
         columns: &[Column],
     ) -> Result<()> {
-        match self.find_table(catalog_name, schema_name, table_name)? {
+        let table = self
+            .catalog_manager
+            .table(catalog_name, schema_name, table_name)
+            .context(CatalogSnafu)?;
+        match table {
             None => {
                 info!(
                     "Table {}.{}.{} does not exist, try create table",
@@ -336,8 +304,18 @@ impl Instance {
             "Try to create table: {} automatically with request: {:?}",
             table_name, create_expr,
         );
-        // Create-on-insert does support partition by other columns now
-        self.handle_create_table(create_expr, None).await
+
+        let result = self
+            .grpc_query_handler
+            .do_query(ObjectExpr {
+                request: Some(Request::Ddl(DdlRequest {
+                    expr: Some(DdlExpr::CreateTable(create_expr)),
+                })),
+            })
+            .await
+            .context(InvokeGrpcServerSnafu)?;
+        let output: RpcOutput = result.try_into().context(InvalidObjectResultSnafu)?;
+        Ok(output.into())
     }
 
     async fn add_new_columns_to_table(
@@ -366,8 +344,8 @@ impl Instance {
                 })),
             })
             .await
-            .context(error::InvokeGrpcServerSnafu)?;
-        let output: RpcOutput = result.try_into().context(RequestDatanodeSnafu)?;
+            .context(InvokeGrpcServerSnafu)?;
+        let output: RpcOutput = result.try_into().context(InvalidObjectResultSnafu)?;
         Ok(output.into())
     }
 
@@ -385,37 +363,6 @@ impl Instance {
             .context(error::SchemaNotFoundSnafu {
                 schema_info: schema_name,
             })
-    }
-
-    fn find_table(&self, catalog: &str, schema: &str, table: &str) -> Result<Option<TableRef>> {
-        self.catalog_manager
-            .table(catalog, schema, table)
-            .context(CatalogSnafu)
-    }
-
-    async fn sql_dist_insert(&self, insert: Box<Insert>) -> Result<usize> {
-        let (catalog, schema, table) = insert.full_table_name().context(error::ParseSqlSnafu)?;
-
-        let catalog_provider = self.get_catalog(&catalog)?;
-        let schema_provider = Self::get_schema(catalog_provider, &schema)?;
-
-        let insert_request = insert_to_request(&schema_provider, *insert)?;
-
-        let (columns, _row_count) =
-            crate::table::insert::insert_request_to_insert_batch(&insert_request)?;
-
-        self.create_or_alter_table_on_demand(&catalog, &schema, &table, &columns)
-            .await?;
-
-        let table = schema_provider
-            .table(&table)
-            .context(error::CatalogSnafu)?
-            .context(error::TableNotFoundSnafu { table_name: &table })?;
-
-        table
-            .insert(insert_request)
-            .await
-            .context(error::TableSnafu)
     }
 
     fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
@@ -468,24 +415,10 @@ impl Instance {
             | Statement::ShowTables(_)
             | Statement::DescribeTable(_)
             | Statement::Explain(_)
-            | Statement::Query(_) => {
+            | Statement::Query(_)
+            | Statement::Insert(_) => {
                 return self.sql_handler.do_statement_query(stmt, query_ctx).await;
             }
-            Statement::Insert(insert) => match self.mode {
-                Mode::Standalone => {
-                    return self.sql_handler.do_statement_query(stmt, query_ctx).await
-                }
-                Mode::Distributed => {
-                    let affected = self
-                        .sql_dist_insert(insert)
-                        .await
-                        .map_err(BoxedError::new)
-                        .context(server_error::ExecuteInsertSnafu {
-                            msg: "execute insert failed",
-                        })?;
-                    Ok(Output::AffectedRows(affected))
-                }
-            },
             Statement::Alter(alter_stmt) => {
                 let expr = AlterExpr::try_from(alter_stmt)
                     .map_err(BoxedError::new)
@@ -639,7 +572,8 @@ mod tests {
 
     use api::v1::column::SemanticType;
     use api::v1::{
-        column, query_request, Column, ColumnDataType, ColumnDef as GrpcColumnDef, QueryRequest,
+        column, query_request, Column, ColumnDataType, ColumnDef as GrpcColumnDef, CreateTableExpr,
+        QueryRequest,
     };
     use common_grpc::flight::{raw_flight_data_to_message, FlightMessage};
     use common_recordbatch::RecordBatch;
@@ -656,7 +590,8 @@ mod tests {
     async fn test_execute_sql() {
         let query_ctx = Arc::new(QueryContext::new());
 
-        let (instance, _guard) = tests::create_standalone_instance("test_execute_sql").await;
+        let standalone = tests::create_standalone_instance("test_execute_sql").await;
+        let instance = standalone.instance;
 
         let sql = r#"CREATE TABLE demo(
                             host STRING,
@@ -749,7 +684,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_execute_grpc() {
-        let (instance, _guard) = tests::create_standalone_instance("test_execute_grpc").await;
+        let standalone = tests::create_standalone_instance("test_execute_grpc").await;
+        let instance = standalone.instance;
 
         // testing data:
         let expected_host_col = Column {
@@ -1015,8 +951,8 @@ mod tests {
             }
         }
 
-        let query_ctx = Arc::new(QueryContext::new());
-        let (mut instance, _guard) = tests::create_standalone_instance("test_hook").await;
+        let standalone = tests::create_standalone_instance("test_hook").await;
+        let mut instance = standalone.instance;
 
         let mut plugins = Plugins::new();
         let counter_hook = Arc::new(AssertionHook::default());
@@ -1032,7 +968,7 @@ mod tests {
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+        let output = SqlQueryHandler::do_query(&*instance, sql, QueryContext::arc())
             .await
             .remove(0)
             .unwrap();
@@ -1072,7 +1008,9 @@ mod tests {
         }
 
         let query_ctx = Arc::new(QueryContext::new());
-        let (mut instance, _guard) = tests::create_standalone_instance("test_db_hook").await;
+
+        let standalone = tests::create_standalone_instance("test_db_hook").await;
+        let mut instance = standalone.instance;
 
         let mut plugins = Plugins::new();
         let hook = Arc::new(DisableDBOpHook::default());

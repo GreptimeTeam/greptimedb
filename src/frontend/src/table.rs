@@ -385,7 +385,10 @@ impl DistTable {
         Ok(partition_rule)
     }
 
-    async fn table_global_value(&self, key: &TableGlobalKey) -> Result<Option<TableGlobalValue>> {
+    pub(crate) async fn table_global_value(
+        &self,
+        key: &TableGlobalKey,
+    ) -> Result<Option<TableGlobalValue>> {
         let raw = self
             .backend
             .get(key.to_string().as_bytes())
@@ -1027,7 +1030,7 @@ mod test {
         let schema = Arc::new(Schema::new(column_schemas.clone()));
 
         let instance = crate::tests::create_distributed_instance(test_name).await;
-        let dist_instance = instance.frontend.dist_instance.as_ref().unwrap();
+        let dist_instance = &instance.dist_instance;
         let datanode_instances = instance.datanodes;
 
         let catalog_manager = dist_instance.catalog_manager();

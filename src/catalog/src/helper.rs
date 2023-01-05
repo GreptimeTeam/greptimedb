@@ -132,7 +132,6 @@ impl TableGlobalKey {
 pub struct TableGlobalValue {
     /// Id of datanode that created the global table info kv. only for debugging.
     pub node_id: u64,
-    // TODO(LFC): Maybe remove it?
     /// Allocation of region ids across all datanodes.
     pub regions_id_map: HashMap<u64, Vec<u32>>,
     pub table_info: RawTableInfo,

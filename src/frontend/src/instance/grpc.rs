@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::object_expr::Request as GrpcRequest;
 use api::v1::{ObjectExpr, ObjectResult};
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::Ticket;
@@ -22,7 +21,7 @@ use common_grpc::flight;
 use prost::Message;
 use servers::error as server_error;
 use servers::query_handler::GrpcQueryHandler;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tonic::Request;
 
 use crate::error::{FlightGetSnafu, InvalidFlightDataSnafu, Result};
@@ -40,29 +39,15 @@ impl Instance {
 #[async_trait]
 impl GrpcQueryHandler for Instance {
     async fn do_query(&self, query: ObjectExpr) -> server_error::Result<ObjectResult> {
-        let request = query
-            .clone()
-            .request
-            .context(server_error::InvalidQuerySnafu {
-                reason: "empty expr",
-            })?;
-        match request {
-            // TODO(LFC): Unify to "boarding" when do_get supports DDL requests.
-            GrpcRequest::Ddl(_) => {
-                GrpcQueryHandler::do_query(&*self.grpc_query_handler, query).await
-            }
-            _ => {
-                let ticket = Request::new(Ticket {
-                    ticket: query.encode_to_vec(),
-                });
-                // TODO(LFC): Temporarily use old GRPC interface here, will get rid of them near the end of Arrow Flight adoption.
-                self.boarding(ticket)
-                    .await
-                    .map_err(BoxedError::new)
-                    .with_context(|_| servers::error::ExecuteQuerySnafu {
-                        query: format!("{query:?}"),
-                    })
-            }
-        }
+        let ticket = Request::new(Ticket {
+            ticket: query.encode_to_vec(),
+        });
+        // TODO(LFC): Temporarily use old GRPC interface here, will get rid of them near the end of Arrow Flight adoption.
+        self.boarding(ticket)
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| servers::error::ExecuteQuerySnafu {
+                query: format!("{query:?}"),
+            })
     }
 }

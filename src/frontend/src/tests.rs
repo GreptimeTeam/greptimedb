@@ -47,19 +47,29 @@ pub struct TestGuard {
     _data_tmp_dir: TempDir,
 }
 
-pub(crate) struct MockDistributedInstances {
+pub(crate) struct MockDistributedInstance {
     pub(crate) frontend: Arc<Instance>,
+    pub(crate) dist_instance: Arc<DistInstance>,
     pub(crate) datanodes: HashMap<u64, Arc<DatanodeInstance>>,
     _guards: Vec<TestGuard>,
 }
 
-pub(crate) async fn create_standalone_instance(test_name: &str) -> (Arc<Instance>, TestGuard) {
+pub(crate) struct MockStandaloneInstance {
+    pub(crate) instance: Arc<Instance>,
+    _guard: TestGuard,
+}
+
+pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandaloneInstance {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(test_name);
     let datanode_instance = DatanodeInstance::new(&opts).await.unwrap();
     datanode_instance.start().await.unwrap();
 
     let frontend_instance = Instance::new_standalone(Arc::new(datanode_instance));
-    (Arc::new(frontend_instance), guard)
+
+    MockStandaloneInstance {
+        instance: Arc::new(frontend_instance),
+        _guard: guard,
+    }
 }
 
 fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) {
@@ -182,7 +192,7 @@ async fn wait_datanodes_alive(kv_store: KvStoreRef) {
     panic!()
 }
 
-pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistributedInstances {
+pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistributedInstance {
     let kv_store: KvStoreRef = Arc::new(MemStore::default()) as _;
     let meta_srv = meta_srv::mocks::mock(MetaSrvOptions::default(), kv_store.clone(), None).await;
 
@@ -233,10 +243,12 @@ pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistribu
         catalog_manager,
         datanode_clients.clone(),
     );
-    let frontend = Instance::new_distributed(dist_instance);
+    let dist_instance = Arc::new(dist_instance);
+    let frontend = Instance::new_distributed(dist_instance.clone());
 
-    MockDistributedInstances {
+    MockDistributedInstance {
         frontend: Arc::new(frontend),
+        dist_instance,
         datanodes: datanode_instances,
         _guards: test_guards,
     }
