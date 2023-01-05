@@ -14,6 +14,7 @@
 
 mod instant_manipulate;
 mod normalize;
+mod range_manipulate;
 
 use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
 pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantManipulateStream};
