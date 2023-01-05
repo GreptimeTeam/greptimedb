@@ -90,3 +90,12 @@ pub struct DropTableRequest {
     pub schema_name: String,
     pub table_name: String,
 }
+
+/// Delete (by primary key) request
+#[derive(Debug)]
+pub struct DeleteRequest {
+    /// Values of each column in this table's primary key and time index.
+    ///
+    /// The key is the column name, and the value is the column value.
+    pub key_column_values: HashMap<String, VectorRef>,
+}

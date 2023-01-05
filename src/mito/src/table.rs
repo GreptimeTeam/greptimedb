@@ -41,7 +41,9 @@ use table::error::Result as TableResult;
 use table::metadata::{
     FilterPushDownType, RawTableInfo, TableInfo, TableInfoRef, TableMeta, TableType,
 };
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
+use table::requests::{
+    AddColumnRequest, AlterKind, AlterTableRequest, DeleteRequest, InsertRequest,
+};
 use table::table::scan::SimpleTableScan;
 use table::table::{AlterContext, Table};
 use tokio::sync::Mutex;
@@ -161,6 +163,10 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(Arc::new(SimpleTableScan::new(stream)))
     }
 
+    fn supports_filter_pushdown(&self, _filter: &Expr) -> table::error::Result<FilterPushDownType> {
+        Ok(FilterPushDownType::Inexact)
+    }
+
     /// Alter table changes the schemas of the table.
     async fn alter(&self, _context: AlterContext, req: AlterTableRequest) -> TableResult<()> {
         let _lock = self.alter_lock.lock().await;
@@ -237,8 +243,34 @@ impl<R: Region> Table for MitoTable<R> {
         Ok(())
     }
 
-    fn supports_filter_pushdown(&self, _filter: &Expr) -> table::error::Result<FilterPushDownType> {
-        Ok(FilterPushDownType::Inexact)
+    async fn delete(&self, request: DeleteRequest) -> TableResult<usize> {
+        if request.key_column_values.is_empty() {
+            return Ok(0);
+        }
+
+        let mut write_request = self.region.write_request();
+
+        let key_column_values = request.key_column_values;
+        // Safety: key_column_values isn't empty.
+        let rows_num = key_column_values.values().next().unwrap().len();
+
+        logging::trace!(
+            "Delete from table {} where key_columns are: {:?}",
+            self.table_info().name,
+            key_column_values
+        );
+
+        write_request
+            .delete(key_column_values)
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+        self.region
+            .write(&WriteContext::default(), write_request)
+            .await
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        Ok(rows_num)
     }
 }
 

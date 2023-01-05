@@ -102,6 +102,9 @@ pub enum Error {
 
     #[snafu(display("Failed to operate table, source: {}", source))]
     TableOperation { source: BoxedError },
+
+    #[snafu(display("Unsupported operation: {}", operation))]
+    Unsupported { operation: String },
 }
 
 impl ErrorExt for Error {
@@ -119,6 +122,7 @@ impl ErrorExt for Error {
             Error::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
+            Error::Unsupported { .. } => StatusCode::Unsupported,
         }
     }
 

@@ -551,7 +551,7 @@ mod tests {
     use storage::EngineImpl;
     use store_api::manifest::Manifest;
     use store_api::storage::ReadContext;
-    use table::requests::{AddColumnRequest, AlterKind};
+    use table::requests::{AddColumnRequest, AlterKind, DeleteRequest};
     use tempdir::TempDir;
 
     use super::*;
@@ -1173,5 +1173,49 @@ mod tests {
         };
         table_engine.create_table(&ctx, request).await.unwrap();
         assert!(table_engine.table_exists(&engine_ctx, &table_reference));
+    }
+
+    #[tokio::test]
+    async fn test_table_delete_rows() {
+        let (_engine, table, _schema, _dir) = test_util::setup_test_engine_and_table().await;
+
+        let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
+        let hosts: VectorRef =
+            Arc::new(StringVector::from(vec!["host1", "host2", "host3", "host4"]));
+        let cpus: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
+        let memories: VectorRef = Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
+        let tss: VectorRef = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 2, 2, 1]));
+
+        columns_values.insert("host".to_string(), hosts.clone());
+        columns_values.insert("cpu".to_string(), cpus.clone());
+        columns_values.insert("memory".to_string(), memories.clone());
+        columns_values.insert("ts".to_string(), tss.clone());
+
+        let insert_req = new_insert_request("demo".to_string(), columns_values);
+        assert_eq!(4, table.insert(insert_req).await.unwrap());
+
+        let del_hosts: VectorRef = Arc::new(StringVector::from(vec!["host1", "host3"]));
+        let del_tss: VectorRef = Arc::new(TimestampMillisecondVector::from_vec(vec![1, 2]));
+        let mut key_column_values = HashMap::with_capacity(2);
+        key_column_values.insert("host".to_string(), del_hosts);
+        key_column_values.insert("ts".to_string(), del_tss);
+        let del_req = DeleteRequest { key_column_values };
+        table.delete(del_req).await.unwrap();
+
+        let session_ctx = SessionContext::new();
+        let stream = table.scan(None, &[], None).await.unwrap();
+        let stream = stream.execute(0, session_ctx.task_ctx()).unwrap();
+        let batches = util::collect_batches(stream).await.unwrap();
+
+        assert_eq!(
+            batches.pretty_print().unwrap(),
+            "\
++-------+-----+--------+-------------------------+
+| host  | cpu | memory | ts                      |
++-------+-----+--------+-------------------------+
+| host2 | 2   | 2      | 1970-01-01T00:00:00.002 |
+| host4 | 4   | 4      | 1970-01-01T00:00:00.001 |
++-------+-----+--------+-------------------------+"
+        );
     }
 }
