@@ -19,7 +19,7 @@ use std::sync::Arc;
 use async_stream::stream;
 use common_telemetry::{error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::logstore::entry::Id;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Namespace as NamespaceTrait;
@@ -30,7 +30,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::LogConfig;
 use crate::error::{
-    AddEntryLogBatchSnafu, Error, IllegalStateSnafu, RaftEngineSnafu, WaitGcTaskStopSnafu,
+    AddEntryLogBatchSnafu, Error, IllegalNamespaceSnafu, IllegalStateSnafu, RaftEngineSnafu,
+    WaitGcTaskStopSnafu,
 };
 use crate::raft_engine::protos::logstore::{Entry, Namespace};
 
@@ -64,6 +65,10 @@ impl RaftEngineLogstore {
             gc_task_handle: Mutex::new(None),
             started: AtomicBool::new(false),
         })
+    }
+
+    pub fn started(&self) -> bool {
+        self.started.load(Ordering::Relaxed)
     }
 }
 
@@ -119,6 +124,8 @@ impl LogStore for RaftEngineLogstore {
     }
 
     async fn stop(&self) -> Result<(), Self::Error> {
+        ensure!(self.started(), IllegalStateSnafu);
+        self.started.store(false, Ordering::Relaxed);
         let handle = self
             .gc_task_handle
             .lock()
@@ -133,13 +140,13 @@ impl LogStore for RaftEngineLogstore {
             .context(IllegalStateSnafu)?;
         token.cancel();
         handle.await.context(WaitGcTaskStopSnafu)?;
-        self.started.store(false, Ordering::Relaxed);
         info!("RaftEngineLogstore stopped");
         Ok(())
     }
 
     /// Append an entry to logstore. Currently of existence of entry's namespace is not checked.
     async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error> {
+        ensure!(self.started(), IllegalStateSnafu);
         let entry_id = e.id;
         let mut batch = LogBatch::with_capacity(1);
         batch
@@ -159,6 +166,7 @@ impl LogStore for RaftEngineLogstore {
         ns: &Self::Namespace,
         entries: Vec<Self::Entry>,
     ) -> Result<Vec<Id>, Self::Error> {
+        ensure!(self.started(), IllegalStateSnafu);
         let entry_ids = entries.iter().map(Entry::get_id).collect::<Vec<_>>();
         let mut batch = LogBatch::with_capacity(entries.len());
         batch
@@ -177,6 +185,7 @@ impl LogStore for RaftEngineLogstore {
         ns: &Self::Namespace,
         id: Id,
     ) -> Result<SendableEntryStream<'_, Self::Entry, Self::Error>, Self::Error> {
+        ensure!(self.started(), IllegalStateSnafu);
         let engine = self.engine.clone();
         let last_index = engine.last_index(ns.id).unwrap();
 
@@ -227,6 +236,11 @@ impl LogStore for RaftEngineLogstore {
     }
 
     async fn create_namespace(&mut self, ns: &Self::Namespace) -> Result<(), Self::Error> {
+        ensure!(
+            ns.id != SYSTEM_NAMESPACE,
+            IllegalNamespaceSnafu { ns: ns.id }
+        );
+        ensure!(self.started(), IllegalStateSnafu);
         let key = format!("{}{}", NAMESPACE_PREFIX, ns.id).as_bytes().to_vec();
         let mut batch = LogBatch::with_capacity(1);
         batch
@@ -239,6 +253,11 @@ impl LogStore for RaftEngineLogstore {
     }
 
     async fn delete_namespace(&mut self, ns: &Self::Namespace) -> Result<(), Self::Error> {
+        ensure!(
+            ns.id != SYSTEM_NAMESPACE,
+            IllegalNamespaceSnafu { ns: ns.id }
+        );
+        ensure!(self.started(), IllegalStateSnafu);
         let key = format!("{}{}", NAMESPACE_PREFIX, ns.id).as_bytes().to_vec();
         let mut batch = LogBatch::with_capacity(1);
         batch.delete(SYSTEM_NAMESPACE, key);
@@ -249,6 +268,7 @@ impl LogStore for RaftEngineLogstore {
     }
 
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error> {
+        ensure!(self.started(), IllegalStateSnafu);
         let mut namespaces: Vec<Namespace> = vec![];
         self.engine
             .scan_messages::<Namespace, _>(
@@ -282,6 +302,7 @@ impl LogStore for RaftEngineLogstore {
     }
 
     async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error> {
+        ensure!(self.started(), IllegalStateSnafu);
         let obsoleted = self.engine.compact_to(namespace.id(), id);
         info!(
             "Namespace {} obsoleted {} entries",
