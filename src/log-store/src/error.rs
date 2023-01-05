@@ -21,12 +21,6 @@ use tokio::task::JoinError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to encode entry, source: {}", source))]
-    Encode { source: common_base::buffer::Error },
-
-    #[snafu(display("Failed to decode entry, remain size: {}", size))]
-    Decode { size: usize, backtrace: Backtrace },
-
     #[snafu(display("Failed to wait for gc task to stop, source: {}", source))]
     WaitGcTaskStop {
         source: JoinError,
