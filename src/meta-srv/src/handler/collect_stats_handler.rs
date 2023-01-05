@@ -70,7 +70,9 @@ impl HeartbeatHandler for CollectStatsHandler {
                         }
                     }
                     Entry::Vacant(e) => {
-                        e.insert(VecDeque::from([stat]));
+                        let mut stat_vec = VecDeque::with_capacity(self.max_cached_stats_per_key);
+                        stat_vec.push_front(stat);
+                        e.insert(stat_vec);
                     }
                 }
             }
