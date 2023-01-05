@@ -30,7 +30,7 @@ The procedure framework consists of the following primary components:
 
 
 ## Procedures
-The `ProcedureManager` keeps calling `Procedure::execute()` until the Procedure is done, so the operation of the Procedure should be idempotent: it needs to be able to undo or replay a partial execution of itself.
+The `ProcedureManager` keeps calling `Procedure::execute()` until the Procedure is done, so the operation of the Procedure should be [idempotent](https://developer.mozilla.org/en-US/docs/Glossary/Idempotent): it needs to be able to undo or replay a partial execution of itself.
 
 ```rust
 trait Procedure {
