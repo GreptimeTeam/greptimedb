@@ -18,6 +18,7 @@ use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
+#[derive(Default)]
 pub struct PersistStatsHandler;
 
 #[async_trait::async_trait]
@@ -32,7 +33,7 @@ impl HeartbeatHandler for PersistStatsHandler {
             return Ok(());
         }
 
-        // TODO: remove stats from `acc` and persist to store
+        // TODO(jiachun): remove stats from `acc` and persist to store
 
         Ok(())
     }

@@ -24,9 +24,11 @@ use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
+type StatKey = (u64, u64);
+
 pub struct CollectStatsHandler {
-    max_size_per_key: usize,
-    cache: DashMap<(u64, u64), VecDeque<Stat>>,
+    max_cached_stats_per_key: usize,
+    cache: DashMap<StatKey, VecDeque<Stat>>,
 }
 
 impl Default for CollectStatsHandler {
@@ -36,9 +38,9 @@ impl Default for CollectStatsHandler {
 }
 
 impl CollectStatsHandler {
-    pub fn new(max_size_per_key: usize) -> Self {
+    pub fn new(max_cached_stats_per_key: usize) -> Self {
         Self {
-            max_size_per_key,
+            max_cached_stats_per_key,
             cache: DashMap::new(),
         }
     }
@@ -63,7 +65,7 @@ impl HeartbeatHandler for CollectStatsHandler {
                     Entry::Occupied(mut e) => {
                         let deque = e.get_mut();
                         deque.push_front(stat);
-                        if deque.len() >= self.max_size_per_key {
+                        if deque.len() >= self.max_cached_stats_per_key {
                             acc.stats = deque.drain(..).collect();
                         }
                     }

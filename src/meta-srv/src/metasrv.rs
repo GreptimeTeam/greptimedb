@@ -101,15 +101,15 @@ impl MetaSrv {
             Some(hg) => hg,
             None => {
                 let hg = HeartbeatHandlerGroup::default();
-                hg.add_handler(ResponseHeaderHandler).await;
+                let kv_store = kv_store.clone();
+                hg.add_handler(ResponseHeaderHandler::default()).await;
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
-                // because even if the current meta server node is no longer the leader it can
-                // still help the data node to keep lease.
-                hg.add_handler(KeepLeaseHandler::new(kv_store.clone()))
-                    .await;
-                hg.add_handler(CheckLeaderHandler).await;
+                // because even if the current meta-server node is no longer the leader it can
+                // still help the datanode to keep lease.
+                hg.add_handler(KeepLeaseHandler::new(kv_store)).await;
+                hg.add_handler(CheckLeaderHandler::default()).await;
                 hg.add_handler(CollectStatsHandler::default()).await;
-                hg.add_handler(PersistStatsHandler).await;
+                hg.add_handler(PersistStatsHandler::default()).await;
                 hg
             }
         };

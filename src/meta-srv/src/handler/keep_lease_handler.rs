@@ -24,18 +24,17 @@ use crate::metasrv::Context;
 use crate::service::store::kv::KvStoreRef;
 
 pub struct KeepLeaseHandler {
-    tx: Sender<(Vec<u8>, Vec<u8>)>,
+    tx: Sender<KeyValue>,
 }
 
 impl KeepLeaseHandler {
     pub fn new(kv_store: KvStoreRef) -> Self {
         let (tx, mut rx) = mpsc::channel(1024);
         common_runtime::spawn_bg(async move {
-            while let Some((key, value)) = rx.recv().await {
-                let mut kvs = vec![KeyValue { key, value }];
+            while let Some(kv) = rx.recv().await {
+                let mut kvs = vec![kv];
 
-                while let Ok((key, value)) = rx.try_recv() {
-                    let kv = KeyValue { key, value };
+                while let Ok(kv) = rx.try_recv() {
                     kvs.push(kv);
                 }
 
@@ -77,13 +76,13 @@ impl HeartbeatHandler for KeepLeaseHandler {
                 node_addr: peer.addr.clone(),
             };
 
-            info!("Receive a heartbeat: {:?}, {:?}", key, value);
+            info!("Receive a heartbeat: {key:?}, {value:?}");
 
             let key = key.try_into()?;
             let value = value.try_into()?;
 
-            if let Err(err) = self.tx.send((key, value)).await {
-                warn!("Failed to send lease KV to writer, peer: {:?}, {err}", peer);
+            if let Err(err) = self.tx.send(KeyValue { key, value }).await {
+                warn!("Failed to send lease KV to writer, peer: {peer:?}, {err}");
             }
         }
 
