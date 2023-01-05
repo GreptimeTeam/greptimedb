@@ -281,7 +281,6 @@ pub fn build_create_expr_from_insertion(
     Ok(expr)
 }
 
-// TODO(hl): handle region id in request
 pub fn to_table_insert_request(request: GrpcInsertRequest) -> Result<InsertRequest> {
     let catalog_name = DEFAULT_CATALOG_NAME;
     let schema_name = &request.schema_name;
