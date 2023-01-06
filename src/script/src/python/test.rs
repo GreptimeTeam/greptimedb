@@ -132,7 +132,7 @@ fn run_ron_testcases() {
                     .zip(res.schema.column_schemas())
                     .for_each(|(anno, real)| {
                         assert!(
-                            anno.datatype.as_ref().unwrap() == &real.data_type.as_arrow_type()
+                            anno.datatype.as_ref().unwrap() == &real.data_type
                                 && anno.is_nullable == real.is_nullable(),
                             "Fields expected to be {anno:#?}, actual {real:#?}"
                         );

@@ -24,7 +24,6 @@ use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
 use statrs::StatsError;
 
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -33,7 +32,10 @@ pub enum Error {
         // TODO(discord9): find a way that prevent circle depend(query<-script<-query) and can use script's error type
         msg: String,
     },
-    #[snafu(display("Fail to create temporary recordbatch when eval Python UDF, source: {}", source))]
+    #[snafu(display(
+        "Fail to create temporary recordbatch when eval Python UDF, source: {}",
+        source
+    ))]
     UdfTempRecordBatch {
         #[snafu(backtrace)]
         source: RecordbatchError,

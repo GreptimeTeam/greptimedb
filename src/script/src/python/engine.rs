@@ -126,7 +126,7 @@ impl Function for PyUdf {
                     ),
                 }
                 .fail();
-            }// if more than one columns, just return first one
+            } // if more than one columns, just return first one
         }
         // TODO(discord9): more error handling
         let res0 = res.column(0);
