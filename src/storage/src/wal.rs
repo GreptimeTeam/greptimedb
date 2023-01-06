@@ -25,7 +25,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::codec::{Decoder, Encoder};
 use crate::error::{
-    DecodeWalHeaderSnafu, EncodeWalHeaderSnafu, Error, MarkWalStableSnafu, ReadWalSnafu, Result,
+    DecodeWalHeaderSnafu, EncodeWalHeaderSnafu, Error, MarkWalObsoleteSnafu, ReadWalSnafu, Result,
     WalDataCorruptedSnafu, WriteWalSnafu,
 };
 use crate::proto::wal::{self, WalHeader};
@@ -68,7 +68,7 @@ impl<S: LogStore> Wal<S> {
             .obsolete(self.namespace.clone(), seq)
             .await
             .map_err(BoxedError::new)
-            .context(MarkWalStableSnafu {
+            .context(MarkWalObsoleteSnafu {
                 region_id: self.region_id,
             })
     }

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use store_api::logstore::LogStore;
 use tempdir::TempDir;
 
 use crate::raft_engine::log_store::RaftEngineLogStore;
@@ -29,7 +28,6 @@ pub async fn create_tmp_local_file_log_store(dir: &str) -> (RaftEngineLogStore, 
         ..Default::default()
     };
 
-    let logstore = RaftEngineLogStore::try_new(cfg).unwrap();
-    logstore.start().await.unwrap();
+    let logstore = RaftEngineLogStore::try_new(cfg).await.unwrap();
     (logstore, dir)
 }
