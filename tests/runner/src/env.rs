@@ -14,12 +14,13 @@
 
 use std::fmt::Display;
 use std::fs::OpenOptions;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use client::{Client, Database as DB, Error as ClientError, RpcOutput};
-use sqlness::{Database, Environment};
+use sqlness::{Database, EnvController};
 use tokio::process::{Child, Command};
 
 use crate::util;
@@ -30,10 +31,10 @@ const SERVER_LOG_FILE: &str = "/tmp/greptime-sqlness.log";
 pub struct Env {}
 
 #[async_trait]
-impl Environment for Env {
+impl EnvController for Env {
     type DB = GreptimeDB;
 
-    async fn start(&self, mode: &str, _config: Option<String>) -> Self::DB {
+    async fn start(&self, mode: &str, _config: Option<&Path>) -> Self::DB {
         match mode {
             "standalone" => Self::start_standalone().await,
             "distributed" => Self::start_distributed().await,
