@@ -24,9 +24,9 @@ use common_query::logical_plan::Expr;
 use common_query::physical_plan::PhysicalPlanRef;
 use datatypes::schema::SchemaRef;
 
-use crate::error::Result;
+use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
-use crate::requests::{AlterTableRequest, InsertRequest};
+use crate::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
 
 pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
 
@@ -49,8 +49,13 @@ pub trait Table: Send + Sync {
     }
 
     /// Insert values into table.
+    ///
+    /// Returns number of inserted rows.
     async fn insert(&self, _request: InsertRequest) -> Result<usize> {
-        unimplemented!();
+        UnsupportedSnafu {
+            operation: "INSERT",
+        }
+        .fail()?
     }
 
     /// Scan the table and returns a SendableRecordBatchStream.
@@ -71,9 +76,22 @@ pub trait Table: Send + Sync {
         Ok(FilterPushDownType::Unsupported)
     }
 
-    async fn alter(&self, _context: AlterContext, request: AlterTableRequest) -> Result<()> {
-        let _ = request;
-        unimplemented!()
+    /// Alter table.
+    async fn alter(&self, _context: AlterContext, _request: AlterTableRequest) -> Result<()> {
+        UnsupportedSnafu {
+            operation: "ALTER TABLE",
+        }
+        .fail()?
+    }
+
+    /// Delete rows in the table.
+    ///
+    /// Returns number of deleted rows.
+    async fn delete(&self, _request: DeleteRequest) -> Result<usize> {
+        UnsupportedSnafu {
+            operation: "DELETE",
+        }
+        .fail()?
     }
 }
 

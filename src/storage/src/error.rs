@@ -205,11 +205,11 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to mark WAL as stable, region id: {}, source: {}",
+        "Failed to mark WAL as obsolete, region id: {}, source: {}",
         region_id,
         source
     ))]
-    MarkWalStable {
+    MarkWalObsolete {
         region_id: u64,
         #[snafu(backtrace)]
         source: BoxedError,
@@ -508,7 +508,7 @@ impl ErrorExt for Error {
             PushBatch { source, .. } => source.status_code(),
             CreateDefault { source, .. } => source.status_code(),
             ConvertChunk { source, .. } => source.status_code(),
-            MarkWalStable { source, .. } => source.status_code(),
+            MarkWalObsolete { source, .. } => source.status_code(),
         }
     }
 

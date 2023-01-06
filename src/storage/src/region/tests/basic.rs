@@ -14,7 +14,8 @@
 
 //! Region read/write tests.
 
-use log_store::fs::log::LocalFileLogStore;
+use common_telemetry::info;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::storage::{OpenOptions, SequenceNumber, WriteResponse};
 use tempdir::TempDir;
 
@@ -30,7 +31,7 @@ async fn create_region_for_basic(
     region_name: &str,
     store_dir: &str,
     enable_version_column: bool,
-) -> RegionImpl<LocalFileLogStore> {
+) -> RegionImpl<RaftEngineLogStore> {
     let metadata = tests::new_metadata(region_name, enable_version_column);
 
     let store_config = config_util::new_store_config(region_name, store_dir).await;
@@ -70,6 +71,11 @@ impl Tester {
 
     async fn try_reopen(&mut self) -> Result<bool> {
         // Close the old region.
+        if let Some(base) = self.base.as_ref() {
+            info!("Reopen tester base");
+            base.close().await;
+        }
+
         self.base = None;
         // Reopen the region.
         let store_config = config_util::new_store_config(&self.region_name, &self.store_dir).await;
@@ -209,6 +215,7 @@ async fn test_scan_different_batch() {
 
 #[tokio::test]
 async fn test_put_delete_scan() {
+    common_telemetry::init_default_ut_logging();
     let dir = TempDir::new("put-delete-scan").unwrap();
     let store_dir = dir.path().to_str().unwrap();
     let mut tester = Tester::new(REGION_NAME, store_dir).await;

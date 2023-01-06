@@ -12,9 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod check_leader;
-pub(crate) mod datanode_lease;
-pub(crate) mod response_header;
+pub use check_leader_handler::CheckLeaderHandler;
+pub use collect_stats_handler::CollectStatsHandler;
+pub use keep_lease_handler::KeepLeaseHandler;
+pub use persist_stats_handler::PersistStatsHandler;
+pub use response_header_handler::ResponseHeaderHandler;
+
+mod check_leader_handler;
+mod collect_stats_handler;
+mod instruction;
+mod keep_lease_handler;
+mod node_stat;
+mod persist_stats_handler;
+mod response_header_handler;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -24,6 +34,8 @@ use common_telemetry::info;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock;
 
+use self::instruction::Instruction;
+use self::node_stat::Stat;
 use crate::error::Result;
 use crate::metasrv::Context;
 
@@ -40,7 +52,7 @@ pub trait HeartbeatHandler: Send + Sync {
 #[derive(Debug, Default)]
 pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
-    pub states: Vec<State>,
+    pub stats: Vec<Stat>,
     pub instructions: Vec<Instruction>,
 }
 
@@ -50,12 +62,6 @@ impl HeartbeatAccumulator {
         vec![]
     }
 }
-
-#[derive(Debug)]
-pub enum State {}
-
-#[derive(Debug)]
-pub enum Instruction {}
 
 pub type Pusher = Sender<std::result::Result<HeartbeatResponse, tonic::Status>>;
 

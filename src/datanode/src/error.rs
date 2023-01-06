@@ -141,12 +141,6 @@ pub enum Error {
         source: log_store::error::Error,
     },
 
-    #[snafu(display("Failed to star log store gc task, source: {}", source))]
-    StartLogStore {
-        #[snafu(backtrace)]
-        source: log_store::error::Error,
-    },
-
     #[snafu(display("Failed to storage engine, source: {}", source))]
     OpenStorageEngine { source: StorageError },
 
@@ -382,7 +376,6 @@ impl ErrorExt for Error {
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::MissingNodeId { .. } => StatusCode::InvalidArguments,
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
-            Error::StartLogStore { source, .. } => source.status_code(),
             Error::PollRecordbatchStream { source } => source.status_code(),
         }
     }

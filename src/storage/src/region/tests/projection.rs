@@ -19,7 +19,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::ScalarVector;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
-use log_store::fs::log::LocalFileLogStore;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::logstore::LogStore;
 use store_api::storage::{
     Chunk, ChunkReader, ReadContext, Region, ScanRequest, Snapshot, WriteContext, WriteRequest,
@@ -167,7 +167,7 @@ impl<S: LogStore> ProjectionTester<S> {
 
 const REGION_NAME: &str = "region-projection-0";
 
-async fn new_tester(store_dir: &str) -> ProjectionTester<LocalFileLogStore> {
+async fn new_tester(store_dir: &str) -> ProjectionTester<RaftEngineLogStore> {
     let metadata = new_metadata(REGION_NAME);
 
     let store_config = config_util::new_store_config(REGION_NAME, store_dir).await;

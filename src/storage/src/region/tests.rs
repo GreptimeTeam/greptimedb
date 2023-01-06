@@ -26,8 +26,8 @@ use datatypes::prelude::{ScalarVector, WrapperType};
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
-use log_store::fs::log::LocalFileLogStore;
-use log_store::fs::noop::NoopLogStore;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
+use log_store::NoopLogStore;
 use object_store::backend::fs;
 use object_store::ObjectStore;
 use store_api::storage::{
@@ -65,6 +65,10 @@ impl<S: LogStore> TesterBase<S> {
             write_ctx: WriteContext::default(),
             read_ctx: ReadContext::default(),
         }
+    }
+
+    pub async fn close(&self) {
+        self.region.inner.wal.close().await.unwrap();
     }
 
     /// Put without version specified.
@@ -137,7 +141,7 @@ impl<S: LogStore> TesterBase<S> {
     }
 }
 
-pub type FileTesterBase = TesterBase<LocalFileLogStore>;
+pub type FileTesterBase = TesterBase<RaftEngineLogStore>;
 
 fn new_write_batch_for_test(enable_version_column: bool) -> WriteBatch {
     if enable_version_column {

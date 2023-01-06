@@ -21,8 +21,8 @@ use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
-use log_store::fs::config::LogConfig;
-use log_store::fs::log::LocalFileLogStore;
+use log_store::raft_engine::log_store::RaftEngineLogStore;
+use log_store::LogConfig;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use mito::config::EngineConfig as TableEngineConfig;
@@ -36,13 +36,12 @@ use servers::Mode;
 use snafu::prelude::*;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
-use store_api::logstore::LogStore;
 use table::table::TableIdProviderRef;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
-    NewCatalogSnafu, Result, StartLogStoreSnafu,
+    NewCatalogSnafu, OpenLogStoreSnafu, Result,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
@@ -53,7 +52,7 @@ mod grpc;
 mod script;
 mod sql;
 
-pub(crate) type DefaultEngine = MitoEngine<EngineImpl<LocalFileLogStore>>;
+pub(crate) type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
 
 // An abstraction to read/write services.
 pub struct Instance {
@@ -63,7 +62,6 @@ pub struct Instance {
     pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
-    pub(crate) logstore: Arc<LocalFileLogStore>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -71,7 +69,7 @@ pub type InstanceRef = Arc<Instance>;
 impl Instance {
     pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
-        let logstore = Arc::new(create_local_file_log_store(&opts.wal_dir).await?);
+        let logstore = Arc::new(create_log_store(&opts.wal_dir).await?);
 
         let meta_client = match opts.mode {
             Mode::Standalone => None,
@@ -161,7 +159,6 @@ impl Instance {
             script_executor,
             heartbeat_task,
             table_id_provider,
-            logstore,
         })
     }
 
@@ -170,7 +167,6 @@ impl Instance {
             .start()
             .await
             .context(NewCatalogSnafu)?;
-        self.logstore.start().await.context(StartLogStoreSnafu)?;
         if let Some(task) = &self.heartbeat_task {
             task.start().await?;
         }
@@ -293,9 +289,7 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Resul
     Ok(meta_client)
 }
 
-pub(crate) async fn create_local_file_log_store(
-    path: impl AsRef<str>,
-) -> Result<LocalFileLogStore> {
+pub(crate) async fn create_log_store(path: impl AsRef<str>) -> Result<RaftEngineLogStore> {
     let path = path.as_ref();
     // create WAL directory
     fs::create_dir_all(path::Path::new(path)).context(error::CreateDirSnafu { dir: path })?;
@@ -307,9 +301,8 @@ pub(crate) async fn create_local_file_log_store(
         ..Default::default()
     };
 
-    let log_store = LocalFileLogStore::open(&log_config)
+    let logstore = RaftEngineLogStore::try_new(log_config)
         .await
-        .context(error::OpenLogStoreSnafu)?;
-
-    Ok(log_store)
+        .context(OpenLogStoreSnafu)?;
+    Ok(logstore)
 }

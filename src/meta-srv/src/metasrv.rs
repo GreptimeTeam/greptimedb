@@ -20,10 +20,10 @@ use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::election::Election;
-use crate::handler::check_leader::CheckLeaderHandler;
-use crate::handler::datanode_lease::DatanodeLeaseHandler;
-use crate::handler::response_header::ResponseHeaderHandler;
-use crate::handler::HeartbeatHandlerGroup;
+use crate::handler::{
+    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
+    PersistStatsHandler, ResponseHeaderHandler,
+};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::Selector;
 use crate::sequence::{Sequence, SequenceRef};
@@ -92,14 +92,27 @@ impl MetaSrv {
         kv_store: KvStoreRef,
         selector: Option<SelectorRef>,
         election: Option<ElectionRef>,
+        handler_group: Option<HeartbeatHandlerGroup>,
     ) -> Self {
         let started = Arc::new(AtomicBool::new(false));
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector {}));
-        let handler_group = HeartbeatHandlerGroup::default();
-        handler_group.add_handler(ResponseHeaderHandler).await;
-        handler_group.add_handler(CheckLeaderHandler).await;
-        handler_group.add_handler(DatanodeLeaseHandler).await;
+        let handler_group = match handler_group {
+            Some(hg) => hg,
+            None => {
+                let hg = HeartbeatHandlerGroup::default();
+                let kv_store = kv_store.clone();
+                hg.add_handler(ResponseHeaderHandler::default()).await;
+                // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
+                // because even if the current meta-server node is no longer the leader it can
+                // still help the datanode to keep lease.
+                hg.add_handler(KeepLeaseHandler::new(kv_store)).await;
+                hg.add_handler(CheckLeaderHandler::default()).await;
+                hg.add_handler(CollectStatsHandler::default()).await;
+                hg.add_handler(PersistStatsHandler::default()).await;
+                hg
+            }
+        };
 
         Self {
             started,
