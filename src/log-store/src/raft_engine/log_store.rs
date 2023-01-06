@@ -47,7 +47,7 @@ pub struct RaftEngineLogStore {
 }
 
 impl RaftEngineLogStore {
-    pub fn try_new(config: LogConfig) -> Result<Self, Error> {
+    pub async fn try_new(config: LogConfig) -> Result<Self, Error> {
         // TODO(hl): set according to available disk space
         let raft_engine_config = Config {
             dir: config.log_file_dir.clone(),
@@ -58,36 +58,22 @@ impl RaftEngineLogStore {
             ..Default::default()
         };
         let engine = Arc::new(Engine::open(raft_engine_config).context(RaftEngineSnafu)?);
-        Ok(Self {
+        let log_store = Self {
             config,
             engine,
             cancel_token: Mutex::new(None),
             gc_task_handle: Mutex::new(None),
             started: AtomicBool::new(false),
-        })
+        };
+        log_store.start().await?;
+        Ok(log_store)
     }
 
     pub fn started(&self) -> bool {
         self.started.load(Ordering::Relaxed)
     }
-}
 
-impl Debug for RaftEngineLogStore {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RaftEngineLogsStore")
-            .field("config", &self.config)
-            .field("started", &self.started.load(Ordering::Relaxed))
-            .finish()
-    }
-}
-
-#[async_trait::async_trait]
-impl LogStore for RaftEngineLogStore {
-    type Error = Error;
-    type Namespace = Namespace;
-    type Entry = Entry;
-
-    async fn start(&self) -> Result<(), Self::Error> {
+    async fn start(&self) -> Result<(), Error> {
         let engine_clone = self.engine.clone();
         let interval = self.config.gc_interval;
         let token = CancellationToken::new();
@@ -123,6 +109,22 @@ impl LogStore for RaftEngineLogStore {
         info!("RaftEngineLogStore started with config: {:?}", self.config);
         Ok(())
     }
+}
+
+impl Debug for RaftEngineLogStore {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RaftEngineLogsStore")
+            .field("config", &self.config)
+            .field("started", &self.started.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl LogStore for RaftEngineLogStore {
+    type Error = Error;
+    type Namespace = Namespace;
+    type Entry = Entry;
 
     async fn stop(&self) -> Result<(), Self::Error> {
         ensure!(
@@ -355,6 +357,7 @@ mod tests {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         })
+        .await
         .unwrap();
         logstore.start().await.unwrap();
         let namespaces = logstore.list_namespaces().await.unwrap();
@@ -368,6 +371,7 @@ mod tests {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         })
+        .await
         .unwrap();
         logstore.start().await.unwrap();
         assert!(logstore.list_namespaces().await.unwrap().is_empty());
@@ -394,6 +398,7 @@ mod tests {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         })
+        .await
         .unwrap();
         logstore.start().await.unwrap();
 
@@ -435,8 +440,8 @@ mod tests {
                 log_file_dir: dir.path().to_str().unwrap().to_string(),
                 ..Default::default()
             })
+            .await
             .unwrap();
-            logstore.start().await.unwrap();
             logstore
                 .append(Entry::create(1, 1, "1".as_bytes().to_vec()))
                 .await
@@ -455,6 +460,7 @@ mod tests {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         })
+        .await
         .unwrap();
         logstore.start().await.unwrap();
 
@@ -495,7 +501,7 @@ mod tests {
             ..Default::default()
         };
 
-        let logstore = RaftEngineLogStore::try_new(config).unwrap();
+        let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
         logstore.start().await.unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..4096 {
@@ -528,7 +534,7 @@ mod tests {
             ..Default::default()
         };
 
-        let logstore = RaftEngineLogStore::try_new(config).unwrap();
+        let logstore = RaftEngineLogStore::try_new(config).await.unwrap();
         logstore.start().await.unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..1024 {

@@ -57,10 +57,6 @@ impl LogStore for NoopLogStore {
     type Namespace = NamespaceImpl;
     type Entry = EntryImpl;
 
-    async fn start(&self) -> Result<()> {
-        Ok(())
-    }
-
     async fn stop(&self) -> Result<()> {
         Ok(())
     }
@@ -131,7 +127,6 @@ mod tests {
     #[tokio::test]
     async fn test_noop_logstore() {
         let mut store = NoopLogStore::default();
-        store.start().await.unwrap();
         let e = store.entry("".as_bytes(), 1, NamespaceImpl::default());
         store.append(e.clone()).await.unwrap();
         store
