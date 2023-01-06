@@ -58,6 +58,10 @@ impl ScriptManager {
 
         logging::info!("Compiled and cached script: {}", name);
 
+        script.as_ref().register_udf();
+
+        logging::info!("Script register as UDF: {}", name);
+
         Ok(script)
     }
 

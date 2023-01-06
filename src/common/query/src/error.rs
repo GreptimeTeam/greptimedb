@@ -16,6 +16,7 @@ use std::any::Any;
 
 use arrow::error::ArrowError;
 use common_error::prelude::*;
+use common_recordbatch::error::Error as RecordbatchError;
 use datafusion_common::DataFusionError;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::DataType as ArrowDatatype;
@@ -23,9 +24,20 @@ use datatypes::error::Error as DataTypeError;
 use datatypes::prelude::ConcreteDataType;
 use statrs::StatsError;
 
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Fail to execute Python UDF, source: {}", msg))]
+    PyUdf {
+        // TODO(discord9): find a way that prevent circle depend(query<-script<-query) and can use script's error type
+        msg: String,
+    },
+    #[snafu(display("Fail to create temporary recordbatch when eval Python UDF, source: {}", source))]
+    UdfTempRecordBatch {
+        #[snafu(backtrace)]
+        source: RecordbatchError,
+    },
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
@@ -167,7 +179,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ExecuteFunction { .. }
+            Error::UdfTempRecordBatch { .. }
+            | Error::PyUdf { .. }
+            | Error::ExecuteFunction { .. }
             | Error::GenerateFunction { .. }
             | Error::CreateAccumulator { .. }
             | Error::DowncastVector { .. }

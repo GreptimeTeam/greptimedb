@@ -20,10 +20,17 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
+use common_function::scalars::{Function, FUNCTION_REGISTRY};
+use common_query::error::{PyUdfSnafu, UdfTempRecordBatchSnafu};
+use common_query::prelude::Signature;
 use common_query::Output;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use datatypes::schema::SchemaRef;
+use common_telemetry::logging;
+use datafusion_expr::Volatility;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::vectors::VectorRef;
 use futures::Stream;
 use query::QueryEngineRef;
 use session::context::QueryContext;
@@ -36,9 +43,110 @@ use crate::python::error::{self, Result};
 
 const PY_ENGINE: &str = "python";
 
+pub struct PyUdf {
+    copr: CoprocessorRef,
+}
+
+impl std::fmt::Display for PyUdf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", &self.copr.name)
+    }
+}
+
+impl PyUdf {
+    fn from_copr(copr: CoprocessorRef) -> Arc<Self> {
+        Arc::new(Self { copr })
+    }
+
+    /// Register to `FUNCTION_REGISTRY`
+    fn register_as_udf(zelf: Arc<Self>) {
+        FUNCTION_REGISTRY.register(zelf)
+    }
+    fn register_to_query_engine(zelf: Arc<Self>, engine: QueryEngineRef) {
+        engine.register_function(zelf)
+    }
+
+    /// Fake a schema, should only be used with dynamically eval a Python Udf
+    fn fake_schema(&self, columns: &[VectorRef]) -> SchemaRef {
+        let arg_names = &self.copr.deco_args.arg_names;
+        let col_sch: Vec<_> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| ColumnSchema::new(arg_names[i].to_owned(), col.data_type(), true))
+            .collect();
+        let schema = datatypes::schema::Schema::new(col_sch);
+        Arc::new(schema)
+    }
+}
+
+impl Function for PyUdf {
+    fn name(&self) -> &str {
+        &self.copr.name
+    }
+
+    fn return_type(
+        &self,
+        _input_types: &[datatypes::prelude::ConcreteDataType],
+    ) -> common_query::error::Result<datatypes::prelude::ConcreteDataType> {
+        // TODO: use correct return annotation if exist
+        Ok(ConcreteDataType::float64_datatype())
+    }
+
+    fn signature(&self) -> common_query::prelude::Signature {
+        Signature::uniform(
+            self.copr.arg_types.len(),
+            ConcreteDataType::numerics(),
+            Volatility::Immutable,
+        )
+    }
+
+    fn eval(
+        &self,
+        _func_ctx: common_function::scalars::function::FunctionContext,
+        columns: &[datatypes::vectors::VectorRef],
+    ) -> common_query::error::Result<datatypes::vectors::VectorRef> {
+        // FIXME: exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
+        let schema = self.fake_schema(columns);
+        let columns = columns.to_vec();
+        // TODO(discord9): remove unwrap
+        let rb = RecordBatch::new(schema, columns).context(UdfTempRecordBatchSnafu)?;
+        let res = exec_parsed(&self.copr, &rb).map_err(|err| {
+            PyUdfSnafu {
+                msg: format!("{err:#?}"),
+            }
+            .build()
+        })?;
+        let len = res.columns().len();
+        if len != 1 {
+            logging::info!("Python UDF should return exactly one column, found {len} column(s)");
+            if len == 0 {
+                return PyUdfSnafu {
+                    msg: format!(
+                        "Python UDF should return exactly one column, found {len} column(s)"
+                    ),
+                }
+                .fail();
+            }// if more than one columns, just return first one
+        }
+        // TODO(discord9): more error handling
+        let res0 = res.column(0);
+        Ok(res0.to_owned())
+    }
+}
+
 pub struct PyScript {
     query_engine: QueryEngineRef,
     copr: CoprocessorRef,
+}
+
+impl PyScript {
+    /// Register Current Script as UDF, register name is same as script name
+    /// FIXME(discord9): possible inject attack?
+    pub(crate) fn register_udf(&self) {
+        let udf = PyUdf::from_copr(self.copr.clone());
+        PyUdf::register_as_udf(udf.clone());
+        PyUdf::register_to_query_engine(udf, self.query_engine.to_owned());
+    }
 }
 
 pub struct CoprStream {
