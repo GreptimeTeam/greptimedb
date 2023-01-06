@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -21,7 +22,7 @@ use datafusion::arrow::array::{Array, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::DFSchemaRef;
+use datafusion::common::{DFField, DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
@@ -44,13 +45,59 @@ pub struct RangeManipulate {
     interval: Millisecond,
     range: Millisecond,
 
-    time_index_column: String,
+    time_index: String,
     value_columns: Vec<String>,
     input: LogicalPlan,
     output_schema: DFSchemaRef,
 }
 
-impl RangeManipulate {}
+impl RangeManipulate {
+    pub fn new(
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        range: Millisecond,
+        time_index: String,
+        value_columns: Vec<String>,
+        input: LogicalPlan,
+    ) -> DataFusionResult<Self> {
+        let output_schema =
+            Self::calculate_output_schema(input.schema(), &time_index, &value_columns)?;
+        Ok(Self {
+            start,
+            end,
+            interval,
+            range,
+            time_index,
+            value_columns,
+            input,
+            output_schema,
+        })
+    }
+
+    fn calculate_output_schema(
+        input_schema: &DFSchemaRef,
+        time_index: &str,
+        value_columns: &[String],
+    ) -> DataFusionResult<DFSchemaRef> {
+        let mut columns = input_schema.fields().clone();
+
+        // process time index column
+        let index = input_schema.index_of_column_by_name(None, time_index)?;
+        columns[index] = DFField::from(RangeArray::convert_field(columns[index].field()));
+
+        // process value columns
+        for name in value_columns {
+            let index = input_schema.index_of_column_by_name(None, name)?;
+            columns[index] = DFField::from(RangeArray::convert_field(columns[index].field()));
+        }
+
+        Ok(Arc::new(DFSchema::new_with_metadata(
+            columns,
+            HashMap::new(),
+        )?))
+    }
+}
 
 impl UserDefinedLogicalNode for RangeManipulate {
     fn as_any(&self) -> &dyn Any {
@@ -73,7 +120,7 @@ impl UserDefinedLogicalNode for RangeManipulate {
         write!(
             f,
             "PromRangeManipulate: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}], values={:?}",
-            self.start, self.end, self.interval, self.range, self.time_index_column, self.value_columns
+            self.start, self.end, self.interval, self.range, self.time_index, self.value_columns
         )
     }
 
@@ -89,7 +136,7 @@ impl UserDefinedLogicalNode for RangeManipulate {
             end: self.end,
             interval: self.interval,
             range: self.range,
-            time_index_column: self.time_index_column.clone(),
+            time_index: self.time_index.clone(),
             value_columns: self.value_columns.clone(),
             input: inputs[0].clone(),
             output_schema: self.output_schema.clone(),

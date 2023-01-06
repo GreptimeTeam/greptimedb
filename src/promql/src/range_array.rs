@@ -14,6 +14,7 @@
 
 //！An extended "array" based on [DictionaryArray].
 
+use datafusion::arrow::datatypes::Field;
 use datatypes::arrow::array::{Array, ArrayData, ArrayRef, DictionaryArray, Int64Array};
 use datatypes::arrow::datatypes::{DataType, Int64Type};
 use snafu::{ensure, OptionExt};
@@ -174,6 +175,17 @@ impl RangeArray {
             );
         }
         Ok(())
+    }
+
+    /// Change the field's datatype to the type after processed by [RangeArray].
+    /// Like `Utf8` will become `Dictionary<Int64, Utf8>`.
+    pub fn convert_field(field: &Field) -> Field {
+        let value_type = Box::new(field.data_type().clone());
+        Field::new(
+            field.name(),
+            DataType::Dictionary(Box::new(Self::key_type()), value_type),
+            field.is_nullable(),
+        )
     }
 }
 
