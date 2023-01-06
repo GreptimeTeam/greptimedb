@@ -12,18 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod flight;
+mod grpc;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{
-    AlterExpr, CreateDatabaseExpr, CreateTableExpr, InsertRequest, ObjectExpr, ObjectResult,
-    TableId,
-};
-use arrow_flight::flight_service_server::FlightService;
-use arrow_flight::Ticket;
+use api::v1::{AlterExpr, CreateDatabaseExpr, CreateTableExpr, InsertRequest, TableId};
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use catalog::{CatalogList, CatalogManager};
@@ -31,7 +26,6 @@ use chrono::DateTime;
 use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
-use common_grpc::flight::flight_data_to_object_result;
 use common_query::Output;
 use common_telemetry::{debug, error, info};
 use datatypes::prelude::ConcreteDataType;
@@ -41,12 +35,11 @@ use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
     TableName, TableRoute,
 };
-use prost::Message;
 use query::parser::QueryStatement;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
-use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
+use servers::query_handler::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -55,15 +48,14 @@ use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use table::table::AlterContext;
-use tonic::Request;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    ColumnDataTypeSnafu, FlightGetSnafu, InvalidFlightDataSnafu, ParseSqlSnafu,
-    PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu,
-    StartMetaClientSnafu, TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
+    ColumnDataTypeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu,
+    RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu, TableNotFoundSnafu,
+    TableSnafu, ToTableInsertRequestSnafu,
 };
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
 use crate::instance::parse_stmt;
@@ -371,13 +363,6 @@ impl DistInstance {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    async fn boarding(&self, ticket: Request<Ticket>) -> Result<ObjectResult> {
-        let response = self.do_get(ticket).await.context(FlightGetSnafu)?;
-        flight_data_to_object_result(response)
-            .await
-            .context(InvalidFlightDataSnafu)
-    }
-
     #[cfg(test)]
     pub(crate) fn catalog_manager(&self) -> Arc<FrontendCatalogManager> {
         self.catalog_manager.clone()
@@ -417,22 +402,6 @@ impl SqlQueryHandler for DistInstance {
             .schema(catalog, schema)
             .map(|s| s.is_some())
             .context(server_error::CatalogSnafu)
-    }
-}
-
-#[async_trait]
-impl GrpcQueryHandler for DistInstance {
-    async fn do_query(&self, query: ObjectExpr) -> server_error::Result<ObjectResult> {
-        let ticket = Request::new(Ticket {
-            ticket: query.encode_to_vec(),
-        });
-        // TODO(LFC): Temporarily use old GRPC interface here, will get rid of them near the end of Arrow Flight adoption.
-        self.boarding(ticket)
-            .await
-            .map_err(BoxedError::new)
-            .with_context(|_| servers::error::ExecuteQuerySnafu {
-                query: format!("{query:?}"),
-            })
     }
 }
 

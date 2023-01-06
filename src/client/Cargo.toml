@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 api = { path = "../api" }
+arrow-flight.workspace = true
 async-stream.workspace = true
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
@@ -17,7 +18,9 @@ common-time = { path = "../common/time" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 enum_dispatch = "0.3"
+futures-util.workspace = true
 parking_lot = "0.12"
+prost.workspace = true
 rand = "0.8"
 snafu.workspace = true
 tonic.workspace = true

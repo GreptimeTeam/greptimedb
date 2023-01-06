@@ -4,18 +4,8 @@ package greptime.v1;
 
 import "greptime/v1/ddl.proto";
 import "greptime/v1/column.proto";
-import "greptime/v1/common.proto";
 
-message DatabaseRequest {
-  string name = 1;
-  repeated ObjectExpr exprs = 2;
-}
-
-message DatabaseResponse {
-  repeated ObjectResult results = 1;
-}
-
-message ObjectExpr {
+message GreptimeRequest {
   oneof request {
     InsertRequest insert = 1;
     QueryRequest query = 2;
@@ -44,11 +34,6 @@ message InsertRequest {
 
   // The region number of current insert request.
   uint32 region_number = 5;
-}
-
-message ObjectResult {
-  ResultHeader header = 1;
-  repeated bytes flight_data = 2;
 }
 
 message FlightDataExt {

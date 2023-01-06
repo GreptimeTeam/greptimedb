@@ -22,12 +22,13 @@ use api::v1::AlterExpr;
 use async_trait::async_trait;
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use catalog::remote::KvBackendRef;
-use client::{Database, RpcOutput};
+use client::Database;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
 use common_query::physical_plan::{PhysicalPlan, PhysicalPlanRef};
+use common_query::Output;
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use common_telemetry::debug;
@@ -108,7 +109,7 @@ impl Table for DistTable {
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
-        let RpcOutput::AffectedRows(rows) = output else { unreachable!() };
+        let Output::AffectedRows(rows) = output else { unreachable!() };
         Ok(rows)
     }
 

@@ -16,8 +16,9 @@ use std::fmt::Formatter;
 use std::sync::Arc;
 
 use api::v1::InsertRequest;
-use client::{Database, RpcOutput};
+use client::Database;
 use common_query::prelude::Expr;
+use common_query::Output;
 use common_recordbatch::RecordBatches;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
@@ -46,7 +47,7 @@ impl DatanodeInstance {
         Self { table, db }
     }
 
-    pub(crate) async fn grpc_insert(&self, request: InsertRequest) -> client::Result<RpcOutput> {
+    pub(crate) async fn grpc_insert(&self, request: InsertRequest) -> client::Result<Output> {
         self.db.insert(request).await
     }
 
@@ -62,7 +63,7 @@ impl DatanodeInstance {
             .logical_plan(substrait_plan.to_vec())
             .await
             .context(error::RequestDatanodeSnafu)?;
-        let RpcOutput::RecordBatches(recordbatches) = result else { unreachable!() };
+        let Output::RecordBatches(recordbatches) = result else { unreachable!() };
         Ok(recordbatches)
     }
 

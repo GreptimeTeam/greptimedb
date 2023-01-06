@@ -1308,6 +1308,7 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "api",
+ "arrow-flight",
  "async-stream",
  "common-base",
  "common-error",
@@ -1320,7 +1321,9 @@ dependencies = [
  "datanode",
  "datatypes",
  "enum_dispatch",
+ "futures-util",
  "parking_lot",
+ "prost 0.11.3",
  "prost 0.9.0",
  "rand 0.8.5",
  "snafu",
@@ -2144,7 +2147,6 @@ name = "datanode"
 version = "0.1.0"
 dependencies = [
  "api",
- "arrow-flight",
  "async-stream",
  "async-trait",
  "axum",
@@ -2611,7 +2613,6 @@ version = "0.1.0"
 dependencies = [
  "anymap",
  "api",
- "arrow-flight",
  "async-stream",
  "async-trait",
  "catalog",
@@ -6581,6 +6582,7 @@ version = "0.1.0"
 dependencies = [
  "aide",
  "api",
+ "arrow-flight",
  "async-trait",
  "axum",
  "axum-macros",
@@ -6592,6 +6594,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
+ "common-grpc-expr",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -6612,6 +6615,7 @@ dependencies = [
  "openmetrics-parser",
  "opensrv-mysql",
  "pgwire",
+ "pin-project",
  "prost 0.11.3",
  "query",
  "rand 0.8.5",
@@ -6637,7 +6641,6 @@ dependencies = [
  "tokio-stream",
  "tokio-test",
  "tonic",
- "tonic-reflection",
  "tower",
  "tower-http",
 ]
@@ -6893,6 +6896,7 @@ dependencies = [
  "client",
  "common-base",
  "common-grpc",
+ "common-query",
  "sqlness",
  "tokio",
 ]
@@ -7327,6 +7331,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
+ "common-query",
  "common-runtime",
  "common-telemetry",
  "datanode",
@@ -7702,21 +7707,6 @@ dependencies = [
  "prost-build 0.11.3",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "tonic-reflection"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0455f730d540a1484bffc3c55c94100b18a662597b982c2e9073f2c55c602616"
-dependencies = [
- "bytes",
- "prost 0.11.3",
- "prost-types 0.11.2",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-build",
 ]
 
 [[package]]

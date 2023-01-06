@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::prometheus::remote::{ReadRequest, WriteRequest};
-use api::v1::{ObjectExpr, ObjectResult};
+use api::v1::GreptimeRequest;
 use async_trait::async_trait;
 use common_query::Output;
 use session::context::QueryContextRef;
@@ -65,7 +65,7 @@ pub trait ScriptHandler {
 
 #[async_trait]
 pub trait GrpcQueryHandler {
-    async fn do_query(&self, query: ObjectExpr) -> Result<ObjectResult>;
+    async fn do_query(&self, query: GreptimeRequest) -> Result<Output>;
 }
 
 #[async_trait]

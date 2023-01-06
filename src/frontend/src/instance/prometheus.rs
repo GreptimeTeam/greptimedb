@@ -14,11 +14,11 @@
 
 use api::prometheus::remote::read_request::ResponseType;
 use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
-use api::v1::object_expr::Request;
-use api::v1::{query_request, ObjectExpr, QueryRequest};
+use api::v1::greptime_request::Request;
+use api::v1::{query_request, GreptimeRequest, QueryRequest};
 use async_trait::async_trait;
-use client::RpcOutput;
-use common_error::prelude::BoxedError;
+use common_query::Output;
+use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
 use prost::Message;
 use servers::error::{self, Result as ServerResult};
@@ -59,8 +59,11 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
     Ok(ResponseType::from_i32(*response_type).unwrap())
 }
 
-fn to_query_result(table_name: &str, object_result: RpcOutput) -> ServerResult<QueryResult> {
-    let RpcOutput::RecordBatches(recordbatches) = object_result else { unreachable!() };
+async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {
+    let Output::Stream(stream) = output else { unreachable!() };
+    let recordbatches = RecordBatches::try_collect(stream)
+        .await
+        .context(error::CollectRecordbatchSnafu)?;
     Ok(QueryResult {
         timeseries: prometheus::recordbatches_to_timeseries(table_name, recordbatches)?,
     })
@@ -71,7 +74,7 @@ impl Instance {
         &self,
         db: &str,
         queries: &[Query],
-    ) -> ServerResult<Vec<(String, RpcOutput)>> {
+    ) -> ServerResult<Vec<(String, Output)>> {
         let mut results = Vec::with_capacity(queries.len());
 
         for query in queries {
@@ -82,19 +85,14 @@ impl Instance {
                 sql
             );
 
-            let query = ObjectExpr {
+            let query = GreptimeRequest {
                 request: Some(Request::Query(QueryRequest {
                     query: Some(query_request::Query::Sql(sql.to_string())),
                 })),
             };
-            let object_result = self
-                .do_query(query)
-                .await?
-                .try_into()
-                .map_err(BoxedError::new)
-                .context(error::ExecuteQuerySnafu { query: &sql })?;
+            let output = self.do_query(query).await?;
 
-            results.push((table_name, object_result));
+            results.push((table_name, output));
         }
         Ok(results)
     }
@@ -104,12 +102,7 @@ impl Instance {
 impl PrometheusProtocolHandler for Instance {
     async fn write(&self, database: &str, request: WriteRequest) -> ServerResult<()> {
         let requests = prometheus::to_grpc_insert_requests(database, request.clone())?;
-        self.handle_inserts(requests)
-            .await
-            .map_err(BoxedError::new)
-            .with_context(|_| error::ExecuteInsertSnafu {
-                msg: format!("{request:?}"),
-            })?;
+        self.handle_inserts(requests).await?;
         Ok(())
     }
 
@@ -123,10 +116,10 @@ impl PrometheusProtocolHandler for Instance {
 
         match response_type {
             ResponseType::Samples => {
-                let query_results = results
-                    .into_iter()
-                    .map(|(table_name, object_result)| to_query_result(&table_name, object_result))
-                    .collect::<ServerResult<Vec<_>>>()?;
+                let mut query_results = Vec::with_capacity(results.len());
+                for (table_name, output) in results {
+                    query_results.push(to_query_result(&table_name, output).await?);
+                }
 
                 let response = ReadResponse {
                     results: query_results,

@@ -23,12 +23,6 @@ use store_api::storage::RegionId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Invalid ObjectResult, source: {}", source))]
-    InvalidObjectResult {
-        #[snafu(backtrace)]
-        source: client::Error,
-    },
-
     #[snafu(display("Failed to request Datanode, source: {}", source))]
     RequestDatanode {
         #[snafu(backtrace)]
@@ -102,12 +96,6 @@ pub enum Error {
     #[snafu(display("Incomplete GRPC result: {}", err_msg))]
     IncompleteGrpcResult {
         err_msg: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Invalid Flight ticket, source: {}", source))]
-    InvalidFlightTicket {
-        source: api::DecodeError,
         backtrace: Backtrace,
     },
 
@@ -233,12 +221,6 @@ pub enum Error {
 
     #[snafu(display("Failed to build CreateExpr on insertion: {}", source))]
     BuildCreateExprOnInsertion {
-        #[snafu(backtrace)]
-        source: common_grpc_expr::error::Error,
-    },
-
-    #[snafu(display("Failed to find new columns on insertion: {}", source))]
-    FindNewColumnsOnInsertion {
         #[snafu(backtrace)]
         source: common_grpc_expr::error::Error,
     },
@@ -374,24 +356,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to invoke GRPC server, source: {}", source))]
-    InvokeGrpcServer {
-        #[snafu(backtrace)]
-        source: servers::error::Error,
-    },
-
-    #[snafu(display("Failed to do Flight get, source: {}", source))]
-    FlightGet {
-        source: tonic::Status,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Invalid FlightData, source: {}", source))]
-    InvalidFlightData {
-        #[snafu(backtrace)]
-        source: common_grpc::Error,
-    },
-
     #[snafu(display("Failed to found context value: {}", key))]
     ContextValueNotFound { key: String, backtrace: Backtrace },
 
@@ -419,14 +383,11 @@ impl ErrorExt for Error {
             | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. }
             | Error::ColumnValuesNumberMismatch { .. }
-            | Error::RegionKeysSize { .. }
-            | Error::InvalidFlightTicket { .. } => StatusCode::InvalidArguments,
+            | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
 
             Error::RuntimeResource { source, .. } => source.status_code(),
 
-            Error::StartServer { source, .. } | Error::InvokeGrpcServer { source } => {
-                source.status_code()
-            }
+            Error::StartServer { source, .. } => source.status_code(),
 
             Error::ParseSql { source } => source.status_code(),
 
@@ -436,9 +397,7 @@ impl ErrorExt for Error {
             | Error::ConvertScalarValue { source, .. }
             | Error::ConvertArrowSchema { source } => source.status_code(),
 
-            Error::InvalidObjectResult { source, .. } | Error::RequestDatanode { source } => {
-                source.status_code()
-            }
+            Error::RequestDatanode { source } => source.status_code(),
 
             Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
                 source.status_code()
@@ -454,7 +413,6 @@ impl ErrorExt for Error {
             | Error::FindRegionPartition { .. }
             | Error::IllegalTableRoutesData { .. }
             | Error::BuildDfLogicalPlan { .. }
-            | Error::FlightGet { .. }
             | Error::BuildTableMeta { .. } => StatusCode::Internal,
 
             Error::IllegalFrontendState { .. }
@@ -475,7 +433,6 @@ impl ErrorExt for Error {
             Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
             Error::Insert { source, .. } => source.status_code(),
             Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
-            Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
             Error::ToTableInsertRequest { source, .. } => source.status_code(),
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteStatement { source, .. } => source.status_code(),
@@ -485,7 +442,6 @@ impl ErrorExt for Error {
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
             Error::BuildVector { source, .. } => source.status_code(),
-            Error::InvalidFlightData { source } => source.status_code(),
         }
     }
 
