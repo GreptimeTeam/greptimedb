@@ -1,6 +1,6 @@
 ---
 Feature Name: "procedure-framework"
-Tracking Issue:
+Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/286
 Date: 2023-01-03
 Author: "Yingwen <realevenyag@gmail.com>"
 ---
