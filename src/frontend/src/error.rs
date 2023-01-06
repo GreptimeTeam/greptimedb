@@ -225,27 +225,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to bump table id when creating table, source: {}", source))]
-    BumpTableId {
-        #[snafu(backtrace)]
-        source: table::error::Error,
-    },
-
-    #[snafu(display("Failed to create database: {}, source: {}", name, source))]
-    CreateDatabase {
-        name: String,
-        #[snafu(backtrace)]
-        source: client::Error,
-    },
-
     #[snafu(display("Failed to insert values to table, source: {}", source))]
     Insert {
-        #[snafu(backtrace)]
-        source: client::Error,
-    },
-
-    #[snafu(display("Failed to create table on insertion, source: {}", source))]
-    CreateTableOnInsertion {
         #[snafu(backtrace)]
         source: client::Error,
     },
@@ -287,15 +268,6 @@ pub enum Error {
     Table {
         #[snafu(backtrace)]
         source: table::error::Error,
-    },
-
-    #[snafu(display("Failed to get catalog manager"))]
-    CatalogManager { backtrace: Backtrace },
-
-    #[snafu(display("Failed to get full table name, source: {}", source))]
-    FullTableName {
-        #[snafu(backtrace)]
-        source: sql::error::Error,
     },
 
     #[snafu(display("Failed to find region routes for table {}", table_name))]
@@ -352,23 +324,10 @@ pub enum Error {
     #[snafu(display("Cannot find primary key column by name: {}", msg))]
     PrimaryKeyNotFound { msg: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to execute sql: {}, source: {}", sql, source))]
-    ExecuteSql {
-        sql: String,
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
-
     #[snafu(display("Failed to execute statement, source: {}", source))]
     ExecuteStatement {
         #[snafu(backtrace)]
         source: query::error::Error,
-    },
-
-    #[snafu(display("Failed to do vector computation, source: {}", source))]
-    VectorComputation {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to build DataFusion logical plan, source: {}", source))]
@@ -460,7 +419,6 @@ impl ErrorExt for Error {
             | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. }
             | Error::ColumnValuesNumberMismatch { .. }
-            | Error::CatalogManager { .. }
             | Error::RegionKeysSize { .. }
             | Error::InvalidFlightTicket { .. } => StatusCode::InvalidArguments,
 
@@ -472,13 +430,10 @@ impl ErrorExt for Error {
 
             Error::ParseSql { source } => source.status_code(),
 
-            Error::FullTableName { source, .. } => source.status_code(),
-
             Error::Table { source } => source.status_code(),
 
             Error::ConvertColumnDefaultConstraint { source, .. }
             | Error::ConvertScalarValue { source, .. }
-            | Error::VectorComputation { source }
             | Error::ConvertArrowSchema { source } => source.status_code(),
 
             Error::InvalidObjectResult { source, .. } | Error::RequestDatanode { source } => {
@@ -516,17 +471,13 @@ impl ErrorExt for Error {
             Error::StartMetaClient { source } | Error::RequestMeta { source } => {
                 source.status_code()
             }
-            Error::BumpTableId { source, .. } => source.status_code(),
             Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
             Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
-            Error::CreateDatabase { source, .. }
-            | Error::CreateTableOnInsertion { source, .. }
-            | Error::Insert { source, .. } => source.status_code(),
+            Error::Insert { source, .. } => source.status_code(),
             Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
             Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
             Error::ToTableInsertRequest { source, .. } => source.status_code(),
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
-            Error::ExecuteSql { source, .. } => source.status_code(),
             Error::ExecuteStatement { source, .. } => source.status_code(),
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),

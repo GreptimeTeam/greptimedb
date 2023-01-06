@@ -151,8 +151,15 @@ pub(crate) fn scalar_value_as_literal_type(v: &ScalarValue) -> Result<LiteralTyp
             ScalarValue::Int64(Some(v)) => LiteralType::I64(*v),
             ScalarValue::LargeUtf8(Some(v)) => LiteralType::String(v.clone()),
             ScalarValue::LargeBinary(Some(v)) => LiteralType::Binary(v.clone()),
+            ScalarValue::TimestampSecond(Some(seconds), _) => {
+                LiteralType::Timestamp(*seconds * 1_000_000)
+            }
             ScalarValue::TimestampMillisecond(Some(millis), _) => {
                 LiteralType::Timestamp(*millis * 1000)
+            }
+            ScalarValue::TimestampMicrosecond(Some(micros), _) => LiteralType::Timestamp(*micros),
+            ScalarValue::TimestampNanosecond(Some(nanos), _) => {
+                LiteralType::Timestamp(*nanos / 1000)
             }
             ScalarValue::Utf8(Some(s)) => LiteralType::String(s.clone()),
             // TODO(LFC): Implement other conversions: ScalarValue => LiteralType
