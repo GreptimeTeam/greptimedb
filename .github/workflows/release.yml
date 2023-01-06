@@ -83,7 +83,7 @@ jobs:
         run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
 
       - name: Run cargo build
-        run: cargo build ${{ matrix.opts }} --release --locked --target ${{ matrix.arch }}
+        run: cargo build ${{ matrix.opts }} --profile weekly --locked --target ${{ matrix.arch }}
 
       - name: Calculate checksum and rename binary
         shell: bash

@@ -68,3 +68,10 @@ tonic = "0.8"
 
 [profile.release]
 debug = true
+
+[profile.weekly]
+inherits = "release"
+strip = true
+lto = true
+debug = false
+incremental = false
