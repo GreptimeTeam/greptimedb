@@ -1,0 +1,109 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use api::v1::meta::HeartbeatRequest;
+use common_time::util as time_util;
+
+#[derive(Debug)]
+pub struct Stat {
+    pub timestamp_millis: i64,
+    pub cluster_id: u64,
+    pub id: u64,
+    pub addr: String,
+    /// Leader node
+    pub is_leader: bool,
+    /// The read capacity units during this period
+    pub rcus: u64,
+    /// The write capacity units during this period
+    pub wcus: u64,
+    /// How many tables on this node
+    pub table_num: u64,
+    /// How many regions on this node
+    pub region_num: u64,
+    pub cpu_usage: f64,
+    pub load: f64,
+    /// Read disk IO on this node
+    pub read_io_rate: f64,
+    /// Write disk IO on this node
+    pub write_io_rate: f64,
+    /// Region stats on this node
+    pub region_stats: Vec<RegionStat>,
+}
+
+#[derive(Debug)]
+pub struct RegionStat {
+    pub id: u64,
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    /// The read capacity units during this period
+    pub rcus: u64,
+    /// The write capacity units during this period
+    pub wcus: u64,
+    /// Approximate bytes of this region
+    pub approximate_bytes: u64,
+    /// Approximate number of rows in this region
+    pub approximate_rows: u64,
+}
+
+impl TryFrom<&HeartbeatRequest> for Stat {
+    type Error = ();
+
+    fn try_from(value: &HeartbeatRequest) -> Result<Self, Self::Error> {
+        let HeartbeatRequest {
+            header,
+            peer,
+            is_leader,
+            node_stat,
+            region_stats,
+            ..
+        } = value;
+
+        match (header, peer, node_stat) {
+            (Some(header), Some(peer), Some(node_stat)) => Ok(Self {
+                timestamp_millis: time_util::current_time_millis(),
+                cluster_id: header.cluster_id,
+                id: peer.id,
+                addr: peer.addr.clone(),
+                is_leader: *is_leader,
+                rcus: node_stat.rcus,
+                wcus: node_stat.wcus,
+                table_num: node_stat.table_num,
+                region_num: node_stat.region_num,
+                cpu_usage: node_stat.cpu_usage,
+                load: node_stat.load,
+                read_io_rate: node_stat.read_io_rate,
+                write_io_rate: node_stat.write_io_rate,
+                region_stats: region_stats.iter().map(RegionStat::from).collect(),
+            }),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<&api::v1::meta::RegionStat> for RegionStat {
+    fn from(value: &api::v1::meta::RegionStat) -> Self {
+        let table = value.table_name.as_ref();
+        Self {
+            id: value.region_id,
+            catalog: table.map_or("", |t| &t.catalog_name).to_string(),
+            schema: table.map_or("", |t| &t.schema_name).to_string(),
+            table: table.map_or("", |t| &t.table_name).to_string(),
+            rcus: value.rcus,
+            wcus: value.wcus,
+            approximate_bytes: value.approximate_bytes,
+            approximate_rows: value.approximate_rows,
+        }
+    }
+}

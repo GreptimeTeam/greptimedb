@@ -26,7 +26,7 @@ message HeartbeatRequest {
   TimeInterval report_interval = 4;
   // Node stat
   NodeStat node_stat = 5;
-  // Region stats in this node
+  // Region stats on this node
   repeated RegionStat region_stats = 6;
   // Follower nodes and stats, empty on follower nodes
   repeated ReplicaStat replica_stats = 7;
@@ -37,16 +37,16 @@ message NodeStat {
   uint64 rcus = 1;
   // The write capacity units during this period
   uint64 wcus = 2;
-  // Table number in this node
+  // How many tables on this node
   uint64 table_num = 3;
-  // Region number in this node
+  // How many regions on this node
   uint64 region_num = 4;
 
   double cpu_usage = 5;
   double load = 6;
-  // Read disk I/O in the node
+  // Read disk IO on this node
   double read_io_rate = 7;
-  // Write disk I/O in the node
+  // Write disk IO on this node
   double write_io_rate = 8;
 
   // Others
@@ -60,9 +60,9 @@ message RegionStat {
   uint64 rcus = 3;
   // The write capacity units during this period
   uint64 wcus = 4;
-  // Approximate region size
-  uint64 approximate_size = 5;
-  // Approximate number of rows
+  // Approximate bytes of this region
+  uint64 approximate_bytes = 5;
+  // Approximate number of rows in this region
   uint64 approximate_rows = 6;
 
   // Others

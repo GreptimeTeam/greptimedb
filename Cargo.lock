@@ -3823,6 +3823,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
+ "dashmap",
  "etcd-client",
  "futures",
  "h2",
