@@ -23,7 +23,7 @@ python = [
 ]
 
 [dependencies]
-async-trait.workspace = true
+async-trait="0.1"
 catalog = { path = "../catalog" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
@@ -40,9 +40,9 @@ datafusion-expr = { workspace = true, optional = true }
 datafusion-physical-expr = { workspace = true, optional = true }
 datatypes = { path = "../datatypes" }
 futures-util = "0.3"
-futures.workspace = true
+futures="0.3"
 once_cell = "1.17.0"
-paste = { workspace = true, optional = true }
+paste = { version="1.0", optional = true }
 query = { path = "../query" }
 # TODO(discord9): This is a forked and tweaked version of RustPython, please update it to newest original RustPython After Update toolchain to 1.65
 rustpython-ast = { git = "https://github.com/discord9/RustPython", optional = true, rev = "f89b1537" }
