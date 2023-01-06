@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{Array, TimestampMillisecondArray};
+use datafusion::arrow::array::{Array, Int64Array, TimestampMillisecondArray};
+use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -323,11 +324,13 @@ impl Stream for RangeManipulateStream {
 
 impl RangeManipulateStream {
     pub fn manipulate(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
+        let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
         // calculate the range
         let ranges = self.calculate_range(&input);
         // transform columns
         let mut new_columns = input.columns().to_vec();
         for index in self.value_columns.iter().chain([self.time_index].iter()) {
+            other_columns.remove(index);
             let column = input.column(*index);
             let new_column = Arc::new(
                 RangeArray::from_ranges(column.clone(), ranges.clone())
@@ -335,6 +338,12 @@ impl RangeManipulateStream {
                     .into_dict(),
             );
             new_columns[*index] = new_column;
+        }
+
+        // truncate other columns
+        let take_indices = Int64Array::from(vec![0; ranges.len()]);
+        for index in other_columns.into_iter() {
+            new_columns[index] = compute::take(&input.column(index), &take_indices, None)?;
         }
 
         RecordBatch::try_new(self.output_schema.clone(), new_columns)
@@ -369,7 +378,7 @@ impl RangeManipulateStream {
 
 #[cfg(test)]
 mod test {
-    use datafusion::arrow::array::{ArrayRef, DictionaryArray, Float64Array};
+    use datafusion::arrow::array::{ArrayRef, DictionaryArray, Float64Array, StringArray};
     use datafusion::arrow::datatypes::{
         ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimestampMillisecondType,
     };
@@ -388,7 +397,7 @@ mod test {
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("value_1", DataType::Float64, true),
             Field::new("value_2", DataType::Float64, true),
-            // Field::new("path", DataType::Utf8, true),
+            Field::new("path", DataType::Utf8, true),
         ]));
         let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice([
             0, 30_000, 60_000, 90_000, 120_000, // every 30s
@@ -396,14 +405,14 @@ mod test {
             241_000, 271_000, 291_000, // others
         ])) as _;
         let value_column: ArrayRef = Arc::new(Float64Array::from_slice([1.0; 10])) as _;
-        // let path_column = Arc::new(StringArray::from_slice(["foo"; 10])) as _;
+        let path_column = Arc::new(StringArray::from_slice(["foo"; 10])) as _;
         let data = RecordBatch::try_new(
             schema.clone(),
             vec![
                 timestamp_column,
                 value_column.clone(),
                 value_column,
-                // path_column,
+                path_column,
             ],
         )
         .unwrap();
@@ -476,17 +485,16 @@ mod test {
     #[tokio::test]
     async fn interval_30s_range_90s() {
         let expected = String::from(
-        "RangeArray { \
-            base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
-            ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
-        }\
-        \nRangeArray { \
-            base array: PrimitiveArray<Float64>\n[\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n], \
-            ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
-        }\nRangeArray { \
-            base array: PrimitiveArray<Float64>\n[\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n], \
-            ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
-        }");
+            "RangeArray { \
+                base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
+                ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
+            }\nRangeArray { \
+                base array: PrimitiveArray<Float64>\n[\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n], \
+                ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
+            }\nRangeArray { \
+                base array: PrimitiveArray<Float64>\n[\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n], \
+                ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
+            }\nStringArray\n[\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n  \"foo\",\n]");
         do_normalize_test(0, 310_000, 30_000, 90_000, expected).await;
     }
 }
