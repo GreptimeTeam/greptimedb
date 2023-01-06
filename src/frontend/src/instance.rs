@@ -30,7 +30,7 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
-use catalog::{CatalogManagerRef, CatalogProviderRef, SchemaProviderRef};
+use catalog::CatalogManagerRef;
 use client::RpcOutput;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
@@ -42,13 +42,13 @@ use datanode::instance::InstanceRef as DnInstanceRef;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
+use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
 use servers::query_handler::{
     GrpcQueryHandler, GrpcQueryHandlerRef, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
     PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
     SqlQueryHandlerRef,
 };
-use servers::{error as server_error, Mode};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::GenericDialect;
@@ -93,10 +93,6 @@ pub struct Instance {
     grpc_query_handler: GrpcQueryHandlerRef,
 
     create_expr_factory: CreateExprFactoryRef,
-    // TODO(fys): it should be a trait that corresponds to two implementations:
-    // Standalone and Distributed, then the code behind it doesn't need to use so
-    // many match statements.
-    mode: Mode,
 
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
@@ -126,7 +122,6 @@ impl Instance {
             catalog_manager,
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            mode: Mode::Distributed,
             sql_handler: dist_instance.clone(),
             grpc_query_handler: dist_instance,
             plugins: Default::default(),
@@ -168,7 +163,6 @@ impl Instance {
             catalog_manager: dn_instance.catalog_manager().clone(),
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            mode: Mode::Standalone,
             sql_handler: dn_instance.clone(),
             grpc_query_handler: dn_instance.clone(),
             plugins: Default::default(),
@@ -181,7 +175,6 @@ impl Instance {
             catalog_manager: dist_instance.catalog_manager(),
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            mode: Mode::Distributed,
             sql_handler: dist_instance.clone(),
             grpc_query_handler: dist_instance,
             plugins: Default::default(),
@@ -347,22 +340,6 @@ impl Instance {
             .context(InvokeGrpcServerSnafu)?;
         let output: RpcOutput = result.try_into().context(InvalidObjectResultSnafu)?;
         Ok(output.into())
-    }
-
-    fn get_catalog(&self, catalog_name: &str) -> Result<CatalogProviderRef> {
-        self.catalog_manager
-            .catalog(catalog_name)
-            .context(error::CatalogSnafu)?
-            .context(error::CatalogNotFoundSnafu { catalog_name })
-    }
-
-    fn get_schema(provider: CatalogProviderRef, schema_name: &str) -> Result<SchemaProviderRef> {
-        provider
-            .schema(schema_name)
-            .context(error::CatalogSnafu)?
-            .context(error::SchemaNotFoundSnafu {
-                schema_info: schema_name,
-            })
     }
 
     fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {

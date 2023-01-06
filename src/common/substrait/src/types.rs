@@ -151,10 +151,21 @@ pub(crate) fn scalar_value_as_literal_type(v: &ScalarValue) -> Result<LiteralTyp
             ScalarValue::Int64(Some(v)) => LiteralType::I64(*v),
             ScalarValue::LargeUtf8(Some(v)) => LiteralType::String(v.clone()),
             ScalarValue::LargeBinary(Some(v)) => LiteralType::Binary(v.clone()),
+            ScalarValue::TimestampSecond(Some(seconds), _) => {
+                LiteralType::Timestamp(*seconds * 1_000_000)
+            }
+            ScalarValue::TimestampMillisecond(Some(millis), _) => {
+                LiteralType::Timestamp(*millis * 1000)
+            }
+            ScalarValue::TimestampMicrosecond(Some(micros), _) => LiteralType::Timestamp(*micros),
+            ScalarValue::TimestampNanosecond(Some(nanos), _) => {
+                LiteralType::Timestamp(*nanos / 1000)
+            }
+            ScalarValue::Utf8(Some(s)) => LiteralType::String(s.clone()),
             // TODO(LFC): Implement other conversions: ScalarValue => LiteralType
             _ => {
                 return error::UnsupportedExprSnafu {
-                    name: format!("{v:?}"),
+                    name: format!("ScalarValue: {v:?}"),
                 }
                 .fail()
             }
@@ -191,6 +202,7 @@ pub(crate) fn literal_type_to_scalar_value(t: LiteralType) -> Result<ScalarValue
         LiteralType::Fp64(v) => ScalarValue::Float64(Some(v)),
         LiteralType::String(v) => ScalarValue::LargeUtf8(Some(v)),
         LiteralType::Binary(v) => ScalarValue::LargeBinary(Some(v)),
+        LiteralType::Timestamp(v) => ScalarValue::TimestampMicrosecond(Some(v), None),
         // TODO(LFC): Implement other conversions: LiteralType => ScalarValue
         _ => {
             return error::UnsupportedSubstraitTypeSnafu {

@@ -14,9 +14,9 @@
 
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
+use servers::error as server_error;
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;
-use servers::{error as server_error, Mode};
 use snafu::prelude::*;
 
 use crate::instance::Instance;
@@ -24,30 +24,8 @@ use crate::instance::Instance;
 #[async_trait]
 impl OpentsdbProtocolHandler for Instance {
     async fn exec(&self, data_point: &DataPoint) -> server_error::Result<()> {
-        // TODO(LFC): Insert metrics in batch, then make OpentsdbLineProtocolHandler::exec received multiple data points, when
-        // metric table and tags can be created upon insertion.
-        match self.mode {
-            Mode::Standalone => {
-                self.insert_opentsdb_metric(data_point).await?;
-            }
-            Mode::Distributed => {
-                self.dist_insert(vec![data_point.as_grpc_insert()])
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteInsertSnafu {
-                        msg: "execute insert failed",
-                    })?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl Instance {
-    async fn insert_opentsdb_metric(&self, data_point: &DataPoint) -> server_error::Result<()> {
-        let insert_expr = data_point.as_grpc_insert();
-        self.handle_insert(insert_expr)
+        let request = data_point.as_grpc_insert();
+        self.handle_insert(request)
             .await
             .map_err(BoxedError::new)
             .with_context(|_| server_error::ExecuteQuerySnafu {
@@ -71,29 +49,22 @@ mod tests {
     use crate::tests;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_exec() {
-        let standalone = tests::create_standalone_instance("test_exec").await;
-        let instance = standalone.instance;
-        instance
-            .exec(
-                &DataPoint::try_create(
-                    "put sys.if.bytes.out 1479496100 1.3E3 host=web01 interface=eth0",
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        instance
-            .exec(&DataPoint::try_create("put sys.procs.running 1479496100 42 host=web01").unwrap())
-            .await
-            .unwrap();
+    async fn test_standalone_exec() {
+        let standalone = tests::create_standalone_instance("test_standalone_exec").await;
+        let instance = &standalone.instance;
+
+        test_exec(instance).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_insert_opentsdb_metric() {
-        let standalone = tests::create_standalone_instance("test_insert_opentsdb_metric").await;
-        let instance = standalone.instance;
+    async fn test_distributed_exec() {
+        let distributed = tests::create_distributed_instance("test_distributed_exec").await;
+        let instance = &distributed.frontend;
 
+        test_exec(instance).await;
+    }
+
+    async fn test_exec(instance: &Arc<Instance>) {
         let data_point1 = DataPoint::new(
             "my_metric_1".to_string(),
             1000,
@@ -104,7 +75,7 @@ mod tests {
             ],
         );
         // should create new table "my_metric_1" directly
-        let result = instance.insert_opentsdb_metric(&data_point1).await;
+        let result = instance.exec(&data_point1).await;
         assert!(result.is_ok());
 
         let data_point2 = DataPoint::new(
@@ -117,12 +88,12 @@ mod tests {
             ],
         );
         // should create new column "tagk3" directly
-        let result = instance.insert_opentsdb_metric(&data_point2).await;
+        let result = instance.exec(&data_point2).await;
         assert!(result.is_ok());
 
         let data_point3 = DataPoint::new("my_metric_1".to_string(), 3000, 3.0, vec![]);
         // should handle null tags properly
-        let result = instance.insert_opentsdb_metric(&data_point3).await;
+        let result = instance.exec(&data_point3).await;
         assert!(result.is_ok());
 
         let output = instance
