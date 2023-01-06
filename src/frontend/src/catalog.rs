@@ -326,6 +326,15 @@ impl SchemaProvider for FrontendSchemaProvider {
         unimplemented!("Frontend schema provider does not support register table")
     }
 
+    fn rename_table(
+        &self,
+        _name: &str,
+        _new_name: String,
+        _table: TableRef,
+    ) -> catalog_err::Result<Option<TableRef>> {
+        unimplemented!("Frontend schema provider does not support rename table")
+    }
+
     fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {
         unimplemented!("Frontend schema provider does not support deregister table")
     }

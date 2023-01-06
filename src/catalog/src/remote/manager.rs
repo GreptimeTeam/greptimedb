@@ -744,6 +744,15 @@ impl SchemaProvider for RemoteSchemaProvider {
         prev
     }
 
+    fn rename_table(
+        &self,
+        _name: &str,
+        _new_name: String,
+        _table: TableRef,
+    ) -> Result<Option<TableRef>> {
+        todo!()
+    }
+
     fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
         let table_name = name.to_string();
         let table_key = self.build_regional_table_key(&table_name).to_string();

@@ -25,7 +25,9 @@ use table::metadata::TableId;
 use table::table::TableIdProvider;
 use table::TableRef;
 
-use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
+use crate::error::{
+    CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, TableNotFoundSnafu,
+};
 use crate::schema::SchemaProvider;
 use crate::{
     CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
@@ -90,9 +92,22 @@ impl CatalogManager for MemoryCatalogManager {
             .map(|v| v.is_none())
     }
 
-    async fn rename_table(&self, _request: RenameTableRequest) -> Result<bool> {
-        // todo impl rename_table for catalog manager
-        todo!()
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
+        let catalogs = self.catalogs.write().unwrap();
+        let catalog = catalogs
+            .get(&request.catalog)
+            .context(CatalogNotFoundSnafu {
+                catalog_name: &request.catalog,
+            })?
+            .clone();
+        let schema = catalog
+            .schema(&request.schema)?
+            .with_context(|| SchemaNotFoundSnafu {
+                schema_info: format!("{}.{}", &request.catalog, &request.schema),
+            })?;
+        schema
+            .rename_table(&request.table_name, request.new_table_name, request.table)
+            .map(|v| v.is_none())
     }
 
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
@@ -296,6 +311,33 @@ impl SchemaProvider for MemorySchemaProvider {
         }
     }
 
+    fn rename_table(
+        &self,
+        name: &str,
+        new_name: String,
+        table: TableRef,
+    ) -> Result<Option<TableRef>> {
+        let mut tables = self.tables.write().unwrap();
+        if let Some(existing) = tables.get(name) {
+            // if table with the same name but different table id exists, then it's a fatal bug
+            if existing.table_info().ident.table_id != table.table_info().ident.table_id {
+                error!(
+                    "Unexpected table rename: {:?}, existing: {:?}",
+                    table.table_info(),
+                    existing.table_info()
+                );
+                return TableExistsSnafu { table: name }.fail()?;
+            }
+            tables.remove(name);
+            Ok(tables.insert(new_name, table))
+        } else {
+            TableNotFoundSnafu {
+                table_info: name.to_string(),
+            }
+            .fail()?
+        }
+    }
+
     fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {
         let mut tables = self.tables.write().unwrap();
         Ok(tables.remove(name))
@@ -358,6 +400,88 @@ mod tests {
         let err = result.err().unwrap();
         assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
+    }
+
+    #[tokio::test]
+    async fn test_mem_provider_rename_table() {
+        let provider = MemorySchemaProvider::new();
+        let table_name = "num";
+        assert!(!provider.table_exist(table_name).unwrap());
+        let test_table: TableRef = Arc::new(NumbersTable::default());
+        // register test table
+        assert!(provider
+            .register_table(table_name.to_string(), test_table.clone())
+            .unwrap()
+            .is_none());
+        assert!(provider.table_exist(table_name).unwrap());
+
+        // rename test table
+        let new_table_name = "numbers";
+        assert!(provider
+            .rename_table(table_name, new_table_name.to_string(), test_table.clone(),)
+            .unwrap()
+            .is_none());
+
+        // test old table name not exist
+        assert!(!provider.table_exist(table_name).unwrap());
+        assert!(provider.deregister_table(table_name).unwrap().is_none());
+
+        // test new table name exists
+        assert!(provider.table_exist(new_table_name).unwrap());
+        let registered_table = provider.table(new_table_name).unwrap().unwrap();
+        assert_eq!(
+            registered_table.table_info().ident.table_id,
+            test_table.table_info().ident.table_id
+        );
+
+        let other_table = Arc::new(NumbersTable::new(2));
+        let result = provider.register_table(new_table_name.to_string(), other_table);
+        let err = result.err().unwrap();
+        assert!(err.backtrace_opt().is_some());
+        assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
+    }
+
+    #[tokio::test]
+    async fn test_catalog_rename_table() {
+        let catalog = MemoryCatalogManager::default();
+        let schema = catalog
+            .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
+            .unwrap()
+            .unwrap();
+
+        // register table
+        let table_name = "num";
+        let table_id = 2333;
+        let table: TableRef = Arc::new(NumbersTable::new(table_id));
+        let register_table_req = RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            table_id,
+            table: table.clone(),
+        };
+        assert!(catalog.register_table(register_table_req).await.unwrap());
+        assert!(schema.table_exist(table_name).unwrap());
+
+        // rename table
+        let new_table_name = "numbers";
+        let rename_table_req = RenameTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            new_table_name: new_table_name.to_string(),
+            table_id,
+            table: table.clone(),
+        };
+        assert!(catalog.rename_table(rename_table_req).await.unwrap());
+        assert!(!schema.table_exist(table_name).unwrap());
+        assert!(schema.table_exist(new_table_name).unwrap());
+
+        let registered_table = catalog
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
+            .unwrap()
+            .unwrap();
+        assert_eq!(registered_table.table_info().ident.table_id, table_id);
     }
 
     #[test]
