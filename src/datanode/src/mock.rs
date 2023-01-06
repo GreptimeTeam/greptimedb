@@ -83,7 +83,6 @@ impl Instance {
             script_executor,
             table_id_provider: Some(Arc::new(LocalTableIdProvider::default())),
             heartbeat_task: Some(heartbeat_task),
-            logstore,
         })
     }
 }

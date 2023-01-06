@@ -109,7 +109,6 @@ mod tests {
     use mito::engine::MitoEngine;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
-    use store_api::logstore::LogStore;
     use tempdir::TempDir;
 
     #[tokio::test]
@@ -124,9 +123,7 @@ mod tests {
             ..Default::default()
         };
 
-        let log_store = RaftEngineLogStore::try_new(log_config).unwrap();
-        log_store.start().await.unwrap();
-
+        let log_store = RaftEngineLogStore::try_new(log_config).await.unwrap();
         let mock_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(

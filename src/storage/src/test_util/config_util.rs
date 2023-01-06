@@ -18,7 +18,6 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::LogConfig;
 use object_store::backend::fs::Builder;
 use object_store::ObjectStore;
-use store_api::logstore::LogStore;
 
 use crate::background::JobPoolImpl;
 use crate::engine;
@@ -51,8 +50,7 @@ pub async fn new_store_config(
         log_file_dir: log_store_dir(store_dir),
         ..Default::default()
     };
-    let log_store = Arc::new(RaftEngineLogStore::try_new(log_config).unwrap());
-    log_store.start().await.unwrap();
+    let log_store = Arc::new(RaftEngineLogStore::try_new(log_config).await.unwrap());
 
     StoreConfig {
         log_store,

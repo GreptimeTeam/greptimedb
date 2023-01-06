@@ -36,13 +36,12 @@ use servers::Mode;
 use snafu::prelude::*;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
-use store_api::logstore::LogStore;
 use table::table::TableIdProviderRef;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
-    NewCatalogSnafu, OpenLogStoreSnafu, Result, StartLogStoreSnafu,
+    NewCatalogSnafu, OpenLogStoreSnafu, Result,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
@@ -62,7 +61,6 @@ pub struct Instance {
     pub(crate) script_executor: ScriptExecutor,
     pub(crate) table_id_provider: Option<TableIdProviderRef>,
     pub(crate) heartbeat_task: Option<HeartbeatTask>,
-    pub(crate) logstore: Arc<RaftEngineLogStore>,
 }
 
 pub type InstanceRef = Arc<Instance>;
@@ -160,12 +158,10 @@ impl Instance {
             script_executor,
             heartbeat_task,
             table_id_provider,
-            logstore,
         })
     }
 
     pub async fn start(&self) -> Result<()> {
-        self.logstore.start().await.context(StartLogStoreSnafu)?;
         self.catalog_manager
             .start()
             .await
@@ -287,6 +283,8 @@ pub(crate) async fn create_log_store(path: impl AsRef<str>) -> Result<RaftEngine
         ..Default::default()
     };
 
-    let logstore = RaftEngineLogStore::try_new(log_config).context(OpenLogStoreSnafu)?;
+    let logstore = RaftEngineLogStore::try_new(log_config)
+        .await
+        .context(OpenLogStoreSnafu)?;
     Ok(logstore)
 }
