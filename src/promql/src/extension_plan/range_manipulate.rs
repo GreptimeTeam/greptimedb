@@ -97,6 +97,20 @@ impl RangeManipulate {
             HashMap::new(),
         )?))
     }
+
+    pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        Arc::new(RangeManipulateExec {
+            start: self.start,
+            end: self.end,
+            interval: self.interval,
+            range: self.range,
+            time_index_column: self.time_index.clone(),
+            value_columns: self.value_columns.clone(),
+            input: exec_input,
+            output_schema: SchemaRef::new(self.output_schema.as_ref().into()),
+            metric: ExecutionPlanMetricsSet::new(),
+        })
+    }
 }
 
 impl UserDefinedLogicalNode for RangeManipulate {
@@ -231,7 +245,7 @@ impl ExecutionPlan for RangeManipulateExec {
             range: self.range,
             time_index,
             value_columns,
-            output_schema: schema,
+            output_schema: self.output_schema.clone(),
             input,
             metric: baseline_metric,
         }))
@@ -313,7 +327,7 @@ impl RangeManipulateStream {
         let ranges = self.calculate_range(&input);
         // transform columns
         let mut new_columns = input.columns().to_vec();
-        for index in &self.value_columns {
+        for index in self.value_columns.iter().chain([self.time_index].iter()) {
             let column = input.column(*index);
             let new_column = Arc::new(
                 RangeArray::from_ranges(column.clone(), ranges.clone())
@@ -346,9 +360,133 @@ impl RangeManipulateStream {
                     range_end = range_end.max(index);
                 }
             }
-            result.push((range_start as _, (range_end - range_start + 1) as _));
+            result.push((range_start as _, (range_end + 1 - range_start) as _));
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use datafusion::arrow::array::{ArrayRef, DictionaryArray, Float64Array};
+    use datafusion::arrow::datatypes::{
+        ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimestampMillisecondType,
+    };
+    use datafusion::common::ToDFSchema;
+    use datafusion::from_slice::FromSlice;
+    use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::prelude::SessionContext;
+    use datatypes::arrow::array::TimestampMillisecondArray;
+
+    use super::*;
+
+    const TIME_INDEX_COLUMN: &str = "timestamp";
+
+    fn prepare_test_data() -> MemoryExec {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new("value_1", DataType::Float64, true),
+            Field::new("value_2", DataType::Float64, true),
+            // Field::new("path", DataType::Utf8, true),
+        ]));
+        let timestamp_column = Arc::new(TimestampMillisecondArray::from_slice([
+            0, 30_000, 60_000, 90_000, 120_000, // every 30s
+            180_000, 240_000, // every 60s
+            241_000, 271_000, 291_000, // others
+        ])) as _;
+        let value_column: ArrayRef = Arc::new(Float64Array::from_slice([1.0; 10])) as _;
+        // let path_column = Arc::new(StringArray::from_slice(["foo"; 10])) as _;
+        let data = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                timestamp_column,
+                value_column.clone(),
+                value_column,
+                // path_column,
+            ],
+        )
+        .unwrap();
+
+        MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
+    }
+
+    async fn do_normalize_test(
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        range: Millisecond,
+        expected: String,
+    ) {
+        let memory_exec = Arc::new(prepare_test_data());
+        let time_index = TIME_INDEX_COLUMN.to_string();
+        let value_columns = vec!["value_1".to_string(), "value_2".to_string()];
+        let manipulate_output_schema = SchemaRef::new(
+            RangeManipulate::calculate_output_schema(
+                &memory_exec.schema().to_dfschema_ref().unwrap(),
+                &time_index,
+                &value_columns,
+            )
+            .unwrap()
+            .as_ref()
+            .into(),
+        );
+        let normalize_exec = Arc::new(RangeManipulateExec {
+            start,
+            end,
+            interval,
+            range,
+            value_columns,
+            output_schema: manipulate_output_schema,
+            time_index_column: time_index,
+            input: memory_exec,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+        let session_context = SessionContext::default();
+        let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())
+            .await
+            .unwrap();
+        // DirectoryArray from RangeArray cannot be print as normal arrays.
+        let result_literal: String = result
+            .into_iter()
+            .filter_map(|batch| {
+                batch
+                    .columns()
+                    .into_iter()
+                    .map(|array| {
+                        if matches!(array.data_type(), &DataType::Dictionary(..)) {
+                            let dict_array = array
+                                .as_any()
+                                .downcast_ref::<DictionaryArray<Int64Type>>()
+                                .unwrap()
+                                .clone();
+                            format!("{:?}", RangeArray::try_new(dict_array).unwrap())
+                        } else {
+                            format!("{:?}", array)
+                        }
+                    })
+                    .reduce(|lhs, rhs| lhs + "\n" + &rhs)
+            })
+            .reduce(|lhs, rhs| lhs + "\n\n" + &rhs)
+            .unwrap();
+
+        assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn interval_30s_range_90s() {
+        let expected = String::from(
+        "RangeArray { \
+            base array: PrimitiveArray<Timestamp(Millisecond, None)>\n[\n  1970-01-01T00:00:00,\n  1970-01-01T00:00:30,\n  1970-01-01T00:01:00,\n  1970-01-01T00:01:30,\n  1970-01-01T00:02:00,\n  1970-01-01T00:03:00,\n  1970-01-01T00:04:00,\n  1970-01-01T00:04:01,\n  1970-01-01T00:04:31,\n  1970-01-01T00:04:51,\n], \
+            ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
+        }\
+        \nRangeArray { \
+            base array: PrimitiveArray<Float64>\n[\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n], \
+            ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
+        }\nRangeArray { \
+            base array: PrimitiveArray<Float64>\n[\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n  1.0,\n], \
+            ranges: [Some(0..1), Some(0..2), Some(0..3), Some(0..4), Some(1..5), Some(2..5), Some(3..6), Some(4..6), Some(5..7), Some(5..8), Some(6..10)] \
+        }");
+        do_normalize_test(0, 310_000, 30_000, 90_000, expected).await;
     }
 }

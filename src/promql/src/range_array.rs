@@ -21,6 +21,8 @@ use snafu::{ensure, OptionExt};
 
 use crate::error::{EmptyRangeSnafu, IllegalRangeSnafu, Result};
 
+pub type RangeTuple = (u32, u32);
+
 /// An compound logical "array" type. Represent serval ranges (slices) of one array.
 /// It's useful to use case like compute sliding window, or range selector from promql.
 ///
@@ -83,7 +85,7 @@ impl RangeArray {
 
     pub fn from_ranges<R>(values: ArrayRef, ranges: R) -> Result<Self>
     where
-        R: IntoIterator<Item = (u32, u32)> + Clone,
+        R: IntoIterator<Item = RangeTuple> + Clone,
     {
         Self::check_ranges(values.len(), ranges.clone())?;
 
@@ -100,7 +102,7 @@ impl RangeArray {
     /// [`from_ranges`]: crate::range_array::RangeArray#method.from_ranges
     pub unsafe fn from_ranges_unchecked<R>(values: ArrayRef, ranges: R) -> Self
     where
-        R: IntoIterator<Item = (u32, u32)>,
+        R: IntoIterator<Item = RangeTuple>,
     {
         let key_array = Int64Array::from_iter(
             ranges
@@ -162,7 +164,7 @@ impl RangeArray {
 
     fn check_ranges<R>(value_len: usize, ranges: R) -> Result<()>
     where
-        R: IntoIterator<Item = (u32, u32)>,
+        R: IntoIterator<Item = RangeTuple>,
     {
         for (offset, length) in ranges.into_iter() {
             ensure!(
@@ -186,6 +188,17 @@ impl RangeArray {
             DataType::Dictionary(Box::new(Self::key_type()), value_type),
             field.is_nullable(),
         )
+    }
+
+    pub fn values(&self) -> &ArrayRef {
+        self.array.values()
+    }
+
+    pub fn ranges(&self) -> impl Iterator<Item = Option<RangeTuple>> + '_ {
+        self.array
+            .keys()
+            .into_iter()
+            .map(|compound| compound.map(|key| unpack(key)))
     }
 }
 
