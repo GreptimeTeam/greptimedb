@@ -94,6 +94,7 @@ fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<ConcreteDataType
         "i64" => Ok(Some(ConcreteDataType::int64_datatype())),
         "f32" => Ok(Some(ConcreteDataType::float32_datatype())),
         "f64" => Ok(Some(ConcreteDataType::float64_datatype())),
+        "str" => Ok(Some(ConcreteDataType::string_datatype())),
         // for any datatype
         "_" => Ok(None),
         // note the different between "_" and _

@@ -89,7 +89,12 @@ impl Function for PyUdf {
         _input_types: &[datatypes::prelude::ConcreteDataType],
     ) -> common_query::error::Result<datatypes::prelude::ConcreteDataType> {
         // TODO: use correct return annotation if exist
-        Ok(ConcreteDataType::float64_datatype())
+        Ok(self.copr.return_types[0]
+            .clone()
+            .map_or(ConcreteDataType::float64_datatype(), |anno| {
+                anno.datatype
+                    .unwrap_or(ConcreteDataType::float64_datatype())
+            }))
     }
 
     fn signature(&self) -> common_query::prelude::Signature {
