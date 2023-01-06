@@ -103,7 +103,8 @@ impl CatalogManager for MemoryCatalogManager {
         let schema = catalog
             .schema(&request.schema)?
             .with_context(|| SchemaNotFoundSnafu {
-                schema_info: format!("{}.{}", &request.catalog, &request.schema),
+                catalog: &request.catalog,
+                schema: &request.schema,
             })?;
         schema
             .rename_table(&request.table_name, request.new_table_name, request.table)
