@@ -15,7 +15,7 @@
 use api::v1::meta::HeartbeatRequest;
 use common_time::util as time_util;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Stat {
     pub timestamp_millis: i64,
     pub cluster_id: u64,

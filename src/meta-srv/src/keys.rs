@@ -23,15 +23,19 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error;
 use crate::error::Result;
+use crate::handler::node_stat::Stat;
 
 pub(crate) const REMOVED_PREFIX: &str = "__removed";
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
+pub(crate) const DN_STAT_PREFIX: &str = "__meta_dnstat";
 pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
 pub(crate) const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
 
 lazy_static! {
-    static ref DATANODE_KEY_PATTERN: Regex =
+    static ref DATANODE_LEASE_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DN_LEASE_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
+    static ref DATANODE_STAT_KEY_PATTERN: Regex =
+        Regex::new(&format!("^{DN_STAT_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
 }
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct LeaseKey {
@@ -43,7 +47,7 @@ impl FromStr for LeaseKey {
     type Err = error::Error;
 
     fn from_str(key: &str) -> Result<Self> {
-        let caps = DATANODE_KEY_PATTERN
+        let caps = DATANODE_LEASE_KEY_PATTERN
             .captures(key)
             .context(error::InvalidLeaseKeySnafu { key })?;
 
@@ -169,12 +173,155 @@ impl<'a> TableRouteKey<'a> {
     }
 }
 
+#[derive(Eq, PartialEq, Debug)]
+pub struct StatKey {
+    pub cluster_id: u64,
+    pub node_id: u64,
+}
+
+impl From<StatKey> for Vec<u8> {
+    fn from(value: StatKey) -> Self {
+        format!("{}-{}-{}", DN_STAT_PREFIX, value.cluster_id, value.node_id).into_bytes()
+    }
+}
+
+impl FromStr for StatKey {
+    type Err = error::Error;
+
+    fn from_str(key: &str) -> Result<Self> {
+        let caps = DATANODE_STAT_KEY_PATTERN
+            .captures(key)
+            .context(error::InvalidLeaseKeySnafu { key })?;
+
+        ensure!(caps.len() == 3, error::InvalidLeaseKeySnafu { key });
+
+        let cluster_id = caps[1].to_string();
+        let node_id = caps[2].to_string();
+        let cluster_id: u64 = cluster_id.parse().context(error::ParseNumSnafu {
+            err_msg: format!("invalid cluster_id: {cluster_id}"),
+        })?;
+        let node_id: u64 = node_id.parse().context(error::ParseNumSnafu {
+            err_msg: format!("invalid node_id: {node_id}"),
+        })?;
+
+        Ok(Self {
+            cluster_id,
+            node_id,
+        })
+    }
+}
+
+impl TryFrom<Vec<u8>> for StatKey {
+    type Error = error::Error;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self> {
+        String::from_utf8(bytes)
+            .context(error::LeaseKeyFromUtf8Snafu {})
+            .map(|x| x.parse())?
+    }
+}
+
+impl From<&Stat> for StatKey {
+    fn from(stat: &Stat) -> Self {
+        StatKey {
+            cluster_id: stat.cluster_id,
+            node_id: stat.id,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StatValue {
+    pub region_num: u64,
+}
+
+impl From<&Stat> for StatValue {
+    fn from(stat: &Stat) -> Self {
+        StatValue {
+            region_num: stat.region_num,
+        }
+    }
+}
+
+impl TryFrom<StatValue> for Vec<u8> {
+    type Error = error::Error;
+
+    fn try_from(value: StatValue) -> Result<Self> {
+        Ok(serde_json::to_string(&value)
+            .context(crate::error::SerializeToJsonSnafu {
+                input: format!("{value:?}"),
+            })?
+            .into_bytes())
+    }
+}
+
+impl FromStr for StatValue {
+    type Err = error::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        serde_json::from_str(value).context(error::DeserializeFromJsonSnafu { input: value })
+    }
+}
+
+impl TryFrom<Vec<u8>> for StatValue {
+    type Error = error::Error;
+
+    fn try_from(value: Vec<u8>) -> Result<Self> {
+        String::from_utf8(value)
+            .context(error::LeaseKeyFromUtf8Snafu {})
+            .map(|x| x.parse())?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_datanode_lease_key() {
+    fn test_convert_stat_to_stat_key_val() {
+        let stat = &Stat {
+            cluster_id: 3,
+            id: 101,
+            region_num: 10,
+            ..Default::default()
+        };
+
+        let stat_key: StatKey = stat.try_into().unwrap();
+
+        assert_eq!(3, stat_key.cluster_id);
+        assert_eq!(101, stat_key.node_id);
+
+        let stat_val: StatValue = stat.try_into().unwrap();
+
+        assert_eq!(10, stat_val.region_num);
+    }
+
+    #[test]
+    fn test_stat_key_round_trip() {
+        let key = StatKey {
+            cluster_id: 0,
+            node_id: 1,
+        };
+
+        let key_bytes: Vec<u8> = key.try_into().unwrap();
+        let new_key: StatKey = key_bytes.try_into().unwrap();
+
+        assert_eq!(0, new_key.cluster_id);
+        assert_eq!(1, new_key.node_id);
+    }
+
+    #[test]
+    fn test_stat_val_round_trip() {
+        let value = StatValue { region_num: 101 };
+
+        let value_bytes: Vec<u8> = value.try_into().unwrap();
+        let new_value: StatValue = value_bytes.try_into().unwrap();
+
+        assert_eq!(101, new_value.region_num);
+    }
+
+    #[test]
+    fn test_lease_key_round_trip() {
         let key = LeaseKey {
             cluster_id: 0,
             node_id: 1,
@@ -187,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn test_datanode_lease_value() {
+    fn test_lease_value_round_trip() {
         let value = LeaseValue {
             timestamp_millis: 111,
             node_addr: "127.0.0.1:3002".to_string(),

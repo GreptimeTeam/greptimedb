@@ -71,6 +71,7 @@ impl Instance {
             opts.node_id.unwrap_or(42),
             opts.rpc_addr.clone(),
             meta_client.clone(),
+            catalog_manager.clone(),
         );
         Ok(Self {
             query_engine: query_engine.clone(),
