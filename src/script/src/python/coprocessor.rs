@@ -371,7 +371,11 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                 let native_module_allow_list = HashSet::from([
                     "array", "cmath", "gc", "hashlib", "_json", "_random", "math",
                 ]);
-                let interpreter = Arc::new(vm::Interpreter::with_init(Default::default(), |vm| {
+                // TODO(discord9): edge cases, can't use "..Default::default" because Settings is `#[non_exhaustive]`
+                // so more in here: https://internals.rust-lang.org/t/allow-constructing-non-exhaustive-structs-using-default-default/13868
+                let mut settings = vm::Settings::default();
+                settings.no_sig_int = true;
+                let interpreter = Arc::new(vm::Interpreter::with_init(settings, |vm| {
                     // not using full stdlib to prevent security issue, instead filter out a few simple util module
                     vm.add_native_modules(
                         rustpython_stdlib::get_module_inits()
