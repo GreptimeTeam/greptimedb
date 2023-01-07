@@ -56,7 +56,7 @@ impl Instance {
             object_store,
         ));
 
-        // By default, catalog manager and factory are created in distributed mode
+        // By default, catalog manager and factory are created in standalone mode
         let (catalog_manager, factory) = match opts.mode {
             Mode::Standalone => {
                 let catalog = Arc::new(
