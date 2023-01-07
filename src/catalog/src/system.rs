@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableInfoRef};
-use table::requests::{CreateTableRequest, InsertRequest, OpenTableRequest};
+use table::requests::{CreateTableRequest, DeleteRequest, InsertRequest, OpenTableRequest};
 use table::{Table, TableRef};
 
 use crate::error::{
@@ -71,6 +71,11 @@ impl Table for SystemCatalogTable {
     /// Insert values into table.
     async fn insert(&self, request: InsertRequest) -> table::error::Result<usize> {
         self.table.insert(request).await
+    }
+
+    /// Delete row from table
+    async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
+        self.table.delete(request).await
     }
 
     fn table_info(&self) -> TableInfoRef {
@@ -168,17 +173,17 @@ fn build_system_catalog_schema() -> Schema {
         ColumnSchema::new(
             "value".to_string(),
             ConcreteDataType::binary_datatype(),
-            false,
+            true,
         ),
         ColumnSchema::new(
             "gmt_created".to_string(),
             ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
+            true,
         ),
         ColumnSchema::new(
             "gmt_modified".to_string(),
             ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
+            true,
         ),
     ];
 
@@ -205,6 +210,27 @@ pub fn build_schema_insert_request(catalog_name: String, schema_name: String) ->
             .unwrap()
             .as_bytes(),
     )
+}
+
+pub fn build_table_delete_request(full_table_name: String) -> DeleteRequest {
+    build_delete_request(EntryType::Table, full_table_name.as_bytes())
+}
+
+pub fn build_delete_request(entry_type: EntryType, key: &[u8]) -> DeleteRequest {
+    let mut key_column_values = HashMap::with_capacity(3);
+    key_column_values.insert(
+        "entry_type".to_string(),
+        Arc::new(UInt8Vector::from_slice(&[entry_type as u8])) as _,
+    );
+    key_column_values.insert(
+        "key".to_string(),
+        Arc::new(BinaryVector::from_slice(&[key])) as _,
+    );
+    key_column_values.insert(
+        "timestamp".to_string(),
+        Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
+    );
+    DeleteRequest { key_column_values }
 }
 
 pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> InsertRequest {
@@ -378,6 +404,8 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
+    use crate::error::DeleteCatalogRecordSnafu;
+    use crate::format_full_table_name;
 
     #[test]
     pub fn test_decode_catalog_entry() {
@@ -486,5 +514,25 @@ mod tests {
         assert_eq!(SYSTEM_CATALOG_TABLE_ID, info.ident.table_id);
         assert_eq!(SYSTEM_CATALOG_NAME, info.catalog_name);
         assert_eq!(INFORMATION_SCHEMA_NAME, info.schema_name);
+    }
+
+    #[tokio::test]
+    async fn test_system_table_delete() {
+        let (_dir, table_engine) = prepare_table_engine().await;
+        let system_table = SystemCatalogTable::new(table_engine).await.unwrap();
+        let table_name = "test_table";
+        let table_id = 42;
+        let full_table_name =
+            format_full_table_name(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name);
+        let insert_req = build_table_insert_request(full_table_name.clone(), table_id);
+
+        assert!(system_table.insert(insert_req).await.is_ok());
+
+        let delete_req = build_table_delete_request(full_table_name);
+        let ret = system_table
+            .delete(delete_req)
+            .await
+            .context(DeleteCatalogRecordSnafu);
+        assert!(ret.is_ok());
     }
 }

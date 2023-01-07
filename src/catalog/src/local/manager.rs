@@ -367,7 +367,12 @@ impl CatalogManager for LocalCatalogManager {
             } else {
                 // table does not exist
                 self.system
-                    .register_table(catalog_name.clone(), schema_name.clone(), request.table_id)
+                    .register_table(
+                        catalog_name.clone(),
+                        schema_name.clone(),
+                        request.table_name.clone(),
+                        request.table_id,
+                    )
                     .await?;
                 schema.register_table(request.table_name, request.table)?;
                 Ok(true)
@@ -400,6 +405,15 @@ impl CatalogManager for LocalCatalogManager {
                 schema: schema_name,
             })?;
 
+        self.system
+            .rename_table(
+                catalog_name.clone(),
+                schema_name.clone(),
+                request.table_name.clone(),
+                request.new_table_name.clone(),
+                request.table_id,
+            )
+            .await?;
         schema
             .rename_table(&request.table_name, request.new_table_name, request.table)
             .map(|v| v.is_none())

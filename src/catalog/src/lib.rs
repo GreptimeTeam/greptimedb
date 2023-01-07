@@ -187,11 +187,6 @@ pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> Strin
     format!("{catalog}.{schema}.{table}")
 }
 
-/// Formats table name by table id
-pub fn format_full_table_name_by_id(catalog: &str, schema: &str, table_id: &TableId) -> String {
-    format!("{catalog}.{schema}.{table_id}")
-}
-
 pub trait CatalogProviderFactory {
     fn create(&self, catalog_name: String) -> CatalogProviderRef;
 }

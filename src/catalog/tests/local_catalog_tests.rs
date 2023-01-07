@@ -40,6 +40,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rename_table() {
+        common_telemetry::init_default_ut_logging();
         let catalog_manager = create_local_catalog_manager().await.unwrap();
         // register table
         let table_name = "test_table";
@@ -54,6 +55,7 @@ mod tests {
         };
         assert!(catalog_manager.register_table(request).await.unwrap());
 
+        // rename table
         let new_table_name = "table_t";
         let rename_table_req = RenameTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),

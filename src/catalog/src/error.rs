@@ -142,6 +142,15 @@ pub enum Error {
         source: table::error::Error,
     },
 
+    #[snafu(display(
+        "Failed to delete table creation record to system catalog, source: {}",
+        source
+    ))]
+    DeleteCatalogRecord {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
     #[snafu(display("Illegal catalog manager state: {}", msg))]
     IllegalManagerState { backtrace: Backtrace, msg: String },
 
@@ -237,6 +246,7 @@ impl ErrorExt for Error {
             Error::OpenSystemCatalog { source, .. }
             | Error::CreateSystemCatalog { source, .. }
             | Error::InsertCatalogRecord { source, .. }
+            | Error::DeleteCatalogRecord { source, .. }
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. } => source.status_code(),
             Error::MetaSrv { source, .. } => source.status_code(),
