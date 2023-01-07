@@ -387,7 +387,7 @@ mod tests {
 
     use super::*;
     use crate::local::memory::new_memory_catalog_list;
-    use crate::{error, CatalogList};
+    use crate::CatalogList;
 
     #[tokio::test]
     async fn test_tables() {

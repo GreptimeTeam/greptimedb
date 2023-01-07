@@ -75,6 +75,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(registered_table.table_info().ident.table_id, table_id);
+
+        // restart catalog manager
+        assert!(catalog_manager.start().await.is_ok());
+
+        // check table
+        let table = catalog_manager
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
+            .unwrap()
+            .unwrap();
+        assert_eq!(table.table_info().ident.table_id, table_id);
+        let opt = catalog_manager
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
+            .unwrap();
+        assert!(opt.is_none());
     }
 
     #[tokio::test]
