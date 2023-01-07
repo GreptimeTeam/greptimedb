@@ -230,26 +230,19 @@ impl From<&Stat> for StatKey {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct StatValue {
-    pub region_num: u64,
+    pub stats: Vec<Stat>,
 }
 
-impl From<&Stat> for StatValue {
-    fn from(stat: &Stat) -> Self {
-        StatValue {
-            region_num: stat.region_num,
-        }
-    }
-}
-
-impl TryFrom<StatValue> for Vec<u8> {
+impl TryFrom<&StatValue> for Vec<u8> {
     type Error = error::Error;
 
-    fn try_from(value: StatValue) -> Result<Self> {
-        Ok(serde_json::to_string(&value)
+    fn try_from(stats: &StatValue) -> Result<Self> {
+        Ok(serde_json::to_string(stats)
             .context(crate::error::SerializeToJsonSnafu {
-                input: format!("{value:?}"),
+                input: format!("{stats:?}"),
             })?
             .into_bytes())
     }
@@ -278,7 +271,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_convert_stat_to_stat_key_val() {
+    fn test_convert_stat_to_stat_key() {
         let stat = &Stat {
             cluster_id: 3,
             id: 101,
@@ -290,10 +283,6 @@ mod tests {
 
         assert_eq!(3, stat_key.cluster_id);
         assert_eq!(101, stat_key.node_id);
-
-        let stat_val: StatValue = stat.try_into().unwrap();
-
-        assert_eq!(10, stat_val.region_num);
     }
 
     #[test]
@@ -312,12 +301,27 @@ mod tests {
 
     #[test]
     fn test_stat_val_round_trip() {
-        let value = StatValue { region_num: 101 };
+        let stat = Stat {
+            cluster_id: 0,
+            id: 101,
+            is_leader: false,
+            region_num: 100,
+            ..Default::default()
+        };
 
-        let value_bytes: Vec<u8> = value.try_into().unwrap();
-        let new_value: StatValue = value_bytes.try_into().unwrap();
+        let stat_val = &StatValue { stats: vec![stat] };
 
-        assert_eq!(101, new_value.region_num);
+        let bytes: Vec<u8> = stat_val.try_into().unwrap();
+        let stat_val: StatValue = bytes.try_into().unwrap();
+        let stats = stat_val.stats;
+
+        assert_eq!(1, stats.len());
+
+        let stat = stats.get(0).unwrap();
+        assert_eq!(0, stat.cluster_id);
+        assert_eq!(101, stat.id);
+        assert!(!stat.is_leader);
+        assert_eq!(100, stat.region_num);
     }
 
     #[test]

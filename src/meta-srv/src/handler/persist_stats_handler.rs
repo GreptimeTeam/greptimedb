@@ -34,17 +34,21 @@ impl HeartbeatHandler for PersistStatsHandler {
             return Ok(());
         }
 
-        let stat = match acc.stats.get(0) {
-            Some(stat) => stat,
+        let stats = &mut acc.stats;
+        let key: StatKey = match stats.get(0) {
+            Some(stat) => stat.into(),
             None => return Ok(()),
         };
 
-        let key: StatKey = stat.into();
-        let value: StatValue = stat.into();
+        // take stats from &mut acc.stats, avoid clone of vec
+        let mut new_stats = vec![];
+        std::mem::swap(stats, &mut new_stats);
+
+        let val = &StatValue { stats: new_stats };
 
         let put = PutRequest {
             key: key.into(),
-            value: value.try_into()?,
+            value: val.try_into()?,
             ..Default::default()
         };
 
@@ -111,6 +115,8 @@ mod tests {
         assert_eq!(101, key.node_id);
 
         let val: StatValue = kv.value.clone().try_into().unwrap();
-        assert_eq!(100, val.region_num);
+
+        assert_eq!(1, val.stats.len());
+        assert_eq!(100, val.stats[0].region_num);
     }
 }
