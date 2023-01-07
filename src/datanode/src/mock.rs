@@ -16,18 +16,21 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use catalog::remote::MetaKvBackend;
+use catalog::CatalogManagerRef;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_srv::mocks::MockInfo;
 use mito::config::EngineConfig as TableEngineConfig;
 use query::QueryEngineFactory;
+use servers::Mode;
+use snafu::ResultExt;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::metadata::TableId;
 use table::table::TableIdProvider;
 
 use crate::datanode::DatanodeOptions;
-use crate::error::Result;
+use crate::error::{CatalogSnafu, Result};
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::{create_log_store, new_object_store, DefaultEngine, Instance};
 use crate::script::ScriptExecutor;
@@ -53,16 +56,29 @@ impl Instance {
             object_store,
         ));
 
-        // create remote catalog manager
-        let catalog_manager = Arc::new(catalog::remote::RemoteCatalogManager::new(
-            table_engine.clone(),
-            opts.node_id.unwrap_or(42),
-            Arc::new(MetaKvBackend {
-                client: meta_client.clone(),
-            }),
-        ));
-
-        let factory = QueryEngineFactory::new(catalog_manager.clone());
+        // By default, catalog manager and factory are created in distributed mode
+        let (catalog_manager, factory) = match opts.mode {
+            Mode::Standalone => {
+                let catalog = Arc::new(
+                    catalog::local::LocalCatalogManager::try_new(table_engine.clone())
+                        .await
+                        .context(CatalogSnafu)?,
+                );
+                let factory = QueryEngineFactory::new(catalog.clone());
+                (catalog as CatalogManagerRef, factory)
+            }
+            Mode::Distributed => {
+                let catalog = Arc::new(catalog::remote::RemoteCatalogManager::new(
+                    table_engine.clone(),
+                    opts.node_id.unwrap_or(42),
+                    Arc::new(MetaKvBackend {
+                        client: meta_client.clone(),
+                    }),
+                ));
+                let factory = QueryEngineFactory::new(catalog.clone());
+                (catalog as CatalogManagerRef, factory)
+            }
+        };
         let query_engine = factory.query_engine();
         let script_executor =
             ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?;

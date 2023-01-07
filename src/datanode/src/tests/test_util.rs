@@ -52,6 +52,10 @@ impl MockInstance {
     pub(crate) fn inner(&self) -> &Instance {
         &self.instance
     }
+
+    pub(crate) async fn restart(&self) -> Result<()> {
+        self.instance.start().await
+    }
 }
 
 struct TestGuard {
