@@ -210,7 +210,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
 }
 
 /// The number of regions in the datanode node.
-pub fn region_number(catalog_manager: CatalogManagerRef) -> Result<u64> {
+pub fn region_number(catalog_manager: &CatalogManagerRef) -> Result<u64> {
     let mut region_number: u64 = 0;
 
     for catalog_name in catalog_manager.catalog_names()? {
