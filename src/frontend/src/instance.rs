@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub(crate) mod distributed;
-mod flight;
 mod grpc;
 mod influxdb;
 mod opentsdb;
@@ -24,14 +23,13 @@ use std::time::Duration;
 
 use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
-use api::v1::object_expr::Request;
+use api::v1::greptime_request::Request;
 use api::v1::{
-    AddColumns, AlterExpr, Column, DdlRequest, DropTableExpr, InsertRequest, ObjectExpr,
+    AddColumns, AlterExpr, Column, DdlRequest, DropTableExpr, GreptimeRequest, InsertRequest,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
-use client::RpcOutput;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -57,10 +55,7 @@ use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
-use crate::error::{
-    self, CatalogSnafu, FindNewColumnsOnInsertionSnafu, InsertSnafu, InvalidObjectResultSnafu,
-    InvokeGrpcServerSnafu, MissingMetasrvOptsSnafu, Result,
-};
+use crate::error::{self, MissingMetasrvOptsSnafu, Result};
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::table::route::TableRoutes;
@@ -194,7 +189,10 @@ impl Instance {
     }
 
     /// Handle batch inserts
-    pub async fn handle_inserts(&self, requests: Vec<InsertRequest>) -> Result<Output> {
+    pub async fn handle_inserts(
+        &self,
+        requests: Vec<InsertRequest>,
+    ) -> server_error::Result<Output> {
         let mut success = 0;
         for request in requests {
             match self.handle_insert(request).await? {
@@ -205,7 +203,7 @@ impl Instance {
         Ok(Output::AffectedRows(success))
     }
 
-    async fn handle_insert(&self, request: InsertRequest) -> Result<Output> {
+    async fn handle_insert(&self, request: InsertRequest) -> server_error::Result<Output> {
         let schema_name = &request.schema_name;
         let table_name = &request.table_name;
         let catalog_name = DEFAULT_CATALOG_NAME;
@@ -215,14 +213,10 @@ impl Instance {
         self.create_or_alter_table_on_demand(catalog_name, schema_name, table_name, columns)
             .await?;
 
-        let query = ObjectExpr {
+        let query = GreptimeRequest {
             request: Some(Request::Insert(request)),
         };
-        let result = GrpcQueryHandler::do_query(&*self.grpc_query_handler, query)
-            .await
-            .context(InvokeGrpcServerSnafu)?;
-        let result: RpcOutput = result.try_into().context(InsertSnafu)?;
-        Ok(result.into())
+        GrpcQueryHandler::do_query(&*self.grpc_query_handler, query).await
     }
 
     // check if table already exist:
@@ -234,11 +228,11 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         columns: &[Column],
-    ) -> Result<()> {
+    ) -> server_error::Result<()> {
         let table = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name)
-            .context(CatalogSnafu)?;
+            .context(server_error::CatalogSnafu)?;
         match table {
             None => {
                 info!(
@@ -256,7 +250,7 @@ impl Instance {
                 let schema = table.schema();
 
                 if let Some(add_columns) = common_grpc_expr::find_new_columns(&schema, columns)
-                    .context(FindNewColumnsOnInsertionSnafu)?
+                    .context(server_error::FindNewColumnsOnInsertionSnafu)?
                 {
                     info!(
                         "Find new columns {:?} on insertion, try to alter table: {}.{}.{}",
@@ -286,29 +280,27 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         columns: &[Column],
-    ) -> Result<Output> {
+    ) -> server_error::Result<Output> {
         // Create table automatically, build schema from data.
         let create_expr = self
             .create_expr_factory
             .create_expr_by_columns(catalog_name, schema_name, table_name, columns)
-            .await?;
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteGrpcQuerySnafu)?;
 
         info!(
             "Try to create table: {} automatically with request: {:?}",
             table_name, create_expr,
         );
 
-        let result = self
-            .grpc_query_handler
-            .do_query(ObjectExpr {
+        self.grpc_query_handler
+            .do_query(GreptimeRequest {
                 request: Some(Request::Ddl(DdlRequest {
                     expr: Some(DdlExpr::CreateTable(create_expr)),
                 })),
             })
             .await
-            .context(InvokeGrpcServerSnafu)?;
-        let output: RpcOutput = result.try_into().context(InvalidObjectResultSnafu)?;
-        Ok(output.into())
     }
 
     async fn add_new_columns_to_table(
@@ -317,7 +309,7 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         add_columns: AddColumns,
-    ) -> Result<Output> {
+    ) -> server_error::Result<Output> {
         debug!(
             "Adding new columns: {:?} to table: {}",
             add_columns, table_name
@@ -329,17 +321,13 @@ impl Instance {
             kind: Some(Kind::AddColumns(add_columns)),
         };
 
-        let result = self
-            .grpc_query_handler
-            .do_query(ObjectExpr {
+        self.grpc_query_handler
+            .do_query(GreptimeRequest {
                 request: Some(Request::Ddl(DdlRequest {
                     expr: Some(DdlExpr::Alter(expr)),
                 })),
             })
             .await
-            .context(InvokeGrpcServerSnafu)?;
-        let output: RpcOutput = result.try_into().context(InvalidObjectResultSnafu)?;
-        Ok(output.into())
     }
 
     fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
@@ -403,19 +391,14 @@ impl Instance {
                 let expr = AlterExpr::try_from(alter_stmt)
                     .map_err(BoxedError::new)
                     .context(server_error::ExecuteAlterSnafu { query })?;
-                let result = self
+                return self
                     .grpc_query_handler
-                    .do_query(ObjectExpr {
+                    .do_query(GreptimeRequest {
                         request: Some(Request::Ddl(DdlRequest {
                             expr: Some(DdlExpr::Alter(expr)),
                         })),
                     })
-                    .await?;
-                let output: RpcOutput = result
-                    .try_into()
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })?;
-                Ok(output.into())
+                    .await;
             }
             Statement::DropTable(drop_stmt) => {
                 let expr = DropTableExpr {
@@ -423,19 +406,14 @@ impl Instance {
                     schema_name: drop_stmt.schema_name,
                     table_name: drop_stmt.table_name,
                 };
-                let result = self
+                return self
                     .grpc_query_handler
-                    .do_query(ObjectExpr {
+                    .do_query(GreptimeRequest {
                         request: Some(Request::Ddl(DdlRequest {
                             expr: Some(DdlExpr::DropTable(expr)),
                         })),
                     })
-                    .await?;
-                let output: RpcOutput = result
-                    .try_into()
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })?;
-                Ok(output.into())
+                    .await;
             }
             Statement::ShowCreateTable(_) => {
                 return server_error::NotSupportedSnafu { feat: query }.fail();
@@ -547,20 +525,8 @@ impl ScriptHandler for Instance {
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
-    use std::iter;
     use std::sync::atomic::AtomicU32;
 
-    use api::v1::column::SemanticType;
-    use api::v1::{
-        column, query_request, Column, ColumnDataType, ColumnDef as GrpcColumnDef, CreateTableExpr,
-        QueryRequest,
-    };
-    use common_grpc::flight::{raw_flight_data_to_message, FlightMessage};
-    use common_recordbatch::RecordBatch;
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema};
-    use datatypes::value::Value;
-    use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
     use session::context::QueryContext;
 
     use super::*;
@@ -660,219 +626,6 @@ mod tests {
                 assert_eq!(pretty, expected);
             }
         };
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_execute_grpc() {
-        let standalone = tests::create_standalone_instance("test_execute_grpc").await;
-        let instance = standalone.instance;
-
-        // testing data:
-        let expected_host_col = Column {
-            column_name: "host".to_string(),
-            values: Some(column::Values {
-                string_values: vec!["fe.host.a", "fe.host.b", "fe.host.c", "fe.host.d"]
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-                ..Default::default()
-            }),
-            semantic_type: SemanticType::Field as i32,
-            datatype: ColumnDataType::String as i32,
-            ..Default::default()
-        };
-        let expected_cpu_col = Column {
-            column_name: "cpu".to_string(),
-            values: Some(column::Values {
-                f64_values: vec![1.0, 3.0, 4.0],
-                ..Default::default()
-            }),
-            null_mask: vec![2],
-            semantic_type: SemanticType::Field as i32,
-            datatype: ColumnDataType::Float64 as i32,
-        };
-        let expected_mem_col = Column {
-            column_name: "memory".to_string(),
-            values: Some(column::Values {
-                f64_values: vec![100.0, 200.0, 400.0],
-                ..Default::default()
-            }),
-            null_mask: vec![4],
-            semantic_type: SemanticType::Field as i32,
-            datatype: ColumnDataType::Float64 as i32,
-        };
-        let expected_ts_col = Column {
-            column_name: "ts".to_string(),
-            values: Some(column::Values {
-                ts_millisecond_values: vec![1000, 2000, 3000, 4000],
-                ..Default::default()
-            }),
-            semantic_type: SemanticType::Timestamp as i32,
-            datatype: ColumnDataType::TimestampMillisecond as i32,
-            ..Default::default()
-        };
-
-        // create
-        let result = GrpcQueryHandler::do_query(
-            &*instance,
-            ObjectExpr {
-                request: Some(Request::Ddl(DdlRequest {
-                    expr: Some(DdlExpr::CreateTable(create_expr())),
-                })),
-            },
-        )
-        .await
-        .unwrap();
-        let output: RpcOutput = result.try_into().unwrap();
-        assert!(matches!(output, RpcOutput::AffectedRows(0)));
-
-        // insert
-        let columns = vec![
-            expected_host_col.clone(),
-            expected_cpu_col.clone(),
-            expected_mem_col.clone(),
-            expected_ts_col.clone(),
-        ];
-        let row_count = 4;
-        let request = InsertRequest {
-            schema_name: "public".to_string(),
-            table_name: "demo".to_string(),
-            region_number: 0,
-            columns,
-            row_count,
-        };
-        let object_expr = ObjectExpr {
-            request: Some(Request::Insert(request)),
-        };
-        let result = GrpcQueryHandler::do_query(&*instance, object_expr)
-            .await
-            .unwrap();
-        let raw_data = result.flight_data;
-        let mut flight_messages = raw_flight_data_to_message(raw_data).unwrap();
-        assert_eq!(flight_messages.len(), 1);
-        let message = flight_messages.remove(0);
-        assert!(matches!(message, FlightMessage::AffectedRows(4)));
-
-        // select
-        let object_expr = ObjectExpr {
-            request: Some(Request::Query(QueryRequest {
-                query: Some(query_request::Query::Sql("select * from demo".to_string())),
-            })),
-        };
-        let result = GrpcQueryHandler::do_query(&*instance, object_expr)
-            .await
-            .unwrap();
-        let raw_data = result.flight_data;
-        let mut flight_messages = raw_flight_data_to_message(raw_data).unwrap();
-        assert_eq!(flight_messages.len(), 2);
-
-        let expected_schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
-            ColumnSchema::new("disk_util", ConcreteDataType::float64_datatype(), true)
-                .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(9.9f64))))
-                .unwrap(),
-            ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                true,
-            )
-            .with_time_index(true),
-        ]));
-        match flight_messages.remove(0) {
-            FlightMessage::Schema(schema) => {
-                assert_eq!(schema, expected_schema);
-            }
-            _ => unreachable!(),
-        }
-
-        match flight_messages.remove(0) {
-            FlightMessage::Recordbatch(recordbatch) => {
-                let expect_recordbatch = RecordBatch::new(
-                    expected_schema,
-                    vec![
-                        Arc::new(StringVector::from(vec![
-                            "fe.host.a",
-                            "fe.host.b",
-                            "fe.host.c",
-                            "fe.host.d",
-                        ])) as _,
-                        Arc::new(Float64Vector::from(vec![
-                            Some(1.0f64),
-                            None,
-                            Some(3.0f64),
-                            Some(4.0f64),
-                        ])) as _,
-                        Arc::new(Float64Vector::from(vec![
-                            Some(100f64),
-                            Some(200f64),
-                            None,
-                            Some(400f64),
-                        ])) as _,
-                        Arc::new(Float64Vector::from_vec(
-                            iter::repeat(9.9f64).take(4).collect(),
-                        )) as _,
-                        Arc::new(TimestampMillisecondVector::from_vec(vec![
-                            1000i64, 2000, 3000, 4000,
-                        ])) as _,
-                    ],
-                )
-                .unwrap();
-                assert_eq!(recordbatch, expect_recordbatch);
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn create_expr() -> CreateTableExpr {
-        let column_defs = vec![
-            GrpcColumnDef {
-                name: "host".to_string(),
-                datatype: ColumnDataType::String as i32,
-                is_nullable: false,
-                default_constraint: vec![],
-            },
-            GrpcColumnDef {
-                name: "cpu".to_string(),
-                datatype: ColumnDataType::Float64 as i32,
-                is_nullable: true,
-                default_constraint: vec![],
-            },
-            GrpcColumnDef {
-                name: "memory".to_string(),
-                datatype: ColumnDataType::Float64 as i32,
-                is_nullable: true,
-                default_constraint: vec![],
-            },
-            GrpcColumnDef {
-                name: "disk_util".to_string(),
-                datatype: ColumnDataType::Float64 as i32,
-                is_nullable: true,
-                default_constraint: ColumnDefaultConstraint::Value(Value::from(9.9f64))
-                    .try_into()
-                    .unwrap(),
-            },
-            GrpcColumnDef {
-                name: "ts".to_string(),
-                datatype: ColumnDataType::TimestampMillisecond as i32,
-                is_nullable: true,
-                default_constraint: vec![],
-            },
-        ];
-        CreateTableExpr {
-            catalog_name: "".to_string(),
-            schema_name: "".to_string(),
-            table_name: "demo".to_string(),
-            desc: "".to_string(),
-            column_defs,
-            time_index: "ts".to_string(),
-            primary_keys: vec!["host".to_string()],
-            create_if_not_exists: true,
-            table_options: Default::default(),
-            table_id: None,
-            region_ids: vec![0],
-        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

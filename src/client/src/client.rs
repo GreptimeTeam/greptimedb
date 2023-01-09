@@ -14,8 +14,7 @@
 
 use std::sync::Arc;
 
-use api::v1::greptime_client::GreptimeClient;
-use api::v1::*;
+use arrow_flight::flight_service_client::FlightServiceClient;
 use common_grpc::channel_manager::ChannelManager;
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt};
@@ -23,6 +22,21 @@ use tonic::transport::Channel;
 
 use crate::load_balance::{LoadBalance, Loadbalancer};
 use crate::{error, Result};
+
+pub(crate) struct FlightClient {
+    addr: String,
+    client: FlightServiceClient<Channel>,
+}
+
+impl FlightClient {
+    pub(crate) fn addr(&self) -> &str {
+        &self.addr
+    }
+
+    pub(crate) fn mut_inner(&mut self) -> &mut FlightServiceClient<Channel> {
+        &mut self.client
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Client {
@@ -104,43 +118,23 @@ impl Client {
         self.inner.set_peers(urls);
     }
 
-    pub async fn database(&self, req: DatabaseRequest) -> Result<DatabaseResponse> {
-        let req = BatchRequest {
-            databases: vec![req],
-            ..Default::default()
-        };
-
-        let mut res = self.batch(req).await?;
-        res.databases.pop().context(error::MissingResultSnafu {
-            name: "database",
-            expected: 1_usize,
-            actual: 0_usize,
-        })
-    }
-
-    pub async fn batch(&self, req: BatchRequest) -> Result<BatchResponse> {
-        let peer = self
+    pub(crate) fn make_client(&self) -> Result<FlightClient> {
+        let addr = self
             .inner
             .get_peer()
             .context(error::IllegalGrpcClientStateSnafu {
                 err_msg: "No available peer found",
             })?;
-        let mut client = self.make_client(&peer)?;
-        let result = client
-            .batch(req)
-            .await
-            .context(error::TonicStatusSnafu { addr: peer })?;
-        Ok(result.into_inner())
-    }
 
-    fn make_client(&self, addr: impl AsRef<str>) -> Result<GreptimeClient<Channel>> {
-        let addr = addr.as_ref();
         let channel = self
             .inner
             .channel_manager
-            .get(addr)
-            .context(error::CreateChannelSnafu { addr })?;
-        Ok(GreptimeClient::new(channel))
+            .get(&addr)
+            .context(error::CreateChannelSnafu { addr: &addr })?;
+        Ok(FlightClient {
+            addr,
+            client: FlightServiceClient::new(channel),
+        })
     }
 }
 

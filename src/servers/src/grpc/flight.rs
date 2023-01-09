@@ -12,31 +12,47 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::pin::Pin;
+mod stream;
 
-use api::v1::ddl_request::Expr as DdlExpr;
-use api::v1::object_expr::Request as GrpcRequest;
-use api::v1::ObjectExpr;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use api::v1::GreptimeRequest;
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket,
 };
 use async_trait::async_trait;
-use datanode::instance::flight::to_flight_data_stream;
+use common_grpc::flight::{FlightEncoder, FlightMessage};
+use common_query::Output;
+use common_runtime::Runtime;
 use futures::Stream;
 use prost::Message;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
+use tokio::sync::oneshot;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::error::{IncompleteGrpcResultSnafu, InvalidFlightTicketSnafu};
-use crate::instance::distributed::DistInstance;
+use crate::error;
+use crate::grpc::flight::stream::FlightRecordBatchStream;
+use crate::query_handler::GrpcQueryHandlerRef;
 
 type TonicResult<T> = Result<T, Status>;
 type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
 
+pub(crate) struct FlightHandler {
+    handler: GrpcQueryHandlerRef,
+    runtime: Arc<Runtime>,
+}
+
+impl FlightHandler {
+    pub(crate) fn new(handler: GrpcQueryHandlerRef, runtime: Arc<Runtime>) -> Self {
+        Self { handler, runtime }
+    }
+}
+
 #[async_trait]
-impl FlightService for DistInstance {
+impl FlightService for FlightHandler {
     type HandshakeStream = TonicStream<HandshakeResponse>;
 
     async fn handshake(
@@ -73,37 +89,27 @@ impl FlightService for DistInstance {
 
     async fn do_get(&self, request: Request<Ticket>) -> TonicResult<Response<Self::DoGetStream>> {
         let ticket = request.into_inner().ticket;
-        let request = ObjectExpr::decode(ticket.as_slice())
-            .context(InvalidFlightTicketSnafu)?
-            .request
-            .context(IncompleteGrpcResultSnafu {
-                err_msg: "Missing 'request' in ObjectExpr",
-            })?;
-        let output = match request {
-            GrpcRequest::Insert(request) => self.handle_dist_insert(request).await?,
-            GrpcRequest::Query(_) => {
-                unreachable!("Query should have been handled directly in Frontend Instance!")
-            }
-            GrpcRequest::Ddl(request) => {
-                let expr = request.expr.context(IncompleteGrpcResultSnafu {
-                    err_msg: "Missing 'expr' in DDL request",
-                })?;
-                match expr {
-                    DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr).await?,
-                    DdlExpr::CreateTable(mut expr) => {
-                        // TODO(LFC): Support creating distributed table through GRPC interface.
-                        // Currently only SQL supports it; how to design the fields in CreateTableExpr?
-                        self.create_table(&mut expr, None).await?
-                    }
-                    DdlExpr::Alter(expr) => self.handle_alter_table(expr).await?,
-                    DdlExpr::DropTable(_) => {
-                        // TODO(LFC): Implement distributed drop table.
-                        // Seems the whole "drop table through GRPC interface" feature is not implemented?
-                        return Err(Status::unimplemented("Not yet implemented"));
-                    }
-                }
-            }
-        };
+        let request =
+            GreptimeRequest::decode(ticket.as_slice()).context(error::InvalidFlightTicketSnafu)?;
+
+        let (tx, rx) = oneshot::channel();
+        let handler = self.handler.clone();
+
+        // Executes requests in another runtime to
+        // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
+        // 2. avoid the handler blocks the gRPC runtime incidentally.
+        self.runtime.spawn(async move {
+            let result = handler.do_query(request).await;
+
+            // Ignore the sending result.
+            // Usually an error indicates the rx at Tonic side is dropped (due to request timeout).
+            let _ = tx.send(result);
+        });
+
+        // Safety: An early-dropped tx usually indicates a serious problem (like panic).
+        // This unwrap is used to poison the upper layer.
+        let output = rx.await.unwrap()?;
+
         let stream = to_flight_data_stream(output);
         Ok(Response::new(stream))
     }
@@ -139,5 +145,24 @@ impl FlightService for DistInstance {
         _: Request<Empty>,
     ) -> TonicResult<Response<Self::ListActionsStream>> {
         Err(Status::unimplemented("Not yet implemented"))
+    }
+}
+
+fn to_flight_data_stream(output: Output) -> TonicStream<FlightData> {
+    match output {
+        Output::Stream(stream) => {
+            let stream = FlightRecordBatchStream::new(stream);
+            Box::pin(stream) as _
+        }
+        Output::RecordBatches(x) => {
+            let stream = FlightRecordBatchStream::new(x.as_stream());
+            Box::pin(stream) as _
+        }
+        Output::AffectedRows(rows) => {
+            let stream = tokio_stream::once(Ok(
+                FlightEncoder::default().encode(FlightMessage::AffectedRows(rows))
+            ));
+            Box::pin(stream) as _
+        }
     }
 }

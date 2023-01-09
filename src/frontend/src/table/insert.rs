@@ -18,7 +18,8 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::SemanticType;
 use api::v1::{Column, InsertRequest as GrpcInsertRequest};
-use client::{Database, RpcOutput};
+use client::Database;
+use common_query::Output;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
@@ -33,7 +34,7 @@ impl DistTable {
     pub async fn dist_insert(
         &self,
         inserts: HashMap<RegionNumber, InsertRequest>,
-    ) -> Result<RpcOutput> {
+    ) -> Result<Output> {
         let route = self.table_routes.get_route(&self.table_name).await?;
 
         let mut joins = Vec::with_capacity(inserts.len());
@@ -68,10 +69,10 @@ impl DistTable {
         let mut success = 0;
         for join in joins {
             let object_result = join.await.context(error::JoinTaskSnafu)??;
-            let RpcOutput::AffectedRows(rows) = object_result else { unreachable!() };
+            let Output::AffectedRows(rows) = object_result else { unreachable!() };
             success += rows;
         }
-        Ok(RpcOutput::AffectedRows(success))
+        Ok(Output::AffectedRows(success))
     }
 }
 

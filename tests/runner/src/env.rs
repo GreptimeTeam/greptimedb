@@ -18,7 +18,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use client::{Client, Database as DB, Error as ClientError, RpcOutput};
+use client::{Client, Database as DB, Error as ClientError};
+use common_query::Output;
 use sqlness::{Database, Environment};
 use tokio::process::{Child, Command};
 
@@ -117,17 +118,17 @@ impl Database for GreptimeDB {
 }
 
 struct ResultDisplayer {
-    result: Result<RpcOutput, ClientError>,
+    result: Result<Output, ClientError>,
 }
 
 impl Display for ResultDisplayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.result {
             Ok(result) => match result {
-                RpcOutput::AffectedRows(rows) => {
+                Output::AffectedRows(rows) => {
                     write!(f, "Affected Rows: {rows}")
                 }
-                RpcOutput::RecordBatches(recordbatches) => {
+                Output::RecordBatches(recordbatches) => {
                     let pretty = recordbatches.pretty_print().map_err(|e| e.to_string());
                     match pretty {
                         Ok(s) => write!(f, "{s}"),
@@ -136,6 +137,7 @@ impl Display for ResultDisplayer {
                         }
                     }
                 }
+                Output::Stream(_) => unreachable!(),
             },
             Err(e) => write!(f, "Failed to execute, error: {e:?}"),
         }

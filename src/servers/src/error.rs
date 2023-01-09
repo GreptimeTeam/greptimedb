@@ -24,6 +24,9 @@ use catalog;
 use common_error::prelude::*;
 use hyper::header::ToStrError;
 use serde_json::json;
+use tonic::codegen::http::{HeaderMap, HeaderValue};
+use tonic::metadata::MetadataMap;
+use tonic::Code;
 
 use crate::auth;
 
@@ -75,6 +78,12 @@ pub enum Error {
     #[snafu(display("Failed to execute query: {}, source: {}", query, source))]
     ExecuteQuery {
         query: String,
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to execute GRPC query, source: {}", source))]
+    ExecuteGrpcQuery {
         #[snafu(backtrace)]
         source: BoxedError,
     },
@@ -184,12 +193,9 @@ pub enum Error {
     #[snafu(display("Invalid prometheus remote read query result, msg: {}", msg))]
     InvalidPromRemoteReadQueryResult { msg: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to decode region id, source: {}", source))]
-    DecodeRegionNumber { source: api::DecodeError },
-
-    #[snafu(display("Failed to build gRPC reflection service, source: {}", source))]
-    GrpcReflectionService {
-        source: tonic_reflection::server::Error,
+    #[snafu(display("Invalid Flight ticket, source: {}", source))]
+    InvalidFlightTicket {
+        source: api::DecodeError,
         backtrace: Backtrace,
     },
 
@@ -252,6 +258,15 @@ pub enum Error {
 
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
+
+    #[snafu(display("Failed to find new columns on insertion: {}", source))]
+    FindNewColumnsOnInsertion {
+        #[snafu(backtrace)]
+        source: common_grpc_expr::error::Error,
+    },
+
+    #[snafu(display("GRPC request missing field: {}", name))]
+    GrpcRequestMissingField { name: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -270,13 +285,13 @@ impl ErrorExt for Error {
             | AlreadyStarted { .. }
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
-            | GrpcReflectionService { .. }
             | CatalogError { .. }
             | BuildingContext { .. } => StatusCode::Internal,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
             | ExecuteQuery { source, .. }
+            | ExecuteGrpcQuery { source, .. }
             | ExecuteStatement { source, .. }
             | ExecuteInsert { source, .. }
             | ExecuteAlter { source, .. }
@@ -291,7 +306,8 @@ impl ErrorExt for Error {
             | DecodePromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
-            | DecodeRegionNumber { .. }
+            | InvalidFlightTicket { .. }
+            | GrpcRequestMissingField { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } | ConvertFlightMessage { source } => {
@@ -311,6 +327,8 @@ impl ErrorExt for Error {
             | InvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
 
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
+
+            FindNewColumnsOnInsertion { source } => source.status_code(),
         }
     }
 
@@ -325,7 +343,20 @@ impl ErrorExt for Error {
 
 impl From<Error> for tonic::Status {
     fn from(err: Error) -> Self {
-        tonic::Status::new(tonic::Code::Internal, err.to_string())
+        let mut headers = HeaderMap::<HeaderValue>::with_capacity(2);
+
+        // If either of the status_code or error msg cannot convert to valid HTTP header value
+        // (which is a very rare case), just ignore. Client will use Tonic status code and message.
+        if let Ok(code) = HeaderValue::from_bytes((err.status_code() as u32).to_string().as_bytes())
+        {
+            headers.insert(INNER_ERROR_CODE, code);
+        }
+        if let Ok(err_msg) = HeaderValue::from_bytes(err.to_string().as_bytes()) {
+            headers.insert(INNER_ERROR_MSG, err_msg);
+        }
+
+        let metadata = MetadataMap::from_headers(headers);
+        tonic::Status::with_metadata(Code::Internal, err.to_string(), metadata)
     }
 }
 

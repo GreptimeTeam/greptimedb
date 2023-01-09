@@ -162,7 +162,7 @@ async fn setup_test_instance(test_name: &str) -> MockInstance {
     let instance = MockInstance::new(test_name).await;
 
     test_util::create_test_table(
-        &instance,
+        instance.inner(),
         ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
@@ -189,7 +189,7 @@ async fn test_execute_insert() {
 async fn test_execute_insert_query_with_i64_timestamp() {
     let instance = MockInstance::new("insert_query_i64_timestamp").await;
 
-    test_util::create_test_table(&instance, ConcreteDataType::int64_datatype())
+    test_util::create_test_table(instance.inner(), ConcreteDataType::int64_datatype())
         .await
         .unwrap();
 
@@ -302,7 +302,7 @@ async fn test_execute_show_databases_tables() {
 
     // creat a table
     test_util::create_test_table(
-        &instance,
+        instance.inner(),
         ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
