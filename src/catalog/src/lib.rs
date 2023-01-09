@@ -19,7 +19,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use common_telemetry::info;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::TableId;
 use table::requests::CreateTableRequest;
@@ -207,4 +207,39 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
         }
     }
     Ok(())
+}
+
+/// The number of regions in the datanode node.
+pub fn region_number(catalog_manager: &CatalogManagerRef) -> Result<u64> {
+    let mut region_number: u64 = 0;
+
+    for catalog_name in catalog_manager.catalog_names()? {
+        let catalog =
+            catalog_manager
+                .catalog(&catalog_name)?
+                .context(error::CatalogNotFoundSnafu {
+                    catalog_name: &catalog_name,
+                })?;
+
+        for schema_name in catalog.schema_names()? {
+            let schema = catalog
+                .schema(&schema_name)?
+                .context(error::SchemaNotFoundSnafu {
+                    catalog: &catalog_name,
+                    schema: &schema_name,
+                })?;
+
+            for table_name in schema.table_names()? {
+                let table = schema
+                    .table(&table_name)?
+                    .context(error::TableNotFoundSnafu {
+                        table_info: &table_name,
+                    })?;
+
+                let region_numbers = &table.table_info().meta.region_numbers;
+                region_number += region_numbers.len() as u64;
+            }
+        }
+    }
+    Ok(region_number)
 }

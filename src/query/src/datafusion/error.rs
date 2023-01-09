@@ -31,16 +31,6 @@ pub enum InnerError {
     #[snafu(display("PhysicalPlan downcast failed"))]
     PhysicalPlanDowncast { backtrace: Backtrace },
 
-    // The sql error already contains the SQL.
-    #[snafu(display("Cannot parse SQL, source: {}", source))]
-    ParseSql {
-        #[snafu(backtrace)]
-        source: sql::error::Error,
-    },
-
-    #[snafu(display("The SQL string has multiple statements, sql: {}", sql))]
-    MultipleStatements { sql: String, backtrace: Backtrace },
-
     #[snafu(display("Cannot plan SQL: {}, source: {}", sql, source))]
     PlanSql {
         sql: String,
@@ -87,11 +77,9 @@ impl ErrorExt for InnerError {
             PhysicalPlanDowncast { .. } | ConvertSchema { .. } | TableSchemaMismatch { .. } => {
                 StatusCode::Unexpected
             }
-            ParseSql { source, .. } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
             ConvertDfRecordBatchStream { source } => source.status_code(),
             ExecutePhysicalPlan { source } => source.status_code(),
-            MultipleStatements { .. } => StatusCode::InvalidArguments,
         }
     }
 
@@ -135,20 +123,5 @@ mod tests {
         let res: Result<(), InnerError> = PhysicalPlanDowncastSnafu {}.fail();
         let err = res.err().unwrap();
         assert_error(&err, StatusCode::Unexpected);
-    }
-
-    fn raise_sql_error() -> Result<(), sql::error::Error> {
-        Err(sql::error::Error::Unsupported {
-            sql: "".to_string(),
-            keyword: "".to_string(),
-        })
-    }
-
-    #[test]
-    fn test_parse_error() {
-        let err = raise_sql_error().context(ParseSqlSnafu).err().unwrap();
-        assert!(err.backtrace_opt().is_none());
-        let sql_err = raise_sql_error().err().unwrap();
-        assert_eq!(sql_err.status_code(), err.status_code());
     }
 }

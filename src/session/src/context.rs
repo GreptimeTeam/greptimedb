@@ -22,6 +22,7 @@ pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
 pub struct QueryContext {
+    current_catalog: ArcSwapOption<String>,
     current_schema: ArcSwapOption<String>,
 }
 
@@ -38,12 +39,14 @@ impl QueryContext {
 
     pub fn new() -> Self {
         Self {
+            current_catalog: ArcSwapOption::new(None),
             current_schema: ArcSwapOption::new(None),
         }
     }
 
-    pub fn with_current_schema(schema: String) -> Self {
+    pub fn with(catalog: String, schema: String) -> Self {
         Self {
+            current_catalog: ArcSwapOption::new(Some(Arc::new(catalog))),
             current_schema: ArcSwapOption::new(Some(Arc::new(schema))),
         }
     }
@@ -52,11 +55,25 @@ impl QueryContext {
         self.current_schema.load().as_deref().cloned()
     }
 
+    pub fn current_catalog(&self) -> Option<String> {
+        self.current_catalog.load().as_deref().cloned()
+    }
+
     pub fn set_current_schema(&self, schema: &str) {
         let last = self.current_schema.swap(Some(Arc::new(schema.to_string())));
         info!(
             "set new session default schema: {:?}, swap old: {:?}",
             schema, last
+        )
+    }
+
+    pub fn set_current_catalog(&self, catalog: &str) {
+        let last = self
+            .current_catalog
+            .swap(Some(Arc::new(catalog.to_string())));
+        info!(
+            "set new session default catalog: {:?}, swap old: {:?}",
+            catalog, last
         )
     }
 }

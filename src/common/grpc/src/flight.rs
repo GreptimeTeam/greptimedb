@@ -13,33 +13,24 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 
-use api::result::ObjectResultBuilder;
-use api::v1::{FlightDataExt, ObjectResult};
+use api::v1::FlightDataExt;
 use arrow_flight::utils::{flight_data_from_arrow_batch, flight_data_to_arrow_batch};
 use arrow_flight::{FlightData, IpcMessage, SchemaAsIpc};
-use common_error::prelude::StatusCode;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::arrow;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::arrow::ipc::{root_as_message, writer, MessageHeader};
 use datatypes::schema::{Schema, SchemaRef};
 use flatbuffers::FlatBufferBuilder;
-use futures::TryStreamExt;
 use prost::Message;
 use snafu::{OptionExt, ResultExt};
-use tonic::codegen::futures_core::Stream;
-use tonic::Response;
 
 use crate::error::{
     ConvertArrowSchemaSnafu, CreateRecordBatchSnafu, DecodeFlightDataSnafu, InvalidFlightDataSnafu,
     Result,
 };
-
-type TonicResult<T> = std::result::Result<T, tonic::Status>;
-type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
 
 #[derive(Debug, Clone)]
 pub enum FlightMessage {
@@ -145,37 +136,6 @@ impl FlightDecoder {
             }
         }
     }
-}
-
-// TODO(LFC): Remove it once we completely get rid of old GRPC interface.
-pub async fn flight_data_to_object_result(
-    response: Response<TonicStream<FlightData>>,
-) -> Result<ObjectResult> {
-    let stream = response.into_inner();
-    let result: TonicResult<Vec<FlightData>> = stream.try_collect().await;
-    match result {
-        Ok(flight_data) => Ok(ObjectResultBuilder::new()
-            .status_code(StatusCode::Success as u32)
-            .flight_data(flight_data)
-            .build()),
-        Err(e) => Ok(ObjectResultBuilder::new()
-            .status_code(StatusCode::Internal as _)
-            .err_msg(e.to_string())
-            .build()),
-    }
-}
-
-pub fn raw_flight_data_to_message(raw_data: Vec<Vec<u8>>) -> Result<Vec<FlightMessage>> {
-    let flight_data = raw_data
-        .into_iter()
-        .map(|x| FlightData::decode(x.as_slice()).context(DecodeFlightDataSnafu))
-        .collect::<Result<Vec<FlightData>>>()?;
-
-    let decoder = &mut FlightDecoder::default();
-    flight_data
-        .into_iter()
-        .map(|x| decoder.try_decode(x))
-        .collect()
 }
 
 pub fn flight_messages_to_recordbatches(messages: Vec<FlightMessage>) -> Result<RecordBatches> {

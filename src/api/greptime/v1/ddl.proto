@@ -3,7 +3,6 @@ syntax = "proto3";
 package greptime.v1;
 
 import "greptime/v1/column.proto";
-import "greptime/v1/common.proto";
 
 // "Data Definition Language" requests, that create, modify or delete the database structures but not the data.
 // `DdlRequest` could carry more information than plain SQL, for example, the "table_id" in `CreateTableExpr`.

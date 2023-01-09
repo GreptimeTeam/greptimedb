@@ -17,8 +17,9 @@ use api::v1::{
     column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef, CreateTableExpr,
     InsertRequest, TableId,
 };
-use client::{Client, Database, RpcOutput};
+use client::{Client, Database};
 use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_query::Output;
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};
 
@@ -136,7 +137,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     // create
     let expr = testing_create_expr();
     let result = db.create(expr).await.unwrap();
-    assert!(matches!(result, RpcOutput::AffectedRows(0)));
+    assert!(matches!(result, Output::AffectedRows(0)));
 
     //alter
     let add_column = ColumnDef {
@@ -158,7 +159,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         kind: Some(kind),
     };
     let result = db.alter(expr).await.unwrap();
-    assert!(matches!(result, RpcOutput::AffectedRows(0)));
+    assert!(matches!(result, Output::AffectedRows(0)));
 
     // insert
     insert_and_assert(&db).await;
@@ -194,7 +195,7 @@ async fn insert_and_assert(db: &Database) {
         )
         .await
         .unwrap();
-    assert!(matches!(result, RpcOutput::AffectedRows(2)));
+    assert!(matches!(result, Output::AffectedRows(2)));
 
     // select
     let result = db
@@ -202,7 +203,7 @@ async fn insert_and_assert(db: &Database) {
         .await
         .unwrap();
     match result {
-        RpcOutput::RecordBatches(recordbatches) => {
+        Output::RecordBatches(recordbatches) => {
             let pretty = recordbatches.pretty_print().unwrap();
             let expected = "\
 +-------+------+--------+-------------------------+

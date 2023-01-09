@@ -58,8 +58,10 @@ datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git",
 datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
 datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
 futures = "0.3"
+futures-util = "0.3"
 parquet = "29.0"
 paste = "1.0"
+prost = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.28"
@@ -68,3 +70,10 @@ tonic = "0.8"
 
 [profile.release]
 debug = true
+
+[profile.weekly]
+inherits = "release"
+strip = true
+lto = true
+debug = false
+incremental = false

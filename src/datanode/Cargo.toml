@@ -12,7 +12,6 @@ python = ["dep:script"]
 async-stream.workspace = true
 async-trait.workspace = true
 api = { path = "../api" }
-arrow-flight.workspace = true
 axum = "0.6"
 axum-macros = "0.3"
 backon = "0.2"
@@ -38,7 +37,7 @@ metrics = "0.20"
 mito = { path = "../mito", features = ["test"] }
 object-store = { path = "../object-store" }
 pin-project = "1.0"
-prost = "0.11"
+prost.workspace = true
 query = { path = "../query" }
 script = { path = "../script", features = ["python"], optional = true }
 serde = "1.0"

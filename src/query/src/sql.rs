@@ -30,6 +30,7 @@ use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
 use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
+use crate::parser::QueryStatement;
 use crate::QueryEngineRef;
 
 const SCHEMAS_COLUMN: &str = "Schemas";
@@ -130,8 +131,11 @@ pub fn show_tables(
             .current_schema()
             .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string())
     };
+    // TODO(sunng87): move this function into query_ctx
+    let catalog = query_ctx.current_catalog();
+    let catalog = catalog.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
     let schema = catalog_manager
-        .schema(DEFAULT_CATALOG_NAME, &schema)
+        .schema(catalog, &schema)
         .context(error::CatalogSnafu)?
         .context(error::SchemaNotFoundSnafu { schema })?;
     let tables = schema.table_names().context(error::CatalogSnafu)?;
@@ -157,7 +161,8 @@ pub async fn explain(
     query_engine: QueryEngineRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let plan = query_engine.statement_to_plan(Statement::Explain(*stmt), query_ctx)?;
+    let plan = query_engine
+        .statement_to_plan(QueryStatement::Sql(Statement::Explain(*stmt)), query_ctx)?;
     query_engine.execute(&plan).await
 }
 

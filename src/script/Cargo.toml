@@ -39,8 +39,8 @@ datafusion-common = { workspace = true, optional = true }
 datafusion-expr = { workspace = true, optional = true }
 datafusion-physical-expr = { workspace = true, optional = true }
 datatypes = { path = "../datatypes" }
-futures-util = "0.3"
 futures.workspace = true
+futures-util.workspace = true
 once_cell = "1.17.0"
 paste = { workspace = true, optional = true }
 query = { path = "../query" }

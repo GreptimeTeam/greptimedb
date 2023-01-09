@@ -25,25 +25,18 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Missing {}, expected {}, actual {}", name, expected, actual))]
-    MissingResult {
-        name: String,
-        expected: usize,
-        actual: usize,
-    },
-
-    #[snafu(display("Missing result header"))]
-    MissingHeader,
-
-    #[snafu(display("Tonic internal error, addr: {}, source: {}", addr, source))]
-    TonicStatus {
+    #[snafu(display(
+        "Failed to do Flight get, addr: {}, code: {}, err_msg: {}",
+        addr,
+        code,
+        err_msg
+    ))]
+    FlightGet {
         addr: String,
-        source: tonic::Status,
+        code: u32,
+        err_msg: String,
         backtrace: Backtrace,
     },
-
-    #[snafu(display("Error occurred on the data node, code: {}, msg: {}", code, msg))]
-    Datanode { code: u32, msg: String },
 
     #[snafu(display("Failed to convert FlightData, source: {}", source))]
     ConvertFlightData {
@@ -84,10 +77,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::IllegalFlightMessages { .. }
-            | Error::MissingResult { .. }
-            | Error::MissingHeader { .. }
-            | Error::TonicStatus { .. }
-            | Error::Datanode { .. }
+            | Error::FlightGet { .. }
             | Error::ColumnDataType { .. }
             | Error::MissingField { .. } => StatusCode::Internal,
             Error::CreateChannel { source, .. } | Error::ConvertFlightData { source } => {

@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_recordbatch::util;
 use datatypes::data_type::ConcreteDataType;
@@ -162,7 +162,7 @@ async fn setup_test_instance(test_name: &str) -> MockInstance {
     let instance = MockInstance::new(test_name).await;
 
     test_util::create_test_table(
-        &instance,
+        instance.inner(),
         ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
@@ -189,7 +189,7 @@ async fn test_execute_insert() {
 async fn test_execute_insert_query_with_i64_timestamp() {
     let instance = MockInstance::new("insert_query_i64_timestamp").await;
 
-    test_util::create_test_table(&instance, ConcreteDataType::int64_datatype())
+    test_util::create_test_table(instance.inner(), ConcreteDataType::int64_datatype())
         .await
         .unwrap();
 
@@ -302,7 +302,7 @@ async fn test_execute_show_databases_tables() {
 
     // creat a table
     test_util::create_test_table(
-        &instance,
+        instance.inner(),
         ConcreteDataType::timestamp_millisecond_datatype(),
     )
     .await
@@ -559,6 +559,9 @@ async fn execute_sql(instance: &MockInstance, sql: &str) -> Output {
 }
 
 async fn execute_sql_in_db(instance: &MockInstance, sql: &str, db: &str) -> Output {
-    let query_ctx = Arc::new(QueryContext::with_current_schema(db.to_string()));
+    let query_ctx = Arc::new(QueryContext::with(
+        DEFAULT_CATALOG_NAME.to_owned(),
+        db.to_string(),
+    ));
     instance.inner().execute_sql(sql, query_ctx).await.unwrap()
 }

@@ -47,7 +47,6 @@ use crate::heartbeat::HeartbeatTask;
 use crate::script::ScriptExecutor;
 use crate::sql::SqlHandler;
 
-pub mod flight;
 mod grpc;
 mod script;
 mod sql;
@@ -146,6 +145,7 @@ impl Instance {
                 opts.node_id.context(MissingNodeIdSnafu)?,
                 opts.rpc_addr.clone(),
                 meta_client.as_ref().unwrap().clone(),
+                catalog_manager.clone(),
             )),
         };
         Ok(Self {

@@ -13,19 +13,21 @@
 // limitations under the License.
 
 use api::v1::ddl_request::Expr as DdlExpr;
+use api::v1::greptime_request::Request;
+use api::v1::query_request::Query;
 use api::v1::{
-    object_expr, query_request, AlterExpr, CreateTableExpr, DatabaseRequest, DdlRequest,
-    DropTableExpr, InsertRequest, ObjectExpr, ObjectResult as GrpcObjectResult, QueryRequest,
+    AlterExpr, CreateTableExpr, DdlRequest, DropTableExpr, GreptimeRequest, InsertRequest,
+    QueryRequest,
 };
-use common_error::status_code::StatusCode;
-use common_grpc::flight::{
-    flight_messages_to_recordbatches, raw_flight_data_to_message, FlightMessage,
-};
+use arrow_flight::{FlightData, Ticket};
+use common_error::prelude::*;
+use common_grpc::flight::{flight_messages_to_recordbatches, FlightDecoder, FlightMessage};
 use common_query::Output;
-use common_recordbatch::RecordBatches;
-use snafu::{ensure, OptionExt, ResultExt};
+use futures_util::{TryFutureExt, TryStreamExt};
+use prost::Message;
+use snafu::{ensure, ResultExt};
 
-use crate::error::{ConvertFlightDataSnafu, DatanodeSnafu, IllegalFlightMessagesSnafu};
+use crate::error::{ConvertFlightDataSnafu, IllegalFlightMessagesSnafu};
 use crate::{error, Client, Result};
 
 #[derive(Clone, Debug)]
@@ -46,112 +48,87 @@ impl Database {
         &self.name
     }
 
-    pub async fn insert(&self, request: InsertRequest) -> Result<RpcOutput> {
-        let expr = ObjectExpr {
-            request: Some(object_expr::Request::Insert(request)),
-        };
-        self.object(expr).await?.try_into()
+    pub async fn insert(&self, request: InsertRequest) -> Result<Output> {
+        self.do_get(GreptimeRequest {
+            request: Some(Request::Insert(request)),
+        })
+        .await
     }
 
-    pub async fn sql(&self, sql: &str) -> Result<RpcOutput> {
-        let query = QueryRequest {
-            query: Some(query_request::Query::Sql(sql.to_string())),
-        };
-        self.do_query(query).await
+    pub async fn sql(&self, sql: &str) -> Result<Output> {
+        self.do_get(GreptimeRequest {
+            request: Some(Request::Query(QueryRequest {
+                query: Some(Query::Sql(sql.to_string())),
+            })),
+        })
+        .await
     }
 
-    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<RpcOutput> {
-        let query = QueryRequest {
-            query: Some(query_request::Query::LogicalPlan(logical_plan)),
-        };
-        self.do_query(query).await
+    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
+        self.do_get(GreptimeRequest {
+            request: Some(Request::Query(QueryRequest {
+                query: Some(Query::LogicalPlan(logical_plan)),
+            })),
+        })
+        .await
     }
 
-    async fn do_query(&self, request: QueryRequest) -> Result<RpcOutput> {
-        let expr = ObjectExpr {
-            request: Some(object_expr::Request::Query(request)),
-        };
-
-        let obj_result = self.object(expr).await?;
-        obj_result.try_into()
-    }
-
-    pub async fn create(&self, expr: CreateTableExpr) -> Result<RpcOutput> {
-        let expr = ObjectExpr {
-            request: Some(object_expr::Request::Ddl(DdlRequest {
+    pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
+        self.do_get(GreptimeRequest {
+            request: Some(Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::CreateTable(expr)),
             })),
-        };
-        self.object(expr).await?.try_into()
+        })
+        .await
     }
 
-    pub async fn alter(&self, expr: AlterExpr) -> Result<RpcOutput> {
-        let expr = ObjectExpr {
-            request: Some(object_expr::Request::Ddl(DdlRequest {
+    pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
+        self.do_get(GreptimeRequest {
+            request: Some(Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::Alter(expr)),
             })),
-        };
-        self.object(expr).await?.try_into()
+        })
+        .await
     }
 
-    pub async fn drop_table(&self, expr: DropTableExpr) -> Result<RpcOutput> {
-        let expr = ObjectExpr {
-            request: Some(object_expr::Request::Ddl(DdlRequest {
+    pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
+        self.do_get(GreptimeRequest {
+            request: Some(Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::DropTable(expr)),
             })),
-        };
-        self.object(expr).await?.try_into()
+        })
+        .await
     }
 
-    pub async fn object(&self, expr: ObjectExpr) -> Result<GrpcObjectResult> {
-        let res = self.objects(vec![expr]).await?.pop().unwrap();
-        Ok(res)
-    }
+    async fn do_get(&self, request: GreptimeRequest) -> Result<Output> {
+        let mut client = self.client.make_client()?;
 
-    async fn objects(&self, exprs: Vec<ObjectExpr>) -> Result<Vec<GrpcObjectResult>> {
-        let expr_count = exprs.len();
-        let req = DatabaseRequest {
-            name: self.name.clone(),
-            exprs,
-        };
+        // TODO(LFC): Streaming get flight data.
+        let flight_data: Vec<FlightData> = client
+            .mut_inner()
+            .do_get(Ticket {
+                ticket: request.encode_to_vec(),
+            })
+            .and_then(|response| response.into_inner().try_collect())
+            .await
+            .map_err(|e| {
+                let code = get_metadata_value(&e, INNER_ERROR_CODE)
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(e.code() as u32);
+                let err_msg = get_metadata_value(&e, INNER_ERROR_MSG).unwrap_or(e.to_string());
+                error::FlightGetSnafu {
+                    addr: client.addr(),
+                    code,
+                    err_msg,
+                }
+                .build()
+            })?;
 
-        let res = self.client.database(req).await?;
-        let res = res.results;
-
-        ensure!(
-            res.len() == expr_count,
-            error::MissingResultSnafu {
-                name: "object_results",
-                expected: expr_count,
-                actual: res.len(),
-            }
-        );
-
-        Ok(res)
-    }
-}
-
-#[derive(Debug)]
-pub enum RpcOutput {
-    RecordBatches(RecordBatches),
-    AffectedRows(usize),
-}
-
-impl TryFrom<api::v1::ObjectResult> for RpcOutput {
-    type Error = error::Error;
-
-    fn try_from(object_result: api::v1::ObjectResult) -> std::result::Result<Self, Self::Error> {
-        let header = object_result.header.context(error::MissingHeaderSnafu)?;
-        if !StatusCode::is_success(header.code) {
-            return DatanodeSnafu {
-                code: header.code,
-                msg: header.err_msg,
-            }
-            .fail();
-        }
-
-        let flight_messages = raw_flight_data_to_message(object_result.flight_data)
-            .context(ConvertFlightDataSnafu)?;
+        let decoder = &mut FlightDecoder::default();
+        let flight_messages = flight_data
+            .into_iter()
+            .map(|x| decoder.try_decode(x).context(ConvertFlightDataSnafu))
+            .collect::<Result<Vec<_>>>()?;
 
         let output = if let Some(FlightMessage::AffectedRows(rows)) = flight_messages.get(0) {
             ensure!(
@@ -160,23 +137,20 @@ impl TryFrom<api::v1::ObjectResult> for RpcOutput {
                     reason: "Expect 'AffectedRows' Flight messages to be one and only!"
                 }
             );
-            RpcOutput::AffectedRows(*rows)
+            Output::AffectedRows(*rows)
         } else {
             let recordbatches = flight_messages_to_recordbatches(flight_messages)
                 .context(ConvertFlightDataSnafu)?;
-            RpcOutput::RecordBatches(recordbatches)
+            Output::RecordBatches(recordbatches)
         };
         Ok(output)
     }
 }
 
-impl From<RpcOutput> for Output {
-    fn from(value: RpcOutput) -> Self {
-        match value {
-            RpcOutput::AffectedRows(x) => Output::AffectedRows(x),
-            RpcOutput::RecordBatches(x) => Output::RecordBatches(x),
-        }
-    }
+fn get_metadata_value(e: &tonic::Status, key: &str) -> Option<String> {
+    e.metadata()
+        .get(key)
+        .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
 }
 
 #[cfg(test)]

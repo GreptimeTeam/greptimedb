@@ -13,18 +13,16 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::Extension;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::status_code::StatusCode;
 use common_telemetry::metric;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use session::context::{QueryContext, UserInfo};
+use session::context::UserInfo;
 
 use crate::http::{ApiState, JsonResponse};
 
@@ -45,26 +43,12 @@ pub async fn sql(
     let sql_handler = &state.sql_handler;
     let start = Instant::now();
     let resp = if let Some(sql) = &params.sql {
-        let query_ctx = Arc::new(QueryContext::new());
-        if let Some(db) = &params.database {
-            match sql_handler.is_valid_schema(DEFAULT_CATALOG_NAME, db) {
-                Ok(true) => query_ctx.set_current_schema(db),
-                Ok(false) => {
-                    return Json(JsonResponse::with_error(
-                        format!("Database not found: {db}"),
-                        StatusCode::DatabaseNotFound,
-                    ));
-                }
-                Err(e) => {
-                    return Json(JsonResponse::with_error(
-                        format!("Error checking database: {db}, {e}"),
-                        StatusCode::Internal,
-                    ));
-                }
+        match super::query_context_from_db(sql_handler.clone(), params.database) {
+            Ok(query_ctx) => {
+                JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
             }
+            Err(resp) => resp,
         }
-
-        JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
     } else {
         JsonResponse::with_error(
             "sql parameter is required.".to_string(),

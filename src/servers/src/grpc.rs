@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod handler;
+mod flight;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use api::v1::{greptime_server, BatchRequest, BatchResponse};
+use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use async_trait::async_trait;
 use common_runtime::Runtime;
 use common_telemetry::logging::info;
@@ -27,10 +27,9 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{Request, Response, Status};
 
-use crate::error::{self, AlreadyStartedSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
-use crate::grpc::handler::BatchHandler;
+use crate::error::{AlreadyStartedSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
+use crate::grpc::flight::FlightHandler;
 use crate::query_handler::GrpcQueryHandlerRef;
 use crate::server::Server;
 
@@ -49,27 +48,9 @@ impl GrpcServer {
         }
     }
 
-    pub fn create_service(&self) -> greptime_server::GreptimeServer<GrpcService> {
-        let service = GrpcService {
-            handler: BatchHandler::new(self.query_handler.clone(), self.runtime.clone()),
-        };
-        greptime_server::GreptimeServer::new(service)
-    }
-}
-
-pub struct GrpcService {
-    handler: BatchHandler,
-}
-
-#[tonic::async_trait]
-impl greptime_server::Greptime for GrpcService {
-    async fn batch(
-        &self,
-        req: Request<BatchRequest>,
-    ) -> std::result::Result<Response<BatchResponse>, Status> {
-        let req = req.into_inner();
-        let res = self.handler.batch(req).await?;
-        Ok(Response::new(res))
+    pub fn create_service(&self) -> FlightServiceServer<impl FlightService> {
+        let service = FlightHandler::new(self.query_handler.clone(), self.runtime.clone());
+        FlightServiceServer::new(service)
     }
 }
 
@@ -107,16 +88,9 @@ impl Server for GrpcServer {
             (listener, addr)
         };
 
-        let reflection_service = tonic_reflection::server::Builder::configure()
-            .register_encoded_file_descriptor_set(api::v1::GREPTIME_FD_SET)
-            .with_service_name("greptime.v1.Greptime")
-            .build()
-            .context(error::GrpcReflectionServiceSnafu)?;
-
         // Would block to serve requests.
         tonic::transport::Server::builder()
             .add_service(self.create_service())
-            .add_service(reflection_service)
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), rx.map(drop))
             .await
             .context(StartGrpcSnafu)?;

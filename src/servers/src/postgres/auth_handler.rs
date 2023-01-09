@@ -151,31 +151,19 @@ impl StartupHandler for PgAuthStartupHandler {
                 auth::save_startup_parameters_to_metadata(client, startup);
 
                 // check if db is valid
-                let db_ref = client.metadata().get(super::METADATA_DATABASE);
-                if let Some(db) = db_ref {
-                    if !self
-                        .query_handler
-                        .is_valid_schema(DEFAULT_CATALOG_NAME, db)
-                        .map_err(|e| PgWireError::ApiError(Box::new(e)))?
-                    {
-                        send_error(
-                            client,
-                            "FATAL",
-                            "3D000",
-                            format!("Database not found: {db}"),
-                        )
-                        .await?;
+                match resolve_db_info(client, self.query_handler.clone())? {
+                    DbResolution::Resolved(catalog, schema) => {
+                        client
+                            .metadata_mut()
+                            .insert(super::METADATA_CATALOG.to_owned(), catalog);
+                        client
+                            .metadata_mut()
+                            .insert(super::METADATA_SCHEMA.to_owned(), schema);
+                    }
+                    DbResolution::NotFound(msg) => {
+                        send_error(client, "FATAL", "3D000", msg).await?;
                         return Ok(());
                     }
-                } else {
-                    send_error(
-                        client,
-                        "FATAL",
-                        "3D000",
-                        "Database not specified".to_owned(),
-                    )
-                    .await?;
-                    return Ok(());
                 }
 
                 if self.verifier.user_provider.is_some() {
@@ -221,4 +209,37 @@ where
         .await?;
     client.close().await?;
     Ok(())
+}
+
+enum DbResolution {
+    Resolved(String, String),
+    NotFound(String),
+}
+
+/// A function extracted to resolve lifetime and readability issues:
+fn resolve_db_info<C>(
+    client: &mut C,
+    query_handler: SqlQueryHandlerRef,
+) -> PgWireResult<DbResolution>
+where
+    C: ClientInfo + Unpin + Send,
+{
+    let db_ref = client.metadata().get(super::METADATA_DATABASE);
+    if let Some(db) = db_ref {
+        let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
+        let catalog = catalog.unwrap_or(DEFAULT_CATALOG_NAME);
+        if query_handler
+            .is_valid_schema(catalog, schema)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?
+        {
+            Ok(DbResolution::Resolved(
+                catalog.to_owned(),
+                schema.to_owned(),
+            ))
+        } else {
+            Ok(DbResolution::NotFound(format!("Database not found: {db}")))
+        }
+    } else {
+        Ok(DbResolution::NotFound("Database not specified".to_owned()))
+    }
 }

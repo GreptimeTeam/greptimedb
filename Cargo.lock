@@ -1308,6 +1308,7 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "api",
+ "arrow-flight",
  "async-stream",
  "common-base",
  "common-error",
@@ -1320,7 +1321,9 @@ dependencies = [
  "datanode",
  "datatypes",
  "enum_dispatch",
+ "futures-util",
  "parking_lot",
+ "prost 0.11.3",
  "prost 0.9.0",
  "rand 0.8.5",
  "snafu",
@@ -2144,7 +2147,6 @@ name = "datanode"
 version = "0.1.0"
 dependencies = [
  "api",
- "arrow-flight",
  "async-stream",
  "async-trait",
  "axum",
@@ -2611,7 +2613,6 @@ version = "0.1.0"
 dependencies = [
  "anymap",
  "api",
- "arrow-flight",
  "async-stream",
  "async-trait",
  "catalog",
@@ -4393,9 +4394,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.22.5"
+version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0d1ff77f4919836ec2002b7b42366722b2856c2b718102d3d1cd58db5e56e3e"
+checksum = "97541724cf371973b28f5a873404f2a2a4f7bb1efe7ca36a27836c13958781c2"
 dependencies = [
  "anyhow",
  "async-compat",
@@ -5154,7 +5155,7 @@ dependencies = [
 [[package]]
 name = "promql-parser"
 version = "0.0.1"
-source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=488cc2603ba513eed795c0167f24633e55b82eb2#488cc2603ba513eed795c0167f24633e55b82eb2"
+source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=d2f6ec4bbbae19b5156cfc977a6e7de9c6684651#d2f6ec4bbbae19b5156cfc977a6e7de9c6684651"
 dependencies = [
  "cfgrammar",
  "lazy_static",
@@ -5385,6 +5386,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
+ "promql-parser",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -5401,9 +5403,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.26.0"
+version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f50b1c63b38611e7d4d7f68b82d3ad0cc71a2ad2e7f61fc10f1328d917c93cd"
+checksum = "ffc053f057dd768a56f62cd7e434c42c831d296968997e9ac1f76ea7c2d14c41"
 dependencies = [
  "memchr",
  "serde",
@@ -5664,9 +5666,9 @@ dependencies = [
 
 [[package]]
 name = "reqsign"
-version = "0.7.1"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64e209415378d7a5e169615faee53d9961ee1f1046d9d00991045a6a2de9f3f6"
+checksum = "1c97ac0f771c78ddf4bcb73c8454c76565a7249780e7296767f7e89661b0e045"
 dependencies = [
  "anyhow",
  "backon",
@@ -6580,6 +6582,7 @@ version = "0.1.0"
 dependencies = [
  "aide",
  "api",
+ "arrow-flight",
  "async-trait",
  "axum",
  "axum-macros",
@@ -6591,6 +6594,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
+ "common-grpc-expr",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -6611,6 +6615,7 @@ dependencies = [
  "openmetrics-parser",
  "opensrv-mysql",
  "pgwire",
+ "pin-project",
  "prost 0.11.3",
  "query",
  "rand 0.8.5",
@@ -6636,7 +6641,6 @@ dependencies = [
  "tokio-stream",
  "tokio-test",
  "tonic",
- "tonic-reflection",
  "tower",
  "tower-http",
 ]
@@ -6893,6 +6897,7 @@ dependencies = [
  "client",
  "common-base",
  "common-grpc",
+ "common-query",
  "sqlness",
  "tokio",
 ]
@@ -7327,6 +7332,7 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
+ "common-query",
  "common-runtime",
  "common-telemetry",
  "datanode",
@@ -7702,21 +7708,6 @@ dependencies = [
  "prost-build 0.11.3",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "tonic-reflection"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0455f730d540a1484bffc3c55c94100b18a662597b982c2e9073f2c55c602616"
-dependencies = [
- "bytes",
- "prost 0.11.3",
- "prost-types 0.11.2",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-build",
 ]
 
 [[package]]

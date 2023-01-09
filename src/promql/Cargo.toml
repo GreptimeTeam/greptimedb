@@ -12,7 +12,7 @@ common-catalog = { path = "../common/catalog" }
 datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
-promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "488cc2603ba513eed795c0167f24633e55b82eb2" }
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "d2f6ec4bbbae19b5156cfc977a6e7de9c6684651" }
 query = { path = "../query" }
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }

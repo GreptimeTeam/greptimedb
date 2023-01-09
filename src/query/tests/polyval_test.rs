@@ -23,6 +23,7 @@ use datatypes::prelude::*;
 use datatypes::types::WrapperType;
 use num_traits::AsPrimitive;
 use query::error::Result;
+use query::parser::QueryLanguageParser;
 use query::QueryEngine;
 use session::context::QueryContext;
 
@@ -79,8 +80,9 @@ async fn execute_polyval<'a>(
     engine: Arc<dyn QueryEngine>,
 ) -> RecordResult<Vec<RecordBatch>> {
     let sql = format!("select POLYVAL({column_name}, 0) as polyval from {table_name}");
+    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
     let plan = engine
-        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
+        .statement_to_plan(stmt, Arc::new(QueryContext::new()))
         .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();

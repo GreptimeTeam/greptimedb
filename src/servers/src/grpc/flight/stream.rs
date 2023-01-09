@@ -26,8 +26,8 @@ use pin_project::{pin_project, pinned_drop};
 use snafu::ResultExt;
 use tokio::task::JoinHandle;
 
+use super::TonicResult;
 use crate::error;
-use crate::instance::flight::TonicResult;
 
 #[pin_project(PinnedDrop)]
 pub(super) struct FlightRecordBatchStream {
@@ -72,7 +72,7 @@ impl FlightRecordBatchStream {
                     }
                 }
                 Err(e) => {
-                    let e = Err(e).context(error::PollRecordbatchStreamSnafu);
+                    let e = Err(e).context(error::CollectRecordbatchSnafu);
                     if let Err(e) = tx.send(e.map_err(|x| x.into())).await {
                         warn!("stop sending Flight data, err: {e}");
                     }

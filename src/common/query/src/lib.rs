@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Debug, Formatter};
+
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 
 pub mod columnar_value;
@@ -27,6 +29,18 @@ pub enum Output {
     AffectedRows(usize),
     RecordBatches(RecordBatches),
     Stream(SendableRecordBatchStream),
+}
+
+impl Debug for Output {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Output::AffectedRows(rows) => write!(f, "Output::AffectedRows({rows})"),
+            Output::RecordBatches(recordbatches) => {
+                write!(f, "Output::RecordBatches({recordbatches:?})")
+            }
+            Output::Stream(_) => write!(f, "Output::Stream(<stream>)"),
+        }
+    }
 }
 
 pub use datafusion::physical_plan::ExecutionPlan as DfPhysicalPlan;

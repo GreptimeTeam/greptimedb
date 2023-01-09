@@ -78,7 +78,7 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
 }
 
 pub(crate) async fn create_test_table(
-    instance: &MockInstance,
+    instance: &Instance,
     ts_type: ConcreteDataType,
 ) -> Result<()> {
     let column_schemas = vec![
@@ -89,7 +89,7 @@ pub(crate) async fn create_test_table(
     ];
 
     let table_name = "demo";
-    let table_engine: TableEngineRef = instance.inner().sql_handler().table_engine();
+    let table_engine: TableEngineRef = instance.sql_handler().table_engine();
     let table = table_engine
         .create_table(
             &EngineContext::default(),
@@ -115,7 +115,6 @@ pub(crate) async fn create_test_table(
         .context(CreateTableSnafu { table_name })?;
 
     let schema_provider = instance
-        .inner()
         .catalog_manager
         .schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME)
         .unwrap()
