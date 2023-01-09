@@ -16,7 +16,7 @@ use api::v1::meta::HeartbeatRequest;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Stat {
     pub timestamp_millis: i64,
     pub cluster_id: u64,
@@ -42,7 +42,7 @@ pub struct Stat {
     pub region_stats: Vec<RegionStat>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RegionStat {
     pub id: u64,
     pub catalog: String,

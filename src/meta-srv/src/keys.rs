@@ -230,7 +230,7 @@ impl From<&Stat> for StatKey {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StatValue {
     pub stats: Vec<Stat>,
