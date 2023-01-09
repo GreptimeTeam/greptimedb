@@ -104,11 +104,10 @@ impl HeartbeatTask {
         common_runtime::spawn_bg(async move {
             while running.load(Ordering::Acquire) {
                 let region_num = match region_number(&catalog_manager_clone) {
-                    Ok(region_num) => region_num,
+                    Ok(region_num) => region_num as i64,
                     Err(e) => {
-                        error!("Failed to get region number, err: {e:?}");
-                        tokio::time::sleep(Duration::from_millis(interval)).await;
-                        continue;
+                        error!("failed to get region number, err: {e:?}");
+                        -1
                     }
                 };
 

@@ -34,13 +34,13 @@ message HeartbeatRequest {
 
 message NodeStat {
   // The read capacity units during this period
-  uint64 rcus = 1;
+  int64 rcus = 1;
   // The write capacity units during this period
-  uint64 wcus = 2;
+  int64 wcus = 2;
   // How many tables on this node
-  uint64 table_num = 3;
+  int64 table_num = 3;
   // How many regions on this node
-  uint64 region_num = 4;
+  int64 region_num = 4;
 
   double cpu_usage = 5;
   double load = 6;
@@ -57,13 +57,13 @@ message RegionStat {
   uint64 region_id = 1;
   TableName table_name = 2;
   // The read capacity units during this period
-  uint64 rcus = 3;
+  int64 rcus = 3;
   // The write capacity units during this period
-  uint64 wcus = 4;
+  int64 wcus = 4;
   // Approximate bytes of this region
-  uint64 approximate_bytes = 5;
+  int64 approximate_bytes = 5;
   // Approximate number of rows in this region
-  uint64 approximate_rows = 6;
+  int64 approximate_rows = 6;
 
   // Others
   map<string, string> attrs = 100;

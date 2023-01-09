@@ -25,13 +25,13 @@ pub struct Stat {
     /// Leader node
     pub is_leader: bool,
     /// The read capacity units during this period
-    pub rcus: u64,
+    pub rcus: i64,
     /// The write capacity units during this period
-    pub wcus: u64,
+    pub wcus: i64,
     /// How many tables on this node
-    pub table_num: u64,
+    pub table_num: i64,
     /// How many regions on this node
-    pub region_num: u64,
+    pub region_num: i64,
     pub cpu_usage: f64,
     pub load: f64,
     /// Read disk IO on this node
@@ -49,13 +49,13 @@ pub struct RegionStat {
     pub schema: String,
     pub table: String,
     /// The read capacity units during this period
-    pub rcus: u64,
+    pub rcus: i64,
     /// The write capacity units during this period
-    pub wcus: u64,
+    pub wcus: i64,
     /// Approximate bytes of this region
-    pub approximate_bytes: u64,
+    pub approximate_bytes: i64,
     /// Approximate number of rows in this region
-    pub approximate_rows: u64,
+    pub approximate_rows: i64,
 }
 
 impl TryFrom<&HeartbeatRequest> for Stat {
