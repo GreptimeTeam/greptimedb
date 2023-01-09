@@ -165,7 +165,7 @@ impl<'a> ParquetReader<'a> {
             )
             .into_iter()
             .enumerate()
-            .flat_map(|(idx, valid)| if valid { Some(idx) } else { None })
+            .filter_map(|(idx, valid)| if valid { Some(idx) } else { None })
             .collect::<Vec<_>>();
 
         let projection = ProjectionMask::roots(
