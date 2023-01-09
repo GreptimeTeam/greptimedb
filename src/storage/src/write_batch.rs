@@ -18,9 +18,7 @@ mod compat;
 use std::collections::HashMap;
 
 use common_recordbatch::RecordBatch;
-use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, SchemaRef};
-use datatypes::value::ValueRef;
 use datatypes::vectors::VectorRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{OpType, WriteRequest};
@@ -218,9 +216,9 @@ impl WriteBatch {
                     columns.push(col.clone());
                 }
                 None => {
-                    // Fills value columns by null, these columns are just placeholders to ensure
+                    // Fills value columns by default value, these columns are just placeholders to ensure
                     // the schema of the record batch is correct.
-                    let col = new_column_with_null(&column_schema.data_type, num_rows);
+                    let col = column_schema.create_default_vector_for_padding(num_rows);
                     columns.push(col);
                 }
             }
@@ -296,17 +294,6 @@ pub(crate) fn new_column_with_default_value(
     validate_column(column_schema, &vector)?;
 
     Ok(vector)
-}
-
-/// Creates a new column and fills it by null.
-fn new_column_with_null(data_type: &ConcreteDataType, num_rows: usize) -> VectorRef {
-    // TODO(yingwen): Use `NullVector` once it supports setting logical type.
-    let mut mutable_vector = data_type.create_mutable_vector(num_rows);
-    for _ in 0..num_rows {
-        // Safety: push null is safe.
-        mutable_vector.push_value_ref(ValueRef::Null).unwrap();
-    }
-    mutable_vector.to_vector()
 }
 
 /// Vectors in [NameToVector] have same length.
@@ -601,5 +588,26 @@ mod tests {
         let mut batch = new_test_batch();
         let err = batch.delete(keys).unwrap_err();
         check_err(err, "Type of column ts does not match");
+    }
+
+    #[test]
+    fn test_delete_non_null_value() {
+        let intv = Arc::new(UInt64Vector::from_slice(&[1, 2, 3])) as VectorRef;
+        let tsv = Arc::new(TimestampMillisecondVector::from_slice(&[0, 0, 0])) as VectorRef;
+
+        let mut keys = HashMap::with_capacity(2);
+        keys.insert("k1".to_string(), intv.clone());
+        keys.insert("ts".to_string(), tsv);
+
+        let mut batch = write_batch_util::new_write_batch(
+            &[
+                ("k1", LogicalTypeId::UInt64, false),
+                ("ts", LogicalTypeId::TimestampMillisecond, false),
+                ("v1", LogicalTypeId::Boolean, false),
+            ],
+            Some(1),
+            2,
+        );
+        batch.delete(keys).unwrap();
     }
 }
