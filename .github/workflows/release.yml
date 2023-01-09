@@ -18,6 +18,8 @@ env:
   # In the future, we can change SCHEDULED_PERIOD to nightly.
   SCHEDULED_PERIOD: weekly
 
+  CARGO_PROFILE: weekly
+
 jobs:
   build:
     name: Build binary
@@ -83,12 +85,12 @@ jobs:
         run: protoc --version ; cargo version ; rustc --version ; gcc --version ; g++ --version
 
       - name: Run cargo build
-        run: cargo build ${{ matrix.opts }} --profile weekly --locked --target ${{ matrix.arch }}
+        run: cargo build ${{ matrix.opts }} --profile ${{ env.CARGO_PROFILE }} --locked --target ${{ matrix.arch }}
 
       - name: Calculate checksum and rename binary
         shell: bash
         run: |
-          cd target/${{ matrix.arch }}/release
+          cd target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}
           chmod +x greptime
           tar -zcvf ${{ matrix.file }}.tgz greptime
           echo $(shasum -a 256 ${{ matrix.file }}.tgz | cut -f1 -d' ') > ${{ matrix.file }}.sha256sum
@@ -97,13 +99,13 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: ${{ matrix.file }}
-          path: target/${{ matrix.arch }}/release/${{ matrix.file }}.tgz
+          path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.tgz
 
       - name: Upload checksum of artifacts
         uses: actions/upload-artifact@v3
         with:
           name: ${{ matrix.file }}.sha256sum
-          path: target/${{ matrix.arch }}/release/${{ matrix.file }}.sha256sum
+          path: target/${{ matrix.arch }}/${{ env.CARGO_PROFILE }}/${{ matrix.file }}.sha256sum
   release:
     name: Release artifacts
     needs: [build]
