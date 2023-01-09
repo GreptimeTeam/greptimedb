@@ -22,6 +22,7 @@ use datatypes::for_all_primitive_types;
 use datatypes::types::WrapperType;
 use num_traits::AsPrimitive;
 use query::error::Result;
+use query::parser::QueryLanguageParser;
 use query::QueryEngine;
 use session::context::QueryContext;
 use statrs::distribution::{ContinuousCDF, Normal};
@@ -78,8 +79,9 @@ async fn execute_scipy_stats_norm_cdf<'a>(
     let sql = format!(
         "select SCIPYSTATSNORMCDF({column_name},2.0) as scipy_stats_norm_cdf from {table_name}",
     );
+    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
     let plan = engine
-        .sql_to_plan(&sql, Arc::new(QueryContext::new()))
+        .statement_to_plan(stmt, Arc::new(QueryContext::new()))
         .unwrap();
 
     let output = engine.execute(&plan).await.unwrap();

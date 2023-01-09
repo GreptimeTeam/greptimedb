@@ -20,6 +20,7 @@ mod planner;
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use catalog::CatalogListRef;
 use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
@@ -34,9 +35,7 @@ use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use session::context::QueryContextRef;
-use snafu::{IntoError, OptionExt, ResultExt};
-use sql::dialect::GenericDialect;
-use sql::parser::ParserContext;
+use snafu::{OptionExt, ResultExt};
 use sql::statements::statement::Statement;
 
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
@@ -45,6 +44,7 @@ use crate::datafusion::planner::DfPlanner;
 use crate::error::{QueryExecutionSnafu, Result};
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
+use crate::parser::QueryStatement;
 use crate::physical_optimizer::PhysicalOptimizer;
 use crate::physical_planner::PhysicalPlanner;
 use crate::plan::LogicalPlan;
@@ -62,44 +62,31 @@ impl DatafusionQueryEngine {
             state: QueryEngineState::new(catalog_list.clone()),
         }
     }
-}
 
-// TODO(LFC): Refactor consideration: extract a "Planner" that stores query context and execute queries inside.
-#[async_trait::async_trait]
-impl QueryEngine for DatafusionQueryEngine {
-    fn name(&self) -> &str {
-        "datafusion"
-    }
-
-    fn sql_to_statement(&self, sql: &str) -> Result<Statement> {
-        let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
-            .context(error::ParseSqlSnafu)
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)?;
-        if statement.len() != 1 {
-            Err(QueryExecutionSnafu {}.into_error(BoxedError::new(
-                error::MultipleStatementsSnafu { sql }.build(),
-            )))
-        } else {
-            Ok(statement.remove(0))
-        }
-    }
-
-    fn statement_to_plan(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<LogicalPlan> {
+    fn plan_sql_stmt(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let context_provider = DfContextProviderAdapter::new(self.state.clone(), query_ctx);
         let planner = DfPlanner::new(&context_provider);
 
         planner.statement_to_plan(stmt)
     }
+}
 
-    fn sql_to_plan(&self, sql: &str, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
-        let _timer = timer!(metric::METRIC_PARSE_SQL_ELAPSED);
-        let stmt = self.sql_to_statement(sql)?;
-        self.statement_to_plan(stmt, query_ctx)
+// TODO(LFC): Refactor consideration: extract a "Planner" that stores query context and execute queries inside.
+#[async_trait]
+impl QueryEngine for DatafusionQueryEngine {
+    fn name(&self) -> &str {
+        "datafusion"
+    }
+
+    fn statement_to_plan(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan> {
+        match stmt {
+            QueryStatement::SQL(stmt) => self.plan_sql_stmt(stmt, query_ctx),
+            QueryStatement::PromQL(_) => unimplemented!(),
+        }
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
@@ -277,6 +264,7 @@ mod tests {
     use session::context::QueryContext;
     use table::table::numbers::NumbersTable;
 
+    use crate::parser::QueryLanguageParser;
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
     fn create_test_engine() -> QueryEngineRef {
@@ -302,8 +290,9 @@ mod tests {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
+        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
         let plan = engine
-            .sql_to_plan(sql, Arc::new(QueryContext::new()))
+            .statement_to_plan(stmt, Arc::new(QueryContext::new()))
             .unwrap();
 
         // TODO(sunng87): do not rely on to_string for compare
@@ -321,8 +310,9 @@ mod tests {
         let engine = create_test_engine();
         let sql = "select sum(number) from numbers limit 20";
 
+        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
         let plan = engine
-            .sql_to_plan(sql, Arc::new(QueryContext::new()))
+            .statement_to_plan(stmt, Arc::new(QueryContext::new()))
             .unwrap();
 
         let output = engine.execute(&plan).await.unwrap();

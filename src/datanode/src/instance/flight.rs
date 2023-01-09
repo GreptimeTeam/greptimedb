@@ -31,6 +31,7 @@ use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::Output;
 use futures::Stream;
 use prost::Message;
+use query::parser::QueryLanguageParser;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response, Streaming};
@@ -140,10 +141,7 @@ impl Instance {
     async fn handle_query(&self, query: Query) -> Result<Output> {
         Ok(match query {
             Query::Sql(sql) => {
-                let stmt = self
-                    .query_engine
-                    .sql_to_statement(&sql)
-                    .context(ExecuteSqlSnafu)?;
+                let stmt = QueryLanguageParser::parse_sql(&sql).context(ExecuteSqlSnafu)?;
                 self.execute_stmt(stmt, QueryContext::arc()).await?
             }
             Query::LogicalPlan(plan) => self.execute_logical(plan).await?,

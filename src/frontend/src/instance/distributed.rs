@@ -42,6 +42,7 @@ use meta_client::rpc::{
     TableName, TableRoute,
 };
 use prost::Message;
+use query::parser::QueryStatement;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
@@ -158,7 +159,7 @@ impl DistInstance {
             Statement::Query(_) => {
                 let plan = self
                     .query_engine
-                    .statement_to_plan(stmt, query_ctx)
+                    .statement_to_plan(QueryStatement::SQL(stmt), query_ctx)
                     .context(error::ExecuteStatementSnafu {})?;
                 self.query_engine.execute(&plan).await
             }

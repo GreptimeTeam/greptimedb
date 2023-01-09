@@ -25,6 +25,7 @@ use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
+use query::parser::QueryLanguageParser;
 use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -144,11 +145,11 @@ impl ScriptsTable {
         // TODO(dennis): we use sql to find the script, the better way is use a function
         //               such as `find_record_by_primary_key` in table_engine.
         let sql = format!("select script from {} where name='{}'", self.name(), name);
-
+        let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
         let plan = self
             .query_engine
-            .sql_to_plan(&sql, Arc::new(QueryContext::new()))
-            .context(FindScriptSnafu { name })?;
+            .statement_to_plan(stmt, Arc::new(QueryContext::new()))
+            .unwrap();
 
         let stream = match self
             .query_engine
