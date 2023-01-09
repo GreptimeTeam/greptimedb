@@ -27,9 +27,10 @@ use crate::handler::node_stat::Stat;
 
 pub(crate) const REMOVED_PREFIX: &str = "__removed";
 pub(crate) const DN_LEASE_PREFIX: &str = "__meta_dnlease";
-pub(crate) const DN_STAT_PREFIX: &str = "__meta_dnstat";
 pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
 pub(crate) const TABLE_ROUTE_PREFIX: &str = "__meta_table_route";
+
+pub const DN_STAT_PREFIX: &str = "__meta_dnstat";
 
 lazy_static! {
     static ref DATANODE_LEASE_KEY_PATTERN: Regex =
@@ -37,7 +38,7 @@ lazy_static! {
     static ref DATANODE_STAT_KEY_PATTERN: Regex =
         Regex::new(&format!("^{DN_STAT_PREFIX}-([0-9]+)-([0-9]+)$")).unwrap();
 }
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct LeaseKey {
     pub cluster_id: u64,
     pub node_id: u64,
