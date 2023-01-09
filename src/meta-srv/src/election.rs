@@ -17,7 +17,7 @@ pub mod etcd;
 use crate::error::Result;
 
 pub const LEASE_SECS: i64 = 3;
-pub const PROCLAIM_PERIOD_SECS: u64 = LEASE_SECS as u64 * 2 / 3;
+pub const KEEP_ALIVE_PERIOD_SECS: u64 = LEASE_SECS as u64 * 2 / 3;
 pub const ELECTION_KEY: &str = "__meta_srv_election";
 
 #[async_trait::async_trait]

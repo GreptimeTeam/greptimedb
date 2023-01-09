@@ -20,7 +20,7 @@ use common_telemetry::{info, warn};
 use etcd_client::Client;
 use snafu::{OptionExt, ResultExt};
 
-use crate::election::{Election, ELECTION_KEY, LEASE_SECS, PROCLAIM_PERIOD_SECS};
+use crate::election::{Election, ELECTION_KEY, KEEP_ALIVE_PERIOD_SECS, LEASE_SECS};
 use crate::error;
 use crate::error::Result;
 use crate::metasrv::{ElectionRef, LeaderValue};
@@ -67,22 +67,21 @@ impl Election for EtcdElection {
             .context(error::EtcdFailedSnafu)?;
         let lease_id = res.id();
 
-        info!("Election grant ttl: {:?}, id: {:?}", res.ttl(), lease_id);
+        info!("Election grant ttl: {:?}, lease: {:?}", res.ttl(), lease_id);
 
-        // campaign
+        // Campaign, waits to acquire leadership in an election, returning
+        // a LeaderKey representing the leadership if successful.
+        //
+        // The method will be blocked until the election is won, and after
+        // passing the method, it is necessary to execute `keep_alive` immediately
+        // to confirm that it is a valid leader, because it is possible that the
+        // election's lease expires.
         let res = election_client
             .campaign(ELECTION_KEY, self.leader_value.clone(), lease_id)
             .await
             .context(error::EtcdFailedSnafu)?;
 
         if let Some(leader) = res.leader() {
-            info!(
-                "[{}] becoming leader: {:?}, lease: {}",
-                &self.leader_value,
-                leader.name_str(),
-                leader.lease()
-            );
-
             let (mut keeper, mut receiver) = self
                 .client
                 .lease_client()
@@ -90,17 +89,30 @@ impl Election for EtcdElection {
                 .await
                 .context(error::EtcdFailedSnafu)?;
 
-            let mut interval = tokio::time::interval(Duration::from_secs(PROCLAIM_PERIOD_SECS));
+            let mut keep_alive_interval =
+                tokio::time::interval(Duration::from_secs(KEEP_ALIVE_PERIOD_SECS));
             loop {
-                interval.tick().await;
+                keep_alive_interval.tick().await;
                 keeper.keep_alive().await.context(error::EtcdFailedSnafu)?;
 
                 if let Some(res) = receiver.message().await.context(error::EtcdFailedSnafu)? {
                     if res.ttl() > 0 {
-                        self.is_leader.store(true, Ordering::Relaxed);
+                        // Only after a successful `keep_alive` is the leader considered official.
+                        if self
+                            .is_leader
+                            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            info!(
+                                "[{}] becoming leader: {:?}, lease: {}",
+                                &self.leader_value,
+                                leader.name_str(),
+                                leader.lease()
+                            );
+                        }
                     } else {
                         warn!(
-                            "Already lost leader status, lease: {}, will re-initiate election",
+                            "Failed to keep-alive, lease: {}, will re-initiate election",
                             leader.lease()
                         );
                         break;
