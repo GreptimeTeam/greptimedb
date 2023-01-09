@@ -281,7 +281,9 @@ mod tests {
         let reader = BufReader::new(
             object_store
                 .object(sst_file_name)
-                .seekable_reader(..)
+                .reader()
+                .await
+                .unwrap()
                 .compat(),
         );
 
