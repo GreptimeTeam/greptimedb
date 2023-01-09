@@ -62,6 +62,12 @@ pub enum Error {
 
     #[snafu(display("Failure during query planning, source: {}", source))]
     QueryPlan { source: BoxedError },
+
+    #[snafu(display("Failure during query parsing, query: {}, source: {}", query, source))]
+    QueryParse { query: String, source: BoxedError },
+
+    #[snafu(display("The SQL string has multiple statements, query: {}", query))]
+    MultipleStatements { query: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -69,6 +75,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            QueryParse { .. } | MultipleStatements { .. } => StatusCode::InvalidSyntax,
             UnsupportedExpr { .. }
             | CatalogNotFound { .. }
             | SchemaNotFound { .. }

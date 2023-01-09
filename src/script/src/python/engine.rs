@@ -25,6 +25,7 @@ use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures::Stream;
+use query::parser::{QueryLanguageParser, QueryStatement};
 use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{ensure, ResultExt};
@@ -89,9 +90,9 @@ impl Script for PyScript {
 
     async fn execute(&self, _ctx: EvalContext) -> Result<Output> {
         if let Some(sql) = &self.copr.deco_args.sql {
-            let stmt = self.query_engine.sql_to_statement(sql)?;
+            let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
             ensure!(
-                matches!(stmt, Statement::Query { .. }),
+                matches!(stmt, QueryStatement::Sql(Statement::Query { .. })),
                 error::UnsupportedSqlSnafu { sql }
             );
             let plan = self

@@ -30,6 +30,7 @@ use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
 use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
+use crate::parser::QueryStatement;
 use crate::QueryEngineRef;
 
 const SCHEMAS_COLUMN: &str = "Schemas";
@@ -160,7 +161,8 @@ pub async fn explain(
     query_engine: QueryEngineRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let plan = query_engine.statement_to_plan(Statement::Explain(*stmt), query_ctx)?;
+    let plan = query_engine
+        .statement_to_plan(QueryStatement::Sql(Statement::Explain(*stmt)), query_ctx)?;
     query_engine.execute(&plan).await
 }
 

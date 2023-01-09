@@ -19,6 +19,7 @@ use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{error, info};
 use common_telemetry::timer;
+use query::parser::{QueryLanguageParser, QueryStatement};
 use servers::query_handler::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -35,11 +36,11 @@ use crate::sql::SqlRequest;
 impl Instance {
     pub async fn execute_stmt(
         &self,
-        stmt: Statement,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         match stmt {
-            Statement::Query(_) => {
+            QueryStatement::Sql(Statement::Query(_)) | QueryStatement::Promql(_) => {
                 let logical_plan = self
                     .query_engine
                     .statement_to_plan(stmt, query_ctx)
@@ -50,7 +51,7 @@ impl Instance {
                     .await
                     .context(ExecuteSqlSnafu)
             }
-            Statement::Insert(i) => {
+            QueryStatement::Sql(Statement::Insert(i)) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(i.table_name(), query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
@@ -62,7 +63,7 @@ impl Instance {
                 self.sql_handler.execute(request, query_ctx).await
             }
 
-            Statement::CreateDatabase(c) => {
+            QueryStatement::Sql(Statement::CreateDatabase(c)) => {
                 let request = CreateDatabaseRequest {
                     db_name: c.name.to_string(),
                 };
@@ -74,7 +75,7 @@ impl Instance {
                     .await
             }
 
-            Statement::CreateTable(c) => {
+            QueryStatement::Sql(Statement::CreateTable(c)) => {
                 let table_id = self
                     .table_id_provider
                     .as_ref()
@@ -99,7 +100,7 @@ impl Instance {
                     .execute(SqlRequest::CreateTable(request), query_ctx)
                     .await
             }
-            Statement::Alter(alter_table) => {
+            QueryStatement::Sql(Statement::Alter(alter_table)) => {
                 let name = alter_table.table_name().clone();
                 let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
@@ -108,36 +109,36 @@ impl Instance {
                     .execute(SqlRequest::Alter(req), query_ctx)
                     .await
             }
-            Statement::DropTable(drop_table) => {
+            QueryStatement::Sql(Statement::DropTable(drop_table)) => {
                 let req = self.sql_handler.drop_table_to_request(drop_table);
                 self.sql_handler
                     .execute(SqlRequest::DropTable(req), query_ctx)
                     .await
             }
-            Statement::ShowDatabases(stmt) => {
+            QueryStatement::Sql(Statement::ShowDatabases(stmt)) => {
                 self.sql_handler
                     .execute(SqlRequest::ShowDatabases(stmt), query_ctx)
                     .await
             }
-            Statement::ShowTables(stmt) => {
+            QueryStatement::Sql(Statement::ShowTables(stmt)) => {
                 self.sql_handler
                     .execute(SqlRequest::ShowTables(stmt), query_ctx)
                     .await
             }
-            Statement::Explain(stmt) => {
+            QueryStatement::Sql(Statement::Explain(stmt)) => {
                 self.sql_handler
                     .execute(SqlRequest::Explain(Box::new(stmt)), query_ctx)
                     .await
             }
-            Statement::DescribeTable(stmt) => {
+            QueryStatement::Sql(Statement::DescribeTable(stmt)) => {
                 self.sql_handler
                     .execute(SqlRequest::DescribeTable(stmt), query_ctx)
                     .await
             }
-            Statement::ShowCreateTable(_stmt) => {
+            QueryStatement::Sql(Statement::ShowCreateTable(_stmt)) => {
                 unimplemented!("SHOW CREATE TABLE is unimplemented yet");
             }
-            Statement::Use(db) => {
+            QueryStatement::Sql(Statement::Use(db)) => {
                 ensure!(
                     self.catalog_manager
                         .schema(DEFAULT_CATALOG_NAME, &db)
@@ -154,10 +155,7 @@ impl Instance {
     }
 
     pub async fn execute_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
-        let stmt = self
-            .query_engine
-            .sql_to_statement(sql)
-            .context(ExecuteSqlSnafu)?;
+        let stmt = QueryLanguageParser::parse_sql(sql).context(ExecuteSqlSnafu)?;
         self.execute_stmt(stmt, query_ctx).await
     }
 }
@@ -219,7 +217,7 @@ impl SqlQueryHandler for Instance {
         query_ctx: QueryContextRef,
     ) -> servers::error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
-        self.execute_stmt(stmt, query_ctx)
+        self.execute_stmt(QueryStatement::Sql(stmt), query_ctx)
             .await
             .map_err(|e| {
                 error!(e; "Instance failed to execute sql");

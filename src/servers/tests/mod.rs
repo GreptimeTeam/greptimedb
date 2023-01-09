@@ -20,6 +20,7 @@ use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaPr
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
+use query::parser::QueryLanguageParser;
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error::Result;
 use servers::query_handler::{
@@ -56,7 +57,11 @@ impl DummyInstance {
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let plan = self.query_engine.sql_to_plan(query, query_ctx).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(query).unwrap();
+        let plan = self
+            .query_engine
+            .statement_to_plan(stmt, query_ctx)
+            .unwrap();
         let output = self.query_engine.execute(&plan).await.unwrap();
         vec![Ok(output)]
     }
