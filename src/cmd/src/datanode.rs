@@ -125,7 +125,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         }
 
         if let Some(wal_dir) = cmd.wal_dir {
-            opts.wal_dir = wal_dir;
+            opts.wal.dir = wal_dir;
         }
         Ok(opts)
     }
@@ -151,7 +151,7 @@ mod tests {
         };
         let options: DatanodeOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
-        assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal_dir);
+        assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal.dir);
         assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
         let MetaClientOpts {

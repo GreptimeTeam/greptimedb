@@ -20,7 +20,7 @@ use catalog::remote::MetaKvBackend;
 use client::Client;
 use common_grpc::channel_manager::ChannelManager;
 use common_runtime::Builder as RuntimeBuilder;
-use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
+use datanode::datanode::{DatanodeOptions, ObjectStoreConfig, WalConfig};
 use datanode::instance::Instance as DatanodeInstance;
 use meta_client::client::MetaClientBuilder;
 use meta_client::rpc::Peer;
@@ -62,7 +62,10 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
     let wal_tmp_dir = TempDir::new(&format!("gt_wal_{name}")).unwrap();
     let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
     let opts = DatanodeOptions {
-        wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+        wal: WalConfig {
+            dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        },
         storage: ObjectStoreConfig::File {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
         },
@@ -142,7 +145,10 @@ async fn create_dist_datanode_instance(
     let data_tmp_dir = TempDir::new_in("/tmp", &format!("dist_datanode-data-{current}")).unwrap();
     let opts = DatanodeOptions {
         node_id: Some(datanode_id),
-        wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+        wal: WalConfig {
+            dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        },
         storage: ObjectStoreConfig::File {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
         },

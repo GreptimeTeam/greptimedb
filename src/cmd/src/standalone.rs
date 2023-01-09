@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use common_telemetry::info;
-use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
+use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig, WalConfig};
 use datanode::instance::InstanceRef;
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
@@ -72,7 +72,7 @@ pub struct StandaloneOptions {
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
     pub mode: Mode,
-    pub wal_dir: String,
+    pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
     pub enable_memory_catalog: bool,
 }
@@ -88,7 +88,7 @@ impl Default for StandaloneOptions {
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
             mode: Mode::Standalone,
-            wal_dir: "/tmp/greptimedb/wal".to_string(),
+            wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
             enable_memory_catalog: false,
         }
@@ -112,7 +112,7 @@ impl StandaloneOptions {
 
     fn datanode_options(self) -> DatanodeOptions {
         DatanodeOptions {
-            wal_dir: self.wal_dir,
+            wal: self.wal,
             storage: self.storage,
             enable_memory_catalog: self.enable_memory_catalog,
             ..Default::default()
