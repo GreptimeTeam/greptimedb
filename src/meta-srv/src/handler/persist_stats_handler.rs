@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::HeartbeatRequest;
+use api::v1::meta::{HeartbeatRequest, PutRequest};
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::keys::StatValue;
 use crate::metasrv::Context;
 
 #[derive(Default)]
@@ -33,8 +34,89 @@ impl HeartbeatHandler for PersistStatsHandler {
             return Ok(());
         }
 
-        // TODO(jiachun): remove stats from `acc` and persist to store
+        let stats = &mut acc.stats;
+        let key = match stats.get(0) {
+            Some(stat) => stat.stat_key(),
+            None => return Ok(()),
+        };
+
+        // take stats from &mut acc.stats, avoid clone of vec
+        let stats = std::mem::take(stats);
+
+        let val = &StatValue { stats };
+
+        let put = PutRequest {
+            key: key.into(),
+            value: val.try_into()?,
+            ..Default::default()
+        };
+
+        ctx.kv_store.put(put).await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    use api::v1::meta::RangeRequest;
+
+    use super::*;
+    use crate::handler::node_stat::Stat;
+    use crate::keys::StatKey;
+    use crate::service::store::memory::MemStore;
+
+    #[tokio::test]
+    async fn test_handle_datanode_stats() {
+        let kv_store = Arc::new(MemStore::new());
+        let ctx = Context {
+            datanode_lease_secs: 30,
+            server_addr: "127.0.0.1:0000".to_string(),
+            kv_store,
+            election: None,
+            skip_all: Arc::new(AtomicBool::new(false)),
+        };
+
+        let req = HeartbeatRequest::default();
+        let mut acc = HeartbeatAccumulator {
+            stats: vec![Stat {
+                cluster_id: 3,
+                id: 101,
+                region_num: 100,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let stats_handler = PersistStatsHandler;
+        stats_handler.handle(&req, &ctx, &mut acc).await.unwrap();
+
+        let key = StatKey {
+            cluster_id: 3,
+            node_id: 101,
+        };
+
+        let req = RangeRequest {
+            key: key.try_into().unwrap(),
+            ..Default::default()
+        };
+
+        let res = ctx.kv_store.range(req).await.unwrap();
+
+        assert_eq!(1, res.kvs.len());
+
+        let kv = &res.kvs[0];
+
+        let key: StatKey = kv.key.clone().try_into().unwrap();
+        assert_eq!(3, key.cluster_id);
+        assert_eq!(101, key.node_id);
+
+        let val: StatValue = kv.value.clone().try_into().unwrap();
+
+        assert_eq!(1, val.stats.len());
+        assert_eq!(100, val.stats[0].region_num);
     }
 }

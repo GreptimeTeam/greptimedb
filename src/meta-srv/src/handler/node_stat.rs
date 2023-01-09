@@ -14,8 +14,11 @@
 
 use api::v1::meta::HeartbeatRequest;
 use common_time::util as time_util;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
+use crate::keys::StatKey;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Stat {
     pub timestamp_millis: i64,
     pub cluster_id: u64,
@@ -24,13 +27,13 @@ pub struct Stat {
     /// Leader node
     pub is_leader: bool,
     /// The read capacity units during this period
-    pub rcus: u64,
+    pub rcus: i64,
     /// The write capacity units during this period
-    pub wcus: u64,
+    pub wcus: i64,
     /// How many tables on this node
-    pub table_num: u64,
+    pub table_num: i64,
     /// How many regions on this node
-    pub region_num: u64,
+    pub region_num: i64,
     pub cpu_usage: f64,
     pub load: f64,
     /// Read disk IO on this node
@@ -41,20 +44,29 @@ pub struct Stat {
     pub region_stats: Vec<RegionStat>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RegionStat {
     pub id: u64,
     pub catalog: String,
     pub schema: String,
     pub table: String,
     /// The read capacity units during this period
-    pub rcus: u64,
+    pub rcus: i64,
     /// The write capacity units during this period
-    pub wcus: u64,
+    pub wcus: i64,
     /// Approximate bytes of this region
-    pub approximate_bytes: u64,
+    pub approximate_bytes: i64,
     /// Approximate number of rows in this region
-    pub approximate_rows: u64,
+    pub approximate_rows: i64,
+}
+
+impl Stat {
+    pub fn stat_key(&self) -> StatKey {
+        StatKey {
+            cluster_id: self.cluster_id,
+            node_id: self.id,
+        }
+    }
 }
 
 impl TryFrom<&HeartbeatRequest> for Stat {
@@ -105,5 +117,25 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             approximate_bytes: value.approximate_bytes,
             approximate_rows: value.approximate_rows,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handler::node_stat::Stat;
+
+    #[test]
+    fn test_stat_key() {
+        let stat = Stat {
+            cluster_id: 3,
+            id: 101,
+            region_num: 10,
+            ..Default::default()
+        };
+
+        let stat_key = stat.stat_key();
+
+        assert_eq!(3, stat_key.cluster_id);
+        assert_eq!(101, stat_key.node_id);
     }
 }
