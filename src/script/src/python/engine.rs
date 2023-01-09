@@ -90,7 +90,7 @@ impl Script for PyScript {
 
     async fn execute(&self, _ctx: EvalContext) -> Result<Output> {
         if let Some(sql) = &self.copr.deco_args.sql {
-            let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
+            let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
             ensure!(
                 matches!(stmt, QueryStatement::SQL(Statement::Query { .. })),
                 error::UnsupportedSqlSnafu { sql }

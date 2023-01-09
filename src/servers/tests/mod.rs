@@ -57,7 +57,7 @@ impl DummyInstance {
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let stmt = QueryLanguageParser::parse_sql(query,).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(query).unwrap();
         let plan = self
             .query_engine
             .statement_to_plan(stmt, query_ctx)
