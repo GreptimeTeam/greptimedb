@@ -69,10 +69,10 @@ impl Stat {
     }
 }
 
-impl TryFrom<&HeartbeatRequest> for Stat {
+impl TryFrom<HeartbeatRequest> for Stat {
     type Error = ();
 
-    fn try_from(value: &HeartbeatRequest) -> Result<Self, Self::Error> {
+    fn try_from(value: HeartbeatRequest) -> Result<Self, Self::Error> {
         let HeartbeatRequest {
             header,
             peer,
@@ -87,8 +87,8 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                 timestamp_millis: time_util::current_time_millis(),
                 cluster_id: header.cluster_id,
                 id: peer.id,
-                addr: peer.addr.clone(),
-                is_leader: *is_leader,
+                addr: peer.addr,
+                is_leader,
                 rcus: node_stat.rcus,
                 wcus: node_stat.wcus,
                 table_num: node_stat.table_num,
@@ -97,15 +97,15 @@ impl TryFrom<&HeartbeatRequest> for Stat {
                 load: node_stat.load,
                 read_io_rate: node_stat.read_io_rate,
                 write_io_rate: node_stat.write_io_rate,
-                region_stats: region_stats.iter().map(RegionStat::from).collect(),
+                region_stats: region_stats.into_iter().map(RegionStat::from).collect(),
             }),
             _ => Err(()),
         }
     }
 }
 
-impl From<&api::v1::meta::RegionStat> for RegionStat {
-    fn from(value: &api::v1::meta::RegionStat) -> Self {
+impl From<api::v1::meta::RegionStat> for RegionStat {
+    fn from(value: api::v1::meta::RegionStat) -> Self {
         let table = value.table_name.as_ref();
         Self {
             id: value.region_id,

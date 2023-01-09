@@ -228,11 +228,11 @@ pub struct StatValue {
     pub stats: Vec<Stat>,
 }
 
-impl TryFrom<&StatValue> for Vec<u8> {
+impl TryFrom<StatValue> for Vec<u8> {
     type Error = error::Error;
 
-    fn try_from(stats: &StatValue) -> Result<Self> {
-        Ok(serde_json::to_string(stats)
+    fn try_from(stats: StatValue) -> Result<Self> {
+        Ok(serde_json::to_string(&stats)
             .context(crate::error::SerializeToJsonSnafu {
                 input: format!("{stats:?}"),
             })?
@@ -286,7 +286,7 @@ mod tests {
             ..Default::default()
         };
 
-        let stat_val = &StatValue { stats: vec![stat] };
+        let stat_val = StatValue { stats: vec![stat] };
 
         let bytes: Vec<u8> = stat_val.try_into().unwrap();
         let stat_val: StatValue = bytes.try_into().unwrap();

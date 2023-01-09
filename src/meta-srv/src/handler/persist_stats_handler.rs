@@ -43,7 +43,7 @@ impl HeartbeatHandler for PersistStatsHandler {
         // take stats from &mut acc.stats, avoid clone of vec
         let stats = std::mem::take(stats);
 
-        let val = &StatValue { stats };
+        let val = StatValue { stats };
 
         let put = PutRequest {
             key: key.into(),

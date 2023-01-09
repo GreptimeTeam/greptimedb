@@ -58,7 +58,7 @@ impl HeartbeatHandler for CollectStatsHandler {
             return Ok(());
         }
 
-        match Stat::try_from(req) {
+        match Stat::try_from(req.clone()) {
             Ok(stat) => {
                 let key = (stat.cluster_id, stat.id);
                 match self.cache.entry(key) {

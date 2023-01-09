@@ -29,7 +29,6 @@ use crate::error;
 use crate::error::Result;
 use crate::service::store::kv::{KvStore, KvStoreRef};
 
-#[derive(Clone)]
 pub struct EtcdStore {
     client: Client,
 }
