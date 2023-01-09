@@ -198,7 +198,7 @@ impl RangeArray {
         self.array
             .keys()
             .into_iter()
-            .map(|compound| compound.map(|key| unpack(key)))
+            .map(|compound| compound.map(unpack))
     }
 }
 

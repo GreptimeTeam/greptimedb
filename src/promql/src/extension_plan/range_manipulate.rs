@@ -472,7 +472,7 @@ mod test {
             .filter_map(|batch| {
                 batch
                     .columns()
-                    .into_iter()
+                    .iter()
                     .map(|array| {
                         if matches!(array.data_type(), &DataType::Dictionary(..)) {
                             let dict_array = array
@@ -482,7 +482,7 @@ mod test {
                                 .clone();
                             format!("{:?}", RangeArray::try_new(dict_array).unwrap())
                         } else {
-                            format!("{:?}", array)
+                            format!("{array:?}")
                         }
                     })
                     .reduce(|lhs, rhs| lhs + "\n" + &rhs)
