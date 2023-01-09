@@ -33,7 +33,8 @@ use table::predicate::Predicate;
 use tokio::io::BufReader;
 
 use crate::error::{
-    self, NewRecordBatchSnafu, ReadParquetSnafu, Result, WriteObjectSnafu, WriteParquetSnafu,
+    self, NewRecordBatchSnafu, ReadObjectSnafu, ReadParquetSnafu, Result, WriteObjectSnafu,
+    WriteParquetSnafu,
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
@@ -140,7 +141,14 @@ impl<'a> ParquetReader<'a> {
 
     pub async fn chunk_stream(&self) -> Result<ChunkStream> {
         let operator = self.object_store.clone();
-        let reader = operator.object(self.file_path).seekable_reader(..).compat();
+        let reader = operator
+            .object(self.file_path)
+            .reader()
+            .await
+            .context(ReadObjectSnafu {
+                path: self.file_path,
+            })?
+            .compat();
         let buf_reader = BufReader::new(reader);
         let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
             .await
@@ -273,7 +281,9 @@ mod tests {
         let reader = BufReader::new(
             object_store
                 .object(sst_file_name)
-                .seekable_reader(..)
+                .reader()
+                .await
+                .unwrap()
                 .compat(),
         );
 
