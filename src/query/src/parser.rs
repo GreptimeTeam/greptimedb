@@ -59,7 +59,7 @@ mod test {
     fn parse_sql_simple() {
         let sql = "select * from t1";
         let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
-        let expected = String::from("SQL(Query(Query { \
+        let expected = String::from("Sql(Query(Query { \
             inner: Query { \
                 with: None, body: Select(Select { \
                     distinct: false, \
