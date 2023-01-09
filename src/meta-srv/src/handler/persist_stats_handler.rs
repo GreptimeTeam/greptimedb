@@ -16,7 +16,7 @@ use api::v1::meta::{HeartbeatRequest, PutRequest};
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
-use crate::keys::{StatKey, StatValue};
+use crate::keys::StatValue;
 use crate::metasrv::Context;
 
 #[derive(Default)]
@@ -35,8 +35,8 @@ impl HeartbeatHandler for PersistStatsHandler {
         }
 
         let stats = &mut acc.stats;
-        let key: StatKey = match stats.get(0) {
-            Some(stat) => stat.into(),
+        let key = match stats.get(0) {
+            Some(stat) => stat.stat_key(),
             None => return Ok(()),
         };
 
@@ -66,6 +66,7 @@ mod tests {
 
     use super::*;
     use crate::handler::node_stat::Stat;
+    use crate::keys::StatKey;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]

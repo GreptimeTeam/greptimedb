@@ -16,6 +16,8 @@ use api::v1::meta::HeartbeatRequest;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
 
+use crate::keys::StatKey;
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Stat {
     pub timestamp_millis: i64,
@@ -56,6 +58,15 @@ pub struct RegionStat {
     pub approximate_bytes: i64,
     /// Approximate number of rows in this region
     pub approximate_rows: i64,
+}
+
+impl Stat {
+    pub fn stat_key(&self) -> StatKey {
+        StatKey {
+            cluster_id: self.cluster_id,
+            node_id: self.id,
+        }
+    }
 }
 
 impl TryFrom<&HeartbeatRequest> for Stat {
@@ -106,5 +117,25 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             approximate_bytes: value.approximate_bytes,
             approximate_rows: value.approximate_rows,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::handler::node_stat::Stat;
+
+    #[test]
+    fn test_stat_key() {
+        let stat = Stat {
+            cluster_id: 3,
+            id: 101,
+            region_num: 10,
+            ..Default::default()
+        };
+
+        let stat_key = stat.stat_key();
+
+        assert_eq!(3, stat_key.cluster_id);
+        assert_eq!(101, stat_key.node_id);
     }
 }

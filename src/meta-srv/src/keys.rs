@@ -222,15 +222,6 @@ impl TryFrom<Vec<u8>> for StatKey {
     }
 }
 
-impl From<&Stat> for StatKey {
-    fn from(stat: &Stat) -> Self {
-        StatKey {
-            cluster_id: stat.cluster_id,
-            node_id: stat.id,
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StatValue {
@@ -270,21 +261,6 @@ impl TryFrom<Vec<u8>> for StatValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_convert_stat_to_stat_key() {
-        let stat = &Stat {
-            cluster_id: 3,
-            id: 101,
-            region_num: 10,
-            ..Default::default()
-        };
-
-        let stat_key: StatKey = stat.try_into().unwrap();
-
-        assert_eq!(3, stat_key.cluster_id);
-        assert_eq!(101, stat_key.node_id);
-    }
 
     #[test]
     fn test_stat_key_round_trip() {
