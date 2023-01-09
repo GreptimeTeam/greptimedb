@@ -39,6 +39,10 @@ use futures::{Stream, StreamExt};
 use crate::extension_plan::Millisecond;
 use crate::range_array::RangeArray;
 
+/// Time series manipulator for range function.
+///
+/// This plan will "fold" time index and value columns into [RangeArray]s, and truncate
+/// other columns to the same length with the "folded" [RangeArray] column.
 #[derive(Debug)]
 pub struct RangeManipulate {
     start: Millisecond,
