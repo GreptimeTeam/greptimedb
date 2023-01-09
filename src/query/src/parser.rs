@@ -9,6 +9,7 @@ use sql::statements::statement::Statement;
 use crate::error::{MultipleStatementsSnafu, QueryParseSnafu, Result};
 use crate::metric::METRIC_PARSE_SQL_ELAPSED;
 
+#[derive(Debug, Clone)]
 pub enum QueryStatement {
     SQL(Statement),
     PromQL(EvalStmt),
@@ -32,5 +33,43 @@ impl QueryLanguageParser {
         } else {
             Ok(QueryStatement::SQL(statement.pop().unwrap()))
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    // Detailed logic tests are covered in the parser crate.
+    #[test]
+    fn parse_sql_simple() {
+        let sql = "select * from t1";
+        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let expected = String::from("SQL(Query(Query { \
+            inner: Query { \
+                with: None, body: Select(Select { \
+                    distinct: false, \
+                    top: None, \
+                    projection: \
+                    [Wildcard(WildcardAdditionalOptions { opt_exclude: None, opt_except: None })], \
+                    into: None, \
+                    from: [TableWithJoins { relation: Table { name: ObjectName([Ident { value: \"t1\", quote_style: None }]\
+                ), \
+                alias: None, \
+                args: None, \
+                with_hints: [] \
+            }, \
+            joins: [] }], \
+            lateral_views: [], \
+            selection: None, \
+            group_by: [], \
+            cluster_by: [], \
+            distribute_by: [], \
+            sort_by: [], \
+            having: None, \
+            qualify: None \
+        }), order_by: [], limit: None, offset: None, fetch: None, lock: None } }))");
+
+        assert_eq!(format!("{stmt:?}"), expected);
     }
 }
