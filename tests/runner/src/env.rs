@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::OnceCell;
 use std::fmt::Display;
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -21,10 +22,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use client::{Client, Database as DB, Error as ClientError};
 use common_query::Output;
+use regex::Regex;
 use sqlness::{Database, EnvController};
 use tokio::process::{Child, Command};
 
 use crate::util;
+
+const ERROR_MESSAGE_REGEX: OnceCell<Regex> = OnceCell::new();
 
 const SERVER_ADDR: &str = "127.0.0.1:4001";
 const SERVER_LOG_FILE: &str = "/tmp/greptime-sqlness.log";
@@ -140,7 +144,17 @@ impl Display for ResultDisplayer {
                 }
                 Output::Stream(_) => unreachable!(),
             },
-            Err(e) => write!(f, "Failed to execute, error: {e:?}"),
+            // Err(e) => write!(f, "Failed to execute, error: {e:?}"),
+            Err(e) => {
+                let err_text = format!("{e:?}");
+                let truncated_error = ERROR_MESSAGE_REGEX
+                    .get_or_init(|| Regex::new("code:.*\",").unwrap())
+                    .captures(&err_text)
+                    .map(|captures| captures.get(0).map(|mat| mat.as_str().to_string()))
+                    .flatten()
+                    .unwrap_or(err_text);
+                write!(f, "Failed to execute, {truncated_error}")
+            }
         }
     }
 }
