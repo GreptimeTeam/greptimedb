@@ -256,7 +256,7 @@ mod tests {
         let sql_handler = SqlHandler::new(table_engine, catalog_list.clone(), query_engine.clone());
 
         let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
-            QueryStatement::SQL(Statement::Insert(i)) => i,
+            QueryStatement::Sql(Statement::Insert(i)) => i,
             _ => {
                 unreachable!()
             }

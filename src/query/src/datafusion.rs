@@ -84,8 +84,8 @@ impl QueryEngine for DatafusionQueryEngine {
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
         match stmt {
-            QueryStatement::SQL(stmt) => self.plan_sql_stmt(stmt, query_ctx),
-            QueryStatement::PromQL(_) => unimplemented!(),
+            QueryStatement::Sql(stmt) => self.plan_sql_stmt(stmt, query_ctx),
+            QueryStatement::Promql(_) => unimplemented!(),
         }
     }
 

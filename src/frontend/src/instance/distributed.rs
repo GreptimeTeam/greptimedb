@@ -159,7 +159,7 @@ impl DistInstance {
             Statement::Query(_) => {
                 let plan = self
                     .query_engine
-                    .statement_to_plan(QueryStatement::SQL(stmt), query_ctx)
+                    .statement_to_plan(QueryStatement::Sql(stmt), query_ctx)
                     .context(error::ExecuteStatementSnafu {})?;
                 self.query_engine.execute(&plan).await
             }

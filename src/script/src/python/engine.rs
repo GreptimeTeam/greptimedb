@@ -92,7 +92,7 @@ impl Script for PyScript {
         if let Some(sql) = &self.copr.deco_args.sql {
             let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
             ensure!(
-                matches!(stmt, QueryStatement::SQL(Statement::Query { .. })),
+                matches!(stmt, QueryStatement::Sql(Statement::Query { .. })),
                 error::UnsupportedSqlSnafu { sql }
             );
             let plan = self

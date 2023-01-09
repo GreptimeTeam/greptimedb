@@ -11,8 +11,8 @@ use crate::metric::METRIC_PARSE_SQL_ELAPSED;
 
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
-    SQL(Statement),
-    PromQL(EvalStmt),
+    Sql(Statement),
+    Promql(EvalStmt),
 }
 
 pub struct QueryLanguageParser {}
@@ -31,7 +31,7 @@ impl QueryLanguageParser {
             }
             .fail()
         } else {
-            Ok(QueryStatement::SQL(statement.pop().unwrap()))
+            Ok(QueryStatement::Sql(statement.pop().unwrap()))
         }
     }
 }
