@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -249,6 +249,24 @@ async fn test_using_db() -> Result<()> {
         .unwrap();
     let result = client.simple_query("SELECT uint32s FROM numbers").await;
     assert!(result.is_ok());
+
+    let client = create_connection_with_given_catalog_schema(
+        server_port,
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+    )
+    .await;
+    assert!(client.is_ok());
+
+    let client =
+        create_connection_with_given_catalog_schema(server_port, "notfound", DEFAULT_SCHEMA_NAME)
+            .await;
+    assert!(client.is_err());
+
+    let client =
+        create_connection_with_given_catalog_schema(server_port, DEFAULT_CATALOG_NAME, "notfound")
+            .await;
+    assert!(client.is_err());
     Ok(())
 }
 
@@ -325,6 +343,17 @@ async fn create_connection_with_given_db(
     db: &str,
 ) -> std::result::Result<Client, PgError> {
     let url = format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={db}");
+    let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
+    tokio::spawn(conn);
+    Ok(client)
+}
+
+async fn create_connection_with_given_catalog_schema(
+    port: u16,
+    catalog: &str,
+    schema: &str,
+) -> std::result::Result<Client, PgError> {
+    let url = format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={catalog}-{schema}");
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     tokio::spawn(conn);
     Ok(client)

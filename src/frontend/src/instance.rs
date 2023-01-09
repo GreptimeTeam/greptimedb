@@ -343,9 +343,12 @@ impl Instance {
     }
 
     fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
+        let catalog = query_ctx.current_catalog();
+        let catalog = catalog.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
+
         ensure!(
             self.catalog_manager
-                .schema(DEFAULT_CATALOG_NAME, &db)
+                .schema(catalog, &db)
                 .context(error::CatalogSnafu)?
                 .is_some(),
             error::SchemaNotFoundSnafu { schema_info: &db }
