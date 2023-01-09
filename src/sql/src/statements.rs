@@ -39,8 +39,9 @@ use crate::ast::{
     Value as SqlValue,
 };
 use crate::error::{
-    self, ColumnTypeMismatchSnafu, ConvertToGrpcDataTypeSnafu, ParseSqlValueSnafu, Result,
-    SerializeColumnDefaultConstraintSnafu, UnsupportedDefaultValueSnafu,
+    self, ColumnTypeMismatchSnafu, ConvertToGrpcDataTypeSnafu, InvalidSqlValueSnafu,
+    ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu,
+    UnsupportedDefaultValueSnafu,
 };
 
 // TODO(LFC): Get rid of this function, use session context aware version of "table_idents_to_full_name" instead.
@@ -222,6 +223,7 @@ pub fn sql_value_to_value(
             parse_string_to_value(column_name, s.to_owned(), data_type)?
         }
         SqlValue::HexStringLiteral(s) => parse_hex_string(s)?,
+        SqlValue::Placeholder(s) => return InvalidSqlValueSnafu { value: s }.fail(),
         _ => todo!("Other sql value"),
     })
 }
@@ -719,5 +721,15 @@ mod tests {
         assert_eq!(ConcreteDataType::string_datatype(), column_schema.data_type);
         assert!(!column_schema.is_nullable());
         assert!(!column_schema.is_time_index());
+    }
+
+    #[test]
+    pub fn test_parse_placeholder_value() {
+        assert!(sql_value_to_value(
+            "test",
+            &ConcreteDataType::string_datatype(),
+            &SqlValue::Placeholder("default".into())
+        )
+        .is_err());
     }
 }

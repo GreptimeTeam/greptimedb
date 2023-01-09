@@ -150,6 +150,14 @@ impl ColumnSchema {
         }
         mutable_vector.to_vector()
     }
+
+    /// Creates a default value for this column.
+    ///
+    /// If the column is `NOT NULL` but doesn't has `DEFAULT` value supplied, returns `Ok(None)`.
+    pub fn create_default(&self) -> Result<Option<Value>> {
+        self.create_default_vector(1)
+            .map(|vec_ref_option| vec_ref_option.map(|vec_ref| vec_ref.get(0)))
+    }
 }
 
 impl TryFrom<&Field> for ColumnSchema {
@@ -336,5 +344,35 @@ mod tests {
         assert_eq!(4, vector.len());
         let expect: VectorRef = Arc::new(Int32Vector::from_slice(&[0, 0, 0, 0]));
         assert_eq!(expect, vector);
+    }
+
+    #[test]
+    fn test_column_schema_single_create_default_null() {
+        // Implicit default null.
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true);
+        let v = column_schema.create_default().unwrap().unwrap();
+        assert!(v.is_null());
+
+        // Explicit default null.
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
+            .with_default_constraint(Some(ColumnDefaultConstraint::null_value()))
+            .unwrap();
+        let v = column_schema.create_default().unwrap().unwrap();
+        assert!(v.is_null());
+    }
+
+    #[test]
+    fn test_column_schema_single_create_default_not_null() {
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::Int32(6))))
+            .unwrap();
+        let v = column_schema.create_default().unwrap().unwrap();
+        assert_eq!(v, Value::Int32(6));
+    }
+
+    #[test]
+    fn test_column_schema_single_no_default() {
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), false);
+        assert!(column_schema.create_default().unwrap().is_none());
     }
 }

@@ -15,7 +15,7 @@
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use datatypes::data_type::DataType;
-use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use datatypes::vectors::MutableVector;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -25,10 +25,13 @@ use table::engine::TableReference;
 use table::requests::*;
 
 use crate::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, ColumnValuesNumberMismatchSnafu, InsertSnafu,
-    ParseSqlValueSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
+    ColumnValuesNumberMismatchSnafu, InsertSnafu, ParseSqlSnafu, ParseSqlValueSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::sql::{SqlHandler, SqlRequest};
+
+const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
 impl SqlHandler {
     pub(crate) async fn insert(&self, req: InsertRequest) -> Result<Output> {
@@ -72,17 +75,13 @@ impl SqlHandler {
         };
         let rows_num = values.len();
 
-        let mut columns_builders: Vec<(&String, &ConcreteDataType, Box<dyn MutableVector>)> =
+        let mut columns_builders: Vec<(&ColumnSchema, Box<dyn MutableVector>)> =
             Vec::with_capacity(columns_num);
 
         if columns.is_empty() {
             for column_schema in schema.column_schemas() {
                 let data_type = &column_schema.data_type;
-                columns_builders.push((
-                    &column_schema.name,
-                    data_type,
-                    data_type.create_mutable_vector(rows_num),
-                ));
+                columns_builders.push((column_schema, data_type.create_mutable_vector(rows_num)));
             }
         } else {
             for column_name in columns {
@@ -94,11 +93,7 @@ impl SqlHandler {
                         }
                     })?;
                 let data_type = &column_schema.data_type;
-                columns_builders.push((
-                    column_name,
-                    data_type,
-                    data_type.create_mutable_vector(rows_num),
-                ));
+                columns_builders.push((column_schema, data_type.create_mutable_vector(rows_num)));
             }
         }
 
@@ -112,10 +107,8 @@ impl SqlHandler {
                 }
             );
 
-            for (sql_val, (column_name, data_type, builder)) in
-                row.iter().zip(columns_builders.iter_mut())
-            {
-                add_row_to_vector(column_name, data_type, sql_val, builder)?;
+            for (sql_val, (column_schema, builder)) in row.iter().zip(columns_builders.iter_mut()) {
+                add_row_to_vector(column_schema, sql_val, builder)?;
             }
         }
 
@@ -125,21 +118,34 @@ impl SqlHandler {
             table_name: table_ref.table.to_string(),
             columns_values: columns_builders
                 .into_iter()
-                .map(|(c, _, mut b)| (c.to_owned(), b.to_vector()))
+                .map(|(cs, mut b)| (cs.name.to_string(), b.to_vector()))
                 .collect(),
         }))
     }
 }
 
 fn add_row_to_vector(
-    column_name: &str,
-    data_type: &ConcreteDataType,
+    column_schema: &ColumnSchema,
     sql_val: &SqlValue,
     builder: &mut Box<dyn MutableVector>,
 ) -> Result<()> {
-    let value = statements::sql_value_to_value(column_name, data_type, sql_val)
-        .context(ParseSqlValueSnafu)?;
+    let value = if replace_default(sql_val) {
+        column_schema
+            .create_default()
+            .context(ColumnDefaultValueSnafu {
+                column: column_schema.name.to_string(),
+            })?
+            .context(ColumnNoneDefaultValueSnafu {
+                column: column_schema.name.to_string(),
+            })?
+    } else {
+        statements::sql_value_to_value(&column_schema.name, &column_schema.data_type, sql_val)
+            .context(ParseSqlSnafu)?
+    };
     builder.push_value_ref(value.as_value_ref()).unwrap();
-
     Ok(())
+}
+
+fn replace_default(sql_val: &SqlValue) -> bool {
+    matches!(sql_val, SqlValue::Placeholder(s) if s.to_lowercase() == DEFAULT_PLACEHOLDER_VALUE)
 }
