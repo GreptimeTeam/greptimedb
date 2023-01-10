@@ -51,7 +51,7 @@ impl HeartbeatHandler for CollectStatsHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &Context,
+        ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         if ctx.is_skip_all() {

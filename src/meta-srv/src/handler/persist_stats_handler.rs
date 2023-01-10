@@ -27,7 +27,7 @@ impl HeartbeatHandler for PersistStatsHandler {
     async fn handle(
         &self,
         _req: &HeartbeatRequest,
-        ctx: &Context,
+        ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         if ctx.is_skip_all() || acc.stats.is_empty() {
@@ -73,7 +73,7 @@ mod tests {
     async fn test_handle_datanode_stats() {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
-        let ctx = Context {
+        let mut ctx = Context {
             datanode_lease_secs: 30,
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
@@ -94,7 +94,10 @@ mod tests {
         };
 
         let stats_handler = PersistStatsHandler;
-        stats_handler.handle(&req, &ctx, &mut acc).await.unwrap();
+        stats_handler
+            .handle(&req, &mut ctx, &mut acc)
+            .await
+            .unwrap();
 
         let key = StatKey {
             cluster_id: 3,

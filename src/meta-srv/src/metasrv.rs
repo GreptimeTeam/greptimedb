@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::election::Election;
 use crate::handler::{
-    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, InitializeMemoryHandler,
-    KeepLeaseHandler, PersistStatsHandler, ResponseHeaderHandler,
+    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
+    OnLeaderStartHandler, PersistStatsHandler, ResponseHeaderHandler,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::Selector;
@@ -70,6 +70,10 @@ impl Context {
     pub fn set_skip_all(&self) {
         self.skip_all.store(true, Ordering::Relaxed);
     }
+
+    pub fn reset_in_memory(&self) {
+        self.in_memory.clear();
+    }
 }
 
 pub struct LeaderValue(pub String);
@@ -108,14 +112,13 @@ impl MetaSrv {
             None => {
                 let group = HeartbeatHandlerGroup::default();
                 let keep_lease_handler = KeepLeaseHandler::new(kv_store.clone());
-                let initialize_memory_handler = InitializeMemoryHandler::new(in_memory.clone());
                 group.add_handler(ResponseHeaderHandler::default()).await;
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
                 // because even if the current meta-server node is no longer the leader it can
                 // still help the datanode to keep lease.
                 group.add_handler(keep_lease_handler).await;
                 group.add_handler(CheckLeaderHandler::default()).await;
-                group.add_handler(initialize_memory_handler).await;
+                group.add_handler(OnLeaderStartHandler).await;
                 group.add_handler(CollectStatsHandler::default()).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 group

@@ -14,17 +14,17 @@
 
 pub use check_leader_handler::CheckLeaderHandler;
 pub use collect_stats_handler::CollectStatsHandler;
-pub use initialize_memory_handler::InitializeMemoryHandler;
 pub use keep_lease_handler::KeepLeaseHandler;
+pub use on_leader_start::OnLeaderStartHandler;
 pub use persist_stats_handler::PersistStatsHandler;
 pub use response_header_handler::ResponseHeaderHandler;
 
 mod check_leader_handler;
 mod collect_stats_handler;
-mod initialize_memory_handler;
 mod instruction;
 mod keep_lease_handler;
 pub(crate) mod node_stat;
+mod on_leader_start;
 mod persist_stats_handler;
 mod response_header_handler;
 
@@ -46,7 +46,7 @@ pub trait HeartbeatHandler: Send + Sync {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &Context,
+        ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()>;
 }
@@ -93,11 +93,15 @@ impl HeartbeatHandlerGroup {
         pushers.remove(key)
     }
 
-    pub async fn handle(&self, req: HeartbeatRequest, ctx: Context) -> Result<HeartbeatResponse> {
+    pub async fn handle(
+        &self,
+        req: HeartbeatRequest,
+        mut ctx: Context,
+    ) -> Result<HeartbeatResponse> {
         let mut acc = HeartbeatAccumulator::default();
         let handlers = self.handlers.read().await;
         for h in handlers.iter() {
-            h.handle(&req, &ctx, &mut acc).await?;
+            h.handle(&req, &mut ctx, &mut acc).await?;
         }
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {

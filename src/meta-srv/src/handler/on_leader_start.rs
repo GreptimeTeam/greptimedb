@@ -12,37 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::v1::meta::HeartbeatRequest;
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::service::store::memory::MemStore;
 
 #[derive(Default)]
-pub struct InitializeMemoryHandler {
-    in_memory: Arc<MemStore>,
-}
-
-impl InitializeMemoryHandler {
-    pub fn new(in_memory: Arc<MemStore>) -> Self {
-        Self { in_memory }
-    }
-}
+pub struct OnLeaderStartHandler;
 
 #[async_trait::async_trait]
-impl HeartbeatHandler for InitializeMemoryHandler {
+impl HeartbeatHandler for OnLeaderStartHandler {
     async fn handle(
         &self,
         _req: &HeartbeatRequest,
-        ctx: &Context,
+        ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         if let Some(election) = &ctx.election {
             if election.in_infancy() {
-                self.in_memory.clear();
+                ctx.reset_in_memory();
             }
         }
         Ok(())

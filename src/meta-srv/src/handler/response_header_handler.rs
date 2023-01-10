@@ -26,7 +26,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        _ctx: &Context,
+        _ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         let HeartbeatRequest { header, .. } = req;
@@ -55,7 +55,7 @@ mod tests {
     async fn test_handle_heartbeat_resp_header() {
         let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
-        let ctx = Context {
+        let mut ctx = Context {
             datanode_lease_secs: 30,
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
@@ -71,7 +71,10 @@ mod tests {
         let mut acc = HeartbeatAccumulator::default();
 
         let response_handler = ResponseHeaderHandler {};
-        response_handler.handle(&req, &ctx, &mut acc).await.unwrap();
+        response_handler
+            .handle(&req, &mut ctx, &mut acc)
+            .await
+            .unwrap();
         let header = std::mem::take(&mut acc.header);
         let res = HeartbeatResponse {
             header,
