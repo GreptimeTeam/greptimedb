@@ -147,7 +147,7 @@ pub struct PyScript {
 impl PyScript {
     /// Register Current Script as UDF, register name is same as script name
     /// FIXME(discord9): possible inject attack?
-    pub(crate) fn register_udf(&self) {
+    pub fn register_udf(&self) {
         let udf = PyUdf::from_copr(self.copr.clone());
         PyUdf::register_as_udf(udf.clone());
         PyUdf::register_to_query_engine(udf, self.query_engine.to_owned());
