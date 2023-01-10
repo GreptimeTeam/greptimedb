@@ -47,4 +47,6 @@ pub struct PartitionEntry {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct CreateDatabase {
     pub name: ObjectName,
+    /// Create if not exists
+    pub if_not_exists: bool,
 }

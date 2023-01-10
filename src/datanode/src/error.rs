@@ -199,6 +199,9 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Schema already exists, name: {}", name))]
+    SchemaExists { name: String, backtrace: Backtrace },
+
     #[snafu(display("Failed to convert alter expr to request: {}", source))]
     AlterExprToRequest {
         #[snafu(backtrace)]
@@ -324,6 +327,7 @@ impl ErrorExt for Error {
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }
             | Error::ConstraintNotSupported { .. }
+            | Error::SchemaExists { .. }
             | Error::ParseTimestamp { .. } => StatusCode::InvalidArguments,
 
             // TODO(yingwen): Further categorize http error.

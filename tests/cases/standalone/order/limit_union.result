@@ -1,0 +1,30 @@
+CREATE TABLE integers(i BIGINT TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO integers VALUES (0), (1), (2), (3), (4);
+
+Affected Rows: 5
+
+SELECT * FROM integers UNION ALL SELECT * FROM integers LIMIT 7;
+
++---+
+| i |
++---+
+| 0 |
+| 1 |
+| 2 |
+| 3 |
+| 4 |
+| 0 |
+| 1 |
++---+
+
+SELECT COUNT(*) FROM (SELECT * FROM integers UNION ALL SELECT * FROM integers LIMIT 7) tbl;
+
+Error: 3001(EngineExecuteQuery), Internal error: create_physical_expr expected same number of fields, got got Arrow schema with 1  and DataFusion schema with 0. This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
+
+DROP TABLE integers;
+
+Affected Rows: 1
+

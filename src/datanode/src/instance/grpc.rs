@@ -35,6 +35,7 @@ impl Instance {
     pub(crate) async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
         let req = CreateDatabaseRequest {
             db_name: expr.database_name,
+            create_if_not_exists: expr.create_if_not_exists,
         };
         self.sql_handler().create_database(req).await
     }
@@ -143,6 +144,7 @@ mod test {
             request: Some(GrpcRequest::Ddl(DdlRequest {
                 expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                     database_name: "my_database".to_string(),
+                    create_if_not_exists: true,
                 })),
             })),
         };

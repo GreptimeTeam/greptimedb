@@ -184,7 +184,7 @@ mod tests {
 
         assert!(SqlQueryHandler::do_query(
             instance.as_ref(),
-            "CREATE DATABASE prometheus",
+            "CREATE DATABASE IF NOT EXISTS prometheus",
             QueryContext::arc()
         )
         .await

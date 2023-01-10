@@ -18,7 +18,8 @@ use std::{fs, path};
 
 use backon::ExponentialBackoff;
 use catalog::remote::MetaKvBackend;
-use catalog::CatalogManagerRef;
+use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -36,7 +37,9 @@ use servers::Mode;
 use snafu::prelude::*;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
+use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
+use table::Table;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig, WalConfig};
 use crate::error::{
@@ -99,6 +102,19 @@ impl Instance {
             Mode::Standalone => {
                 if opts.enable_memory_catalog {
                     let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
+                    let table = NumbersTable::new(MIN_USER_TABLE_ID);
+
+                    catalog
+                        .register_table(RegisterTableRequest {
+                            table_id: MIN_USER_TABLE_ID,
+                            table_name: table.table_info().name.to_string(),
+                            table: Arc::new(table),
+                            catalog: DEFAULT_CATALOG_NAME.to_string(),
+                            schema: DEFAULT_SCHEMA_NAME.to_string(),
+                        })
+                        .await
+                        .expect("Failed to register numbers");
+
                     let factory = QueryEngineFactory::new(catalog.clone());
 
                     (

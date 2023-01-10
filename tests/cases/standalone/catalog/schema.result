@@ -1,0 +1,75 @@
+CREATE SCHEMA test;
+
+Affected Rows: 1
+
+SHOW DATABASES;
+
++---------+
+| Schemas |
++---------+
+| public  |
+| test    |
++---------+
+
+CREATE TABLE test.hello(i BIGINT TIME INDEX);
+
+Affected Rows: 0
+
+DROP TABLE test.hello;
+
+Affected Rows: 1
+
+DROP SCHEMA test;
+
+Error: 1001(Unsupported), SQL statement is not supported:  DROP SCHEMA test;, keyword: SCHEMA
+
+CREATE SCHEMA test;
+
+Affected Rows: 1
+
+CREATE TABLE test.hello(i BIGINT TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test.hello VALUES (2), (3), (4);
+
+Affected Rows: 3
+
+SELECT * FROM test.hello;
+
++---+
+| i |
++---+
+| 2 |
+| 3 |
+| 4 |
++---+
+
+SHOW TABLES;
+
++---------+
+| Tables  |
++---------+
+| numbers |
++---------+
+
+SHOW TABLES FROM test;
+
++--------+
+| Tables |
++--------+
+| hello  |
++--------+
+
+DROP TABLE test.hello;
+
+Affected Rows: 1
+
+DROP SCHEMA test;
+
+Error: 1001(Unsupported), SQL statement is not supported:  DROP SCHEMA test;, keyword: SCHEMA
+
+SELECT * FROM test.hello;
+
+Error: 3000(PlanQuery), Error during planning: table 'greptime.test.hello' not found
+

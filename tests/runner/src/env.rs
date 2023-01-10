@@ -46,8 +46,11 @@ impl EnvController for Env {
     }
 
     /// Stop one [`Database`].
+    #[allow(clippy::print_stdout)]
     async fn stop(&self, _mode: &str, mut database: Self::DB) {
-        database.server_process.kill().await.unwrap()
+        database.server_process.kill().await.unwrap();
+        let _ = database.server_process.wait().await;
+        println!("Stopped DB.");
     }
 }
 

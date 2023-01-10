@@ -112,6 +112,7 @@ mod test {
             request: Some(Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                     database_name: "database_created_through_grpc".to_string(),
+                    create_if_not_exists: true,
                 })),
             })),
         };
@@ -219,8 +220,8 @@ mod test {
         let sql = format!(
             r"
 CREATE TABLE {table_name} (
-    a INT, 
-    ts TIMESTAMP, 
+    a INT,
+    ts TIMESTAMP,
     TIME INDEX (ts)
 ) PARTITION BY RANGE COLUMNS(a) (
     PARTITION r0 VALUES LESS THAN (10),

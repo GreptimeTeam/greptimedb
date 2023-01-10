@@ -1,0 +1,110 @@
+CREATE TABLE test(i INTEGER, j INTEGER, t BIGINT TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (1, 1, 1), (NULL, 1, 2), (1, NULL, 3);
+
+Affected Rows: 3
+
+SELECT * FROM test ORDER BY i NULLS FIRST, j NULLS LAST;
+
++---+---+---+
+| i | j | t |
++---+---+---+
+|   | 1 | 2 |
+| 1 | 1 | 1 |
+| 1 |   | 3 |
++---+---+---+
+
+SELECT * FROM test ORDER BY i NULLS FIRST, j NULLS FIRST;
+
++---+---+---+
+| i | j | t |
++---+---+---+
+|   | 1 | 2 |
+| 1 |   | 3 |
+| 1 | 1 | 1 |
++---+---+---+
+
+SELECT * FROM test ORDER BY i NULLS LAST, j NULLS FIRST;
+
++---+---+---+
+| i | j | t |
++---+---+---+
+| 1 |   | 3 |
+| 1 | 1 | 1 |
+|   | 1 | 2 |
++---+---+---+
+
+SELECT i, j, row_number() OVER (PARTITION BY i ORDER BY j NULLS FIRST) FROM test ORDER BY i NULLS FIRST, j NULLS FIRST;
+
++---+---+--------------+
+| i | j | ROW_NUMBER() |
++---+---+--------------+
+|   | 1 | 1            |
+| 1 |   | 1            |
+| 1 | 1 | 2            |
++---+---+--------------+
+
+SELECT i, j, row_number() OVER (PARTITION BY i ORDER BY j NULLS LAST) FROM test ORDER BY i NULLS FIRST, j NULLS FIRST;
+
++---+---+--------------+
+| i | j | ROW_NUMBER() |
++---+---+--------------+
+|   | 1 | 1            |
+| 1 |   | 2            |
+| 1 | 1 | 1            |
++---+---+--------------+
+
+SELECT * FROM test ORDER BY i NULLS FIRST, j NULLS LAST LIMIT 2;
+
++---+---+---+
+| i | j | t |
++---+---+---+
+|   | 1 | 2 |
+| 1 | 1 | 1 |
++---+---+---+
+
+SELECT * FROM test ORDER BY i NULLS LAST, j NULLS LAST LIMIT 2;
+
++---+---+---+
+| i | j | t |
++---+---+---+
+| 1 | 1 | 1 |
+| 1 |   | 3 |
++---+---+---+
+
+SELECT * FROM test ORDER BY i;
+
++---+---+---+
+| i | j | t |
++---+---+---+
+| 1 | 1 | 1 |
+| 1 |   | 3 |
+|   | 1 | 2 |
++---+---+---+
+
+SELECT * FROM test ORDER BY i NULLS FIRST;
+
++---+---+---+
+| i | j | t |
++---+---+---+
+|   | 1 | 2 |
+| 1 | 1 | 1 |
+| 1 |   | 3 |
++---+---+---+
+
+SELECT * FROM test ORDER BY i NULLS LAST;
+
++---+---+---+
+| i | j | t |
++---+---+---+
+| 1 | 1 | 1 |
+| 1 |   | 3 |
+|   | 1 | 2 |
++---+---+---+
+
+DROP TABLE test;
+
+Affected Rows: 1
+
