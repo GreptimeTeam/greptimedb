@@ -1,6 +1,6 @@
 CREATE TABLE test(i BIGINT TIME INDEX, j INTEGER NOT NULL);
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO test VALUES (1, 1), (2, 2);
 

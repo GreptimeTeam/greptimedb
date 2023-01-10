@@ -40,7 +40,7 @@ SELECT SUM(-1) FROM numbers WHERE number>10000 limit 1000;
 
 CREATE TABLE bigints(b BIGINT TIME INDEX);
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO bigints values (4611686018427387904), (4611686018427388904), (1);
 
@@ -56,7 +56,7 @@ SELECT SUM(b) FROM bigints;
 
 CREATE TABLE doubles(n DOUBLE, ts BIGINT TIME INDEX);
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO doubles (n, ts) VALUES (9007199254740992, 1), (1, 2), (1, 3), (0, 4);
 

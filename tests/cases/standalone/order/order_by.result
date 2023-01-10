@@ -1,6 +1,6 @@
 CREATE TABLE test (a BIGINT, b INTEGER, time index(a));
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO test VALUES (11, 22), (12, 21), (13, 22);
 
@@ -194,7 +194,7 @@ SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY k;
 
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY l;
 
-Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT a - 10 AS k FROM test UNION SELECT a - 10 AS l FROM test ORDER BY l, source: Schema error: No field named 'l'. Valid fields are 'k'." }
+Error: 3000(PlanQuery), Schema error: No field named 'l'. Valid fields are 'k'.
 
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY 1-k;
 
@@ -208,11 +208,11 @@ SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY 1-k;
 
 SELECT a-10 AS k FROM test UNION SELECT a-10 AS l FROM test ORDER BY a-10;
 
-Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT a - 10 AS k FROM test UNION SELECT a - 10 AS l FROM test ORDER BY a - 10, source: Schema error: No field named 'a'. Valid fields are 'k'." }
+Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'k'.
 
 SELECT a-10 AS k FROM test UNION SELECT a-11 AS l FROM test ORDER BY a-11;
 
-Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT a - 10 AS k FROM test UNION SELECT a - 11 AS l FROM test ORDER BY a - 11, source: Schema error: No field named 'a'. Valid fields are 'k'." }
+Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'k'.
 
 DROP TABLE test;
 

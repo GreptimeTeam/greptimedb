@@ -1,30 +1,30 @@
 CREATE TABLE integers (i BIGINT);
 
-Failed to execute, error: Datanode { code: 2000, msg: "Failed to execute sql, source: Failure during query execution, source: Cannot parse SQL, source: Unexpected token while parsing SQL statement:  CREATE TABLE integers (i BIGINT);, expected: 'TIME INDEX', found: ), source: sql parser error: Expected TIME, found: )" }
+Error: 2000(InvalidSyntax), sql parser error: Expected TIME, found: )
 
 CREATE TABLE integers (i BIGINT TIME INDEX);
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE IF NOT EXISTS integers (i BIGINT TIME INDEX);
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE test1 (i INTEGER, j INTEGER);
 
-Failed to execute, error: Datanode { code: 1004, msg: "Missing timestamp column in request" }
+Error: 1004(InvalidArguments), Missing timestamp column in request
 
 CREATE TABLE test1 (i INTEGER, j BIGINT TIME INDEX NOT NULL);
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX NULL);
 
-Failed to execute, error: Datanode { code: 2000, msg: "Failed to execute sql, source: Failure during query execution, source: Cannot parse SQL, source: Unexpected token while parsing SQL statement:  CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX NULL);, expected: 'NOT NULL', found: NULL, source: sql parser error: Expected NOT, found: NULL" }
+Error: 2000(InvalidSyntax), sql parser error: Expected NOT, found: NULL
 
 CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX);
 
-Affected Rows: 1
+Affected Rows: 0
 
 DESC TABLE integers;
 

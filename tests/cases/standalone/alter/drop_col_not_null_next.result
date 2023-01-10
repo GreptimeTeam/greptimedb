@@ -1,6 +1,6 @@
 CREATE TABLE test(i BIGINT TIME INDEX, j INTEGER, k INTEGER NOT NULL);
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO test VALUES (1, 1, 11), (2, 2, 12);
 
@@ -21,7 +21,7 @@ Affected Rows: 0
 
 INSERT INTO test VALUES (3, NULL);
 
-Failed to execute, error: Datanode { code: 1004, msg: "Failed to insert value to table: greptime.public.test, source: Failed to operate table, source: Column k is not null but input has null" }
+Error: 1004(InvalidArguments), Column k is not null but input has null
 
 INSERT INTO test VALUES (3, 13);
 

@@ -1,6 +1,6 @@
 CREATE TABLE strings(i STRING, t BIGINT, time index(t));
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO strings VALUES ('â‚(', 1);
 
@@ -8,7 +8,7 @@ Affected Rows: 1
 
 INSERT INTO strings VALUES (3, 4);
 
-Failed to execute, error: Datanode { code: 2000, msg: "Failed to parse sql value, source: Failed to parse value: Fail to parse number 3, invalid column type: String(StringType)" }
+Error: 2000(InvalidSyntax), Failed to parse value: Fail to parse number 3, invalid column type: String(StringType)
 
 SELECT * FROM strings WHERE i = 'â‚(';
 
@@ -20,7 +20,7 @@ SELECT * FROM strings WHERE i = 'â‚(';
 
 CREATE TABLE a(i integer, j BIGINT, time index(j));
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO a VALUES (1, 2);
 
@@ -28,17 +28,17 @@ Affected Rows: 1
 
 INSERT INTO a VALUES (1);
 
-Failed to execute, error: Datanode { code: 1004, msg: "Columns and values number mismatch, columns: 2, values: 1" }
+Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 1
 
 INSERT INTO a VALUES (1,2,3);
 
-Failed to execute, error: Datanode { code: 1004, msg: "Columns and values number mismatch, columns: 2, values: 3" }
+Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 3
 
 INSERT INTO a VALUES (1,2),(3);
 
-Failed to execute, error: Datanode { code: 1004, msg: "Columns and values number mismatch, columns: 2, values: 1" }
+Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 1
 
 INSERT INTO a VALUES (1,2),(3,4,5);
 
-Failed to execute, error: Datanode { code: 1004, msg: "Columns and values number mismatch, columns: 2, values: 3" }
+Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 3
 

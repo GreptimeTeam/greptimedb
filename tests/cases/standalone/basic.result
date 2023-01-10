@@ -57,3 +57,4 @@ SELECT idc, avg(memory_util) FROM system_metrics GROUP BY idc ORDER BY idc;
 DROP TABLE system_metrics;
 
 Affected Rows: 1
+

@@ -1,6 +1,6 @@
 CREATE TABLE test (a BIGINT TIME INDEX, b INTEGER);
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO test VALUES (11, 22), (12, 21), (13, 22);
 
@@ -8,11 +8,11 @@ Affected Rows: 3
 
 SELECT a FROM test ORDER BY 2;
 
-Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT a FROM test ORDER BY 2, source: Error during planning: Order by column out of bounds, specified: 2, max: 1" }
+Error: 3000(PlanQuery), Error during planning: Order by column out of bounds, specified: 2, max: 1
 
 SELECT a FROM test ORDER BY 'hello', a;
 
-Failed to execute, error: Datanode { code: 1003, msg: "status: Unknown, message: \"Failed to poll recordbatch stream, source: Failed to poll stream, source: External error: Arrow error: External error: Error during planning: Sort operation is not applicable to scalar value hello\", details: [], metadata: MetadataMap { headers: {} }" }
+Error: 1003(Internal), External error: Arrow error: External error: Error during planning: Sort operation is not applicable to scalar value hello
 
 SELECT a AS k, b FROM test UNION SELECT a, b AS k FROM test ORDER BY k;
 
@@ -36,21 +36,21 @@ SELECT a AS k, b FROM test UNION SELECT a AS k, b FROM test ORDER BY k;
 
 SELECT a % 2, b FROM test UNION SELECT b, a % 2 AS k ORDER BY a % 2;
 
-Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT a % 2, b FROM test UNION SELECT b, a % 2 AS k ORDER BY a % 2, source: Schema error: No field named 'b'. Valid fields are ." }
+Error: 3000(PlanQuery), Schema error: No field named 'b'. Valid fields are .
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY a % 2;
 
-Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY a % 2, source: Schema error: No field named 'a'. Valid fields are 'test.a % Int64(2)', 'b'." }
+Error: 3000(PlanQuery), Schema error: No field named 'a'. Valid fields are 'test.a % Int64(2)', 'b'.
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 3;
 
-Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY 3, source: Error during planning: Order by column out of bounds, specified: 3, max: 2" }
+Error: 3000(PlanQuery), Error during planning: Order by column out of bounds, specified: 3, max: 2
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k, b FROM test ORDER BY -1;
 
-Failed to execute, error: Datanode { code: 1003, msg: "status: Unknown, message: \"Failed to poll recordbatch stream, source: Failed to poll stream, source: External error: Arrow error: External error: Error during planning: Sort operation is not applicable to scalar value -1\", details: [], metadata: MetadataMap { headers: {} }" }
+Error: 1003(Internal), External error: Arrow error: External error: Error during planning: Sort operation is not applicable to scalar value -1
 
 SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;
 
-Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1, source: Error during planning: Union queries must have the same number of columns, (left is 2, right is 1)" }
+Error: 3000(PlanQuery), Error during planning: Union queries must have the same number of columns, (left is 2, right is 1)
 

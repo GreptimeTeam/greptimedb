@@ -1,6 +1,6 @@
 CREATE TABLE test(i INTEGER, j BIGINT TIME INDEX);
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO test VALUES (1, 1), (2, 2);
 
@@ -21,7 +21,7 @@ SELECT * FROM test;
 
 ALTER TABLE test DROP COLUMN j;
 
-Failed to execute, error: Datanode { code: 1004, msg: "Failed to alter table greptime.public.test, source: Failed to operate table, source: Failed to alter table test, source: Not allowed to remove index column j from table test" }
+Error: 1004(InvalidArguments), Not allowed to remove index column j from table test
 
 DROP TABLE test;
 

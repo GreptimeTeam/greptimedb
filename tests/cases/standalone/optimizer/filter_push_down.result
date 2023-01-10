@@ -1,6 +1,6 @@
 CREATE TABLE integers(i INTEGER, j BIGINT TIME INDEX);
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO integers VALUES (1, 1), (2, 2), (3, 3), (NULL, 4);
 
@@ -45,7 +45,7 @@ SELECT i1.i,i2.i FROM integers i1 JOIN integers i2 ON i1.i=i2.i WHERE i1.i>1 ORD
 
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=1 WHERE i1.i>2 ORDER BY 2;
 
-Failed to execute, error: Datanode { code: 1003, msg: "status: Unknown, message: \"Failed to poll recordbatch stream, source: Failed to poll stream, source: External error: Arrow error: External error: External error: Not expected to run ExecutionPlan more than once\", details: [], metadata: MetadataMap { headers: {} }" }
+Error: 1003(Internal), External error: Arrow error: External error: External error: Not expected to run ExecutionPlan more than once
 
 SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=0 WHERE i2.i IS NOT NULL ORDER BY 2;
 
@@ -85,19 +85,19 @@ SELECT i1.i,i2.i FROM integers i1 LEFT OUTER JOIN integers i2 ON 1=1 WHERE i1.i=
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) ORDER BY i;
 
-Failed to execute, error: Datanode { code: 3001, msg: "Failed to execute sql, source: Failure during query execution, source: Fail to create physical plan: This feature is not implemented: Physical plan does not support logical expression (<subquery>)" }
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Physical plan does not support logical expression (<subquery>)
 
 SELECT * FROM integers WHERE i NOT IN ((SELECT i FROM integers WHERE i=1)) ORDER BY i;
 
-Failed to execute, error: Datanode { code: 3001, msg: "Failed to execute sql, source: Failure during query execution, source: Fail to create physical plan: This feature is not implemented: Physical plan does not support logical expression (<subquery>)" }
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Physical plan does not support logical expression (<subquery>)
 
 SELECT * FROM integers WHERE i IN ((SELECT i FROM integers)) AND i<3 ORDER BY i;
 
-Failed to execute, error: Datanode { code: 3001, msg: "Failed to execute sql, source: Failure during query execution, source: Fail to create physical plan: This feature is not implemented: Physical plan does not support logical expression (<subquery>)" }
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Physical plan does not support logical expression (<subquery>)
 
 SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i IN ((SELECT i FROM integers)) AND i1.i=i2.i ORDER BY 1;
 
-Failed to execute, error: Datanode { code: 3001, msg: "Failed to execute sql, source: Failure during query execution, source: Fail to create physical plan: This feature is not implemented: Physical plan does not support logical expression (<subquery>)" }
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Physical plan does not support logical expression (<subquery>)
 
 SELECT * FROM integers i1 WHERE EXISTS(SELECT i FROM integers WHERE i=i1.i) ORDER BY i1.i;
 
@@ -119,7 +119,7 @@ SELECT * FROM integers i1 WHERE NOT EXISTS(SELECT i FROM integers WHERE i=i1.i) 
 
 SELECT i1.i,i2.i FROM integers i1, integers i2 WHERE i1.i=(SELECT i FROM integers WHERE i1.i=i) AND i1.i=i2.i ORDER BY i1.i;
 
-Failed to execute, error: Datanode { code: 3001, msg: "Failed to execute sql, source: Failure during query execution, source: Fail to create physical plan: This feature is not implemented: Physical plan does not support logical expression (<subquery>)" }
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Physical plan does not support logical expression (<subquery>)
 
 SELECT * FROM (SELECT i1.i AS a, i2.i AS b FROM integers i1, integers i2) a1 WHERE a=b ORDER BY 1;
 

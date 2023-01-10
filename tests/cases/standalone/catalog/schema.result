@@ -13,7 +13,7 @@ SHOW DATABASES;
 
 CREATE TABLE test.hello(i BIGINT TIME INDEX);
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE test.hello;
 
@@ -21,7 +21,7 @@ Affected Rows: 1
 
 DROP SCHEMA test;
 
-Failed to execute, error: Datanode { code: 1001, msg: "Failed to execute sql, source: Failure during query execution, source: Cannot parse SQL, source: SQL statement is not supported:  DROP SCHEMA test;, keyword: SCHEMA" }
+Error: 1001(Unsupported), SQL statement is not supported:  DROP SCHEMA test;, keyword: SCHEMA
 
 CREATE SCHEMA test;
 
@@ -29,7 +29,7 @@ Affected Rows: 1
 
 CREATE TABLE test.hello(i BIGINT TIME INDEX);
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO test.hello VALUES (2), (3), (4);
 
@@ -67,9 +67,9 @@ Affected Rows: 1
 
 DROP SCHEMA test;
 
-Failed to execute, error: Datanode { code: 1001, msg: "Failed to execute sql, source: Failure during query execution, source: Cannot parse SQL, source: SQL statement is not supported:  DROP SCHEMA test;, keyword: SCHEMA" }
+Error: 1001(Unsupported), SQL statement is not supported:  DROP SCHEMA test;, keyword: SCHEMA
 
 SELECT * FROM test.hello;
 
-Failed to execute, error: Datanode { code: 3000, msg: "Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT * FROM test.hello, source: Error during planning: table 'greptime.test.hello' not found" }
+Error: 3000(PlanQuery), Error during planning: table 'greptime.test.hello' not found
 

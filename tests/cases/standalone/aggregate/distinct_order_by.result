@@ -1,6 +1,6 @@
 CREATE TABLE integers(i BIGINT TIME INDEX);
 
-Affected Rows: 1
+Affected Rows: 0
 
 INSERT INTO integers VALUES (1), (2), (3);
 
@@ -26,7 +26,7 @@ SELECT DISTINCT i % 2 FROM integers WHERE i<3 ORDER BY i;
 
 SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;
 
-Failed to execute, error: Datanode { code: 1001, msg: "Failed to execute sql, source: Failure during query execution, source: Cannot parse SQL, source: SQL statement is not supported:  SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;, keyword: %" }
+Error: 1001(Unsupported), SQL statement is not supported:  SELECT DISTINCT ON (1) i % 2, i FROM integers WHERE i<3 ORDER BY i;, keyword: %
 
 SELECT DISTINCT integers.i FROM integers ORDER BY i DESC;
 
