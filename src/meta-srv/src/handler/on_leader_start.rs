@@ -12,30 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{Error, HeartbeatRequest};
+use api::v1::meta::HeartbeatRequest;
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
 #[derive(Default)]
-pub struct CheckLeaderHandler;
+pub struct OnLeaderStartHandler;
 
 #[async_trait::async_trait]
-impl HeartbeatHandler for CheckLeaderHandler {
+impl HeartbeatHandler for OnLeaderStartHandler {
     async fn handle(
         &self,
         _req: &HeartbeatRequest,
         ctx: &mut Context,
-        acc: &mut HeartbeatAccumulator,
+        _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         if let Some(election) = &ctx.election {
-            if election.is_leader() {
-                return Ok(());
-            }
-            if let Some(header) = &mut acc.header {
-                header.error = Some(Error::is_not_leader());
-                ctx.set_skip_all();
+            if election.in_infancy() {
+                ctx.reset_in_memory();
             }
         }
         Ok(())

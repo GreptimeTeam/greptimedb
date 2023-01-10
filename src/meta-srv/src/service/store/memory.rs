@@ -15,7 +15,6 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::sync::Arc;
 
 use api::v1::meta::{
     BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
@@ -25,12 +24,10 @@ use api::v1::meta::{
 use parking_lot::RwLock;
 
 use crate::error::Result;
-use crate::service::store::kv::KvStore;
+use crate::service::store::kv::{KvStore, ResetableKvStore};
 
-/// Only for mock test
-#[derive(Clone)]
 pub struct MemStore {
-    inner: Arc<RwLock<BTreeMap<Vec<u8>, Vec<u8>>>>,
+    inner: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
 impl Default for MemStore {
@@ -42,8 +39,14 @@ impl Default for MemStore {
 impl MemStore {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(Default::default())),
+            inner: RwLock::new(Default::default()),
         }
+    }
+}
+
+impl ResetableKvStore for MemStore {
+    fn reset(&self) {
+        self.inner.write().clear();
     }
 }
 

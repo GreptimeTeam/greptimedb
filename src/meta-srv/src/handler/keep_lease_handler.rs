@@ -58,7 +58,7 @@ impl HeartbeatHandler for KeepLeaseHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &Context,
+        ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         if ctx.is_skip_all() {
