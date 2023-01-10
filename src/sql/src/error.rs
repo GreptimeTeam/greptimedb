@@ -51,11 +51,6 @@ pub enum Error {
         expr,
         column_name
     ))]
-    UnsupportedDefaultValue {
-        column_name: String,
-        expr: Expr,
-        backtrace: Backtrace,
-    },
 
     // Syntax error from sql parser.
     #[snafu(display("Syntax error, sql: {}, source: {}", sql, source))]
@@ -68,19 +63,6 @@ pub enum Error {
         "Invalid time index, it should contains only one column, sql: {}.",
         sql
     ))]
-    InvalidTimeIndex { sql: String, backtrace: Backtrace },
-
-    #[snafu(display("Invalid SQL, error: {}", msg))]
-    InvalidSql { msg: String, backtrace: Backtrace },
-
-    #[snafu(display("SQL data type not supported yet: {:?}", t))]
-    SqlTypeNotSupported {
-        t: crate::ast::DataType,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to parse value: {}", msg))]
-    ParseSqlValue { msg: String, backtrace: Backtrace },
 
     #[snafu(display(
         "Column {} expect type: {:?}, actual: {:?}",
@@ -95,20 +77,6 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid database name: {}", name))]
-    InvalidDatabaseName { name: String, backtrace: Backtrace },
-
-    #[snafu(display("Invalid table name: {}", name))]
-    InvalidTableName { name: String, backtrace: Backtrace },
-
-    #[snafu(display("Invalid default constraint, column: {}, source: {}", column, source))]
-    InvalidDefault {
-        column: String,
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Unsupported ALTER TABLE statement: {}", msg))]
-    UnsupportedAlterTableStatement { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to serialize column default constraint, source: {}", source))]
     SerializeColumnDefaultConstraint {
