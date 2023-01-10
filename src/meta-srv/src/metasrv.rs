@@ -21,13 +21,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::election::Election;
 use crate::handler::{
-    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
-    PersistStatsHandler, ResponseHeaderHandler,
+    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, InitializeMemoryHandler,
+    KeepLeaseHandler, PersistStatsHandler, ResponseHeaderHandler,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::Selector;
 use crate::sequence::{Sequence, SequenceRef};
 use crate::service::store::kv::KvStoreRef;
+use crate::service::store::memory::MemStore;
 
 pub const TABLE_ID_SEQ: &str = "table_id";
 
@@ -55,6 +56,7 @@ impl Default for MetaSrvOptions {
 pub struct Context {
     pub datanode_lease_secs: i64,
     pub server_addr: String,
+    pub in_memory: Arc<MemStore>,
     pub kv_store: KvStoreRef,
     pub election: Option<ElectionRef>,
     pub skip_all: Arc<AtomicBool>,
@@ -79,6 +81,9 @@ pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 pub struct MetaSrv {
     started: Arc<AtomicBool>,
     options: MetaSrvOptions,
+    // It is only valid at the leader node and is used to temporarily
+    // store some data that will not be persisted.
+    in_memory: Arc<MemStore>,
     kv_store: KvStoreRef,
     table_id_sequence: SequenceRef,
     selector: SelectorRef,
@@ -97,26 +102,30 @@ impl MetaSrv {
         let started = Arc::new(AtomicBool::new(false));
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector {}));
+        let in_memory = Arc::new(MemStore::default());
         let handler_group = match handler_group {
             Some(hg) => hg,
             None => {
-                let hg = HeartbeatHandlerGroup::default();
-                let kv_store = kv_store.clone();
-                hg.add_handler(ResponseHeaderHandler::default()).await;
+                let group = HeartbeatHandlerGroup::default();
+                let keep_lease_handler = KeepLeaseHandler::new(kv_store.clone());
+                let initialize_memory_handler = InitializeMemoryHandler::new(in_memory.clone());
+                group.add_handler(ResponseHeaderHandler::default()).await;
                 // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
                 // because even if the current meta-server node is no longer the leader it can
                 // still help the datanode to keep lease.
-                hg.add_handler(KeepLeaseHandler::new(kv_store)).await;
-                hg.add_handler(CheckLeaderHandler::default()).await;
-                hg.add_handler(CollectStatsHandler::default()).await;
-                hg.add_handler(PersistStatsHandler::default()).await;
-                hg
+                group.add_handler(keep_lease_handler).await;
+                group.add_handler(CheckLeaderHandler::default()).await;
+                group.add_handler(initialize_memory_handler).await;
+                group.add_handler(CollectStatsHandler::default()).await;
+                group.add_handler(PersistStatsHandler::default()).await;
+                group
             }
         };
 
         Self {
             started,
             options,
+            in_memory,
             kv_store,
             table_id_sequence,
             selector,
@@ -163,6 +172,11 @@ impl MetaSrv {
     }
 
     #[inline]
+    pub fn in_memory(&self) -> Arc<MemStore> {
+        self.in_memory.clone()
+    }
+
+    #[inline]
     pub fn kv_store(&self) -> KvStoreRef {
         self.kv_store.clone()
     }
@@ -191,12 +205,14 @@ impl MetaSrv {
     pub fn new_ctx(&self) -> Context {
         let datanode_lease_secs = self.options().datanode_lease_secs;
         let server_addr = self.options().server_addr.clone();
+        let in_memory = self.in_memory();
         let kv_store = self.kv_store();
         let election = self.election();
         let skip_all = Arc::new(AtomicBool::new(false));
         Context {
             datanode_lease_secs,
             server_addr,
+            in_memory,
             kv_store,
             election,
             skip_all,

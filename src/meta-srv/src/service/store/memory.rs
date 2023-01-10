@@ -43,7 +43,7 @@ impl MemStore {
         }
     }
 
-    pub fn clear(&mut self) {
+    pub fn clear(&self) {
         self.inner.write().clear();
     }
 }

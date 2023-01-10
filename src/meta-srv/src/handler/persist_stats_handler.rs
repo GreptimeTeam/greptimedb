@@ -71,10 +71,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_datanode_stats() {
+        let in_memory = Arc::new(MemStore::new());
         let kv_store = Arc::new(MemStore::new());
         let ctx = Context {
             datanode_lease_secs: 30,
             server_addr: "127.0.0.1:0000".to_string(),
+            in_memory,
             kv_store,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),

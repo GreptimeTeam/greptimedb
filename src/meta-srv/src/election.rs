@@ -27,6 +27,13 @@ pub trait Election: Send + Sync {
     /// Returns `true` if current node is the leader.
     fn is_leader(&self) -> bool;
 
+    /// When a new leader is born, it may need some initialization
+    /// operations (asynchronous), this method tells us when these
+    /// initialization operations can be performed.
+    ///
+    /// note: a new leader will only return true on the first call.
+    fn in_infancy(&self) -> bool;
+
     /// Campaign waits to acquire leadership in an election.
     ///
     /// Multiple sessions can participate in the election,

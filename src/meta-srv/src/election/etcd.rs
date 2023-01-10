@@ -29,6 +29,7 @@ pub struct EtcdElection {
     leader_value: String,
     client: Client,
     is_leader: AtomicBool,
+    infancy: AtomicBool,
 }
 
 impl EtcdElection {
@@ -46,6 +47,7 @@ impl EtcdElection {
             leader_value,
             client,
             is_leader: AtomicBool::new(false),
+            infancy: AtomicBool::new(false),
         }))
     }
 }
@@ -56,6 +58,12 @@ impl Election for EtcdElection {
 
     fn is_leader(&self) -> bool {
         self.is_leader.load(Ordering::Relaxed)
+    }
+
+    fn in_infancy(&self) -> bool {
+        self.infancy
+            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 
     async fn campaign(&self) -> Result<()> {
@@ -103,6 +111,7 @@ impl Election for EtcdElection {
                             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                             .is_ok()
                         {
+                            self.infancy.store(true, Ordering::Relaxed);
                             info!(
                                 "[{}] becoming leader: {:?}, lease: {}",
                                 &self.leader_value,
