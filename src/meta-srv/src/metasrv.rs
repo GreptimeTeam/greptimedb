@@ -27,7 +27,7 @@ use crate::handler::{
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::Selector;
 use crate::sequence::{Sequence, SequenceRef};
-use crate::service::store::kv::KvStoreRef;
+use crate::service::store::kv::{KvStoreRef, ResetableKvStoreRef};
 use crate::service::store::memory::MemStore;
 
 pub const TABLE_ID_SEQ: &str = "table_id";
@@ -56,7 +56,7 @@ impl Default for MetaSrvOptions {
 pub struct Context {
     pub datanode_lease_secs: i64,
     pub server_addr: String,
-    pub in_memory: Arc<MemStore>,
+    pub in_memory: ResetableKvStoreRef,
     pub kv_store: KvStoreRef,
     pub election: Option<ElectionRef>,
     pub skip_all: Arc<AtomicBool>,
@@ -72,7 +72,7 @@ impl Context {
     }
 
     pub fn reset_in_memory(&self) {
-        self.in_memory.clear();
+        self.in_memory.reset();
     }
 }
 
@@ -87,7 +87,7 @@ pub struct MetaSrv {
     options: MetaSrvOptions,
     // It is only valid at the leader node and is used to temporarily
     // store some data that will not be persisted.
-    in_memory: Arc<MemStore>,
+    in_memory: ResetableKvStoreRef,
     kv_store: KvStoreRef,
     table_id_sequence: SequenceRef,
     selector: SelectorRef,
@@ -118,7 +118,7 @@ impl MetaSrv {
                 // still help the datanode to keep lease.
                 group.add_handler(keep_lease_handler).await;
                 group.add_handler(CheckLeaderHandler::default()).await;
-                group.add_handler(OnLeaderStartHandler).await;
+                group.add_handler(OnLeaderStartHandler::default()).await;
                 group.add_handler(CollectStatsHandler::default()).await;
                 group.add_handler(PersistStatsHandler::default()).await;
                 group
@@ -175,7 +175,7 @@ impl MetaSrv {
     }
 
     #[inline]
-    pub fn in_memory(&self) -> Arc<MemStore> {
+    pub fn in_memory(&self) -> ResetableKvStoreRef {
         self.in_memory.clone()
     }
 

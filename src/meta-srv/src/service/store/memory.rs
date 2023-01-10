@@ -24,7 +24,7 @@ use api::v1::meta::{
 use parking_lot::RwLock;
 
 use crate::error::Result;
-use crate::service::store::kv::KvStore;
+use crate::service::store::kv::{KvStore, ResetableKvStore};
 
 pub struct MemStore {
     inner: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,
@@ -42,8 +42,10 @@ impl MemStore {
             inner: RwLock::new(Default::default()),
         }
     }
+}
 
-    pub fn clear(&self) {
+impl ResetableKvStore for MemStore {
+    fn reset(&self) {
         self.inner.write().clear();
     }
 }
