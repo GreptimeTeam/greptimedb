@@ -298,7 +298,7 @@ pub(crate) async fn create_log_store(wal_config: &WalConfig) -> Result<RaftEngin
     let log_config = LogConfig {
         file_size: wal_config.file_size,
         log_file_dir: wal_config.dir.clone(),
-        purge_interval: Duration::from_secs(wal_config.purge_interval),
+        purge_interval: wal_config.purge_interval,
         purge_threshold: wal_config.purge_threshold,
         read_batch_size: wal_config.read_batch_size,
         sync_write: wal_config.sync_write,

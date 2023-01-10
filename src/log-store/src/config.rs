@@ -16,10 +16,10 @@ use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct LogConfig {
-    pub file_size: usize,
+    pub file_size: u64,
     pub log_file_dir: String,
     pub purge_interval: Duration,
-    pub purge_threshold: usize,
+    pub purge_threshold: u64,
     pub read_batch_size: usize,
     pub sync_write: bool,
 }
