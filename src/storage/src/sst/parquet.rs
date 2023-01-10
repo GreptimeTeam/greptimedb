@@ -161,7 +161,7 @@ fn decode_timestamp_range_inner(
         ConcreteDataType::Timestamp(type_) => type_.unit(),
         _ => {
             return DecodeParquetTimeRangeSnafu {
-                msg: format!("Unexpected timestamp column datatype: {:?}", ts_datatype),
+                msg: format!("Unexpected timestamp column datatype: {ts_datatype:?}"),
             }
             .fail();
         }
@@ -457,10 +457,19 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
 
-        writer
+        let SstInfo {
+            start_timestamp,
+            end_timestamp,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
+
+        assert_eq!(Some(Timestamp::new_millisecond(0)), start_timestamp);
+        assert_eq!(
+            Some(Timestamp::new_millisecond((rows_total - 1) as i64)),
+            end_timestamp
+        );
 
         let operator = ObjectStore::new(
             object_store::backend::fs::Builder::default()
@@ -521,10 +530,16 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
 
-        writer
+        let SstInfo {
+            start_timestamp,
+            end_timestamp,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
+
+        assert_eq!(Some(Timestamp::new_millisecond(1000)), start_timestamp);
+        assert_eq!(Some(Timestamp::new_millisecond(2003)), end_timestamp);
 
         let operator = ObjectStore::new(
             object_store::backend::fs::Builder::default()
