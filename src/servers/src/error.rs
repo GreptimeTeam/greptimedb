@@ -347,11 +347,12 @@ impl From<Error> for tonic::Status {
 
         // If either of the status_code or error msg cannot convert to valid HTTP header value
         // (which is a very rare case), just ignore. Client will use Tonic status code and message.
-        if let Ok(code) = HeaderValue::from_bytes((err.status_code() as u32).to_string().as_bytes())
-        {
+        if let Ok(code) = HeaderValue::from_bytes(err.status_code().to_string().as_bytes()) {
+            println!("code: {:?}", code);
             headers.insert(INNER_ERROR_CODE, code);
         }
-        if let Ok(err_msg) = HeaderValue::from_bytes(err.to_string().as_bytes()) {
+        let root_error = err.iter_chain().last().unwrap();
+        if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
             headers.insert(INNER_ERROR_MSG, err_msg);
         }
 

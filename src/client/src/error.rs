@@ -25,18 +25,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display(
-        "Failed to do Flight get, addr: {}, code: {}, err_msg: {}",
-        addr,
-        code,
-        err_msg
-    ))]
-    FlightGet {
-        addr: String,
-        code: u32,
-        err_msg: String,
-        backtrace: Backtrace,
-    },
+    #[snafu(display("Failed to do Flight get, addr: {}, source: {}", addr, source))]
+    FlightGet { addr: String, source: BoxedError },
 
     #[snafu(display("Failed to convert FlightData, source: {}", source))]
     ConvertFlightData {
@@ -69,6 +59,10 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc::error::Error,
     },
+
+    /// Error deserialized from gRPC metadata
+    #[snafu(display("{}", msg))]
+    ExternalError { code: StatusCode, msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -77,13 +71,14 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::IllegalFlightMessages { .. }
-            | Error::FlightGet { .. }
             | Error::ColumnDataType { .. }
             | Error::MissingField { .. } => StatusCode::Internal,
+            Error::FlightGet { source, .. } => source.status_code(),
             Error::CreateChannel { source, .. } | Error::ConvertFlightData { source } => {
                 source.status_code()
             }
             Error::IllegalGrpcClientState { .. } => StatusCode::Unexpected,
+            Error::ExternalError { code, .. } => *code,
         }
     }
 

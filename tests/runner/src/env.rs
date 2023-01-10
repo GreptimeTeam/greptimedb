@@ -20,6 +20,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use client::{Client, Database as DB, Error as ClientError};
+use common_error::ext::ErrorExt;
+use common_error::snafu::ErrorCompat;
 use common_query::Output;
 use sqlness::{Database, EnvController};
 use tokio::process::{Child, Command};
@@ -140,7 +142,15 @@ impl Display for ResultDisplayer {
                 }
                 Output::Stream(_) => unreachable!(),
             },
-            Err(e) => write!(f, "{e}"),
+            Err(e) => {
+                let status_code = e.status_code();
+                let root_cause = e.iter_chain().last().unwrap();
+                write!(
+                    f,
+                    "Error: {}({status_code}), {root_cause}",
+                    status_code as u32
+                )
+            }
         }
     }
 }

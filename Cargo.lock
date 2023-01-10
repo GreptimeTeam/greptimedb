@@ -1433,6 +1433,7 @@ name = "common-error"
 version = "0.1.0"
 dependencies = [
  "snafu",
+ "strum",
 ]
 
 [[package]]
@@ -6896,6 +6897,7 @@ dependencies = [
  "async-trait",
  "client",
  "common-base",
+ "common-error",
  "common-grpc",
  "common-query",
  "sqlness",
