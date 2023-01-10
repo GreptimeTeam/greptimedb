@@ -134,6 +134,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::time::Duration;
 
     use datanode::datanode::ObjectStoreConfig;
     use servers::Mode;
@@ -216,6 +217,11 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+        assert_eq!("/tmp/greptimedb/wal", dn_opts.wal.dir);
+        assert_eq!(Duration::from_secs(600), dn_opts.wal.purge_interval);
+        assert_eq!(1024 * 1024 * 1024, dn_opts.wal.file_size.0);
+        assert_eq!(1024 * 1024 * 1024 * 50, dn_opts.wal.purge_threshold.0);
+        assert_eq!(false, dn_opts.wal.sync_write);
         assert_eq!(Some(42), dn_opts.node_id);
         let MetaClientOpts {
             metasrv_addrs: metasrv_addr,

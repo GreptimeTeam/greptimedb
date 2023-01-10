@@ -296,10 +296,10 @@ pub(crate) async fn create_log_store(wal_config: &WalConfig) -> Result<RaftEngin
     })?;
     info!("Creating logstore with config: {:?}", wal_config);
     let log_config = LogConfig {
-        file_size: wal_config.file_size,
+        file_size: wal_config.file_size.0,
         log_file_dir: wal_config.dir.clone(),
         purge_interval: wal_config.purge_interval,
-        purge_threshold: wal_config.purge_threshold,
+        purge_threshold: wal_config.purge_threshold.0,
         read_batch_size: wal_config.read_batch_size,
         sync_write: wal_config.sync_write,
     };

@@ -11,3 +11,6 @@ common-error = { path = "../error" }
 paste = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 snafu.workspace = true
+
+[dev-dependencies]
+toml = "0.5"

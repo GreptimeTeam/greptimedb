@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
@@ -53,9 +54,9 @@ pub struct WalConfig {
     // wal directory
     pub dir: String,
     // wal file size in bytes
-    pub file_size: u64,
+    pub file_size: ReadableSize,
     // wal purge threshold in bytes
-    pub purge_threshold: u64,
+    pub purge_threshold: ReadableSize,
     // purge interval in seconds
     #[serde(with = "humantime_serde")]
     pub purge_interval: Duration,
@@ -69,8 +70,8 @@ impl Default for WalConfig {
     fn default() -> Self {
         Self {
             dir: "/tmp/greptimedb/wal".to_string(),
-            file_size: 1024 * 1024 * 1024, // log file size 1G
-            purge_threshold: 1024 * 1024 * 1024 * 50, // purge threshold 50G
+            file_size: ReadableSize::gb(1),        // log file size 1G
+            purge_threshold: ReadableSize::gb(50), // purge threshold 50G
             purge_interval: Duration::from_secs(600),
             read_batch_size: 128,
             sync_write: false,
