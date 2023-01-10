@@ -23,7 +23,7 @@ use axum::Router;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_runtime::Builder as RuntimeBuilder;
-use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
+use datanode::datanode::{DatanodeOptions, ObjectStoreConfig, WalConfig};
 use datanode::error::{CreateTableSnafu, Result};
 use datanode::instance::{Instance, InstanceRef};
 use datanode::sql::SqlHandler;
@@ -149,7 +149,10 @@ pub fn create_tmp_dir_and_datanode_opts(
     let (storage, data_tmp_dir) = get_test_store_config(&store_type, name);
 
     let opts = DatanodeOptions {
-        wal_dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+        wal: WalConfig {
+            dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        },
         storage,
         mode: Mode::Standalone,
         ..Default::default()

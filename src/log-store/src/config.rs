@@ -16,11 +16,10 @@ use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct LogConfig {
-    pub append_buffer_size: usize,
-    pub max_log_file_size: usize,
+    pub file_size: u64,
     pub log_file_dir: String,
-    pub gc_interval: Duration,
-    pub purge_threshold: usize,
+    pub purge_interval: Duration,
+    pub purge_threshold: u64,
     pub read_batch_size: usize,
     pub sync_write: bool,
 }
@@ -30,10 +29,9 @@ impl Default for LogConfig {
     /// in tests.
     fn default() -> Self {
         Self {
-            append_buffer_size: 128,
-            max_log_file_size: 1024 * 1024 * 1024,
+            file_size: 1024 * 1024 * 1024,
             log_file_dir: "/tmp/greptimedb".to_string(),
-            gc_interval: Duration::from_secs(10 * 60),
+            purge_interval: Duration::from_secs(10 * 60),
             purge_threshold: 1024 * 1024 * 1024 * 50,
             read_batch_size: 128,
             sync_write: false,
@@ -52,9 +50,8 @@ mod tests {
         common_telemetry::logging::init_default_ut_logging();
         let default = LogConfig::default();
         info!("LogConfig::default(): {:?}", default);
-        assert_eq!(1024 * 1024 * 1024, default.max_log_file_size);
-        assert_eq!(128, default.append_buffer_size);
-        assert_eq!(Duration::from_secs(600), default.gc_interval);
+        assert_eq!(1024 * 1024 * 1024, default.file_size);
+        assert_eq!(Duration::from_secs(600), default.purge_interval);
         assert_eq!(1024 * 1024 * 1024 * 50, default.purge_threshold);
         assert_eq!(128, default.read_batch_size);
         assert!(!default.sync_write);

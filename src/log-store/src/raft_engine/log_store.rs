@@ -51,10 +51,10 @@ impl RaftEngineLogStore {
         // TODO(hl): set according to available disk space
         let raft_engine_config = Config {
             dir: config.log_file_dir.clone(),
-            purge_threshold: ReadableSize(config.purge_threshold as u64),
+            purge_threshold: ReadableSize(config.purge_threshold),
             recovery_mode: RecoveryMode::TolerateTailCorruption,
             batch_compression_threshold: ReadableSize::kb(8),
-            target_file_size: ReadableSize(config.max_log_file_size as u64),
+            target_file_size: ReadableSize(config.file_size),
             ..Default::default()
         };
         let engine = Arc::new(Engine::open(raft_engine_config).context(RaftEngineSnafu)?);
@@ -75,7 +75,7 @@ impl RaftEngineLogStore {
 
     async fn start(&self) -> Result<(), Error> {
         let engine_clone = self.engine.clone();
-        let interval = self.config.gc_interval;
+        let interval = self.config.purge_interval;
         let token = CancellationToken::new();
         let child = token.child_token();
         // TODO(hl): Maybe spawn to a blocking runtime.
@@ -495,9 +495,9 @@ mod tests {
 
         let config = LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
-            max_log_file_size: ReadableSize::mb(2).0 as usize,
-            purge_threshold: ReadableSize::mb(4).0 as usize,
-            gc_interval: Duration::from_secs(5),
+            file_size: ReadableSize::mb(2).0,
+            purge_threshold: ReadableSize::mb(4).0,
+            purge_interval: Duration::from_secs(5),
             ..Default::default()
         };
 
@@ -528,9 +528,9 @@ mod tests {
 
         let config = LogConfig {
             log_file_dir: dir.path().to_str().unwrap().to_string(),
-            max_log_file_size: ReadableSize::mb(2).0 as usize,
-            purge_threshold: ReadableSize::mb(4).0 as usize,
-            gc_interval: Duration::from_secs(5),
+            file_size: ReadableSize::mb(2).0,
+            purge_threshold: ReadableSize::mb(4).0,
+            purge_interval: Duration::from_secs(5),
             ..Default::default()
         };
 
