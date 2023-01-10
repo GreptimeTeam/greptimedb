@@ -327,6 +327,9 @@ impl Stream for RangeManipulateStream {
 }
 
 impl RangeManipulateStream {
+    // Prometheus: https://github.com/prometheus/prometheus/blob/e934d0f01158a1d55fa0ebb035346b195fcc1260/promql/engine.go#L1113-L1198
+    // But they are not exactly the same, because we don't eager-evaluate on the data in this plan.
+    // And the generated timestamp is not aligned to the step. It's expected to do later.
     pub fn manipulate(&self, input: RecordBatch) -> ArrowResult<RecordBatch> {
         let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
         // calculate the range
