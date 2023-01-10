@@ -147,7 +147,6 @@ impl<S: ContextProvider> PromPlanner<S> {
                         expr: prom_expr.clone(),
                     })?)?;
                 let mut func_exprs = self.create_function_expr(func, args.literals)?;
-                println!("{func_exprs:?}");
                 func_exprs.insert(0, self.create_time_index_column_expr()?);
                 LogicalPlanBuilder::from(input)
                     .project(func_exprs)
@@ -298,15 +297,6 @@ impl<S: ContextProvider> PromPlanner<S> {
             .cloned()
             .collect();
 
-        println!(
-            "value columns: {:?}",
-            table
-                .table_info()
-                .meta
-                .value_column_names()
-                .collect::<Vec<_>>()
-        );
-
         self.ctx.value_columns = values;
 
         Ok(())
@@ -360,9 +350,6 @@ impl<S: ContextProvider> PromPlanner<S> {
             }
             .build()
         })?;
-
-        println!("other_input_exprs: {:?}", other_input_exprs);
-        println!("value_columns: {:?}", self.ctx.value_columns);
 
         // TODO(ruihang): handle those functions doesn't require input
         let mut exprs = Vec::with_capacity(self.ctx.value_columns.len());

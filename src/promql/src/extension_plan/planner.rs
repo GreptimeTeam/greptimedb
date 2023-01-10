@@ -23,7 +23,6 @@ impl ExtensionPlanner for PromExtensionPlanner {
         _session_state: &SessionState,
     ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
         if let Some(node) = node.as_any().downcast_ref::<SeriesNormalize>() {
-            println!("{node:?}");
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))
         } else if let Some(node) = node.as_any().downcast_ref::<InstantManipulate>() {
             Ok(Some(node.to_execution_plan(physical_inputs[0].clone())))

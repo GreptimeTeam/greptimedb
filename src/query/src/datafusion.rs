@@ -78,7 +78,7 @@ impl DatafusionQueryEngine {
     fn plan_promql_stmt(&self, stmt: EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let context_provider = DfContextProviderAdapter::new(self.state.clone(), query_ctx);
         PromPlanner::stmt_to_plan(stmt, context_provider)
-            .map(|plan| LogicalPlan::DfPlan(plan))
+            .map(LogicalPlan::DfPlan)
             .map_err(BoxedError::new)
             .context(QueryPlanSnafu)
     }
