@@ -5386,6 +5386,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
+ "promql",
  "promql-parser",
  "rand 0.8.5",
  "serde",

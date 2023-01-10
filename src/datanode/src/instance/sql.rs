@@ -158,6 +158,11 @@ impl Instance {
         let stmt = QueryLanguageParser::parse_sql(sql).context(ExecuteSqlSnafu)?;
         self.execute_stmt(stmt, query_ctx).await
     }
+
+    pub async fn execute_promql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
+        let stmt = QueryLanguageParser::parse_promql(sql).context(ExecuteSqlSnafu)?;
+        self.execute_stmt(stmt, query_ctx).await
+    }
 }
 
 // TODO(LFC): Refactor consideration: move this function to some helper mod,

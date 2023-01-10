@@ -116,9 +116,14 @@ impl TableMeta {
 
     pub fn value_column_names(&self) -> impl Iterator<Item = &String> {
         let columns_schemas = &self.schema.column_schemas();
-        self.value_indices
-            .iter()
-            .map(|idx| &columns_schemas[*idx].name)
+        self.value_indices.iter().filter_map(|idx| {
+            let column = &columns_schemas[*idx];
+            if column.is_time_index() {
+                None
+            } else {
+                Some(&column.name)
+            }
+        })
     }
 
     /// Returns the new [TableMetaBuilder] after applying given `alter_kind`.

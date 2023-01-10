@@ -26,6 +26,7 @@ pub enum Error {
     #[snafu(display("Internal error during build DataFusion plan, error: {}", source))]
     DataFusionPlanning {
         source: datafusion::error::DataFusionError,
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Unexpected plan or expression: {}", desc))]
