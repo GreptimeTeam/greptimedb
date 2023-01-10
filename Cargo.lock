@@ -1323,7 +1323,7 @@ dependencies = [
  "enum_dispatch",
  "futures-util",
  "parking_lot",
- "prost 0.11.3",
+ "prost 0.11.5",
  "prost 0.9.0",
  "rand 0.8.5",
  "snafu",
@@ -5669,15 +5669,9 @@ dependencies = [
 
 [[package]]
 name = "reqsign"
-<<<<<<< HEAD
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c97ac0f771c78ddf4bcb73c8454c76565a7249780e7296767f7e89661b0e045"
-=======
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70bdb7e4031af194baaf4422662b753ae625400ed8d562b3b3530935e1a52a83"
->>>>>>> 6c1c7dcb (feat: enable fail_fast and test_filter in sqlness)
 dependencies = [
  "anyhow",
  "backon",
@@ -6624,12 +6618,8 @@ dependencies = [
  "openmetrics-parser",
  "opensrv-mysql",
  "pgwire",
-<<<<<<< HEAD
  "pin-project",
- "prost 0.11.3",
-=======
  "prost 0.11.5",
->>>>>>> 6c1c7dcb (feat: enable fail_fast and test_filter in sqlness)
  "query",
  "rand 0.8.5",
  "regex",
@@ -7722,21 +7712,6 @@ dependencies = [
  "prost-build 0.11.3",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "tonic-reflection"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0455f730d540a1484bffc3c55c94100b18a662597b982c2e9073f2c55c602616"
-dependencies = [
- "bytes",
- "prost 0.11.5",
- "prost-types 0.11.5",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-build",
 ]
 
 [[package]]

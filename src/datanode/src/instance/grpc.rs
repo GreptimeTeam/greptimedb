@@ -144,6 +144,7 @@ mod test {
             request: Some(GrpcRequest::Ddl(DdlRequest {
                 expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                     database_name: "my_database".to_string(),
+                    create_if_not_exists: true,
                 })),
             })),
         };

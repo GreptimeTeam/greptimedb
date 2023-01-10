@@ -37,7 +37,6 @@ use servers::Mode;
 use snafu::prelude::*;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
-use store_api::logstore::LogStore;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 use table::Table;
