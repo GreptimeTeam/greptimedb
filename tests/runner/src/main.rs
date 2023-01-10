@@ -20,8 +20,17 @@ mod util;
 
 #[tokio::main]
 async fn main() {
+    let mut args: Vec<String> = std::env::args().collect();
+    let test_filter = if args.len() > 1 {
+        args.pop().unwrap()
+    } else {
+        "".to_string()
+    };
+
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir())
+        .fail_fast(true)
+        .test_filter(test_filter)
         .build()
         .unwrap();
     let runner = Runner::new_with_config(config, Env {}).await.unwrap();

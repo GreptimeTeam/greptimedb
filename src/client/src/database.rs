@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
+
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
@@ -113,15 +115,17 @@ impl Database {
             .await
             .map_err(|e| {
                 let code = get_metadata_value(&e, INNER_ERROR_CODE)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(e.code() as u32);
-                let err_msg = get_metadata_value(&e, INNER_ERROR_MSG).unwrap_or(e.to_string());
-                error::FlightGetSnafu {
-                    addr: client.addr(),
-                    code,
-                    err_msg,
-                }
-                .build()
+                    .and_then(|s| StatusCode::from_str(&s).ok())
+                    .unwrap_or(StatusCode::Unknown);
+                let msg = get_metadata_value(&e, INNER_ERROR_MSG).unwrap_or(e.to_string());
+                error::ExternalSnafu { code, msg }
+                    .fail::<()>()
+                    .map_err(BoxedError::new)
+                    .context(error::FlightGetSnafu {
+                        tonic_code: e.code(),
+                        addr: client.addr(),
+                    })
+                    .unwrap_err()
             })?;
 
         let decoder = &mut FlightDecoder::default();

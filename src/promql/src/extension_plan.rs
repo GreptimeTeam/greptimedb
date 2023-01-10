@@ -14,9 +14,11 @@
 
 mod instant_manipulate;
 mod normalize;
+mod range_manipulate;
 
 use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
 pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantManipulateStream};
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
+pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulateStream};
 
 pub(crate) type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;

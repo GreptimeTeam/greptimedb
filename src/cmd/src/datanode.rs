@@ -125,7 +125,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         }
 
         if let Some(wal_dir) = cmd.wal_dir {
-            opts.wal_dir = wal_dir;
+            opts.wal.dir = wal_dir;
         }
         Ok(opts)
     }
@@ -134,6 +134,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::time::Duration;
 
     use datanode::datanode::ObjectStoreConfig;
     use servers::Mode;
@@ -151,7 +152,7 @@ mod tests {
         };
         let options: DatanodeOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
-        assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal_dir);
+        assert_eq!("/tmp/greptimedb/wal".to_string(), options.wal.dir);
         assert_eq!("127.0.0.1:4406".to_string(), options.mysql_addr);
         assert_eq!(4, options.mysql_runtime_size);
         let MetaClientOpts {
@@ -216,6 +217,11 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+        assert_eq!("/tmp/greptimedb/wal", dn_opts.wal.dir);
+        assert_eq!(Duration::from_secs(600), dn_opts.wal.purge_interval);
+        assert_eq!(1024 * 1024 * 1024, dn_opts.wal.file_size.0);
+        assert_eq!(1024 * 1024 * 1024 * 50, dn_opts.wal.purge_threshold.0);
+        assert!(!dn_opts.wal.sync_write);
         assert_eq!(Some(42), dn_opts.node_id);
         let MetaClientOpts {
             metasrv_addrs: metasrv_addr,

@@ -14,8 +14,10 @@
 
 use std::fmt;
 
+use strum::EnumString;
+
 /// Common status code for public API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString)]
 pub enum StatusCode {
     // ====== Begin of common status code ==============
     /// Success.

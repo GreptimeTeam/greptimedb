@@ -1,0 +1,29 @@
+CREATE TABLE test(i INTEGER, j BIGINT TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (1, 1), (2, 2);
+
+Affected Rows: 2
+
+ALTER TABLE test DROP COLUMN i;
+
+Affected Rows: 0
+
+SELECT * FROM test;
+
++---+
+| j |
++---+
+| 1 |
+| 2 |
++---+
+
+ALTER TABLE test DROP COLUMN j;
+
+Error: 1004(InvalidArguments), Not allowed to remove index column j from table test
+
+DROP TABLE test;
+
+Affected Rows: 1
+

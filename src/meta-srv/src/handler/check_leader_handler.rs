@@ -26,7 +26,7 @@ impl HeartbeatHandler for CheckLeaderHandler {
     async fn handle(
         &self,
         _req: &HeartbeatRequest,
-        ctx: &Context,
+        ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         if let Some(election) = &ctx.election {

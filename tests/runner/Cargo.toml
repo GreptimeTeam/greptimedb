@@ -8,7 +8,8 @@ license.workspace = true
 async-trait = "0.1"
 client = { path = "../../src/client" }
 common-base = { path = "../../src/common/base" }
+common-error = { path = "../../src/common/error" }
 common-grpc = { path = "../../src/common/grpc" }
 common-query = { path = "../../src/common/query" }
-sqlness = { git = "https://github.com/ceresdb/sqlness.git" }
+sqlness = "0.1"
 tokio.workspace = true

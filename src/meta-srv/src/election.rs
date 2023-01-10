@@ -17,7 +17,7 @@ pub mod etcd;
 use crate::error::Result;
 
 pub const LEASE_SECS: i64 = 3;
-pub const PROCLAIM_PERIOD_SECS: u64 = LEASE_SECS as u64 * 2 / 3;
+pub const KEEP_ALIVE_PERIOD_SECS: u64 = LEASE_SECS as u64 * 2 / 3;
 pub const ELECTION_KEY: &str = "__meta_srv_election";
 
 #[async_trait::async_trait]
@@ -26,6 +26,13 @@ pub trait Election: Send + Sync {
 
     /// Returns `true` if current node is the leader.
     fn is_leader(&self) -> bool;
+
+    /// When a new leader is born, it may need some initialization
+    /// operations (asynchronous), this method tells us when these
+    /// initialization operations can be performed.
+    ///
+    /// note: a new leader will only return true on the first call.
+    fn in_infancy(&self) -> bool;
 
     /// Campaign waits to acquire leadership in an election.
     ///

@@ -14,13 +14,16 @@
 
 use std::fmt::Display;
 use std::fs::OpenOptions;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use client::{Client, Database as DB, Error as ClientError};
+use common_error::ext::ErrorExt;
+use common_error::snafu::ErrorCompat;
 use common_query::Output;
-use sqlness::{Database, Environment};
+use sqlness::{Database, EnvController};
 use tokio::process::{Child, Command};
 
 use crate::util;
@@ -31,10 +34,10 @@ const SERVER_LOG_FILE: &str = "/tmp/greptime-sqlness.log";
 pub struct Env {}
 
 #[async_trait]
-impl Environment for Env {
+impl EnvController for Env {
     type DB = GreptimeDB;
 
-    async fn start(&self, mode: &str, _config: Option<String>) -> Self::DB {
+    async fn start(&self, mode: &str, _config: Option<&Path>) -> Self::DB {
         match mode {
             "standalone" => Self::start_standalone().await,
             "distributed" => Self::start_distributed().await,
@@ -43,8 +46,11 @@ impl Environment for Env {
     }
 
     /// Stop one [`Database`].
+    #[allow(clippy::print_stdout)]
     async fn stop(&self, _mode: &str, mut database: Self::DB) {
-        database.server_process.kill().await.unwrap()
+        database.server_process.kill().await.unwrap();
+        let _ = database.server_process.wait().await;
+        println!("Stopped DB.");
     }
 }
 
@@ -139,7 +145,15 @@ impl Display for ResultDisplayer {
                 }
                 Output::Stream(_) => unreachable!(),
             },
-            Err(e) => write!(f, "Failed to execute, error: {e:?}"),
+            Err(e) => {
+                let status_code = e.status_code();
+                let root_cause = e.iter_chain().last().unwrap();
+                write!(
+                    f,
+                    "Error: {}({status_code}), {root_cause}",
+                    status_code as u32
+                )
+            }
         }
     }
 }

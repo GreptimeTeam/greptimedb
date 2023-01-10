@@ -33,6 +33,7 @@ pub struct InsertRequest {
 #[derive(Debug, Clone)]
 pub struct CreateDatabaseRequest {
     pub db_name: String,
+    pub create_if_not_exists: bool,
 }
 
 /// Create table request

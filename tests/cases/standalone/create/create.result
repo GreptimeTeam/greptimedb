@@ -1,0 +1,66 @@
+CREATE TABLE integers (i BIGINT);
+
+Error: 2000(InvalidSyntax), sql parser error: Expected TIME, found: )
+
+CREATE TABLE integers (i BIGINT TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE IF NOT EXISTS integers (i BIGINT TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE test1 (i INTEGER, j INTEGER);
+
+Error: 1004(InvalidArguments), Missing timestamp column in request
+
+CREATE TABLE test1 (i INTEGER, j BIGINT TIME INDEX NOT NULL);
+
+Affected Rows: 0
+
+CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX NULL);
+
+Error: 2000(InvalidSyntax), sql parser error: Expected NOT, found: NULL
+
+CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX);
+
+Affected Rows: 0
+
+DESC TABLE integers;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int64 | NO   |         | TIME INDEX    |
++-------+-------+------+---------+---------------+
+
+DESC TABLE test1;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int32 | YES  |         | VALUE         |
+| j     | Int64 | NO   |         | TIME INDEX    |
++-------+-------+------+---------+---------------+
+
+DESC TABLE test2;
+
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int32 | YES  |         | VALUE         |
+| j     | Int64 | NO   |         | TIME INDEX    |
++-------+-------+------+---------+---------------+
+
+DROP TABLE integers;
+
+Affected Rows: 1
+
+DROP TABLE test1;
+
+Affected Rows: 1
+
+DROP TABLE test2;
+
+Affected Rows: 1
+

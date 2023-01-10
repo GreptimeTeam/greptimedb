@@ -66,6 +66,7 @@ impl Instance {
             QueryStatement::Sql(Statement::CreateDatabase(c)) => {
                 let request = CreateDatabaseRequest {
                     db_name: c.name.to_string(),
+                    create_if_not_exists: c.if_not_exists,
                 };
 
                 info!("Creating a new database: {}", request.db_name);

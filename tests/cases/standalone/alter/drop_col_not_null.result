@@ -1,0 +1,39 @@
+CREATE TABLE test(i BIGINT TIME INDEX, j INTEGER NOT NULL);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (1, 1), (2, 2);
+
+Affected Rows: 2
+
+SELECT * FROM test;
+
++---+---+
+| i | j |
++---+---+
+| 1 | 1 |
+| 2 | 2 |
++---+---+
+
+ALTER TABLE test DROP COLUMN j;
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (3);
+
+Affected Rows: 1
+
+SELECT * FROM test;
+
++---+
+| i |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
+DROP TABLE test;
+
+Affected Rows: 1
+

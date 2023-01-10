@@ -46,7 +46,7 @@ impl<'a> ParserContext<'a> {
             Token::Word(w) => match w.keyword {
                 Keyword::TABLE => self.parse_create_table(),
 
-                Keyword::DATABASE => self.parse_create_database(),
+                Keyword::SCHEMA | Keyword::DATABASE => self.parse_create_database(),
 
                 _ => self.unsupported(w.to_string()),
             },
@@ -56,6 +56,10 @@ impl<'a> ParserContext<'a> {
 
     fn parse_create_database(&mut self) -> Result<Statement> {
         self.parser.next_token();
+
+        let if_not_exists =
+            self.parser
+                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
 
         let database_name = self
             .parser
@@ -68,6 +72,7 @@ impl<'a> ParserContext<'a> {
 
         Ok(Statement::CreateDatabase(CreateDatabase {
             name: database_name,
+            if_not_exists,
         }))
     }
 
@@ -253,8 +258,10 @@ impl<'a> ParserContext<'a> {
             .parse_column_def()
             .context(SyntaxSnafu { sql: self.sql })?;
 
-        if !matches!(column.data_type, DataType::Timestamp(_, _))
-            || matches!(self.parser.peek_token(), Token::Comma)
+        if !matches!(
+            column.data_type,
+            DataType::Timestamp(_, _) | DataType::BigInt(_)
+        ) || matches!(self.parser.peek_token(), Token::Comma)
         {
             columns.push(column);
             return Ok(());
@@ -290,6 +297,7 @@ impl<'a> ParserContext<'a> {
             is_primary: false,
         };
 
+        // TIME INDEX option means NOT NULL implicitly.
         column.options = vec![ColumnOptionDef {
             name: None,
             option: NotNull,
@@ -297,7 +305,7 @@ impl<'a> ParserContext<'a> {
         columns.push(column);
         constraints.push(constraint);
 
-        if let Token::Comma = self.parser.peek_token() {
+        if matches!(self.parser.peek_token(), Token::Comma | Token::RParen) {
             return Ok(());
         }
 
@@ -580,6 +588,19 @@ mod tests {
         match &stmts[0] {
             Statement::CreateDatabase(c) => {
                 assert_eq!(c.name.to_string(), "prometheus");
+                assert!(!c.if_not_exists);
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "create database if not exists prometheus";
+        let stmts = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+
+        assert_eq!(1, stmts.len());
+        match &stmts[0] {
+            Statement::CreateDatabase(c) => {
+                assert_eq!(c.name.to_string(), "prometheus");
+                assert!(c.if_not_exists);
             }
             _ => unreachable!(),
         }
@@ -838,6 +859,39 @@ ENGINE=mito";
         let result3 = ParserContext::create_with_dialect(sql3, &GenericDialect {}).unwrap();
 
         assert_ne!(result1, result3);
+
+        // BIGINT as time index
+        let sql1 = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  b          bigint TIME INDEX,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+        let result1 = ParserContext::create_with_dialect(sql1, &GenericDialect {}).unwrap();
+
+        if let Statement::CreateTable(c) = &result1[0] {
+            assert_eq!(c.constraints.len(), 2);
+            let tc = c.constraints[0].clone();
+            match tc {
+                TableConstraint::Unique {
+                    name,
+                    columns,
+                    is_primary,
+                } => {
+                    assert_eq!(name.unwrap().to_string(), "__time_index");
+                    assert_eq!(columns.len(), 1);
+                    assert_eq!(&columns[0].value, "b");
+                    assert!(!is_primary);
+                }
+                _ => panic!("should be time index constraint"),
+            };
+        } else {
+            panic!("should be create_table statement");
+        }
     }
 
     #[test]

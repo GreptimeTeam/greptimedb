@@ -311,8 +311,15 @@ pub fn sql_column_def_to_grpc_column_def(col: ColumnDef) -> Result<api::v1::Colu
 pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
     match data_type {
         SqlDataType::BigInt(_) => Ok(ConcreteDataType::int64_datatype()),
-        SqlDataType::Int(_) => Ok(ConcreteDataType::int32_datatype()),
+        SqlDataType::UnsignedBigInt(_) => Ok(ConcreteDataType::uint64_datatype()),
+        SqlDataType::Int(_) | SqlDataType::Integer(_) => Ok(ConcreteDataType::int32_datatype()),
+        SqlDataType::UnsignedInt(_) | SqlDataType::UnsignedInteger(_) => {
+            Ok(ConcreteDataType::uint32_datatype())
+        }
         SqlDataType::SmallInt(_) => Ok(ConcreteDataType::int16_datatype()),
+        SqlDataType::UnsignedSmallInt(_) => Ok(ConcreteDataType::uint16_datatype()),
+        SqlDataType::TinyInt(_) => Ok(ConcreteDataType::int8_datatype()),
+        SqlDataType::UnsignedTinyInt(_) => Ok(ConcreteDataType::uint8_datatype()),
         SqlDataType::Char(_)
         | SqlDataType::Varchar(_)
         | SqlDataType::Text
@@ -377,6 +384,10 @@ mod tests {
         );
         check_type(SqlDataType::Int(None), ConcreteDataType::int32_datatype());
         check_type(
+            SqlDataType::Integer(None),
+            ConcreteDataType::int32_datatype(),
+        );
+        check_type(
             SqlDataType::SmallInt(None),
             ConcreteDataType::int16_datatype(),
         );
@@ -405,6 +416,22 @@ mod tests {
         check_type(
             SqlDataType::Varbinary(None),
             ConcreteDataType::binary_datatype(),
+        );
+        check_type(
+            SqlDataType::UnsignedBigInt(None),
+            ConcreteDataType::uint64_datatype(),
+        );
+        check_type(
+            SqlDataType::UnsignedInt(None),
+            ConcreteDataType::uint32_datatype(),
+        );
+        check_type(
+            SqlDataType::UnsignedSmallInt(None),
+            ConcreteDataType::uint16_datatype(),
+        );
+        check_type(
+            SqlDataType::UnsignedTinyInt(None),
+            ConcreteDataType::uint8_datatype(),
         );
     }
 

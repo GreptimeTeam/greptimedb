@@ -51,14 +51,14 @@ impl HeartbeatHandler for CollectStatsHandler {
     async fn handle(
         &self,
         req: &HeartbeatRequest,
-        ctx: &Context,
+        ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         if ctx.is_skip_all() {
             return Ok(());
         }
 
-        match Stat::try_from(req) {
+        match Stat::try_from(req.clone()) {
             Ok(stat) => {
                 let key = (stat.cluster_id, stat.id);
                 match self.cache.entry(key) {

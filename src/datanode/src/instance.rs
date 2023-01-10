@@ -18,7 +18,8 @@ use std::{fs, path};
 
 use backon::ExponentialBackoff;
 use catalog::remote::MetaKvBackend;
-use catalog::CatalogManagerRef;
+use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -36,9 +37,11 @@ use servers::Mode;
 use snafu::prelude::*;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
+use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
+use table::Table;
 
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig};
+use crate::datanode::{DatanodeOptions, ObjectStoreConfig, WalConfig};
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
     NewCatalogSnafu, OpenLogStoreSnafu, Result,
@@ -68,7 +71,7 @@ pub type InstanceRef = Arc<Instance>;
 impl Instance {
     pub async fn new(opts: &DatanodeOptions) -> Result<Self> {
         let object_store = new_object_store(&opts.storage).await?;
-        let logstore = Arc::new(create_log_store(&opts.wal_dir).await?);
+        let logstore = Arc::new(create_log_store(&opts.wal).await?);
 
         let meta_client = match opts.mode {
             Mode::Standalone => None,
@@ -99,6 +102,19 @@ impl Instance {
             Mode::Standalone => {
                 if opts.enable_memory_catalog {
                     let catalog = Arc::new(catalog::local::MemoryCatalogManager::default());
+                    let table = NumbersTable::new(MIN_USER_TABLE_ID);
+
+                    catalog
+                        .register_table(RegisterTableRequest {
+                            table_id: MIN_USER_TABLE_ID,
+                            table_name: table.table_info().name.to_string(),
+                            table: Arc::new(table),
+                            catalog: DEFAULT_CATALOG_NAME.to_string(),
+                            schema: DEFAULT_SCHEMA_NAME.to_string(),
+                        })
+                        .await
+                        .expect("Failed to register numbers");
+
                     let factory = QueryEngineFactory::new(catalog.clone());
 
                     (
@@ -289,16 +305,19 @@ async fn new_metasrv_client(node_id: u64, meta_config: &MetaClientOpts) -> Resul
     Ok(meta_client)
 }
 
-pub(crate) async fn create_log_store(path: impl AsRef<str>) -> Result<RaftEngineLogStore> {
-    let path = path.as_ref();
+pub(crate) async fn create_log_store(wal_config: &WalConfig) -> Result<RaftEngineLogStore> {
     // create WAL directory
-    fs::create_dir_all(path::Path::new(path)).context(error::CreateDirSnafu { dir: path })?;
-
-    info!("The WAL directory is: {}", path);
-
+    fs::create_dir_all(path::Path::new(&wal_config.dir)).context(error::CreateDirSnafu {
+        dir: &wal_config.dir,
+    })?;
+    info!("Creating logstore with config: {:?}", wal_config);
     let log_config = LogConfig {
-        log_file_dir: path.to_string(),
-        ..Default::default()
+        file_size: wal_config.file_size.0,
+        log_file_dir: wal_config.dir.clone(),
+        purge_interval: wal_config.purge_interval,
+        purge_threshold: wal_config.purge_threshold.0,
+        read_batch_size: wal_config.read_batch_size,
+        sync_write: wal_config.sync_write,
     };
 
     let logstore = RaftEngineLogStore::try_new(log_config)

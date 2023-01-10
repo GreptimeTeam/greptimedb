@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
@@ -47,6 +49,36 @@ impl Default for ObjectStoreConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalConfig {
+    // wal directory
+    pub dir: String,
+    // wal file size in bytes
+    pub file_size: ReadableSize,
+    // wal purge threshold in bytes
+    pub purge_threshold: ReadableSize,
+    // purge interval in seconds
+    #[serde(with = "humantime_serde")]
+    pub purge_interval: Duration,
+    // read batch size
+    pub read_batch_size: usize,
+    // whether to sync log file after every write
+    pub sync_write: bool,
+}
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        Self {
+            dir: "/tmp/greptimedb/wal".to_string(),
+            file_size: ReadableSize::gb(1),        // log file size 1G
+            purge_threshold: ReadableSize::gb(50), // purge threshold 50G
+            purge_interval: Duration::from_secs(600),
+            read_batch_size: 128,
+            sync_write: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatanodeOptions {
@@ -56,7 +88,7 @@ pub struct DatanodeOptions {
     pub mysql_addr: String,
     pub mysql_runtime_size: usize,
     pub meta_client_opts: Option<MetaClientOpts>,
-    pub wal_dir: String,
+    pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
     pub enable_memory_catalog: bool,
     pub mode: Mode,
@@ -71,7 +103,7 @@ impl Default for DatanodeOptions {
             mysql_addr: "127.0.0.1:4406".to_string(),
             mysql_runtime_size: 2,
             meta_client_opts: None,
-            wal_dir: "/tmp/greptimedb/wal".to_string(),
+            wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
             enable_memory_catalog: false,
             mode: Mode::Standalone,
