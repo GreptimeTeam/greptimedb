@@ -50,8 +50,6 @@ def double_that(col)->vector[u32]:
             let col = first.column(0);
             let val = col.get(1);
             assert_eq!(val, datatypes::value::Value::UInt32(2));
-            let pretty_print = batches.pretty_print().unwrap();
-            println!("{pretty_print}");
         }
     }
     Ok(())
