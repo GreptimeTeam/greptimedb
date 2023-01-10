@@ -87,7 +87,7 @@ impl QueryLanguageParser {
             expr: prom_expr,
             start: std::time::UNIX_EPOCH,
             end: std::time::UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
+                .checked_add(Duration::from_secs(100))
                 .unwrap(),
             interval: Duration::from_secs(5),
             lookback_delta: Duration::from_secs(1),

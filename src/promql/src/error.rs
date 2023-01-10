@@ -38,6 +38,9 @@ pub enum Error {
     #[snafu(display("Cannot find time index column in table {}", table))]
     TimeIndexNotFound { table: String, backtrace: Backtrace },
 
+    #[snafu(display("Cannot find value columns in table {}", table))]
+    ValueNotFound { table: String, backtrace: Backtrace },
+
     #[snafu(display("Cannot find the table {}", table))]
     TableNotFound {
         table: String,
@@ -85,6 +88,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             TimeIndexNotFound { .. }
+            | ValueNotFound { .. }
             | UnsupportedExpr { .. }
             | MultipleVector { .. }
             | ExpectExpr { .. } => StatusCode::InvalidArguments,

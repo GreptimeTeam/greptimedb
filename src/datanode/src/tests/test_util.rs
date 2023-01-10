@@ -87,7 +87,7 @@ pub(crate) async fn create_test_table(
     ts_type: ConcreteDataType,
 ) -> Result<()> {
     let column_schemas = vec![
-        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("ts", ts_type, true).with_time_index(true),

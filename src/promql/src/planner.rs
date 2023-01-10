@@ -18,8 +18,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::{
-    BinaryExpr, BuiltinScalarFunction, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
+    BinaryExpr, BuiltinScalarFunction, Extension, Filter, LogicalPlan, LogicalPlanBuilder, Operator,
 };
+use datafusion::optimizer::utils;
 use datafusion::prelude::{Column, Expr as DfExpr};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::planner::ContextProvider;
@@ -32,6 +33,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::error::{
     DataFusionPlanningSnafu, ExpectExprSnafu, MultipleVectorSnafu, Result, TableNameNotFoundSnafu,
     TableNotFoundSnafu, TimeIndexNotFoundSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    ValueNotFoundSnafu,
 };
 use crate::extension_plan::{InstantManipulate, Millisecond, SeriesNormalize};
 
@@ -150,6 +152,8 @@ impl<S: ContextProvider> PromPlanner<S> {
                 LogicalPlanBuilder::from(input)
                     .project(func_exprs)
                     .context(DataFusionPlanningSnafu)?
+                    .filter(self.create_empty_values_filter_expr()?)
+                    .context(DataFusionPlanningSnafu)?
                     .build()
                     .context(DataFusionPlanningSnafu)?
             }
@@ -179,18 +183,38 @@ impl<S: ContextProvider> PromPlanner<S> {
         label_matchers: Matchers,
     ) -> Result<LogicalPlan> {
         let table_name = self.ctx.table_name.clone().unwrap();
-        // TODO(ruihang): add time range filter
-        let filter = self.matchers_to_expr(label_matchers)?;
-        let table_scan = self.create_table_scan_plan(&table_name, filter)?;
-        let offset = offset.unwrap_or_default();
 
+        // make filter exprs
+        let mut filters = self.matchers_to_expr(label_matchers)?;
+        filters.push(self.create_time_index_column_expr()?.gt_eq(DfExpr::Literal(
+            ScalarValue::TimestampMillisecond(Some(self.ctx.start), None),
+        )));
+        filters.push(self.create_time_index_column_expr()?.lt_eq(DfExpr::Literal(
+            ScalarValue::TimestampMillisecond(Some(self.ctx.end), None),
+        )));
+
+        // make table scan with filter exprs
+        let table_scan = self.create_table_scan_plan(&table_name, filters.clone())?;
+
+        // make filter plan
+        let filter_plan = LogicalPlan::Filter(
+            Filter::try_new(
+                // safety: at least there are two exprs that filter timestamp column.
+                utils::conjunction(filters.into_iter()).unwrap(),
+                Arc::new(table_scan),
+            )
+            .context(DataFusionPlanningSnafu)?,
+        );
+
+        // make series_normalize plan
+        let offset = offset.unwrap_or_default();
         let series_normalize = SeriesNormalize::new(
             offset,
             self.ctx
                 .time_index_column
                 .clone()
                 .with_context(|| TimeIndexNotFoundSnafu { table: table_name })?,
-            table_scan,
+            filter_plan,
         );
         let logical_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(series_normalize),
@@ -363,6 +387,18 @@ impl<S: ContextProvider> PromPlanner<S> {
                 .clone()
                 .with_context(|| TimeIndexNotFoundSnafu { table: "unknown" })?,
         )))
+    }
+
+    fn create_empty_values_filter_expr(&self) -> Result<DfExpr> {
+        let mut exprs = Vec::with_capacity(self.ctx.value_columns.len());
+        for value in &self.ctx.value_columns {
+            let expr = DfExpr::Column(Column::from_name(value)).is_not_null();
+            exprs.push(expr);
+        }
+
+        utils::conjunction(exprs.into_iter()).context(ValueNotFoundSnafu {
+            table: self.ctx.table_name.clone().unwrap(),
+        })
     }
 }
 
