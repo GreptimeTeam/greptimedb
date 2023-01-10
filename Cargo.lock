@@ -6898,7 +6898,6 @@ dependencies = [
  "common-base",
  "common-grpc",
  "common-query",
- "regex",
  "sqlness",
  "tokio",
 ]

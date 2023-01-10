@@ -79,14 +79,14 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to parse value: {}, {}", msg, backtrace))]
+    #[snafu(display("Failed to parse value: {}", msg))]
     ParseSqlValue { msg: String, backtrace: Backtrace },
 
     #[snafu(display(
         "Column {} expect type: {:?}, actual: {:?}",
         column_name,
         expect,
-        actual
+        actual,
     ))]
     ColumnTypeMismatch {
         column_name: String,

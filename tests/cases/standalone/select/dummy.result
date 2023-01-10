@@ -24,13 +24,13 @@ select 4 + 0.5;
 
 select "a";
 
-Failed to execute, code: 3000, err_msg: "Failed to execute sql statement, source: Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT \"a\", source: Schema error: No field named 'a'. Valid fields are .",
+Failed to do Flight get, addr: 127.0.0.1:4001, code: 3000, err_msg: Failed to execute sql statement, source: Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT "a", source: Schema error: No field named 'a'. Valid fields are .
 
 select "A";
 
-Failed to execute, code: 3000, err_msg: "Failed to execute sql statement, source: Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT \"A\", source: Schema error: No field named 'A'. Valid fields are .",
+Failed to do Flight get, addr: 127.0.0.1:4001, code: 3000, err_msg: Failed to execute sql statement, source: Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT "A", source: Schema error: No field named 'A'. Valid fields are .
 
 select * where "a" = "A";
 
-Failed to execute, code: 3000, err_msg: "Failed to execute sql statement, source: Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT * WHERE \"a\" = \"A\", source: Schema error: No field named 'a'. Valid fields are .",
+Failed to do Flight get, addr: 127.0.0.1:4001, code: 3000, err_msg: Failed to execute sql statement, source: Failed to execute sql, source: Failure during query planning, source: Cannot plan SQL: SELECT * WHERE "a" = "A", source: Schema error: No field named 'a'. Valid fields are .
 
