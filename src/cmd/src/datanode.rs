@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(Duration::from_secs(600), dn_opts.wal.purge_interval);
         assert_eq!(1024 * 1024 * 1024, dn_opts.wal.file_size.0);
         assert_eq!(1024 * 1024 * 1024 * 50, dn_opts.wal.purge_threshold.0);
-        assert_eq!(false, dn_opts.wal.sync_write);
+        assert!(!dn_opts.wal.sync_write);
         assert_eq!(Some(42), dn_opts.node_id);
         let MetaClientOpts {
             metasrv_addrs: metasrv_addr,
