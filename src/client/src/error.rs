@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use tonic::Code;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -25,8 +26,17 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to do Flight get, addr: {}, source: {}", addr, source))]
-    FlightGet { addr: String, source: BoxedError },
+    #[snafu(display(
+        "Failed to do Flight get, addr: {}, code: {}, source: {}",
+        addr,
+        tonic_code,
+        source
+    ))]
+    FlightGet {
+        addr: String,
+        tonic_code: Code,
+        source: BoxedError,
+    },
 
     #[snafu(display("Failed to convert FlightData, source: {}", source))]
     ConvertFlightData {

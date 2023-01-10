@@ -122,6 +122,7 @@ impl Database {
                     .fail::<()>()
                     .map_err(BoxedError::new)
                     .context(error::FlightGetSnafu {
+                        tonic_code: e.code(),
                         addr: client.addr(),
                     })
                     .unwrap_err()
