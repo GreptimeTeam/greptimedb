@@ -54,21 +54,21 @@ use self::authorize::HttpAuth;
 use self::influxdb::influxdb_write;
 use crate::auth::UserProviderRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
+use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
     InfluxdbLineProtocolHandlerRef, OpentsdbProtocolHandlerRef, PrometheusProtocolHandlerRef,
-    ScriptHandlerRef, SqlQueryHandlerRef,
+    ScriptHandlerRef,
 };
 use crate::server::Server;
 
 /// create query context from database name information, catalog and schema are
 /// resolved from the name
 pub(crate) fn query_context_from_db(
-    query_handler: SqlQueryHandlerRef,
+    query_handler: ServerSqlQueryHandlerRef,
     db: Option<String>,
 ) -> std::result::Result<Arc<QueryContext>, JsonResponse> {
     if let Some(db) = &db {
         let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
-        let catalog = catalog.unwrap_or(DEFAULT_CATALOG_NAME);
 
         match query_handler.is_valid_schema(catalog, schema) {
             Ok(true) => Ok(Arc::new(QueryContext::with(
@@ -95,7 +95,7 @@ pub(crate) fn query_context_from_db(
 const HTTP_API_VERSION: &str = "v1";
 
 pub struct HttpServer {
-    sql_handler: SqlQueryHandlerRef,
+    sql_handler: ServerSqlQueryHandlerRef,
     options: HttpOptions,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     opentsdb_handler: Option<OpentsdbProtocolHandlerRef>,
@@ -344,12 +344,12 @@ async fn serve_docs() -> Html<String> {
 
 #[derive(Clone)]
 pub struct ApiState {
-    pub sql_handler: SqlQueryHandlerRef,
+    pub sql_handler: ServerSqlQueryHandlerRef,
     pub script_handler: Option<ScriptHandlerRef>,
 }
 
 impl HttpServer {
-    pub fn new(sql_handler: SqlQueryHandlerRef, options: HttpOptions) -> Self {
+    pub fn new(sql_handler: ServerSqlQueryHandlerRef, options: HttpOptions) -> Self {
         Self {
             sql_handler,
             options,
@@ -568,7 +568,8 @@ mod test {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::query_handler::SqlQueryHandler;
+    use crate::error::Error;
+    use crate::query_handler::sql::{ServerSqlQueryHandlerAdaptor, SqlQueryHandler};
 
     struct DummyInstance {
         _tx: mpsc::Sender<(String, Vec<u8>)>,
@@ -576,6 +577,8 @@ mod test {
 
     #[async_trait]
     impl SqlQueryHandler for DummyInstance {
+        type Error = Error;
+
         async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
             unimplemented!()
         }
@@ -603,6 +606,7 @@ mod test {
 
     fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
         let instance = Arc::new(DummyInstance { _tx: tx });
+        let instance = ServerSqlQueryHandlerAdaptor::arc(instance);
         let server = HttpServer::new(instance, HttpOptions::default());
         server.make_app().route(
             "/test/timeout",

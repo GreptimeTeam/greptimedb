@@ -29,7 +29,7 @@ use crate::auth::UserProviderRef;
 use crate::error::Result;
 use crate::postgres::auth_handler::PgAuthStartupHandler;
 use crate::postgres::handler::PostgresServerHandler;
-use crate::query_handler::SqlQueryHandlerRef;
+use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::TlsOption;
 
@@ -43,7 +43,7 @@ pub struct PostgresServer {
 impl PostgresServer {
     /// Creates a new Postgres server with provided query_handler and async runtime
     pub fn new(
-        query_handler: SqlQueryHandlerRef,
+        query_handler: ServerSqlQueryHandlerRef,
         tls: TlsOption,
         io_runtime: Arc<Runtime>,
         user_provider: Option<UserProviderRef>,

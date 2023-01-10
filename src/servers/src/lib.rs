@@ -14,6 +14,7 @@
 
 #![feature(assert_matches)]
 
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use serde::{Deserialize, Serialize};
 
 pub mod auth;
@@ -56,33 +57,34 @@ pub enum Mode {
 /// schema name
 /// - if `[<catalog>-]` is provided, we split database name with `-` and use
 /// `<catalog>` and `<schema>`.
-pub(crate) fn parse_catalog_and_schema_from_client_database_name(db: &str) -> (Option<&str>, &str) {
+pub(crate) fn parse_catalog_and_schema_from_client_database_name(db: &str) -> (&str, &str) {
     let parts = db.splitn(2, '-').collect::<Vec<&str>>();
     if parts.len() == 2 {
-        (Some(parts[0]), parts[1])
+        (parts[0], parts[1])
     } else {
-        (None, db)
+        (DEFAULT_CATALOG_NAME, db)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
-    fn test_parse_catalog_and_schema_from_client_database_name() {
+    fn test_parse_catalog_and_schema() {
         assert_eq!(
-            (None, "fullschema"),
-            super::parse_catalog_and_schema_from_client_database_name("fullschema")
+            (DEFAULT_CATALOG_NAME, "fullschema"),
+            parse_catalog_and_schema_from_client_database_name("fullschema")
         );
 
         assert_eq!(
-            (Some("catalog"), "schema"),
-            super::parse_catalog_and_schema_from_client_database_name("catalog-schema")
+            ("catalog", "schema"),
+            parse_catalog_and_schema_from_client_database_name("catalog-schema")
         );
 
         assert_eq!(
-            (Some("catalog"), "schema1-schema2"),
-            super::parse_catalog_and_schema_from_client_database_name("catalog-schema1-schema2")
+            ("catalog", "schema1-schema2"),
+            parse_catalog_and_schema_from_client_database_name("catalog-schema1-schema2")
         );
     }
 }

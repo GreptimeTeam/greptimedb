@@ -25,7 +25,6 @@ use catalog::{CatalogList, CatalogManager};
 use chrono::DateTime;
 use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::{debug, error, info};
 use datatypes::prelude::ConcreteDataType;
@@ -38,8 +37,7 @@ use meta_client::rpc::{
 use query::parser::QueryStatement;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
-use servers::error as server_error;
-use servers::query_handler::SqlQueryHandler;
+use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -372,37 +370,25 @@ impl DistInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DistInstance {
-    async fn do_query(
-        &self,
-        query: &str,
-        query_ctx: QueryContextRef,
-    ) -> Vec<server_error::Result<Output>> {
-        self.handle_sql(query, query_ctx)
-            .await
-            .into_iter()
-            .map(|r| {
-                r.map_err(BoxedError::new)
-                    .context(server_error::ExecuteQuerySnafu { query })
-            })
-            .collect()
+    type Error = error::Error;
+
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        self.handle_sql(query, query_ctx).await
     }
 
     async fn do_statement_query(
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> server_error::Result<Output> {
-        self.handle_statement(stmt, query_ctx)
-            .await
-            .map_err(BoxedError::new)
-            .context(server_error::ExecuteStatementSnafu)
+    ) -> Result<Output> {
+        self.handle_statement(stmt, query_ctx).await
     }
 
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.catalog_manager
             .schema(catalog, schema)
             .map(|s| s.is_some())
-            .context(server_error::CatalogSnafu)
+            .context(CatalogSnafu)
     }
 }
 
@@ -596,7 +582,7 @@ fn find_partition_columns(
 #[cfg(test)]
 mod test {
     use itertools::Itertools;
-    use servers::query_handler::SqlQueryHandlerRef;
+    use servers::query_handler::sql::SqlQueryHandlerRef;
     use session::context::QueryContext;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
@@ -604,6 +590,7 @@ mod test {
 
     use super::*;
     use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
+    use crate::instance::standalone::StandaloneSqlQueryHandler;
 
     #[tokio::test]
     async fn test_parse_partitions() {
@@ -732,7 +719,7 @@ ENGINE=mito",
             .remove(0)
             .unwrap();
 
-        async fn assert_show_tables(instance: SqlQueryHandlerRef) {
+        async fn assert_show_tables(instance: SqlQueryHandlerRef<error::Error>) {
             let sql = "show tables in test_show_tables";
             let output = instance
                 .do_query(sql, QueryContext::arc())
@@ -756,7 +743,7 @@ ENGINE=mito",
 
         // Asserts that new table is created in Datanode as well.
         for x in datanode_instances.values() {
-            assert_show_tables(x.clone()).await
+            assert_show_tables(StandaloneSqlQueryHandler::arc(x.clone())).await
         }
     }
 }

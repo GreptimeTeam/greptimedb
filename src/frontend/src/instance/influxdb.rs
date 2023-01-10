@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use common_error::prelude::BoxedError;
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::InfluxdbLineProtocolHandler;
+use snafu::ResultExt;
 
 use crate::instance::Instance;
 
@@ -22,7 +24,10 @@ use crate::instance::Instance;
 impl InfluxdbLineProtocolHandler for Instance {
     async fn exec(&self, request: &InfluxdbRequest) -> servers::error::Result<()> {
         let requests = request.try_into()?;
-        self.handle_inserts(requests).await?;
+        self.handle_inserts(requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(servers::error::ExecuteGrpcQuerySnafu)?;
         Ok(())
     }
 }
@@ -33,7 +38,7 @@ mod test {
 
     use common_query::Output;
     use common_recordbatch::RecordBatches;
-    use servers::query_handler::SqlQueryHandler;
+    use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
     use super::*;

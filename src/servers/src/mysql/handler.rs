@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_telemetry::{error, trace};
 use opensrv_mysql::{
@@ -26,16 +25,17 @@ use opensrv_mysql::{
 use rand::RngCore;
 use session::context::Channel;
 use session::Session;
+use snafu::ensure;
 use tokio::io::AsyncWrite;
 
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
-use crate::query_handler::SqlQueryHandlerRef;
+use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 // An intermediate shim for executing MySQL queries.
 pub struct MysqlInstanceShim {
-    query_handler: SqlQueryHandlerRef,
+    query_handler: ServerSqlQueryHandlerRef,
     salt: [u8; 20],
     session: Arc<Session>,
     user_provider: Option<UserProviderRef>,
@@ -43,7 +43,7 @@ pub struct MysqlInstanceShim {
 
 impl MysqlInstanceShim {
     pub fn create(
-        query_handler: SqlQueryHandlerRef,
+        query_handler: ServerSqlQueryHandlerRef,
         client_addr: SocketAddr,
         user_provider: Option<UserProviderRef>,
     ) -> MysqlInstanceShim {
@@ -184,21 +184,16 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     }
 
     async fn on_init<'a>(&'a mut self, database: &'a str, w: InitWriter<'a, W>) -> Result<()> {
-        // TODO(sunng87): set catalog
-        if self
-            .query_handler
-            .is_valid_schema(DEFAULT_CATALOG_NAME, database)?
-        {
-            let context = self.session.context();
-            // TODO(sunng87): set catalog
-            context.set_current_schema(database);
-            w.ok().await.map_err(|e| e.into())
-        } else {
-            error::DatabaseNotFoundSnafu {
-                catalog: DEFAULT_CATALOG_NAME,
-                schema: database,
-            }
-            .fail()
-        }
+        let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(database);
+        ensure!(
+            self.query_handler.is_valid_schema(catalog, schema)?,
+            error::DatabaseNotFoundSnafu { catalog, schema }
+        );
+
+        let context = self.session.context();
+        context.set_current_catalog(catalog);
+        context.set_current_schema(database);
+
+        w.ok().await.map_err(|e| e.into())
     }
 }

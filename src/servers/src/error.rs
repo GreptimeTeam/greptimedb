@@ -82,7 +82,7 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to execute GRPC query, source: {}", source))]
+    #[snafu(display("{source}"))]
     ExecuteGrpcQuery {
         #[snafu(backtrace)]
         source: BoxedError,
@@ -94,9 +94,8 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to execute insert: {}, source: {}", msg, source))]
-    ExecuteInsert {
-        msg: String,
+    #[snafu(display("Failed to check database validity, source: {}", source))]
+    CheckDatabaseValidity {
         #[snafu(backtrace)]
         source: BoxedError,
     },
@@ -258,15 +257,6 @@ pub enum Error {
 
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
-
-    #[snafu(display("Failed to find new columns on insertion: {}", source))]
-    FindNewColumnsOnInsertion {
-        #[snafu(backtrace)]
-        source: common_grpc_expr::error::Error,
-    },
-
-    #[snafu(display("GRPC request missing field: {}", name))]
-    GrpcRequestMissingField { name: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -293,7 +283,7 @@ impl ErrorExt for Error {
             | ExecuteQuery { source, .. }
             | ExecuteGrpcQuery { source, .. }
             | ExecuteStatement { source, .. }
-            | ExecuteInsert { source, .. }
+            | CheckDatabaseValidity { source, .. }
             | ExecuteAlter { source, .. }
             | PutOpentsdbDataPoint { source, .. } => source.status_code(),
 
@@ -307,7 +297,6 @@ impl ErrorExt for Error {
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
-            | GrpcRequestMissingField { .. }
             | TimePrecision { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. } | ConvertFlightMessage { source } => {
@@ -327,8 +316,6 @@ impl ErrorExt for Error {
             | InvalidUtf8Value { .. } => StatusCode::InvalidAuthHeader,
 
             DatabaseNotFound { .. } => StatusCode::DatabaseNotFound,
-
-            FindNewColumnsOnInsertion { source } => source.status_code(),
         }
     }
 

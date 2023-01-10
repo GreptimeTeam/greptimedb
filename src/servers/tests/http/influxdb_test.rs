@@ -20,10 +20,11 @@ use axum::{http, Router};
 use axum_test_helper::TestClient;
 use common_query::Output;
 use servers::auth::user_provider::StaticUserProvider;
-use servers::error::Result;
+use servers::error::{Error, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::influxdb::InfluxdbRequest;
-use servers::query_handler::{InfluxdbLineProtocolHandler, SqlQueryHandler};
+use servers::query_handler::sql::SqlQueryHandler;
+use servers::query_handler::InfluxdbLineProtocolHandler;
 use session::context::QueryContextRef;
 use tokio::sync::mpsc;
 
@@ -46,6 +47,8 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
+    type Error = Error;
+
     async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
         unimplemented!()
     }

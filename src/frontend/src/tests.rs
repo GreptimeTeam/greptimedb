@@ -29,6 +29,7 @@ use meta_srv::mocks::MockInfo;
 use meta_srv::service::store::kv::KvStoreRef;
 use meta_srv::service::store::memory::MemStore;
 use servers::grpc::GrpcServer;
+use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::Mode;
 use tempdir::TempDir;
 use tonic::transport::Server;
@@ -110,7 +111,11 @@ pub(crate) async fn create_datanode_client(
 
     // create a mock datanode grpc service, see example here:
     // https://github.com/hyperium/tonic/blob/master/examples/src/mock/mock.rs
-    let datanode_service = GrpcServer::new(datanode_instance, runtime).create_service();
+    let datanode_service = GrpcServer::new(
+        ServerGrpcQueryHandlerAdaptor::arc(datanode_instance),
+        runtime,
+    )
+    .create_service();
     tokio::spawn(async move {
         Server::builder()
             .add_service(datanode_service)

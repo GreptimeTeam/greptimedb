@@ -22,16 +22,15 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::parser::QueryLanguageParser;
 use query::{QueryEngineFactory, QueryEngineRef};
-use servers::error::Result;
-use servers::query_handler::{
-    ScriptHandler, ScriptHandlerRef, SqlQueryHandler, SqlQueryHandlerRef,
-};
+use servers::error::{Error, Result};
+use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use table::test_util::MemTable;
 
 mod http;
 mod mysql;
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
+use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use session::context::QueryContextRef;
 
 mod interceptor;
@@ -56,6 +55,8 @@ impl DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
+    type Error = Error;
+
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         let stmt = QueryLanguageParser::parse_sql(query).unwrap();
         let plan = self
@@ -126,6 +127,6 @@ fn create_testing_script_handler(table: MemTable) -> ScriptHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }
 
-fn create_testing_sql_query_handler(table: MemTable) -> SqlQueryHandlerRef {
+fn create_testing_sql_query_handler(table: MemTable) -> ServerSqlQueryHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }

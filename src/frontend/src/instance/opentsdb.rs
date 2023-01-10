@@ -42,7 +42,7 @@ mod tests {
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use itertools::Itertools;
-    use servers::query_handler::SqlQueryHandler;
+    use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
     use super::*;

@@ -14,13 +14,12 @@
 
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::logging::{error, info};
+use common_telemetry::logging::info;
 use common_telemetry::timer;
 use query::parser::{QueryLanguageParser, QueryStatement};
-use servers::query_handler::SqlQueryHandler;
+use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::ast::ObjectName;
@@ -139,16 +138,16 @@ impl Instance {
             QueryStatement::Sql(Statement::ShowCreateTable(_stmt)) => {
                 unimplemented!("SHOW CREATE TABLE is unimplemented yet");
             }
-            QueryStatement::Sql(Statement::Use(db)) => {
+            QueryStatement::Sql(Statement::Use(schema)) => {
+                let catalog = query_ctx.current_catalog();
+                let catalog = catalog.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
+
                 ensure!(
-                    self.catalog_manager
-                        .schema(DEFAULT_CATALOG_NAME, &db)
-                        .context(error::CatalogSnafu)?
-                        .is_some(),
-                    error::SchemaNotFoundSnafu { name: &db }
+                    self.is_valid_schema(catalog, &schema)?,
+                    error::DatabaseNotFoundSnafu { catalog, schema }
                 );
 
-                query_ctx.set_current_schema(&db);
+                query_ctx.set_current_schema(&schema);
 
                 Ok(Output::RecordBatches(RecordBatches::empty()))
             }
@@ -194,21 +193,12 @@ fn table_idents_to_full_name(
 
 #[async_trait]
 impl SqlQueryHandler for Instance {
-    async fn do_query(
-        &self,
-        query: &str,
-        query_ctx: QueryContextRef,
-    ) -> Vec<servers::error::Result<Output>> {
+    type Error = error::Error;
+
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
         // we assume sql string has only 1 statement in datanode
-        let result = self
-            .execute_sql(query, query_ctx)
-            .await
-            .map_err(|e| {
-                error!(e; "Instance failed to execute sql");
-                BoxedError::new(e)
-            })
-            .context(servers::error::ExecuteQuerySnafu { query });
+        let result = self.execute_sql(query, query_ctx).await;
         vec![result]
     }
 
@@ -216,22 +206,17 @@ impl SqlQueryHandler for Instance {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> servers::error::Result<Output> {
+    ) -> Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
         self.execute_stmt(QueryStatement::Sql(stmt), query_ctx)
             .await
-            .map_err(|e| {
-                error!(e; "Instance failed to execute sql");
-                BoxedError::new(e)
-            })
-            .context(servers::error::ExecuteStatementSnafu)
     }
 
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> servers::error::Result<bool> {
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.catalog_manager
             .schema(catalog, schema)
             .map(|s| s.is_some())
-            .context(servers::error::CatalogSnafu)
+            .context(error::CatalogSnafu)
     }
 }
 

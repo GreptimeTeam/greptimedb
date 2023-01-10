@@ -15,19 +15,24 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use common_error::prelude::ErrorExt;
 use common_query::Output;
 use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
-use crate::error::Result;
-
 /// SqlQueryInterceptor can track life cycle of a sql query and customize or
 /// abort its execution at given point.
 pub trait SqlQueryInterceptor {
+    type Error: ErrorExt;
+
     /// Called before a query string is parsed into sql statements.
     /// The implementation is allowed to change the sql string if needed.
-    fn pre_parsing<'a>(&self, query: &'a str, _query_ctx: QueryContextRef) -> Result<Cow<'a, str>> {
+    fn pre_parsing<'a>(
+        &self,
+        query: &'a str,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Cow<'a, str>, Self::Error> {
         Ok(Cow::Borrowed(query))
     }
 
@@ -38,7 +43,7 @@ pub trait SqlQueryInterceptor {
         &self,
         statements: Vec<Statement>,
         _query_ctx: QueryContextRef,
-    ) -> Result<Vec<Statement>> {
+    ) -> Result<Vec<Statement>, Self::Error> {
         Ok(statements)
     }
 
@@ -48,21 +53,35 @@ pub trait SqlQueryInterceptor {
         _statement: &Statement,
         _plan: Option<&LogicalPlan>,
         _query_ctx: QueryContextRef,
-    ) -> Result<()> {
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 
     /// Called after execution finished. The implementation can modify the
     /// output if needed.
-    fn post_execute(&self, output: Output, _query_ctx: QueryContextRef) -> Result<Output> {
+    fn post_execute(
+        &self,
+        output: Output,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Output, Self::Error> {
         Ok(output)
     }
 }
 
-pub type SqlQueryInterceptorRef = Arc<dyn SqlQueryInterceptor + Send + Sync + 'static>;
+pub type SqlQueryInterceptorRef<E> =
+    Arc<dyn SqlQueryInterceptor<Error = E> + Send + Sync + 'static>;
 
-impl SqlQueryInterceptor for Option<&SqlQueryInterceptorRef> {
-    fn pre_parsing<'a>(&self, query: &'a str, query_ctx: QueryContextRef) -> Result<Cow<'a, str>> {
+impl<E> SqlQueryInterceptor for Option<&SqlQueryInterceptorRef<E>>
+where
+    E: ErrorExt,
+{
+    type Error = E;
+
+    fn pre_parsing<'a>(
+        &self,
+        query: &'a str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Cow<'a, str>, Self::Error> {
         if let Some(this) = self {
             this.pre_parsing(query, query_ctx)
         } else {
@@ -74,7 +93,7 @@ impl SqlQueryInterceptor for Option<&SqlQueryInterceptorRef> {
         &self,
         statements: Vec<Statement>,
         query_ctx: QueryContextRef,
-    ) -> Result<Vec<Statement>> {
+    ) -> Result<Vec<Statement>, Self::Error> {
         if let Some(this) = self {
             this.post_parsing(statements, query_ctx)
         } else {
@@ -87,7 +106,7 @@ impl SqlQueryInterceptor for Option<&SqlQueryInterceptorRef> {
         statement: &Statement,
         plan: Option<&LogicalPlan>,
         query_ctx: QueryContextRef,
-    ) -> Result<()> {
+    ) -> Result<(), Self::Error> {
         if let Some(this) = self {
             this.pre_execute(statement, plan, query_ctx)
         } else {
@@ -95,7 +114,11 @@ impl SqlQueryInterceptor for Option<&SqlQueryInterceptorRef> {
         }
     }
 
-    fn post_execute(&self, output: Output, query_ctx: QueryContextRef) -> Result<Output> {
+    fn post_execute(
+        &self,
+        output: Output,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output, Self::Error> {
         if let Some(this) = self {
             this.post_execute(output, query_ctx)
         } else {

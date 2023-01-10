@@ -35,18 +35,18 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
 use crate::grpc::flight::stream::FlightRecordBatchStream;
-use crate::query_handler::GrpcQueryHandlerRef;
+use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 type TonicResult<T> = Result<T, Status>;
 type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
 
 pub(crate) struct FlightHandler {
-    handler: GrpcQueryHandlerRef,
+    handler: ServerGrpcQueryHandlerRef,
     runtime: Arc<Runtime>,
 }
 
 impl FlightHandler {
-    pub(crate) fn new(handler: GrpcQueryHandlerRef, runtime: Arc<Runtime>) -> Self {
+    pub(crate) fn new(handler: ServerGrpcQueryHandlerRef, runtime: Arc<Runtime>) -> Self {
         Self { handler, runtime }
     }
 }
