@@ -405,11 +405,11 @@ impl CatalogManager for LocalCatalogManager {
                 schema: schema_name,
             })?;
 
+        // rename table in system catalog
         self.system
-            .rename_table(
+            .register_table(
                 catalog_name.clone(),
                 schema_name.clone(),
-                request.table_name.clone(),
                 request.new_table_name.clone(),
                 request.table_id,
             )

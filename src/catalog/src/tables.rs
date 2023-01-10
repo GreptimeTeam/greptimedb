@@ -38,14 +38,9 @@ use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::SimpleTableScan;
 use table::{Table, TableRef};
 
-use crate::error::{DeleteCatalogRecordSnafu, Error, InsertCatalogRecordSnafu};
-use crate::system::{
-    build_schema_insert_request, build_table_delete_request, build_table_insert_request,
-    SystemCatalogTable,
-};
-use crate::{
-    format_full_table_name, CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef,
-};
+use crate::error::{Error, InsertCatalogRecordSnafu};
+use crate::system::{build_schema_insert_request, build_table_insert_request, SystemCatalogTable};
+use crate::{CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef};
 
 /// Tables holds all tables created by user.
 pub struct Tables {
@@ -281,33 +276,12 @@ impl SystemCatalog {
         table_name: String,
         table_id: TableId,
     ) -> crate::error::Result<usize> {
-        let full_table_name = format_full_table_name(&catalog, &schema, &table_name);
-        let request = build_table_insert_request(full_table_name, table_id);
+        let request = build_table_insert_request(catalog, schema, table_name, table_id);
         self.information_schema
             .system
             .insert(request)
             .await
             .context(InsertCatalogRecordSnafu)
-    }
-
-    pub async fn rename_table(
-        &self,
-        catalog: String,
-        schema: String,
-        table_name: String,
-        new_table_name: String,
-        table_id: TableId,
-    ) -> crate::error::Result<usize> {
-        let full_table_name = format_full_table_name(&catalog, &schema, &table_name);
-        let delete_table_req = build_table_delete_request(full_table_name);
-        self.information_schema
-            .system
-            .delete(delete_table_req)
-            .await
-            .context(DeleteCatalogRecordSnafu)?;
-
-        self.register_table(catalog, schema, new_table_name, table_id)
-            .await
     }
 
     pub async fn register_schema(
@@ -381,8 +355,6 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::physical_plan::SessionContext;
     use futures_util::StreamExt;
-    use mito::config::EngineConfig;
-    use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
     use table::table::numbers::NumbersTable;
 
     use super::*;
@@ -450,47 +422,5 @@ mod tests {
         } else {
             panic!("Record batch should not be empty!")
         }
-    }
-
-    async fn create_system_catalog() -> Result<SystemCatalog, Error> {
-        let (_dir, object_store) = new_test_object_store("setup_mock_engine_and_table").await;
-        let mock_engine = Arc::new(MockMitoEngine::new(
-            EngineConfig::default(),
-            MockEngine::default(),
-            object_store,
-        ));
-        let table = SystemCatalogTable::new(mock_engine.clone()).await?;
-        let memory_catalog_list = new_memory_catalog_list().unwrap();
-        Ok(SystemCatalog::new(table, memory_catalog_list, mock_engine))
-    }
-
-    #[tokio::test]
-    async fn test_rename_table() {
-        let system_catalog = create_system_catalog().await.unwrap();
-        let catalog = DEFAULT_CATALOG_NAME.to_string();
-        let schema = DEFAULT_SCHEMA_NAME.to_string();
-        let table_name = "test_table";
-        let table_id = 42;
-        assert!(system_catalog
-            .register_table(
-                catalog.clone(),
-                schema.clone(),
-                table_name.to_string(),
-                table_id
-            )
-            .await
-            .is_ok());
-
-        let new_table_name = "demo";
-        let ret = system_catalog
-            .rename_table(
-                catalog.clone(),
-                schema.clone(),
-                table_name.to_string(),
-                new_table_name.to_string(),
-                table_id,
-            )
-            .await;
-        assert!(ret.is_ok());
     }
 }
