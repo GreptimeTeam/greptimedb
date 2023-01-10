@@ -32,6 +32,7 @@ pub enum Error {
         // TODO(discord9): find a way that prevent circle depend(query<-script<-query) and can use script's error type
         msg: String,
     },
+
     #[snafu(display(
         "Fail to create temporary recordbatch when eval Python UDF, source: {}",
         source
@@ -40,6 +41,7 @@ pub enum Error {
         #[snafu(backtrace)]
         source: RecordbatchError,
     },
+
     #[snafu(display("Fail to execute function, source: {}", source))]
     ExecuteFunction {
         source: DataFusionError,
