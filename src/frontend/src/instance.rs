@@ -483,9 +483,14 @@ impl SqlQueryHandler for Instance {
 
 #[async_trait]
 impl ScriptHandler for Instance {
-    async fn insert_script(&self, name: &str, script: &str) -> server_error::Result<()> {
+    async fn insert_script(
+        &self,
+        schema: &str,
+        name: &str,
+        script: &str,
+    ) -> server_error::Result<()> {
         if let Some(handler) = &self.script_handler {
-            handler.insert_script(name, script).await
+            handler.insert_script(schema, name, script).await
         } else {
             server_error::NotSupportedSnafu {
                 feat: "Script execution in Frontend",
@@ -494,9 +499,9 @@ impl ScriptHandler for Instance {
         }
     }
 
-    async fn execute_script(&self, script: &str) -> server_error::Result<Output> {
+    async fn execute_script(&self, schema: &str, script: &str) -> server_error::Result<Output> {
         if let Some(handler) = &self.script_handler {
-            handler.execute_script(script).await
+            handler.execute_script(schema, script).await
         } else {
             server_error::NotSupportedSnafu {
                 feat: "Script execution in Frontend",

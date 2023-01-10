@@ -71,10 +71,15 @@ mod python {
             })
         }
 
-        pub async fn insert_script(&self, name: &str, script: &str) -> servers::error::Result<()> {
+        pub async fn insert_script(
+            &self,
+            schema: &str,
+            name: &str,
+            script: &str,
+        ) -> servers::error::Result<()> {
             let _s = self
                 .script_manager
-                .insert_and_compile(name, script)
+                .insert_and_compile(schema, name, script)
                 .await
                 .map_err(|e| {
                     error!(e; "Instance failed to insert script");
@@ -85,9 +90,13 @@ mod python {
             Ok(())
         }
 
-        pub async fn execute_script(&self, name: &str) -> servers::error::Result<Output> {
+        pub async fn execute_script(
+            &self,
+            schema: &str,
+            name: &str,
+        ) -> servers::error::Result<Output> {
             self.script_manager
-                .execute(name)
+                .execute(schema, name)
                 .await
                 .map_err(|e| {
                     error!(e; "Instance failed to execute script");

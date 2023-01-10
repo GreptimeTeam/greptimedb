@@ -51,16 +51,26 @@ pub async fn scripts(
     RawBody(body): RawBody,
 ) -> Json<JsonResponse> {
     if let Some(script_handler) = &state.script_handler {
+        let schema = params.schema.as_ref();
+
+        if schema.is_none() || schema.unwrap().is_empty() {
+            json_err!("invalid schema")
+        }
+
         let name = params.name.as_ref();
 
         if name.is_none() || name.unwrap().is_empty() {
             json_err!("invalid name");
         }
+
         let bytes = unwrap_or_json_err!(hyper::body::to_bytes(body).await);
 
         let script = unwrap_or_json_err!(String::from_utf8(bytes.to_vec()));
 
-        let body = match script_handler.insert_script(name.unwrap(), &script).await {
+        let body = match script_handler
+            .insert_script(schema.unwrap(), name.unwrap(), &script)
+            .await
+        {
             Ok(()) => JsonResponse::with_output(None),
             Err(e) => json_err!(format!("Insert script error: {e}"), e.status_code()),
         };
@@ -73,6 +83,7 @@ pub async fn scripts(
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ScriptQuery {
+    pub schema: Option<String>,
     pub name: Option<String>,
 }
 
@@ -84,6 +95,12 @@ pub async fn run_script(
 ) -> Json<JsonResponse> {
     if let Some(script_handler) = &state.script_handler {
         let start = Instant::now();
+        let schema = params.schema.as_ref();
+
+        if schema.is_none() || schema.unwrap().is_empty() {
+            json_err!("invalid schema")
+        }
+
         let name = params.name.as_ref();
 
         if name.is_none() || name.unwrap().is_empty() {
@@ -92,7 +109,9 @@ pub async fn run_script(
 
         // TODO(sunng87): query_context and db name resolution
 
-        let output = script_handler.execute_script(name.unwrap()).await;
+        let output = script_handler
+            .execute_script(schema.unwrap(), name.unwrap())
+            .await;
         let resp = JsonResponse::from_output(vec![output]).await;
 
         Json(resp.with_execution_time(start.elapsed().as_millis()))
