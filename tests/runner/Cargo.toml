@@ -10,5 +10,5 @@ client = { path = "../../src/client" }
 common-base = { path = "../../src/common/base" }
 common-grpc = { path = "../../src/common/grpc" }
 common-query = { path = "../../src/common/query" }
-sqlness = { git = "https://github.com/ceresdb/sqlness.git" }
+sqlness = "0.1"
 tokio.workspace = true
