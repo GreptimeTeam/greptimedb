@@ -73,6 +73,13 @@ pub enum Error {
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String, backtrace: Backtrace },
 
+    #[snafu(display("Invalid column option, column name: {}, error: {}", name, msg))]
+    InvalidColumnOption {
+        name: String,
+        msg: String,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("SQL data type not supported yet: {:?}", t))]
     SqlTypeNotSupported {
         t: crate::ast::DataType,
@@ -141,9 +148,10 @@ impl ErrorExt for Error {
             | SqlTypeNotSupported { .. }
             | InvalidDefault { .. } => StatusCode::InvalidSyntax,
 
-            InvalidDatabaseName { .. } | ColumnTypeMismatch { .. } | InvalidTableName { .. } => {
-                StatusCode::InvalidArguments
-            }
+            InvalidColumnOption { .. }
+            | InvalidDatabaseName { .. }
+            | ColumnTypeMismatch { .. }
+            | InvalidTableName { .. } => StatusCode::InvalidArguments,
             UnsupportedAlterTableStatement { .. } => StatusCode::InvalidSyntax,
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
