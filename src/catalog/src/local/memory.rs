@@ -316,7 +316,8 @@ impl SchemaProvider for MemorySchemaProvider {
         let mut tables = self.tables.write().unwrap();
         if tables.get(name).is_some() {
             let table = tables.remove(name).unwrap();
-            Ok(tables.insert(new_name, table).unwrap())
+            tables.insert(new_name, table.clone());
+            Ok(table)
         } else {
             TableNotFoundSnafu {
                 table_info: name.to_string(),

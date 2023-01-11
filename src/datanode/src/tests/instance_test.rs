@@ -369,7 +369,7 @@ async fn check_show_tables_and_select(instance: &MockInstance) {
 
 #[tokio::test]
 async fn test_rename_table() {
-    let instance = MockInstance::new("test_rename_table_local").await;
+    let mut instance = MockInstance::new("test_rename_table_local").await;
 
     let output = execute_sql(&instance, "create database db").await;
     assert!(matches!(output, Output::AffectedRows(1)));
@@ -389,7 +389,7 @@ async fn test_rename_table() {
         "db",
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(1)));
+    assert!(matches!(output, Output::AffectedRows(2)));
 
     // rename table
     let output = execute_sql_in_db(&instance, "alter table demo rename test_table", "db").await;
@@ -398,8 +398,7 @@ async fn test_rename_table() {
     check_show_tables_and_select(&instance).await;
 
     // restart instance
-    let instance = MockInstance::create_by_options(instance.options()).await;
-
+    instance.restart().await;
     check_show_tables_and_select(&instance).await;
 }
 
