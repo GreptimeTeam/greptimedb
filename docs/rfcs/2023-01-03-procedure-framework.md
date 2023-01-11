@@ -105,7 +105,7 @@ It supports the following operations:
 When `ProcedureManager` starts, it loads procedures from the `ProcedureStore` and restores the procedures by the `ProcedureLoader`. The manager stores the type name from `Procedure::type_name()` with the data from `Procedure::dump()` in the `.step` file and uses the type name to find a `ProcedureLoader` to recover the procedure from its data.
 
 ```rust
-type ProcedureLoader = Fn(&str) -> Result<Box<dyn Procedure>>;
+type ProcedureLoader = dyn Fn(&str) -> Result<Box<dyn Procedure>>;
 ```
 
 ## Rollback
