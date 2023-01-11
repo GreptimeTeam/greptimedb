@@ -21,26 +21,32 @@ use std::sync::Arc;
 use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
+use common_telemetry::error;
+use common_time::timestamp::TimeUnit;
+use common_time::Timestamp;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::prelude::ConcreteDataType;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use parquet::arrow::{ArrowWriter, ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::basic::{Compression, Encoding};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
-use snafu::ResultExt;
+use parquet::format::FileMetaData;
+use snafu::{OptionExt, ResultExt};
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
 use crate::error::{
-    self, NewRecordBatchSnafu, ReadObjectSnafu, ReadParquetSnafu, Result, WriteObjectSnafu,
-    WriteParquetSnafu,
+    self, DecodeParquetTimeRangeSnafu, NewRecordBatchSnafu, ReadObjectSnafu, ReadParquetSnafu,
+    Result, WriteObjectSnafu, WriteParquetSnafu,
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
-use crate::schema::{ProjectedSchemaRef, StoreSchema};
+use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
 use crate::sst;
+use crate::sst::SstInfo;
 
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
@@ -64,14 +70,14 @@ impl<'a> ParquetWriter<'a> {
         }
     }
 
-    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<()> {
+    pub async fn write_sst(self, _opts: &sst::WriteOptions) -> Result<SstInfo> {
         self.write_rows(None).await
     }
 
     /// Iterates memtable and writes rows to Parquet file.
     /// A chunk of records yielded from each iteration with a size given
     /// in config will be written to a single row group.
-    async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<()> {
+    async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<SstInfo> {
         let projected_schema = self.iter.schema();
         let store_schema = projected_schema.schema_to_read();
         let schema = store_schema.arrow_schema().clone();
@@ -109,12 +115,99 @@ impl<'a> ParquetWriter<'a> {
                 .write(&arrow_batch)
                 .context(WriteParquetSnafu)?;
         }
-        arrow_writer.close().context(WriteParquetSnafu)?;
+
+        let file_meta = arrow_writer.close().context(WriteParquetSnafu)?;
+
+        let (start_timestamp, end_timestamp) =
+            match decode_timestamp_range(&file_meta, store_schema) {
+                Ok(Some((start, end))) => (Some(start), Some(end)),
+                Ok(None) => (None, None),
+                Err(e) => {
+                    error!(e;"Failed to calculate time range of parquet file");
+                    (None, None)
+                }
+            };
+
         object.write(buf).await.context(WriteObjectSnafu {
             path: object.path(),
         })?;
-        Ok(())
+        Ok(SstInfo {
+            start_timestamp,
+            end_timestamp,
+        })
     }
+}
+
+fn decode_timestamp_range(
+    file_meta: &FileMetaData,
+    store_schema: &StoreSchemaRef,
+) -> Result<Option<(Timestamp, Timestamp)>> {
+    let schema = store_schema.schema();
+    let (Some(ts_col_idx), Some(ts_col)) = (schema.timestamp_index(), schema.timestamp_column()) else { return Ok(None); };
+    let ts_datatype = &ts_col.data_type;
+    decode_timestamp_range_inner(file_meta, ts_col_idx, ts_datatype)
+}
+
+fn decode_timestamp_range_inner(
+    file_meta: &FileMetaData,
+    ts_index: usize,
+    ts_datatype: &ConcreteDataType,
+) -> Result<Option<(Timestamp, Timestamp)>> {
+    let mut start = i64::MAX;
+    let mut end = i64::MIN;
+
+    let unit = match ts_datatype {
+        ConcreteDataType::Int64(_) => TimeUnit::Millisecond,
+        ConcreteDataType::Timestamp(type_) => type_.unit(),
+        _ => {
+            return DecodeParquetTimeRangeSnafu {
+                msg: format!("Unexpected timestamp column datatype: {ts_datatype:?}"),
+            }
+            .fail();
+        }
+    };
+
+    for rg in &file_meta.row_groups {
+        let Some(ref metadata) = rg
+            .columns
+            .get(ts_index)
+            .context(DecodeParquetTimeRangeSnafu {
+                msg: format!("Cannot find ts column by index: {ts_index}"),
+            })?
+            .meta_data else { return Ok(None) };
+        let Some(stats) = &metadata.statistics else { return Ok(None) };
+        let (Some(min_value), Some(max_value)) = (&stats.min_value, &stats.max_value) else { return Ok(None); };
+
+        // according to [parquet's spec](https://parquet.apache.org/docs/file-format/data-pages/encodings/), min/max value in stats uses plain encoding with little endian.
+        // also see https://github.com/apache/arrow-rs/blob/5fb337db04a1a19f7d40da46f19b7b5fd4051593/parquet/src/file/statistics.rs#L172
+        let min = i64::from_le_bytes(min_value[..8].try_into().map_err(|e| {
+            error!(
+                "Failed to decode min value from stats, bytes: {:?}, source: {:?}",
+                min_value, e
+            );
+            DecodeParquetTimeRangeSnafu {
+                msg: "decode min value",
+            }
+            .build()
+        })?);
+        let max = i64::from_le_bytes(max_value[..8].try_into().map_err(|e| {
+            error!(
+                "Failed to decode max value from stats, bytes: {:?}, source: {:?}",
+                max_value, e
+            );
+            DecodeParquetTimeRangeSnafu {
+                msg: "decode max value",
+            }
+            .build()
+        })?);
+        start = start.min(min);
+        end = end.max(max);
+    }
+
+    Ok(Some((
+        Timestamp::new(start, unit),
+        Timestamp::new(end, unit),
+    )))
 }
 
 pub struct ParquetReader<'a> {
@@ -374,10 +467,19 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
 
-        writer
+        let SstInfo {
+            start_timestamp,
+            end_timestamp,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
+
+        assert_eq!(Some(Timestamp::new_millisecond(0)), start_timestamp);
+        assert_eq!(
+            Some(Timestamp::new_millisecond((rows_total - 1) as i64)),
+            end_timestamp
+        );
 
         let operator = ObjectStore::new(
             object_store::backend::fs::Builder::default()
@@ -438,10 +540,16 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
 
-        writer
+        let SstInfo {
+            start_timestamp,
+            end_timestamp,
+        } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
+
+        assert_eq!(Some(Timestamp::new_millisecond(1000)), start_timestamp);
+        assert_eq!(Some(Timestamp::new_millisecond(2003)), end_timestamp);
 
         let operator = ObjectStore::new(
             object_store::backend::fs::Builder::default()

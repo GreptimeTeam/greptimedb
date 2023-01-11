@@ -17,6 +17,7 @@ mod parquet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_time::Timestamp;
 use object_store::{util, ObjectStore};
 use serde::{Deserialize, Serialize};
 use table::predicate::Predicate;
@@ -176,6 +177,8 @@ impl FileHandleInner {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileMeta {
     pub file_name: String,
+    pub start_timestamp: Option<Timestamp>,
+    pub end_timestamp: Option<Timestamp>,
     /// SST level of the file.
     pub level: u8,
 }
@@ -195,6 +198,12 @@ pub struct ReadOptions {
     pub predicate: Predicate,
 }
 
+#[derive(Debug)]
+pub struct SstInfo {
+    pub start_timestamp: Option<Timestamp>,
+    pub end_timestamp: Option<Timestamp>,
+}
+
 /// SST access layer.
 #[async_trait]
 pub trait AccessLayer: Send + Sync + std::fmt::Debug {
@@ -204,7 +213,7 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
         file_name: &str,
         iter: BoxedBatchIterator,
         opts: &WriteOptions,
-    ) -> Result<()>;
+    ) -> Result<SstInfo>;
 
     /// Read SST file with given `file_name` and schema.
     async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
@@ -240,14 +249,12 @@ impl AccessLayer for FsAccessLayer {
         file_name: &str,
         iter: BoxedBatchIterator,
         opts: &WriteOptions,
-    ) -> Result<()> {
+    ) -> Result<SstInfo> {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(file_name);
         let writer = ParquetWriter::new(&file_path, iter, self.object_store.clone());
-
-        writer.write_sst(opts).await?;
-        Ok(())
+        writer.write_sst(opts).await
     }
 
     async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader> {

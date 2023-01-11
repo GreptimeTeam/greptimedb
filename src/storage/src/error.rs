@@ -43,9 +43,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Missing timestamp in write batch"))]
-    BatchMissingTimestamp { backtrace: Backtrace },
-
     #[snafu(display("Failed to write columns, source: {}", source))]
     FlushIo {
         source: object_store::Error,
@@ -184,13 +181,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("IO failed while reading Parquet file: {}, source: {}", file, source))]
-    ReadParquetIo {
-        file: String,
-        source: std::io::Error,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Region is under {} state, cannot proceed operation", state))]
     InvalidRegionState {
         state: &'static str,
@@ -219,12 +209,6 @@ pub enum Error {
     WalDataCorrupted {
         region_id: RegionId,
         message: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Region version not found in manifest, the region: {}", region_name))]
-    VersionNotFound {
-        region_name: String,
         backtrace: Backtrace,
     },
 
@@ -315,18 +299,6 @@ pub enum Error {
         column: String,
         version: u32,
         backtrace: Backtrace,
-    },
-
-    #[snafu(display("Timestamp column type illegal, data type: {:?}", data_type))]
-    IllegalTimestampColumnType { data_type: ConcreteDataType },
-
-    #[snafu(display(
-        "Failed to convert between ColumnSchema and ColumnMetadata, source: {}",
-        source
-    ))]
-    ConvertColumnSchema {
-        #[snafu(backtrace)]
-        source: MetadataError,
     },
 
     #[snafu(display("Incompatible schema to read, reason: {}", reason))]
@@ -437,6 +409,9 @@ pub enum Error {
 
     #[snafu(display("More columns than expected in the request"))]
     MoreColumnThanExpected { backtrace: Backtrace },
+
+    #[snafu(display("Failed to decode parquet file time range, msg: {}", msg))]
+    DecodeParquetTimeRange { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -448,12 +423,10 @@ impl ErrorExt for Error {
         match self {
             InvalidScanIndex { .. }
             | BatchMissingColumn { .. }
-            | BatchMissingTimestamp { .. }
             | InvalidProjection { .. }
             | BuildBatch { .. }
             | NotInSchemaToCompat { .. }
             | WriteToOldVersion { .. }
-            | IllegalTimestampColumnType { .. }
             | CreateRecordBatch { .. }
             | RequestTooLarge { .. }
             | TypeMismatch { .. }
@@ -469,7 +442,6 @@ impl ErrorExt for Error {
             | DecodeMetaActionList { .. }
             | Readline { .. }
             | WalDataCorrupted { .. }
-            | VersionNotFound { .. }
             | SequenceNotMonotonic { .. }
             | ConvertStoreSchema { .. }
             | InvalidRawRegion { .. }
@@ -496,19 +468,19 @@ impl ErrorExt for Error {
             | ManifestProtocolForbidRead { .. }
             | ManifestProtocolForbidWrite { .. }
             | ReadParquet { .. }
-            | ReadParquetIo { .. }
             | InvalidRegionState { .. }
             | ReadWal { .. } => StatusCode::StorageUnavailable,
 
             UnknownColumn { .. } => StatusCode::TableColumnNotFound,
 
-            InvalidAlterRequest { source, .. }
-            | InvalidRegionDesc { source, .. }
-            | ConvertColumnSchema { source, .. } => source.status_code(),
+            InvalidAlterRequest { source, .. } | InvalidRegionDesc { source, .. } => {
+                source.status_code()
+            }
             PushBatch { source, .. } => source.status_code(),
             CreateDefault { source, .. } => source.status_code(),
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
+            DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
         }
     }
 

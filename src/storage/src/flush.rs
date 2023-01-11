@@ -27,7 +27,7 @@ use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{IterContext, MemtableId, MemtableRef};
 use crate::region::{RegionWriterRef, SharedDataRef};
-use crate::sst::{AccessLayerRef, FileMeta, WriteOptions};
+use crate::sst::{AccessLayerRef, FileMeta, SstInfo, WriteOptions};
 use crate::wal::Wal;
 
 /// Default write buffer size (32M).
@@ -185,12 +185,18 @@ impl<S: LogStore> FlushJob<S> {
             // TODO(hl): Check if random file name already exists in meta.
             let iter = m.iter(&iter_ctx)?;
             futures.push(async move {
-                self.sst_layer
+                let SstInfo {
+                    start_timestamp,
+                    end_timestamp,
+                } = self
+                    .sst_layer
                     .write_sst(&file_name, iter, &WriteOptions::default())
                     .await?;
 
                 Ok(FileMeta {
                     file_name,
+                    start_timestamp,
+                    end_timestamp,
                     level: 0,
                 })
             });
