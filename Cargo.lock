@@ -5140,6 +5140,7 @@ dependencies = [
 name = "promql"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytemuck",
  "catalog",
  "common-catalog",
@@ -5389,6 +5390,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "paste",
+ "promql",
  "promql-parser",
  "rand 0.8.5",
  "serde",

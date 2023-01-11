@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 bytemuck = "1.12"
 catalog = { path = "../catalog" }
 common-error = { path = "../common/error" }
@@ -13,10 +14,10 @@ datafusion.workspace = true
 datatypes = { path = "../datatypes" }
 futures = "0.3"
 promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "d2f6ec4bbbae19b5156cfc977a6e7de9c6684651" }
-query = { path = "../query" }
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 table = { path = "../table" }
 
 [dev-dependencies]
 tokio = { version = "1.23", features = ["full"] }
+query = { path = "../query" }

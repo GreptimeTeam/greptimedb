@@ -21,7 +21,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::vectors::{Int64Vector, StringVector, UInt64Vector, VectorRef};
 use session::context::QueryContext;
 
-use crate::tests::test_util::{self, MockInstance};
+use crate::tests::test_util::{self, check_output_stream, setup_test_instance, MockInstance};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_database_and_insert_query() {
@@ -69,6 +69,7 @@ async fn test_create_database_and_insert_query() {
         _ => unreachable!(),
     }
 }
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_issue477_same_table_name_in_different_databases() {
     let instance = MockInstance::new("test_issue477_same_table_name_in_different_databases").await;
@@ -156,19 +157,6 @@ async fn assert_query_result(instance: &MockInstance, sql: &str, ts: i64, host: 
         }
         _ => unreachable!(),
     }
-}
-
-async fn setup_test_instance(test_name: &str) -> MockInstance {
-    let instance = MockInstance::new(test_name).await;
-
-    test_util::create_test_table(
-        instance.inner(),
-        ConcreteDataType::timestamp_millisecond_datatype(),
-    )
-    .await
-    .unwrap();
-
-    instance
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -352,16 +340,6 @@ pub async fn test_execute_create() {
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(0)));
-}
-
-async fn check_output_stream(output: Output, expected: String) {
-    let recordbatches = match output {
-        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
-        Output::RecordBatches(recordbatches) => recordbatches,
-        _ => unreachable!(),
-    };
-    let pretty_print = recordbatches.pretty_print().unwrap();
-    assert_eq!(pretty_print, expected);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -26,6 +26,7 @@ pub enum Error {
     #[snafu(display("Internal error during build DataFusion plan, error: {}", source))]
     DataFusionPlanning {
         source: datafusion::error::DataFusionError,
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Unexpected plan or expression: {}", desc))]
@@ -36,6 +37,9 @@ pub enum Error {
 
     #[snafu(display("Cannot find time index column in table {}", table))]
     TimeIndexNotFound { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Cannot find value columns in table {}", table))]
+    ValueNotFound { table: String, backtrace: Backtrace },
 
     #[snafu(display("Cannot find the table {}", table))]
     TableNotFound {
@@ -84,6 +88,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             TimeIndexNotFound { .. }
+            | ValueNotFound { .. }
             | UnsupportedExpr { .. }
             | MultipleVector { .. }
             | ExpectExpr { .. } => StatusCode::InvalidArguments,

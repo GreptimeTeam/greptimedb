@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
+use async_trait::async_trait;
 use catalog::CatalogListRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
@@ -23,15 +24,17 @@ use common_query::physical_plan::{SessionContext, TaskContext};
 use common_query::prelude::ScalarUdf;
 use datafusion::catalog::TableReference;
 use datafusion::error::Result as DfResult;
-use datafusion::execution::context::{SessionConfig, SessionState};
+use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::physical_plan::planner::DefaultPhysicalPlanner;
 use datafusion::physical_plan::udf::ScalarUDF;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::{ExecutionPlan, PhysicalPlanner};
 use datafusion_common::ScalarValue;
 use datafusion_expr::{LogicalPlan as DfLogicalPlan, TableSource};
 use datafusion_optimizer::optimizer::Optimizer;
 use datafusion_sql::planner::ContextProvider;
 use datatypes::arrow::datatypes::DataType;
+use promql::extension_plan::PromExtensionPlanner;
 
 use crate::datafusion::DfCatalogListAdapter;
 use crate::optimizer::TypeConversionRule;
@@ -66,6 +69,7 @@ impl QueryEngineState {
         let mut session_state = SessionState::with_config_rt(session_config, runtime_env);
         session_state.optimizer = optimizer;
         session_state.catalog_list = Arc::new(DfCatalogListAdapter::new(catalog_list.clone()));
+        session_state.query_planner = Arc::new(DfQueryPlanner::new());
 
         let df_context = SessionContext::with_state(session_state);
 
@@ -156,5 +160,32 @@ impl QueryEngineState {
         }
 
         Ok(plan)
+    }
+}
+
+struct DfQueryPlanner {
+    physical_planner: DefaultPhysicalPlanner,
+}
+
+#[async_trait]
+impl QueryPlanner for DfQueryPlanner {
+    async fn create_physical_plan(
+        &self,
+        logical_plan: &DfLogicalPlan,
+        session_state: &SessionState,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        self.physical_planner
+            .create_physical_plan(logical_plan, session_state)
+            .await
+    }
+}
+
+impl DfQueryPlanner {
+    fn new() -> Self {
+        Self {
+            physical_planner: DefaultPhysicalPlanner::with_extension_planners(vec![Arc::new(
+                PromExtensionPlanner {},
+            )]),
+        }
     }
 }

@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
+use common_query::Output;
+use common_recordbatch::util;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use mito::config::EngineConfig;
@@ -85,7 +87,7 @@ pub(crate) async fn create_test_table(
     ts_type: ConcreteDataType,
 ) -> Result<()> {
     let column_schemas = vec![
-        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ColumnSchema::new("ts", ts_type, true).with_time_index(true),
@@ -145,4 +147,27 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
     let factory = QueryEngineFactory::new(catalog_list);
 
     SqlHandler::new(mock_engine, catalog_manager, factory.query_engine())
+}
+
+pub(crate) async fn setup_test_instance(test_name: &str) -> MockInstance {
+    let instance = MockInstance::new(test_name).await;
+
+    create_test_table(
+        instance.inner(),
+        ConcreteDataType::timestamp_millisecond_datatype(),
+    )
+    .await
+    .unwrap();
+
+    instance
+}
+
+pub async fn check_output_stream(output: Output, expected: String) {
+    let recordbatches = match output {
+        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        Output::RecordBatches(recordbatches) => recordbatches,
+        _ => unreachable!(),
+    };
+    let pretty_print = recordbatches.pretty_print().unwrap();
+    assert_eq!(pretty_print, expected);
 }

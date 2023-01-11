@@ -34,6 +34,8 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
+use promql::planner::PromPlanner;
+use promql_parser::parser::EvalStmt;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::statement::Statement;
@@ -41,7 +43,7 @@ use sql::statements::statement::Statement;
 pub use crate::datafusion::catalog_adapter::DfCatalogListAdapter;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::datafusion::planner::DfPlanner;
-use crate::error::{QueryExecutionSnafu, Result};
+use crate::error::{QueryExecutionSnafu, QueryPlanSnafu, Result};
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
 use crate::parser::QueryStatement;
@@ -66,8 +68,19 @@ impl DatafusionQueryEngine {
     fn plan_sql_stmt(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let context_provider = DfContextProviderAdapter::new(self.state.clone(), query_ctx);
         let planner = DfPlanner::new(&context_provider);
+        planner
+            .statement_to_plan(stmt)
+            .map_err(BoxedError::new)
+            .context(QueryPlanSnafu)
+    }
 
-        planner.statement_to_plan(stmt)
+    // TODO(ruihang): test this method once parser is ready.
+    fn plan_promql_stmt(&self, stmt: EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+        let context_provider = DfContextProviderAdapter::new(self.state.clone(), query_ctx);
+        PromPlanner::stmt_to_plan(stmt, context_provider)
+            .map(LogicalPlan::DfPlan)
+            .map_err(BoxedError::new)
+            .context(QueryPlanSnafu)
     }
 }
 
@@ -85,7 +98,7 @@ impl QueryEngine for DatafusionQueryEngine {
     ) -> Result<LogicalPlan> {
         match stmt {
             QueryStatement::Sql(stmt) => self.plan_sql_stmt(stmt, query_ctx),
-            QueryStatement::Promql(_) => unimplemented!(),
+            QueryStatement::Promql(stmt) => self.plan_promql_stmt(stmt, query_ctx),
         }
     }
 

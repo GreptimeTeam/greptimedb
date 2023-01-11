@@ -13,4 +13,5 @@
 // limitations under the License.
 
 mod instance_test;
+mod promql_test;
 pub(crate) mod test_util;
