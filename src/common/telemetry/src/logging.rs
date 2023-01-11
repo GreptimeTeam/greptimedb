@@ -45,7 +45,8 @@ pub fn init_default_ut_logging() {
         let dir =
             env::var("UNITTEST_LOG_DIR").unwrap_or_else(|_| "/tmp/__unittest_logs".to_string());
 
-        *g = Some(init_global_logging("unittest", &dir, "DEBUG", false));
+        let level = env::var("UNITTEST_LOG_LEVEL").unwrap_or_else(|_| "DEBUG".to_string());
+        *g = Some(init_global_logging("unittest", &dir, &level, false));
 
         info!("logs dir = {}", dir);
     });
