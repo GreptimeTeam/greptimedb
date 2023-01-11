@@ -53,8 +53,10 @@ pub fn new_insert_request(
 pub fn schema_for_test() -> Schema {
     let column_schemas = vec![
         ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        // Nullable value column: cpu
         ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
+        // Non-null value column: memory
+        ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), false),
         ColumnSchema::new(
             "ts",
             ConcreteDataType::timestamp_datatype(common_time::timestamp::TimeUnit::Millisecond),

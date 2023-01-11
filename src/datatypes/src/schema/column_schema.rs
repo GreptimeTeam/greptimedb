@@ -21,6 +21,7 @@ use snafu::{ensure, ResultExt};
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, Result};
 use crate::schema::constraint::ColumnDefaultConstraint;
+use crate::value::Value;
 use crate::vectors::VectorRef;
 
 pub type Metadata = HashMap<String, String>;
@@ -106,6 +107,9 @@ impl ColumnSchema {
         self
     }
 
+    /// Creates a vector with default value for this column.
+    ///
+    /// If the column is `NOT NULL` but doesn't has `DEFAULT` value supplied, returns `Ok(None)`.
     pub fn create_default_vector(&self, num_rows: usize) -> Result<Option<VectorRef>> {
         match &self.default_constraint {
             Some(c) => c
@@ -123,6 +127,28 @@ impl ColumnSchema {
                 }
             }
         }
+    }
+
+    /// Creates a vector for padding.
+    ///
+    /// This method always returns a vector since it uses [DataType::default_value]
+    /// to fill the vector. Callers should only use the created vector for padding
+    /// and never read its content.
+    pub fn create_default_vector_for_padding(&self, num_rows: usize) -> VectorRef {
+        let padding_value = if self.is_nullable {
+            Value::Null
+        } else {
+            // If the column is not null, use the data type's default value as it is
+            // more efficient to acquire.
+            self.data_type.default_value()
+        };
+        let value_ref = padding_value.as_value_ref();
+        let mut mutable_vector = self.data_type.create_mutable_vector(num_rows);
+        for _ in 0..num_rows {
+            // Safety: Both the vector and default value are created by the data type.
+            mutable_vector.push_value_ref(value_ref).unwrap();
+        }
+        mutable_vector.to_vector()
     }
 }
 
@@ -182,10 +208,13 @@ impl TryFrom<&ColumnSchema> for Field {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use arrow::datatypes::DataType as ArrowDataType;
 
     use super::*;
     use crate::value::Value;
+    use crate::vectors::Int32Vector;
 
     #[test]
     fn test_column_schema() {
@@ -293,5 +322,19 @@ mod tests {
     fn test_column_schema_no_default() {
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), false);
         assert!(column_schema.create_default_vector(5).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_create_default_vector_for_padding() {
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true);
+        let vector = column_schema.create_default_vector_for_padding(4);
+        assert!(vector.only_null());
+        assert_eq!(4, vector.len());
+
+        let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), false);
+        let vector = column_schema.create_default_vector_for_padding(4);
+        assert_eq!(4, vector.len());
+        let expect: VectorRef = Arc::new(Int32Vector::from_slice(&[0, 0, 0, 0]));
+        assert_eq!(expect, vector);
     }
 }
