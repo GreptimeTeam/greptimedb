@@ -26,9 +26,7 @@ use common_query::prelude::Signature;
 use common_query::Output;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use common_telemetry::logging;
 use datafusion_expr::Volatility;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::vectors::VectorRef;
 use futures::Stream;
@@ -38,22 +36,28 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::coprocessor::{exec_parsed, parse, CoprocessorRef};
+use crate::python::coprocessor::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
 use crate::python::error::{self, Result};
 
 const PY_ENGINE: &str = "python";
 
-pub struct PyUdf {
+#[derive(Debug)]
+pub struct PyUDF {
     copr: CoprocessorRef,
 }
 
-impl std::fmt::Display for PyUdf {
+impl std::fmt::Display for PyUDF {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", &self.copr.name)
+        write!(
+            f,
+            "{}({})->",
+            &self.copr.name,
+            &self.copr.deco_args.arg_names.join(",")
+        )
     }
 }
 
-impl PyUdf {
+impl PyUDF {
     fn from_copr(copr: CoprocessorRef) -> Arc<Self> {
         Arc::new(Self { copr })
     }
@@ -79,7 +83,7 @@ impl PyUdf {
     }
 }
 
-impl Function for PyUdf {
+impl Function for PyUDF {
     fn name(&self) -> &str {
         &self.copr.name
     }
@@ -88,21 +92,38 @@ impl Function for PyUdf {
         &self,
         _input_types: &[datatypes::prelude::ConcreteDataType],
     ) -> common_query::error::Result<datatypes::prelude::ConcreteDataType> {
-        // TODO: use correct return annotation if exist
-        Ok(self.copr.return_types[0]
-            .clone()
-            .map_or(ConcreteDataType::float64_datatype(), |anno| {
-                anno.datatype
-                    .unwrap_or(ConcreteDataType::float64_datatype())
-            }))
+        // TODO(discord9): use correct return annotation if exist
+        match self.copr.return_types.get(0) {
+            Some(Some(AnnotationInfo {
+                datatype: Some(ty), ..
+            })) => Ok(ty.to_owned()),
+            _ => PyUdfSnafu {
+                msg: "Can't found return type for python UDF {self}",
+            }
+            .fail(),
+        }
     }
 
     fn signature(&self) -> common_query::prelude::Signature {
-        Signature::uniform(
-            self.copr.arg_types.len(),
-            ConcreteDataType::numerics(),
-            Volatility::Immutable,
-        )
+        // try our best to get a type signature
+        let mut arg_types = Vec::with_capacity(self.copr.arg_types.len());
+        let mut know_all_types = true;
+        for ty in self.copr.arg_types.iter() {
+            match ty {
+                Some(AnnotationInfo {
+                    datatype: Some(ty), ..
+                }) => arg_types.push(ty.to_owned()),
+                _ => {
+                    know_all_types = false;
+                    break;
+                }
+            }
+        }
+        if know_all_types {
+            Signature::variadic(arg_types, Volatility::Immutable)
+        } else {
+            Signature::any(self.copr.arg_types.len(), Volatility::Immutable)
+        }
     }
 
     fn eval(
@@ -110,7 +131,7 @@ impl Function for PyUdf {
         _func_ctx: common_function::scalars::function::FunctionContext,
         columns: &[datatypes::vectors::VectorRef],
     ) -> common_query::error::Result<datatypes::vectors::VectorRef> {
-        // FIXME: exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
+        // FIXME(discord9): exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
         let schema = self.fake_schema(columns);
         let columns = columns.to_vec();
         // TODO(discord9): remove unwrap
@@ -122,17 +143,13 @@ impl Function for PyUdf {
             .build()
         })?;
         let len = res.columns().len();
-        if len != 1 {
-            logging::info!("Python UDF should return exactly one column, found {len} column(s)");
-            if len == 0 {
-                return PyUdfSnafu {
-                    msg: format!(
-                        "Python UDF should return exactly one column, found {len} column(s)"
-                    ),
-                }
-                .fail();
-            } // if more than one columns, just return first one
-        }
+        if len == 0 {
+            return PyUdfSnafu {
+                msg: "Python UDF should return exactly one column, found zero column".to_string(),
+            }
+            .fail();
+        } // if more than one columns, just return first one
+
         // TODO(discord9): more error handling
         let res0 = res.column(0);
         Ok(res0.to_owned())
@@ -148,9 +165,9 @@ impl PyScript {
     /// Register Current Script as UDF, register name is same as script name
     /// FIXME(discord9): possible inject attack?
     pub fn register_udf(&self) {
-        let udf = PyUdf::from_copr(self.copr.clone());
-        PyUdf::register_as_udf(udf.clone());
-        PyUdf::register_to_query_engine(udf, self.query_engine.to_owned());
+        let udf = PyUDF::from_copr(self.copr.clone());
+        PyUDF::register_as_udf(udf.clone());
+        PyUDF::register_to_query_engine(udf, self.query_engine.to_owned());
     }
 }
 

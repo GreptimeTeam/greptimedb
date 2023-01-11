@@ -31,6 +31,7 @@ pub enum Error {
     PyUdf {
         // TODO(discord9): find a way that prevent circle depend(query<-script<-query) and can use script's error type
         msg: String,
+        backtrace: Backtrace,
     },
 
     #[snafu(display(

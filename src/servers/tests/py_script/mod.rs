@@ -22,7 +22,7 @@ use table::test_util::MemTable;
 use crate::create_testing_instance;
 
 #[tokio::test]
-async fn test_insert_udf_and_query() -> Result<()> {
+async fn test_insert_py_udf_and_query() -> Result<()> {
     let query_ctx = Arc::new(QueryContext::new());
     let table = MemTable::default_numbers_table();
 
