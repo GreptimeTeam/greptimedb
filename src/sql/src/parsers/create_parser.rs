@@ -1080,6 +1080,20 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
 
         if let Statement::CreateTable(c) = &result[0] {
+            let tc = c.constraints[0].clone();
+            match tc {
+                TableConstraint::Unique {
+                    name,
+                    columns,
+                    is_primary,
+                } => {
+                    assert_eq!(name.unwrap().to_string(), "__time_index");
+                    assert_eq!(columns.len(), 1);
+                    assert_eq!(&columns[0].value, "ts");
+                    assert!(!is_primary);
+                }
+                _ => panic!("should be time index constraint"),
+            }
             let ts = c.columns[2].clone();
             assert_eq!(ts.name.to_string(), "ts");
             assert!(matches!(ts.options[0].option, ColumnOption::Default(..)));
