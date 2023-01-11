@@ -178,13 +178,23 @@ fn decode_timestamp_range_inner(
         let Some(stats) = &metadata.statistics else { return Ok(None) };
         let (Some(min_value), Some(max_value)) = (&stats.min_value, &stats.max_value) else { return Ok(None); };
 
-        let min = i64::from_le_bytes(min_value[..8].try_into().map_err(|_| {
+        // according to [parquet's spec](https://parquet.apache.org/docs/file-format/data-pages/encodings/), min/max value in stats uses plain encoding with little endian.
+        // also see https://github.com/apache/arrow-rs/blob/5fb337db04a1a19f7d40da46f19b7b5fd4051593/parquet/src/file/statistics.rs#L172
+        let min = i64::from_le_bytes(min_value[..8].try_into().map_err(|e| {
+            error!(
+                "Failed to decode min value from stats, bytes: {:?}, source: {:?}",
+                min_value, e
+            );
             DecodeParquetTimeRangeSnafu {
                 msg: "decode min value",
             }
             .build()
         })?);
-        let max = i64::from_le_bytes(max_value[..8].try_into().map_err(|_| {
+        let max = i64::from_le_bytes(max_value[..8].try_into().map_err(|e| {
+            error!(
+                "Failed to decode max value from stats, bytes: {:?}, source: {:?}",
+                max_value, e
+            );
             DecodeParquetTimeRangeSnafu {
                 msg: "decode max value",
             }
