@@ -92,7 +92,8 @@ pub(crate) fn query_context_from_db(
     }
 }
 
-pub(crate) const HTTP_API_VERSION: &str = "v1";
+const HTTP_API_VERSION: &str = "v1";
+const HTTP_API_PREFIX: &str = "/v1/";
 
 pub struct HttpServer {
     sql_handler: SqlQueryHandlerRef,

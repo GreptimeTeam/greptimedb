@@ -25,7 +25,7 @@ use tower_http::auth::AsyncAuthorizeRequest;
 
 use crate::auth::{Identity, UserProviderRef};
 use crate::error::{self, Result};
-use crate::http::HTTP_API_VERSION;
+use crate::http::HTTP_API_PREFIX;
 
 pub struct HttpAuth<RespBody> {
     user_provider: Option<UserProviderRef>,
@@ -62,10 +62,7 @@ where
     fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
         let user_provider = self.user_provider.clone();
         Box::pin(async move {
-            let need_auth = request
-                .uri()
-                .path()
-                .starts_with(format!("/{HTTP_API_VERSION}/").as_str());
+            let need_auth = request.uri().path().starts_with(HTTP_API_PREFIX);
             let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
                 user_provider
             } else {
