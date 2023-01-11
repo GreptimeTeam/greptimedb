@@ -44,7 +44,7 @@ impl SqlHandler {
                 table_name: &full_table_name,
             }
         );
-        let kind = req.alter_kind.clone();
+        let is_rename = req.is_rename_table();
         let table =
             self.table_engine
                 .alter_table(&ctx, req)
@@ -52,18 +52,16 @@ impl SqlHandler {
                 .context(error::AlterTableSnafu {
                     table_name: full_table_name,
                 })?;
-        let table_info = &table.table_info();
-        if let AlterKind::RenameTable { .. } = kind {
+        if is_rename {
+            let table_info = &table.table_info();
             let rename_table_req = RenameTableRequest {
                 catalog: table_info.catalog_name.clone(),
                 schema: table_info.schema_name.clone(),
                 table_name,
                 new_table_name: table_info.name.clone(),
-                table_id: table_info.ident.table_id,
-                table,
             };
             self.catalog_manager
-                .rename_table(rename_table_req)
+                .rename_table(rename_table_req, table_info.ident.table_id)
                 .await
                 .context(error::RenameTableSnafu)?;
         }

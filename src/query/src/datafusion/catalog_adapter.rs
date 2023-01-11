@@ -231,12 +231,7 @@ impl SchemaProvider for SchemaProviderAdapter {
             .map(|_| table))
     }
 
-    fn rename_table(
-        &self,
-        _name: &str,
-        _new_name: String,
-        _table: TableRef,
-    ) -> catalog_error::Result<Option<TableRef>> {
+    fn rename_table(&self, _name: &str, _new_name: String) -> catalog_error::Result<TableRef> {
         todo!()
     }
 

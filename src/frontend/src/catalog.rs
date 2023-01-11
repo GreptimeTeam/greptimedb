@@ -30,6 +30,7 @@ use catalog::{
 use futures::StreamExt;
 use meta_client::rpc::TableName;
 use snafu::prelude::*;
+use table::metadata::TableId;
 use table::TableRef;
 
 use crate::datanode::DatanodeClients;
@@ -97,7 +98,11 @@ impl CatalogManager for FrontendCatalogManager {
         unimplemented!()
     }
 
-    async fn rename_table(&self, _request: RenameTableRequest) -> catalog_err::Result<bool> {
+    async fn rename_table(
+        &self,
+        _request: RenameTableRequest,
+        _table_id: TableId,
+    ) -> catalog_err::Result<bool> {
         unimplemented!()
     }
 
@@ -326,12 +331,7 @@ impl SchemaProvider for FrontendSchemaProvider {
         unimplemented!("Frontend schema provider does not support register table")
     }
 
-    fn rename_table(
-        &self,
-        _name: &str,
-        _new_name: String,
-        _table: TableRef,
-    ) -> catalog_err::Result<Option<TableRef>> {
+    fn rename_table(&self, _name: &str, _new_name: String) -> catalog_err::Result<TableRef> {
         unimplemented!("Frontend schema provider does not support rename table")
     }
 

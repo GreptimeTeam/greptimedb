@@ -98,7 +98,7 @@ pub trait CatalogManager: CatalogList {
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
 
     /// Rename a table to [RenameTableRequest::new_table_name], returns whether the table is renamed.
-    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool>;
+    async fn rename_table(&self, request: RenameTableRequest, table_id: TableId) -> Result<bool>;
 
     /// Register a system table, should be called before starting the manager.
     async fn register_system_table(&self, request: RegisterSystemTableRequest)
@@ -145,27 +145,12 @@ impl Debug for RegisterTableRequest {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RenameTableRequest {
     pub catalog: String,
     pub schema: String,
     pub table_name: String,
     pub new_table_name: String,
-    pub table_id: TableId,
-    pub table: TableRef,
-}
-
-impl Debug for RenameTableRequest {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RenameTableRequest")
-            .field("catalog", &self.catalog)
-            .field("schema", &self.schema)
-            .field("table_name", &self.table_name)
-            .field("new_table_name", &self.new_table_name)
-            .field("table_id", &self.table_id)
-            .field("table", &self.table.table_info())
-            .finish()
-    }
 }
 
 #[derive(Clone)]

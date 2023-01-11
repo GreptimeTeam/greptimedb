@@ -92,7 +92,7 @@ impl CatalogManager for MemoryCatalogManager {
             .map(|v| v.is_none())
     }
 
-    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
+    async fn rename_table(&self, request: RenameTableRequest, _table_id: TableId) -> Result<bool> {
         let catalogs = self.catalogs.write().unwrap();
         let catalog = catalogs
             .get(&request.catalog)
@@ -106,9 +106,9 @@ impl CatalogManager for MemoryCatalogManager {
                 catalog: &request.catalog,
                 schema: &request.schema,
             })?;
-        schema
-            .rename_table(&request.table_name, request.new_table_name, request.table)
-            .map(|v| v.is_none())
+        Ok(schema
+            .rename_table(&request.table_name, request.new_table_name)
+            .is_ok())
     }
 
     async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
@@ -312,25 +312,11 @@ impl SchemaProvider for MemorySchemaProvider {
         }
     }
 
-    fn rename_table(
-        &self,
-        name: &str,
-        new_name: String,
-        table: TableRef,
-    ) -> Result<Option<TableRef>> {
+    fn rename_table(&self, name: &str, new_name: String) -> Result<TableRef> {
         let mut tables = self.tables.write().unwrap();
-        if let Some(existing) = tables.get(name) {
-            // if table with the same name but different table id exists, then it's a fatal bug
-            if existing.table_info().ident.table_id != table.table_info().ident.table_id {
-                error!(
-                    "Unexpected table rename: {:?}, existing: {:?}",
-                    table.table_info(),
-                    existing.table_info()
-                );
-                return TableExistsSnafu { table: name }.fail()?;
-            }
-            tables.remove(name);
-            Ok(tables.insert(new_name, table))
+        if tables.get(name).is_some() {
+            let table = tables.remove(name).unwrap();
+            Ok(tables.insert(new_name, table).unwrap())
         } else {
             TableNotFoundSnafu {
                 table_info: name.to_string(),
@@ -418,10 +404,9 @@ mod tests {
 
         // rename test table
         let new_table_name = "numbers";
-        assert!(provider
-            .rename_table(table_name, new_table_name.to_string(), test_table.clone(),)
-            .unwrap()
-            .is_none());
+        provider
+            .rename_table(table_name, new_table_name.to_string())
+            .unwrap();
 
         // test old table name not exist
         assert!(!provider.table_exist(table_name).unwrap());
@@ -438,7 +423,6 @@ mod tests {
         let other_table = Arc::new(NumbersTable::new(2));
         let result = provider.register_table(new_table_name.to_string(), other_table);
         let err = result.err().unwrap();
-        assert!(err.backtrace_opt().is_some());
         assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
     }
 
@@ -459,7 +443,7 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             table_id,
-            table: table.clone(),
+            table,
         };
         assert!(catalog.register_table(register_table_req).await.unwrap());
         assert!(schema.table_exist(table_name).unwrap());
@@ -471,10 +455,11 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             new_table_name: new_table_name.to_string(),
-            table_id,
-            table: table.clone(),
         };
-        assert!(catalog.rename_table(rename_table_req).await.unwrap());
+        assert!(catalog
+            .rename_table(rename_table_req, table_id)
+            .await
+            .unwrap());
         assert!(!schema.table_exist(table_name).unwrap());
         assert!(schema.table_exist(new_table_name).unwrap());
 

@@ -449,9 +449,11 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(true)
     }
 
-    async fn rename_table(&self, _request: RenameTableRequest) -> Result<bool> {
-        // todo impl rename_table for catalog manager
-        todo!()
+    async fn rename_table(&self, _request: RenameTableRequest, _table_id: TableId) -> Result<bool> {
+        UnimplementedSnafu {
+            operation: "rename table",
+        }
+        .fail()
     }
 
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
@@ -744,13 +746,11 @@ impl SchemaProvider for RemoteSchemaProvider {
         prev
     }
 
-    fn rename_table(
-        &self,
-        _name: &str,
-        _new_name: String,
-        _table: TableRef,
-    ) -> Result<Option<TableRef>> {
-        todo!()
+    fn rename_table(&self, _name: &str, _new_name: String) -> Result<TableRef> {
+        UnimplementedSnafu {
+            operation: "rename table",
+        }
+        .fail()
     }
 
     fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {

@@ -231,13 +231,8 @@ impl SchemaProvider for InformationSchema {
         panic!("System catalog & schema does not support register table")
     }
 
-    fn rename_table(
-        &self,
-        _name: &str,
-        _new_name: String,
-        _table: TableRef,
-    ) -> crate::error::Result<Option<TableRef>> {
-        panic!("System catalog & schema does not support rename table")
+    fn rename_table(&self, _name: &str, _new_name: String) -> crate::error::Result<TableRef> {
+        unimplemented!("System catalog & schema does not support rename table")
     }
 
     fn deregister_table(&self, _name: &str) -> crate::error::Result<Option<TableRef>> {

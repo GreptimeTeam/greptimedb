@@ -36,7 +36,8 @@ use crate::sql::SqlHandler;
 
 pub(crate) struct MockInstance {
     instance: Instance,
-    _guard: TestGuard,
+    opts: DatanodeOptions,
+    _guard: Option<TestGuard>,
 }
 
 impl MockInstance {
@@ -46,15 +47,30 @@ impl MockInstance {
         let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
 
-        MockInstance { instance, _guard }
+        MockInstance {
+            instance,
+            opts,
+            _guard: Some(_guard),
+        }
+    }
+
+    pub(crate) async fn create_by_options(opts: DatanodeOptions) -> Self {
+        let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
+        instance.start().await.unwrap();
+
+        MockInstance {
+            instance,
+            opts,
+            _guard: None,
+        }
     }
 
     pub(crate) fn inner(&self) -> &Instance {
         &self.instance
     }
 
-    pub(crate) async fn restart(&self) -> Result<()> {
-        self.instance.start().await
+    pub(crate) fn options(&self) -> DatanodeOptions {
+        self.opts.clone()
     }
 }
 

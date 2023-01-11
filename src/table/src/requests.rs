@@ -70,6 +70,12 @@ pub struct AlterTableRequest {
     pub alter_kind: AlterKind,
 }
 
+impl AlterTableRequest {
+    pub fn is_rename_table(&self) -> bool {
+        matches!(self.alter_kind, AlterKind::RenameTable { .. })
+    }
+}
+
 /// Add column request
 #[derive(Debug, Clone)]
 pub struct AddColumnRequest {

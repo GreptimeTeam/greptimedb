@@ -187,6 +187,7 @@ fn build_system_catalog_schema() -> Schema {
 }
 
 /// Formats key string for table entry in system catalog
+#[inline]
 pub fn format_table_entry_key(catalog: &str, schema: &str, table_id: TableId) -> String {
     format!("{catalog}.{schema}.{table_id}")
 }
@@ -309,7 +310,7 @@ pub fn decode_system_catalog(
             debug!("Table meta value: {}", String::from_utf8_lossy(value));
             let table_meta: TableEntryValue =
                 serde_json::from_slice(value).context(ValueDeserializeSnafu)?;
-            let table_id = table_parts[2].parse::<u32>().unwrap();
+            let table_id = table_parts[2].parse::<TableId>().unwrap();
             Ok(Entry::Table(TableEntry {
                 catalog_name: table_parts[0].to_string(),
                 schema_name: table_parts[1].to_string(),

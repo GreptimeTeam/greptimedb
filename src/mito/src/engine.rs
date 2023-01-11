@@ -525,9 +525,10 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
             table_ref.table = new_table_name.as_str();
+            let full_table_name = table_ref.to_string();
             let mut tables = self.tables.write().unwrap();
-            tables.remove(&table_ref.to_string());
-            tables.insert(table_ref.to_string(), table.clone());
+            tables.remove(&full_table_name);
+            tables.insert(full_table_name, table.clone());
         }
         Ok(table)
     }
@@ -1123,9 +1124,11 @@ mod tests {
                 new_table_name: another_name.to_string(),
             },
         };
-        let ret = table_engine.alter_table(&ctx, req).await;
-        assert!(ret.is_err());
-        assert!(matches!(ret, Err(e) if format!("{e:?}").contains("Table already exists")));
+        let err = table_engine.alter_table(&ctx, req).await.err().unwrap();
+        assert!(
+            err.to_string().contains("Table already exists"),
+            "Unexpected error: {err}"
+        );
 
         let new_table_name = "test_table";
         // test rename table
