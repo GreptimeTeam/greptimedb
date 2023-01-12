@@ -160,6 +160,7 @@ impl Instance {
             Mode::Distributed => Some(HeartbeatTask::new(
                 opts.node_id.context(MissingNodeIdSnafu)?,
                 opts.rpc_addr.clone(),
+                opts.rpc_hostname.clone(),
                 meta_client.as_ref().unwrap().clone(),
                 catalog_manager.clone(),
             )),

@@ -27,6 +27,7 @@ use crate::error::{MetaClientInitSnafu, Result};
 pub struct HeartbeatTask {
     node_id: u64,
     server_addr: String,
+    server_hostname: Option<String>,
     running: Arc<AtomicBool>,
     meta_client: Arc<MetaClient>,
     catalog_manager: CatalogManagerRef,
@@ -44,12 +45,14 @@ impl HeartbeatTask {
     pub fn new(
         node_id: u64,
         server_addr: String,
+        server_hostname: Option<String>,
         meta_client: Arc<MetaClient>,
         catalog_manager: CatalogManagerRef,
     ) -> Self {
         Self {
             node_id,
             server_addr,
+            server_hostname,
             running: Arc::new(AtomicBool::new(false)),
             meta_client,
             catalog_manager,
@@ -97,6 +100,7 @@ impl HeartbeatTask {
         let interval = self.interval;
         let node_id = self.node_id;
         let server_addr = self.server_addr.clone();
+        let server_hostname = self.server_hostname.clone();
         let meta_client = self.meta_client.clone();
 
         let catalog_manager_clone = self.catalog_manager.clone();
@@ -114,7 +118,7 @@ impl HeartbeatTask {
                 let req = HeartbeatRequest {
                     peer: Some(Peer {
                         id: node_id,
-                        addr: server_addr.clone(),
+                        addr: server_hostname.clone().unwrap_or(server_addr.clone()),
                     }),
                     node_stat: Some(NodeStat {
                         region_num,
