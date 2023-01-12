@@ -228,6 +228,21 @@ pub struct StatValue {
     pub stats: Vec<Stat>,
 }
 
+impl StatValue {
+    /// Get the region number from stat value.
+    pub fn region_num(&self) -> Option<u64> {
+        for stat in self.stats.iter() {
+            let region_num = stat.region_num;
+            if region_num < 0 {
+                continue;
+            } else {
+                return Some(region_num as u64);
+            }
+        }
+        None
+    }
+}
+
 impl TryFrom<StatValue> for Vec<u8> {
     type Error = error::Error;
 
@@ -325,5 +340,40 @@ mod tests {
         let new_value: LeaseValue = value_bytes.try_into().unwrap();
 
         assert_eq!(new_value, value);
+    }
+
+    #[test]
+    fn test_get_region_num_from_stat_val() {
+        let empty = StatValue { stats: vec![] };
+        let region_num = empty.region_num();
+        assert!(region_num.is_none());
+
+        let wrong = StatValue {
+            stats: vec![Stat {
+                region_num: -1,
+                ..Default::default()
+            }],
+        };
+        let right = wrong.region_num();
+        assert!(right.is_none());
+
+        let stat_val = StatValue {
+            stats: vec![
+                Stat {
+                    region_num: 1,
+                    ..Default::default()
+                },
+                Stat {
+                    region_num: -1,
+                    ..Default::default()
+                },
+                Stat {
+                    region_num: 2,
+                    ..Default::default()
+                },
+            ],
+        };
+        let region_num = stat_val.region_num().unwrap();
+        assert_eq!(1, region_num);
     }
 }

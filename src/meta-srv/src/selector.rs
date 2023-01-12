@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod lease_based;
+pub mod load_based;
 
 use crate::error::Result;
 
