@@ -174,7 +174,7 @@ impl<'a> TableRouteKey<'a> {
     }
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Hash)]
 pub struct StatKey {
     pub cluster_id: u64,
     pub node_id: u64,
