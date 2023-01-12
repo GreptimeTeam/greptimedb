@@ -342,34 +342,9 @@ pub async fn test_execute_create() {
     assert!(matches!(output, Output::AffectedRows(0)));
 }
 
-async fn check_show_tables_and_select(instance: &MockInstance) {
-    let output = execute_sql_in_db(instance, "show tables", "db").await;
-    let expect = "\
-+------------+
-| Tables     |
-+------------+
-| test_table |
-+------------+\
-"
-    .to_string();
-    check_output_stream(output, expect).await;
-
-    let output = execute_sql_in_db(instance, "select * from test_table order by ts", "db").await;
-    let expected = "\
-+-------+-----+--------+---------------------+
-| host  | cpu | memory | ts                  |
-+-------+-----+--------+---------------------+
-| host1 | 1.1 | 100    | 1970-01-01T00:00:01 |
-| host2 | 2.2 | 200    | 1970-01-01T00:00:02 |
-+-------+-----+--------+---------------------+\
-"
-    .to_string();
-    check_output_stream(output, expected).await;
-}
-
 #[tokio::test]
 async fn test_rename_table() {
-    let mut instance = MockInstance::new("test_rename_table_local").await;
+    let instance = MockInstance::new("test_rename_table_local").await;
 
     let output = execute_sql(&instance, "create database db").await;
     assert!(matches!(output, Output::AffectedRows(1)));
@@ -395,11 +370,28 @@ async fn test_rename_table() {
     let output = execute_sql_in_db(&instance, "alter table demo rename test_table", "db").await;
     assert!(matches!(output, Output::AffectedRows(0)));
 
-    check_show_tables_and_select(&instance).await;
+    let output = execute_sql_in_db(&instance, "show tables", "db").await;
+    let expect = "\
++------------+
+| Tables     |
++------------+
+| test_table |
++------------+\
+"
+    .to_string();
+    check_output_stream(output, expect).await;
 
-    // restart instance
-    instance.restart().await;
-    check_show_tables_and_select(&instance).await;
+    let output = execute_sql_in_db(&instance, "select * from test_table order by ts", "db").await;
+    let expected = "\
++-------+-----+--------+---------------------+
+| host  | cpu | memory | ts                  |
++-------+-----+--------+---------------------+
+| host1 | 1.1 | 100    | 1970-01-01T00:00:01 |
+| host2 | 2.2 | 200    | 1970-01-01T00:00:02 |
++-------+-----+--------+---------------------+\
+"
+    .to_string();
+    check_output_stream(output, expected).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

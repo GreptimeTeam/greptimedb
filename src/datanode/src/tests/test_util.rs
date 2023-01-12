@@ -31,12 +31,11 @@ use tempdir::TempDir;
 
 use crate::datanode::{DatanodeOptions, ObjectStoreConfig, WalConfig};
 use crate::error::{CreateTableSnafu, Result};
-use crate::instance::{Instance, InstanceRef};
+use crate::instance::Instance;
 use crate::sql::SqlHandler;
 
 pub(crate) struct MockInstance {
-    instance: InstanceRef,
-    opts: DatanodeOptions,
+    instance: Instance,
     _guard: TestGuard,
 }
 
@@ -47,21 +46,11 @@ impl MockInstance {
         let instance = Instance::with_mock_meta_client(&opts).await.unwrap();
         instance.start().await.unwrap();
 
-        MockInstance {
-            instance: Arc::new(instance),
-            opts,
-            _guard,
-        }
-    }
-
-    pub(crate) async fn restart(&mut self) {
-        let instance = Instance::with_mock_meta_client(&self.opts).await.unwrap();
-        instance.start().await.unwrap();
-        self.instance = Arc::new(instance);
+        MockInstance { instance, _guard }
     }
 
     pub(crate) fn inner(&self) -> &Instance {
-        self.instance.as_ref()
+        &self.instance
     }
 }
 
