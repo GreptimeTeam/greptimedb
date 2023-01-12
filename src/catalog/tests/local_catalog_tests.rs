@@ -17,7 +17,7 @@ mod tests {
     use std::sync::Arc;
 
     use catalog::local::LocalCatalogManager;
-    use catalog::{CatalogManager, RegisterTableRequest};
+    use catalog::{CatalogManager, RegisterTableRequest, RenameTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_telemetry::{error, info};
     use mito::config::EngineConfig;
@@ -36,6 +36,44 @@ mod tests {
         let catalog_manager = LocalCatalogManager::try_new(mock_engine).await.unwrap();
         catalog_manager.start().await?;
         Ok(catalog_manager)
+    }
+
+    #[tokio::test]
+    async fn test_rename_table() {
+        common_telemetry::init_default_ut_logging();
+        let catalog_manager = create_local_catalog_manager().await.unwrap();
+        // register table
+        let table_name = "test_table";
+        let table_id = 42;
+        let table = Arc::new(NumbersTable::new(table_id));
+        let request = RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            table_id,
+            table: table.clone(),
+        };
+        assert!(catalog_manager.register_table(request).await.unwrap());
+
+        // rename table
+        let new_table_name = "table_t";
+        let rename_table_req = RenameTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            new_table_name: new_table_name.to_string(),
+            table_id,
+        };
+        assert!(catalog_manager
+            .rename_table(rename_table_req)
+            .await
+            .unwrap());
+
+        let registered_table = catalog_manager
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
+            .unwrap()
+            .unwrap();
+        assert_eq!(registered_table.table_info().ident.table_id, table_id);
     }
 
     #[tokio::test]

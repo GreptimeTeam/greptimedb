@@ -43,7 +43,7 @@ use crate::remote::{Kv, KvBackendRef};
 use crate::{
     handle_system_table_request, CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef,
     DeregisterTableRequest, RegisterSchemaRequest, RegisterSystemTableRequest,
-    RegisterTableRequest, SchemaProvider, SchemaProviderRef,
+    RegisterTableRequest, RenameTableRequest, SchemaProvider, SchemaProviderRef,
 };
 
 /// Catalog manager based on metasrv.
@@ -449,6 +449,13 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(true)
     }
 
+    async fn rename_table(&self, _request: RenameTableRequest) -> Result<bool> {
+        UnimplementedSnafu {
+            operation: "rename table",
+        }
+        .fail()
+    }
+
     async fn register_system_table(&self, request: RegisterSystemTableRequest) -> Result<()> {
         let mut requests = self.system_table_requests.lock().await;
         requests.push(request);
@@ -737,6 +744,13 @@ impl SchemaProvider for RemoteSchemaProvider {
         .join()
         .unwrap();
         prev
+    }
+
+    fn rename_table(&self, _name: &str, _new_name: String) -> Result<TableRef> {
+        UnimplementedSnafu {
+            operation: "rename table",
+        }
+        .fail()
     }
 
     fn deregister_table(&self, name: &str) -> Result<Option<TableRef>> {

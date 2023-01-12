@@ -186,11 +186,23 @@ fn build_system_catalog_schema() -> Schema {
     SchemaBuilder::try_from(cols).unwrap().build().unwrap()
 }
 
-pub fn build_table_insert_request(full_table_name: String, table_id: TableId) -> InsertRequest {
+/// Formats key string for table entry in system catalog
+#[inline]
+pub fn format_table_entry_key(catalog: &str, schema: &str, table_id: TableId) -> String {
+    format!("{catalog}.{schema}.{table_id}")
+}
+
+pub fn build_table_insert_request(
+    catalog: String,
+    schema: String,
+    table_name: String,
+    table_id: TableId,
+) -> InsertRequest {
+    let entry_key = format_table_entry_key(&catalog, &schema, table_id);
     build_insert_request(
         EntryType::Table,
-        full_table_name.as_bytes(),
-        serde_json::to_string(&TableEntryValue { table_id })
+        entry_key.as_bytes(),
+        serde_json::to_string(&TableEntryValue { table_name })
             .unwrap()
             .as_bytes(),
     )
@@ -285,8 +297,8 @@ pub fn decode_system_catalog(
         }
 
         EntryType::Table => {
-            // As for table entry, the key is a string with format: `<catalog_name>.<schema_name>.<table_name>`
-            // and the value is a JSON string with format: `{"table_id": <table_id>}`
+            // As for table entry, the key is a string with format: `<catalog_name>.<schema_name>.<table_id>`
+            // and the value is a JSON string with format: `{"table_name": <table_name>}`
             let table_parts = key.split('.').collect::<Vec<_>>();
             ensure!(
                 table_parts.len() >= 3,
@@ -298,11 +310,12 @@ pub fn decode_system_catalog(
             debug!("Table meta value: {}", String::from_utf8_lossy(value));
             let table_meta: TableEntryValue =
                 serde_json::from_slice(value).context(ValueDeserializeSnafu)?;
+            let table_id = table_parts[2].parse::<TableId>().unwrap();
             Ok(Entry::Table(TableEntry {
                 catalog_name: table_parts[0].to_string(),
                 schema_name: table_parts[1].to_string(),
-                table_name: table_parts[2].to_string(),
-                table_id: table_meta.table_id,
+                table_name: table_meta.table_name,
+                table_id,
             }))
         }
     }
@@ -362,7 +375,7 @@ pub struct TableEntry {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TableEntryValue {
-    pub table_id: TableId,
+    pub table_name: String,
 }
 
 #[cfg(test)]
@@ -415,8 +428,8 @@ mod tests {
     pub fn test_decode_table() {
         let entry = decode_system_catalog(
             Some(EntryType::Table as u8),
-            Some("some_catalog.some_schema.some_table".as_bytes()),
-            Some("{\"table_id\":42}".as_bytes()),
+            Some("some_catalog.some_schema.42".as_bytes()),
+            Some("{\"table_name\":\"some_table\"}".as_bytes()),
         )
         .unwrap();
 
@@ -435,7 +448,7 @@ mod tests {
     pub fn test_decode_mismatch() {
         decode_system_catalog(
             Some(EntryType::Table as u8),
-            Some("some_catalog.some_schema.some_table".as_bytes()),
+            Some("some_catalog.some_schema.42".as_bytes()),
             None,
         )
         .unwrap();

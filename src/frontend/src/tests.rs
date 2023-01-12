@@ -170,6 +170,7 @@ async fn create_distributed_datanode(
         storage: ObjectStoreConfig::File {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
         },
+        mode: Mode::Distributed,
         ..Default::default()
     };
 

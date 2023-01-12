@@ -24,8 +24,8 @@ use catalog::helper::{
 use catalog::remote::{Kv, KvBackendRef};
 use catalog::{
     CatalogList, CatalogManager, CatalogProvider, CatalogProviderRef, DeregisterTableRequest,
-    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider,
-    SchemaProviderRef,
+    RegisterSchemaRequest, RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest,
+    SchemaProvider, SchemaProviderRef,
 };
 use futures::StreamExt;
 use meta_client::rpc::TableName;
@@ -94,6 +94,10 @@ impl CatalogManager for FrontendCatalogManager {
         &self,
         _request: RegisterSchemaRequest,
     ) -> catalog::error::Result<bool> {
+        unimplemented!()
+    }
+
+    async fn rename_table(&self, _request: RenameTableRequest) -> catalog_err::Result<bool> {
         unimplemented!()
     }
 
@@ -320,6 +324,10 @@ impl SchemaProvider for FrontendSchemaProvider {
         _table: TableRef,
     ) -> catalog::error::Result<Option<TableRef>> {
         unimplemented!("Frontend schema provider does not support register table")
+    }
+
+    fn rename_table(&self, _name: &str, _new_name: String) -> catalog_err::Result<TableRef> {
+        unimplemented!("Frontend schema provider does not support rename table")
     }
 
     fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {

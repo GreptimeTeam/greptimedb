@@ -47,7 +47,8 @@ use crate::tables::SystemCatalog;
 use crate::{
     format_full_table_name, handle_system_table_request, CatalogList, CatalogManager,
     CatalogProvider, CatalogProviderRef, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterSystemTableRequest, RegisterTableRequest, SchemaProvider, SchemaProviderRef,
+    RegisterSystemTableRequest, RegisterTableRequest, RenameTableRequest, SchemaProvider,
+    SchemaProviderRef,
 };
 
 /// A `CatalogManager` consists of a system catalog and a bunch of user catalogs.
@@ -377,6 +378,45 @@ impl CatalogManager for LocalCatalogManager {
                 Ok(true)
             }
         }
+    }
+
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
+        let started = self.init_lock.lock().await;
+
+        ensure!(
+            *started,
+            IllegalManagerStateSnafu {
+                msg: "Catalog manager not started",
+            }
+        );
+
+        let catalog_name = &request.catalog;
+        let schema_name = &request.schema;
+
+        let catalog = self
+            .catalogs
+            .catalog(catalog_name)?
+            .context(CatalogNotFoundSnafu { catalog_name })?;
+
+        let schema = catalog
+            .schema(schema_name)?
+            .with_context(|| SchemaNotFoundSnafu {
+                catalog: catalog_name,
+                schema: schema_name,
+            })?;
+
+        // rename table in system catalog
+        self.system
+            .register_table(
+                catalog_name.clone(),
+                schema_name.clone(),
+                request.new_table_name.clone(),
+                request.table_id,
+            )
+            .await?;
+        Ok(schema
+            .rename_table(&request.table_name, request.new_table_name)
+            .is_ok())
     }
 
     async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {

@@ -168,7 +168,7 @@ impl<R: Region> Table for MitoTable<R> {
     }
 
     /// Alter table changes the schemas of the table.
-    async fn alter(&self, _context: AlterContext, req: AlterTableRequest) -> TableResult<()> {
+    async fn alter(&self, _context: AlterContext, req: &AlterTableRequest) -> TableResult<()> {
         let _lock = self.alter_lock.lock().await;
 
         let table_info = self.table_info();

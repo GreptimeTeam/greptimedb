@@ -231,6 +231,10 @@ impl SchemaProvider for SchemaProviderAdapter {
             .map(|_| table))
     }
 
+    fn rename_table(&self, _name: &str, _new_name: String) -> catalog_error::Result<TableRef> {
+        todo!()
+    }
+
     fn deregister_table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
         self.df_schema_provider
             .deregister_table(name)

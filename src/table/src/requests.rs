@@ -70,14 +70,20 @@ pub struct AlterTableRequest {
     pub alter_kind: AlterKind,
 }
 
+impl AlterTableRequest {
+    pub fn is_rename_table(&self) -> bool {
+        matches!(self.alter_kind, AlterKind::RenameTable { .. })
+    }
+}
+
 /// Add column request
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AddColumnRequest {
     pub column_schema: ColumnSchema,
     pub is_key: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AlterKind {
     AddColumns { columns: Vec<AddColumnRequest> },
     DropColumns { names: Vec<String> },

@@ -29,7 +29,9 @@ use store_api::storage::{
 };
 use table::engine::{EngineContext, TableEngine, TableReference};
 use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
-use table::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
+use table::requests::{
+    AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
+};
 use table::table::{AlterContext, TableRef};
 use table::{error as table_error, Result as TableResult, Table};
 use tokio::sync::Mutex;
@@ -491,7 +493,22 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let schema_name = req.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = &req.table_name.clone();
 
-        let table_ref = TableReference {
+        if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
+            let table_ref = TableReference {
+                catalog: catalog_name,
+                schema: schema_name,
+                table: new_table_name,
+            };
+
+            if self.get_table(&table_ref).is_some() {
+                return TableExistsSnafu {
+                    table_name: table_ref.to_string(),
+                }
+                .fail();
+            }
+        }
+
+        let mut table_ref = TableReference {
             catalog: catalog_name,
             schema: schema_name,
             table: table_name,
@@ -502,9 +519,17 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         logging::info!("start altering table {} with request {:?}", table_name, req);
         table
-            .alter(AlterContext::new(), req)
+            .alter(AlterContext::new(), &req)
             .await
             .context(error::AlterTableSnafu { table_name })?;
+
+        if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
+            table_ref.table = new_table_name.as_str();
+            let full_table_name = table_ref.to_string();
+            let mut tables = self.tables.write().unwrap();
+            tables.remove(&full_table_name);
+            tables.insert(full_table_name, table.clone());
+        }
         Ok(table)
     }
 
@@ -556,7 +581,7 @@ mod tests {
 
     use super::*;
     use crate::table::test_util;
-    use crate::table::test_util::{new_insert_request, MockRegion, TABLE_NAME};
+    use crate::table::test_util::{new_insert_request, schema_for_test, MockRegion, TABLE_NAME};
 
     async fn setup_table_with_column_default_constraint() -> (TempDir, String, TableRef) {
         let table_name = "test_default_constraint";
@@ -1070,8 +1095,42 @@ mod tests {
     async fn test_alter_rename_table() {
         let (engine, table_engine, _table, object_store, _dir) =
             test_util::setup_mock_engine_and_table().await;
+        let ctx = EngineContext::default();
 
-        let new_table_name = "table_t";
+        // register another table
+        let another_name = "another_table";
+        let req = CreateTableRequest {
+            id: 1024,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: another_name.to_string(),
+            desc: Some("another test table".to_string()),
+            schema: Arc::new(schema_for_test()),
+            region_numbers: vec![0],
+            primary_key_indices: vec![0],
+            create_if_not_exists: true,
+            table_options: HashMap::new(),
+        };
+        table_engine
+            .create_table(&ctx, req)
+            .await
+            .expect("create table must succeed");
+        // test renaming a table with an existing name.
+        let req = AlterTableRequest {
+            catalog_name: None,
+            schema_name: None,
+            table_name: TABLE_NAME.to_string(),
+            alter_kind: AlterKind::RenameTable {
+                new_table_name: another_name.to_string(),
+            },
+        };
+        let err = table_engine.alter_table(&ctx, req).await.err().unwrap();
+        assert!(
+            err.to_string().contains("Table already exists"),
+            "Unexpected error: {err}"
+        );
+
+        let new_table_name = "test_table";
         // test rename table
         let req = AlterTableRequest {
             catalog_name: None,
@@ -1081,7 +1140,6 @@ mod tests {
                 new_table_name: new_table_name.to_string(),
             },
         };
-        let ctx = EngineContext::default();
         let table = table_engine.alter_table(&ctx, req).await.unwrap();
 
         assert_eq!(table.table_info().name, new_table_name);

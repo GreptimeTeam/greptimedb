@@ -270,7 +270,7 @@ impl DistInstance {
         let mut context = AlterContext::with_capacity(1);
         context.insert(expr);
 
-        table.alter(context, request).await.context(TableSnafu)?;
+        table.alter(context, &request).await.context(TableSnafu)?;
 
         Ok(Output::AffectedRows(0))
     }

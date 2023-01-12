@@ -163,7 +163,7 @@ impl Table for DistTable {
         Ok(FilterPushDownType::Inexact)
     }
 
-    async fn alter(&self, context: AlterContext, request: AlterTableRequest) -> table::Result<()> {
+    async fn alter(&self, context: AlterContext, request: &AlterTableRequest) -> table::Result<()> {
         self.handle_alter(context, request)
             .await
             .map_err(BoxedError::new)
@@ -414,7 +414,7 @@ impl DistTable {
             .context(CatalogSnafu)
     }
 
-    async fn handle_alter(&self, context: AlterContext, request: AlterTableRequest) -> Result<()> {
+    async fn handle_alter(&self, context: AlterContext, request: &AlterTableRequest) -> Result<()> {
         let alter_expr = context
             .get::<AlterExpr>()
             .context(ContextValueNotFoundSnafu { key: "AlterExpr" })?;

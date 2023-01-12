@@ -208,9 +208,15 @@ mod tests {
         ) -> catalog::error::Result<Option<TableRef>> {
             unimplemented!();
         }
+
+        fn rename_table(&self, _name: &str, _new_name: String) -> catalog::error::Result<TableRef> {
+            unimplemented!()
+        }
+
         fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {
             unimplemented!();
         }
+
         fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
             Ok(name == "demo")
         }

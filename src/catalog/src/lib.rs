@@ -97,6 +97,9 @@ pub trait CatalogManager: CatalogList {
     /// schema registered.
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
 
+    /// Rename a table to [RenameTableRequest::new_table_name], returns whether the table is renamed.
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool>;
+
     /// Register a system table, should be called before starting the manager.
     async fn register_system_table(&self, request: RegisterSystemTableRequest)
         -> error::Result<()>;
@@ -140,6 +143,15 @@ impl Debug for RegisterTableRequest {
             .field("table", &self.table.table_info())
             .finish()
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RenameTableRequest {
+    pub catalog: String,
+    pub schema: String,
+    pub table_name: String,
+    pub new_table_name: String,
+    pub table_id: TableId,
 }
 
 #[derive(Clone)]
