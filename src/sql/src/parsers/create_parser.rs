@@ -111,7 +111,7 @@ impl<'a> ParserContext<'a> {
             table_id: 0, // table id is assigned by catalog manager
             partitions,
         };
-        validate_create(&create_table)?;
+        validate_create(self.sql, &create_table)?;
 
         Ok(Statement::CreateTable(create_table))
     }
@@ -273,6 +273,15 @@ impl<'a> ParserContext<'a> {
                         })
                     ]
                 ) {
+                    ensure!(
+                        time_index_opt_idx.is_none(),
+                        InvalidColumnOptionSnafu {
+                            name: column.name.to_string(),
+                            msg: "duplicated time index",
+                        }
+                    );
+                    time_index_opt_idx = Some(index);
+
                     let constraint = TableConstraint::Unique {
                         name: Some(Ident {
                             value: TIME_INDEX.to_owned(),
@@ -284,9 +293,7 @@ impl<'a> ParserContext<'a> {
                         }],
                         is_primary: false,
                     };
-
                     constraints.push(constraint);
-                    time_index_opt_idx = Some(index);
                 }
             }
         }
@@ -450,7 +457,13 @@ impl<'a> ParserContext<'a> {
                     .parse_parenthesized_column_list(Mandatory)
                     .context(error::SyntaxSnafu { sql: self.sql })?;
 
-                ensure!(columns.len() == 1, InvalidTimeIndexSnafu { sql: self.sql });
+                ensure!(
+                    columns.len() == 1,
+                    InvalidTimeIndexSnafu {
+                        sql: self.sql,
+                        msg: "it should contain only one column in time index",
+                    }
+                );
 
                 // TODO(dennis): TableConstraint doesn't support dialect right now,
                 // so we use unique constraint with special key to represent TIME INDEX.
@@ -495,10 +508,57 @@ impl<'a> ParserContext<'a> {
     }
 }
 
-fn validate_create(create_table: &CreateTable) -> Result<()> {
+fn validate_create(sql: &str, create_table: &CreateTable) -> Result<()> {
     if let Some(partitions) = &create_table.partitions {
         validate_partitions(&create_table.columns, partitions)?;
     }
+    validate_time_index(sql, create_table)?;
+
+    Ok(())
+}
+
+fn validate_time_index(sql: &str, create_table: &CreateTable) -> Result<()> {
+    let time_index_constraints: Vec<_> = create_table
+        .constraints
+        .iter()
+        .filter_map(|c| {
+            if let TableConstraint::Unique {
+                name: Some(ident),
+                columns,
+                is_primary: false,
+            } = c
+            {
+                if ident.value == TIME_INDEX {
+                    let column_names = columns.iter().map(|c| &c.value).collect::<Vec<_>>();
+                    Some(column_names)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .unique()
+        .collect();
+
+    ensure!(
+        time_index_constraints.len() == 1,
+        InvalidTimeIndexSnafu {
+            msg: format!(
+                "invalid time index, expected one constraint but actual {}",
+                time_index_constraints.len()
+            ),
+            sql,
+        }
+    );
+    ensure!(
+        time_index_constraints[0].len() == 1,
+        InvalidTimeIndexSnafu {
+            msg: "it should contain only one column in time index",
+            sql,
+        }
+    );
+
     Ok(())
 }
 
@@ -696,7 +756,7 @@ mod tests {
     #[test]
     fn test_validate_create() {
         let sql = r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( a INT, b STRING, c INT, ts BIGINT TIME INDEX)
 PARTITION BY RANGE COLUMNS(b, a) (
   PARTITION r0 VALUES LESS THAN ('hz', 1000),
   PARTITION r1 VALUES LESS THAN ('sh', 2000),
@@ -1209,6 +1269,37 @@ ENGINE=mito";
                              cpu float64 default 0,
                              memory float64,
                              TIME INDEX (ts, host),
+                             PRIMARY KEY(ts, host)) engine=mito
+                             with(regions=1);
+         ";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result.is_err());
+        assert_matches!(result, Err(crate::error::Error::InvalidTimeIndex { .. }));
+    }
+
+    #[test]
+    fn test_duplicated_time_index() {
+        let sql = r"create table demo(
+                             host string,
+                             ts int64 time index,
+                             t timestamp time index,
+                             cpu float64 default 0,
+                             memory float64,
+                             TIME INDEX (ts, host),
+                             PRIMARY KEY(ts, host)) engine=mito
+                             with(regions=1);
+         ";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result.is_err());
+        assert_matches!(result, Err(crate::error::Error::InvalidColumnOption { .. }));
+
+        let sql = r"create table demo(
+                             host string,
+                             ts bigint time index,
+                             cpu float64 default 0,
+                             t timestamp,
+                             memory float64,
+                             TIME INDEX (t),
                              PRIMARY KEY(ts, host)) engine=mito
                              with(regions=1);
          ";

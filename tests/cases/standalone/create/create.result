@@ -1,6 +1,6 @@
 CREATE TABLE integers (i BIGINT);
 
-Error: 1004(InvalidArguments), Missing timestamp column in request
+Error: 2000(InvalidSyntax), Invalid time index, error: invalid time index, expected one constraint but actual 0, sql:  CREATE TABLE integers (i BIGINT);.
 
 CREATE TABLE integers (i INT TIME INDEX);
 
@@ -24,7 +24,7 @@ Affected Rows: 0
 
 CREATE TABLE test1 (i INTEGER, j INTEGER);
 
-Error: 1004(InvalidArguments), Missing timestamp column in request
+Error: 2000(InvalidSyntax), Invalid time index, error: invalid time index, expected one constraint but actual 0, sql:  CREATE TABLE test1 (i INTEGER, j INTEGER);.
 
 CREATE TABLE test1 (i INTEGER, j BIGINT TIME INDEX NOT NULL);
 
