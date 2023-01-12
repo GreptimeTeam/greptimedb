@@ -28,7 +28,7 @@ use tokio::io::BufWriter;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::ServerConfig;
 
-use crate::auth::UserProviderRef;
+use crate::auth::{SchemaValidatorRef, UserProviderRef};
 use crate::error::{Error, Result};
 use crate::mysql::handler::MysqlInstanceShim;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -43,6 +43,7 @@ struct MysqlRuntimeOption {
     tls_conf: Option<Arc<ServerConfig>>,
     force_tls: bool,
     user_provider: Option<UserProviderRef>,
+    schema_validator: Option<SchemaValidatorRef>,
 }
 
 type MysqlRuntimeOptionRef = Arc<MysqlRuntimeOption>;
@@ -52,6 +53,7 @@ pub struct MysqlServer {
     query_handler: ServerSqlQueryHandlerRef,
     tls: TlsOption,
     user_provider: Option<UserProviderRef>,
+    schema_validator: Option<SchemaValidatorRef>,
 }
 
 impl MysqlServer {
@@ -60,12 +62,14 @@ impl MysqlServer {
         io_runtime: Arc<Runtime>,
         tls: TlsOption,
         user_provider: Option<UserProviderRef>,
+        schema_validator: Option<SchemaValidatorRef>,
     ) -> Box<dyn Server> {
         Box::new(MysqlServer {
             base_server: BaseTcpServer::create_server("MySQL", io_runtime),
             query_handler,
             tls,
             user_provider,
+            schema_validator,
         })
     }
 
@@ -77,6 +81,7 @@ impl MysqlServer {
     ) -> impl Future<Output = ()> {
         let query_handler = self.query_handler.clone();
         let user_provider = self.user_provider.clone();
+        let schema_validator = self.schema_validator.clone();
 
         let force_tls = self.tls.should_force_tls();
 
@@ -84,6 +89,7 @@ impl MysqlServer {
             let io_runtime = io_runtime.clone();
             let query_handler = query_handler.clone();
             let user_provider = user_provider.clone();
+            let schema_validator = schema_validator.clone();
             let tls_conf = tls_conf.clone();
 
             let mysql_runtime_option = Arc::new(MysqlRuntimeOption {
@@ -91,6 +97,7 @@ impl MysqlServer {
                 tls_conf,
                 force_tls,
                 user_provider,
+                schema_validator,
             });
 
             async move {
@@ -131,6 +138,7 @@ impl MysqlServer {
             runtime_opts.query_handler.clone(),
             stream.peer_addr()?,
             runtime_opts.user_provider.clone(),
+            runtime_opts.schema_validator.clone(),
         );
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);

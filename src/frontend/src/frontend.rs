@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
-use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;
 use servers::Mode;
 use snafu::prelude::*;
@@ -92,8 +91,6 @@ impl<T: FrontendInstance> Frontend<T> {
         let instance = Arc::new(instance);
 
         // TODO(sunng87): merge this into instance
-        let provider = self.plugins.get::<UserProviderRef>().cloned();
-
-        Services::start(&self.opts, instance, provider).await
+        Services::start(&self.opts, instance, self.plugins.clone()).await
     }
 }

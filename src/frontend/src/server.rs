@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
-use servers::auth::UserProviderRef;
+use servers::auth::{SchemaValidatorRef, UserProviderRef};
 use servers::grpc::GrpcServer;
 use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
@@ -34,6 +34,7 @@ use crate::frontend::FrontendOptions;
 use crate::influxdb::InfluxdbOptions;
 use crate::instance::FrontendInstance;
 use crate::prometheus::PrometheusOptions;
+use crate::Plugins;
 
 pub(crate) struct Services;
 
@@ -41,12 +42,15 @@ impl Services {
     pub(crate) async fn start<T>(
         opts: &FrontendOptions,
         instance: Arc<T>,
-        user_provider: Option<UserProviderRef>,
+        plugins: Arc<Plugins>,
     ) -> Result<()>
     where
         T: FrontendInstance,
     {
         info!("Starting frontend servers");
+        let user_provider = plugins.get::<UserProviderRef>().cloned();
+        let schema_validator = plugins.get::<SchemaValidatorRef>().cloned();
+
         let grpc_server_and_addr = if let Some(opts) = &opts.grpc_options {
             let grpc_addr = parse_addr(&opts.addr)?;
 
@@ -84,6 +88,7 @@ impl Services {
                 mysql_io_runtime,
                 opts.tls.clone(),
                 user_provider.clone(),
+                schema_validator.clone(),
             );
 
             Some((mysql_server, mysql_addr))

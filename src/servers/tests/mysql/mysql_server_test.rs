@@ -51,6 +51,7 @@ fn create_mysql_server(table: MemTable, tls: TlsOption) -> Result<Box<dyn Server
         io_runtime,
         tls,
         Some(Arc::new(provider)),
+        None,
     ))
 }
 

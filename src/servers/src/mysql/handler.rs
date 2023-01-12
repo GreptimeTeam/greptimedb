@@ -28,7 +28,7 @@ use session::Session;
 use snafu::ensure;
 use tokio::io::AsyncWrite;
 
-use crate::auth::{Identity, Password, UserProviderRef};
+use crate::auth::{Identity, Password, SchemaValidatorRef, UserProviderRef};
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -39,6 +39,7 @@ pub struct MysqlInstanceShim {
     salt: [u8; 20],
     session: Arc<Session>,
     user_provider: Option<UserProviderRef>,
+    schema_validator: Option<SchemaValidatorRef>,
 }
 
 impl MysqlInstanceShim {
@@ -46,6 +47,7 @@ impl MysqlInstanceShim {
         query_handler: ServerSqlQueryHandlerRef,
         client_addr: SocketAddr,
         user_provider: Option<UserProviderRef>,
+        schema_validator: Option<SchemaValidatorRef>,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -65,6 +67,7 @@ impl MysqlInstanceShim {
             salt: scramble,
             session: Arc::new(Session::new(client_addr, Channel::Mysql)),
             user_provider,
+            schema_validator,
         }
     }
 
@@ -189,6 +192,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             self.query_handler.is_valid_schema(catalog, schema)?,
             error::DatabaseNotFoundSnafu { catalog, schema }
         );
+
+        if let Some(schema_validator) = &self.schema_validator {
+            schema_validator
+                .validate(catalog, schema, self.session.clone())
+                .await?;
+        }
 
         let context = self.session.context();
         context.set_current_catalog(catalog);
