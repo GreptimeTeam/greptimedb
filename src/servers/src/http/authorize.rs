@@ -181,7 +181,7 @@ mod tests {
     use tower_http::auth::AsyncAuthorizeRequest;
 
     use super::{auth_header, decode_basic, AuthScheme, HttpAuth};
-    use crate::auth::test::MockUserProvider;
+    use crate::auth::test_mock_user_provider::MockUserProvider;
     use crate::auth::UserProvider;
     use crate::error;
     use crate::error::Result;

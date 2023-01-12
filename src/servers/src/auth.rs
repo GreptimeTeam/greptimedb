@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod user_provider;
-
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use session::context::UserInfo;
+use session::Session;
 use snafu::{Backtrace, ErrorCompat, OptionExt, Snafu};
 
 use crate::auth::user_provider::StaticUserProvider;
+
+pub mod user_provider;
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
@@ -70,6 +71,17 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
     }
 }
 
+/// [`SchemaValidator`] validates whether a connection request
+/// from a certain user to a certain catalog/schema is legal.
+/// This authorization is performed after a user is authenticated,
+/// so that the user's [`UserInfo`] should be already stored in the session.
+#[async_trait::async_trait]
+pub trait SchemaValidator: Send + Sync {
+    async fn validate(&self, catalog: &str, schema: &str, session: Arc<Session>) -> Result<()>;
+}
+
+pub type SchemaValidatorRef = Arc<dyn SchemaValidator>;
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -96,6 +108,18 @@ pub enum Error {
 
     #[snafu(display("Username and password does not match, username: {}", username))]
     UserPasswordMismatch { username: String },
+
+    #[snafu(display(
+        "User {} is not allowed to access catalog {} and schema {}",
+        username,
+        catalog,
+        schema
+    ))]
+    AccessDenied {
+        catalog: String,
+        schema: String,
+        username: String,
+    },
 }
 
 impl ErrorExt for Error {
@@ -108,6 +132,7 @@ impl ErrorExt for Error {
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
             Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,
             Error::UserPasswordMismatch { .. } => StatusCode::UserPasswordMismatch,
+            Error::AccessDenied { .. } => StatusCode::AccessDenied,
         }
     }
 
@@ -123,7 +148,7 @@ impl ErrorExt for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
-pub mod test {
+pub mod test_mock_user_provider {
     use super::{Identity, Password, UserInfo, UserProvider};
 
     pub struct MockUserProvider {}
@@ -169,10 +194,65 @@ pub mod test {
 }
 
 #[cfg(test)]
+pub mod test_mock_schema_validator {
+    use std::sync::Arc;
+
+    use super::{SchemaValidator, Session};
+    use crate::auth::AccessDeniedSnafu;
+
+    pub struct MockSchemaValidator {
+        catalog: String,
+        schema: String,
+        username: String,
+    }
+
+    impl MockSchemaValidator {
+        pub fn new(catalog: &str, schema: &str, username: &str) -> Self {
+            Self {
+                catalog: catalog.to_string(),
+                schema: schema.to_string(),
+                username: username.to_string(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SchemaValidator for MockSchemaValidator {
+        async fn validate(
+            &self,
+            catalog: &str,
+            schema: &str,
+            session: Arc<Session>,
+        ) -> Result<(), super::Error> {
+            if catalog == self.catalog
+                && schema == self.schema
+                && session.user_info().username() == self.username
+            {
+                Ok(())
+            } else {
+                AccessDeniedSnafu {
+                    catalog: catalog.to_string(),
+                    schema: schema.to_string(),
+                    username: session.user_info().username().to_string(),
+                }
+                .fail()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::test::MockUserProvider;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use session::context::{Channel, UserInfo};
+
+    use super::test_mock_user_provider::MockUserProvider;
     use super::{Identity, Password, UserProvider};
     use crate::auth;
+    use crate::auth::test_mock_schema_validator::MockSchemaValidator;
+    use crate::auth::SchemaValidator;
 
     #[tokio::test]
     async fn test_auth_by_plain_text() {
@@ -224,5 +304,41 @@ mod tests {
             auth_result.err().unwrap(),
             auth::Error::UserPasswordMismatch { .. }
         );
+    }
+
+    #[tokio::test]
+    async fn test_schema_validate() {
+        let validator = MockSchemaValidator::new("greptime", "public", "test_user");
+        let session = session::Session::new(
+            SocketAddr::V4("127.0.0.1:3306".parse().unwrap()),
+            Channel::Mysql,
+        );
+        let session = Arc::new(session);
+        // check user first
+        let re = validator
+            .validate("greptime", "public", session.clone())
+            .await;
+        assert!(re.is_err());
+        // set user to correct
+        session.set_user_info(UserInfo::new("test_user"));
+        let re = validator
+            .validate("greptime", "public", session.clone())
+            .await;
+        assert!(re.is_ok());
+        // check catalog
+        let re = validator
+            .validate("greptime_wrong", "public", session.clone())
+            .await;
+        assert!(re.is_err());
+        // check schema
+        let re = validator
+            .validate("greptime", "public_wrong", session.clone())
+            .await;
+        assert!(re.is_err());
+        // check ok again
+        let re = validator
+            .validate("greptime", "public", session.clone())
+            .await;
+        assert!(re.is_ok());
     }
 }
