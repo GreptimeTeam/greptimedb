@@ -23,19 +23,24 @@ use session::context::UserInfo;
 use snafu::{OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
-use crate::auth::{Identity, UserProviderRef};
+use crate::auth::{Identity, SchemaValidatorRef, UserProviderRef};
 use crate::error::{self, Result};
 use crate::http::HTTP_API_PREFIX;
 
 pub struct HttpAuth<RespBody> {
     user_provider: Option<UserProviderRef>,
+    schema_validator: Option<SchemaValidatorRef>,
     _ty: PhantomData<RespBody>,
 }
 
 impl<RespBody> HttpAuth<RespBody> {
-    pub fn new(user_provider: Option<UserProviderRef>) -> Self {
+    pub fn new(
+        user_provider: Option<UserProviderRef>,
+        schema_validator: Option<SchemaValidatorRef>,
+    ) -> Self {
         Self {
             user_provider,
+            schema_validator,
             _ty: PhantomData,
         }
     }
@@ -45,6 +50,7 @@ impl<RespBody> Clone for HttpAuth<RespBody> {
     fn clone(&self) -> Self {
         Self {
             user_provider: self.user_provider.clone(),
+            schema_validator: self.schema_validator.clone(),
             _ty: PhantomData,
         }
     }
@@ -190,6 +196,7 @@ mod tests {
     async fn test_http_auth() {
         let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
             user_provider: None,
+            schema_validator: None,
             _ty: PhantomData,
         };
 
@@ -204,6 +211,7 @@ mod tests {
         let mock_user_provider = Some(Arc::new(MockUserProvider {}) as Arc<dyn UserProvider>);
         let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
             user_provider: mock_user_provider,
+            schema_validator: None,
             _ty: PhantomData,
         };
 
@@ -230,6 +238,7 @@ mod tests {
         let mock_user_provider = Some(Arc::new(MockUserProvider {}) as Arc<dyn UserProvider>);
         let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
             user_provider: mock_user_provider,
+            schema_validator: None,
             _ty: PhantomData,
         };
 
