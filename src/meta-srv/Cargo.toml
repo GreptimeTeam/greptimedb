@@ -8,6 +8,7 @@ license.workspace = true
 mock = []
 
 [dependencies]
+anymap = "1.0.0-beta.2"
 api = { path = "../api" }
 async-trait = "0.1"
 catalog = { path = "../catalog" }
