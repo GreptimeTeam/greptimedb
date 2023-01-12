@@ -99,8 +99,7 @@ impl HeartbeatTask {
         }
         let interval = self.interval;
         let node_id = self.node_id;
-        let server_addr = self.server_addr.clone();
-        let server_hostname = self.server_hostname.clone();
+        let addr = resolve_addr(&self.server_addr, &self.server_hostname);
         let meta_client = self.meta_client.clone();
 
         let catalog_manager_clone = self.catalog_manager.clone();
@@ -118,7 +117,7 @@ impl HeartbeatTask {
                 let req = HeartbeatRequest {
                     peer: Some(Peer {
                         id: node_id,
-                        addr: server_hostname.clone().unwrap_or(server_addr.clone()),
+                        addr: addr.clone(),
                     }),
                     node_stat: Some(NodeStat {
                         region_num,
@@ -144,5 +143,46 @@ impl HeartbeatTask {
         });
 
         Ok(())
+    }
+}
+
+/// Resolves hostname:port address for meta registration
+///
+fn resolve_addr(bind_addr: &str, hostname_addr: &Option<String>) -> String {
+    match hostname_addr {
+        Some(hostname_addr) => {
+            // it has port configured
+            if hostname_addr.contains(':') {
+                hostname_addr.clone()
+            } else {
+                // otherwise, resolve port from bind_addr
+                // should be safe to unwrap here because bind_addr is already validated
+                let port = &bind_addr.split(':').nth(1).unwrap();
+                format!("{hostname_addr}:{port}")
+            }
+        }
+        None => bind_addr.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn test_resolve_addr() {
+        assert_eq!(
+            "tomcat:3001",
+            super::resolve_addr("127.0.0.1:3001", &Some("tomcat".to_owned()))
+        );
+
+        assert_eq!(
+            "tomcat:3002",
+            super::resolve_addr("127.0.0.1:3001", &Some("tomcat:3002".to_owned()))
+        );
+
+        assert_eq!(
+            "127.0.0.1:3001",
+            super::resolve_addr("127.0.0.1:3001", &None)
+        );
     }
 }

@@ -97,7 +97,9 @@ impl TryFrom<StartCommand> for DatanodeOptions {
             opts.rpc_addr = addr;
         }
 
-        opts.rpc_hostname = cmd.rpc_hostname;
+        if cmd.rpc_hostname.is_some() {
+            opts.rpc_hostname = cmd.rpc_hostname;
+        }
 
         if let Some(addr) = cmd.mysql_addr {
             opts.mysql_addr = addr;
