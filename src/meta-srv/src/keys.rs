@@ -112,7 +112,7 @@ impl TryFrom<Vec<u8>> for LeaseValue {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self> {
         String::from_utf8(bytes)
-            .context(error::LeaseKeyFromUtf8Snafu {})
+            .context(error::LeaseValueFromUtf8Snafu {})
             .map(|x| x.parse())?
     }
 }
@@ -194,7 +194,7 @@ impl FromStr for StatKey {
             .captures(key)
             .context(error::InvalidLeaseKeySnafu { key })?;
 
-        ensure!(caps.len() == 3, error::InvalidLeaseKeySnafu { key });
+        ensure!(caps.len() == 3, error::InvalidStatKeySnafu { key });
 
         let cluster_id = caps[1].to_string();
         let node_id = caps[2].to_string();
@@ -217,7 +217,7 @@ impl TryFrom<Vec<u8>> for StatKey {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self> {
         String::from_utf8(bytes)
-            .context(error::LeaseKeyFromUtf8Snafu {})
+            .context(error::StatKeyFromUtf8Snafu {})
             .map(|x| x.parse())?
     }
 }
@@ -253,7 +253,7 @@ impl TryFrom<Vec<u8>> for StatValue {
 
     fn try_from(value: Vec<u8>) -> Result<Self> {
         String::from_utf8(value)
-            .context(error::LeaseKeyFromUtf8Snafu {})
+            .context(error::StatValueFromUtf8Snafu {})
             .map(|x| x.parse())?
     }
 }
