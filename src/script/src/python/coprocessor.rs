@@ -18,7 +18,7 @@ pub mod parse;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::result::Result as StdResult;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::info;
@@ -27,6 +27,7 @@ use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
+use query::QueryEngine;
 use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
 use rustpython_vm::class::PyClassImpl;
@@ -77,6 +78,25 @@ pub struct Coprocessor {
     // but CodeObject doesn't.
     #[cfg_attr(test, serde(skip))]
     pub code_obj: Option<CodeObject>,
+    #[cfg_attr(test, serde(skip))]
+    pub query_engine: Option<QueryEngineWeakRef>,
+}
+
+#[derive(Clone)]
+pub struct QueryEngineWeakRef(pub Weak<dyn QueryEngine>);
+
+impl From<Weak<dyn QueryEngine>> for QueryEngineWeakRef {
+    fn from(value: Weak<dyn QueryEngine>) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Debug for QueryEngineWeakRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("QueryEngineWeakRef")
+            .field(&self.0.upgrade().map(|f| f.name().to_owned()))
+            .finish()
+    }
 }
 
 impl PartialEq for Coprocessor {
@@ -318,7 +338,7 @@ pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
-    let copr = parse::parse_and_compile_copr(script)?;
+    let copr = parse::parse_and_compile_copr(script, None)?;
     exec_parsed(&copr, rb)
 }
 
@@ -444,7 +464,7 @@ def test(a, b, c):
     return add(a, b) / g.sqrt(c)
 "#;
 
-        let copr = parse_and_compile_copr(script).unwrap();
+        let copr = parse_and_compile_copr(script, None).unwrap();
         assert_eq!(copr.name, "test");
         let deco_args = copr.deco_args.clone();
         assert_eq!(

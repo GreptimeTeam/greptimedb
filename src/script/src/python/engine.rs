@@ -265,7 +265,7 @@ impl ScriptEngine for PyEngine {
     }
 
     async fn compile(&self, script: &str, _ctx: CompileContext) -> Result<PyScript> {
-        let copr = Arc::new(parse::parse_and_compile_copr(script)?);
+        let copr = Arc::new(parse::parse_and_compile_copr(script, None)?);
 
         Ok(PyScript {
             copr,
