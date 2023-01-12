@@ -392,8 +392,9 @@ impl ErrorExt for Error {
             | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. }
             | Error::ColumnValuesNumberMismatch { .. }
-            | Error::RegionKeysSize { .. }
-            | Error::NotSupported { .. } => StatusCode::InvalidArguments,
+            | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
+
+            Error::NotSupported { .. } => StatusCode::Unsupported,
 
             Error::RuntimeResource { source, .. } => source.status_code(),
 
