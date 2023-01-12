@@ -380,7 +380,7 @@ impl CatalogManager for LocalCatalogManager {
         }
     }
 
-    async fn rename_table(&self, request: RenameTableRequest, table_id: TableId) -> Result<bool> {
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
         let started = self.init_lock.lock().await;
 
         ensure!(
@@ -411,7 +411,7 @@ impl CatalogManager for LocalCatalogManager {
                 catalog_name.clone(),
                 schema_name.clone(),
                 request.new_table_name.clone(),
-                table_id,
+                request.table_id,
             )
             .await?;
         Ok(schema

@@ -62,9 +62,10 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             new_table_name: new_table_name.to_string(),
+            table_id,
         };
         assert!(catalog_manager
-            .rename_table(rename_table_req, table_id)
+            .rename_table(rename_table_req)
             .await
             .unwrap());
 

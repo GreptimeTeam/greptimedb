@@ -59,9 +59,10 @@ impl SqlHandler {
                 schema: table_info.schema_name.clone(),
                 table_name,
                 new_table_name: table_info.name.clone(),
+                table_id: table_info.ident.table_id,
             };
             self.catalog_manager
-                .rename_table(rename_table_req, table_info.ident.table_id)
+                .rename_table(rename_table_req)
                 .await
                 .context(error::RenameTableSnafu)?;
         }

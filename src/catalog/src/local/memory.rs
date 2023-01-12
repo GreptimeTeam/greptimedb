@@ -92,7 +92,7 @@ impl CatalogManager for MemoryCatalogManager {
             .map(|v| v.is_none())
     }
 
-    async fn rename_table(&self, request: RenameTableRequest, _table_id: TableId) -> Result<bool> {
+    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
         let catalogs = self.catalogs.write().unwrap();
         let catalog = catalogs
             .get(&request.catalog)
@@ -456,11 +456,9 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             new_table_name: new_table_name.to_string(),
+            table_id,
         };
-        assert!(catalog
-            .rename_table(rename_table_req, table_id)
-            .await
-            .unwrap());
+        assert!(catalog.rename_table(rename_table_req).await.unwrap());
         assert!(!schema.table_exist(table_name).unwrap());
         assert!(schema.table_exist(new_table_name).unwrap());
 

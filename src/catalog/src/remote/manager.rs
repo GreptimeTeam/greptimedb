@@ -449,7 +449,7 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(true)
     }
 
-    async fn rename_table(&self, _request: RenameTableRequest, _table_id: TableId) -> Result<bool> {
+    async fn rename_table(&self, _request: RenameTableRequest) -> Result<bool> {
         UnimplementedSnafu {
             operation: "rename table",
         }
