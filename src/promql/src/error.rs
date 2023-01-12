@@ -15,13 +15,19 @@
 use std::any::Any;
 
 use common_error::prelude::*;
-use promql_parser::parser::Expr as PromExpr;
+use promql_parser::parser::{Expr as PromExpr, TokenType};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Unexpected token: {}", token))]
+    UnexpectedToken {
+        token: TokenType,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Internal error during build DataFusion plan, error: {}", source))]
     DataFusionPlanning {
@@ -40,6 +46,12 @@ pub enum Error {
 
     #[snafu(display("Cannot find value columns in table {}", table))]
     ValueNotFound { table: String, backtrace: Backtrace },
+
+    #[snafu(display("Cannot find label in table {}, source: {}", table, source))]
+    LabelNotFound {
+        table: String,
+        source: datafusion::error::DataFusionError,
+    },
 
     #[snafu(display("Cannot find the table {}", table))]
     TableNotFound {
@@ -90,7 +102,9 @@ impl ErrorExt for Error {
             TimeIndexNotFound { .. }
             | ValueNotFound { .. }
             | UnsupportedExpr { .. }
+            | UnexpectedToken { .. }
             | MultipleVector { .. }
+            | LabelNotFound { .. }
             | ExpectExpr { .. } => StatusCode::InvalidArguments,
             UnknownTable { .. }
             | TableNotFound { .. }
