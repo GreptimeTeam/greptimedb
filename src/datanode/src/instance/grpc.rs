@@ -18,11 +18,10 @@ use api::v1::query_request::Query;
 use api::v1::{CreateDatabaseExpr, DdlRequest, GreptimeRequest, InsertRequest};
 use async_trait::async_trait;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
-use common_error::prelude::BoxedError;
 use common_query::Output;
 use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
-use servers::query_handler::GrpcQueryHandler;
+use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContext;
 use snafu::prelude::*;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -91,34 +90,28 @@ impl Instance {
             DdlExpr::DropTable(expr) => self.handle_drop_table(expr).await,
         }
     }
+}
 
-    async fn handle_grpc_query(&self, query: GreptimeRequest) -> Result<Output> {
+#[async_trait]
+impl GrpcQueryHandler for Instance {
+    type Error = error::Error;
+
+    async fn do_query(&self, query: GreptimeRequest) -> Result<Output> {
         let request = query.request.context(error::MissingRequiredFieldSnafu {
             name: "GreptimeRequest.request",
         })?;
-        let output = match request {
-            GrpcRequest::Insert(request) => self.handle_insert(request).await?,
+        match request {
+            GrpcRequest::Insert(request) => self.handle_insert(request).await,
             GrpcRequest::Query(query_request) => {
                 let query = query_request
                     .query
                     .context(error::MissingRequiredFieldSnafu {
                         name: "QueryRequest.query",
                     })?;
-                self.handle_query(query).await?
+                self.handle_query(query).await
             }
-            GrpcRequest::Ddl(request) => self.handle_ddl(request).await?,
-        };
-        Ok(output)
-    }
-}
-
-#[async_trait]
-impl GrpcQueryHandler for Instance {
-    async fn do_query(&self, query: GreptimeRequest) -> servers::error::Result<Output> {
-        self.handle_grpc_query(query)
-            .await
-            .map_err(BoxedError::new)
-            .context(servers::error::ExecuteGrpcQuerySnafu)
+            GrpcRequest::Ddl(request) => self.handle_ddl(request).await,
+        }
     }
 }
 

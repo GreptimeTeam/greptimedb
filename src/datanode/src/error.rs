@@ -286,6 +286,9 @@ pub enum Error {
 
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField { name: String, backtrace: Backtrace },
+
+    #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
+    DatabaseNotFound { catalog: String, schema: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -328,7 +331,8 @@ impl ErrorExt for Error {
             | Error::SchemaNotFound { .. }
             | Error::ConstraintNotSupported { .. }
             | Error::SchemaExists { .. }
-            | Error::ParseTimestamp { .. } => StatusCode::InvalidArguments,
+            | Error::ParseTimestamp { .. }
+            | Error::DatabaseNotFound { .. } => StatusCode::InvalidArguments,
 
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }

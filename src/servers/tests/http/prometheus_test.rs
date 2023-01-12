@@ -22,11 +22,12 @@ use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
 use prost::Message;
-use servers::error::Result;
+use servers::error::{Error, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::prometheus;
 use servers::prometheus::{snappy_compress, Metrics};
-use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse, SqlQueryHandler};
+use servers::query_handler::sql::SqlQueryHandler;
+use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use session::context::QueryContextRef;
 use tokio::sync::mpsc;
 
@@ -70,6 +71,8 @@ impl PrometheusProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
+    type Error = Error;
+
     async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
         unimplemented!()
     }

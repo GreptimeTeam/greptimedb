@@ -29,7 +29,7 @@ use datanode::instance::{Instance, InstanceRef};
 use datanode::sql::SqlHandler;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
-use frontend::instance::{FrontendInstance, Instance as FeInstance};
+use frontend::instance::Instance as FeInstance;
 use object_store::backend::s3;
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
@@ -37,12 +37,15 @@ use once_cell::sync::OnceCell;
 use rand::Rng;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServer};
+use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
+use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
 use servers::Mode;
 use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::CreateTableRequest;
 use tempdir::TempDir;
+
 static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
 
 fn get_port() -> usize {
@@ -234,7 +237,10 @@ pub async fn setup_test_app(store_type: StorageType, name: &str) -> (Router, Tes
     )
     .await
     .unwrap();
-    let http_server = HttpServer::new(instance, HttpOptions::default());
+    let http_server = HttpServer::new(
+        ServerSqlQueryHandlerAdaptor::arc(instance),
+        HttpOptions::default(),
+    );
     (http_server.make_app(), guard)
 }
 
@@ -244,7 +250,7 @@ pub async fn setup_test_app_with_frontend(
 ) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
-    let mut frontend = build_frontend_instance(instance.clone()).await;
+    let frontend = build_frontend_instance(instance.clone()).await;
     instance.start().await.unwrap();
     create_test_table(
         frontend.catalog_manager(),
@@ -253,8 +259,10 @@ pub async fn setup_test_app_with_frontend(
     )
     .await
     .unwrap();
-    frontend.start().await.unwrap();
-    let mut http_server = HttpServer::new(Arc::new(frontend), HttpOptions::default());
+    let mut http_server = HttpServer::new(
+        ServerSqlQueryHandlerAdaptor::arc(Arc::new(frontend)),
+        HttpOptions::default(),
+    );
     http_server.set_script_handler(instance.clone());
     let app = http_server.make_app();
     (app, guard)
@@ -282,7 +290,10 @@ pub async fn setup_grpc_server(
 
     let fe_instance = frontend::instance::Instance::new_standalone(instance.clone());
     let fe_instance_ref = Arc::new(fe_instance);
-    let fe_grpc_server = Arc::new(GrpcServer::new(fe_instance_ref, runtime));
+    let fe_grpc_server = Arc::new(GrpcServer::new(
+        ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref),
+        runtime,
+    ));
     let grpc_server_clone = fe_grpc_server.clone();
 
     let fe_grpc_addr_clone = fe_grpc_addr.clone();

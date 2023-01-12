@@ -17,13 +17,15 @@ use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, Wri
 use api::v1::greptime_request::Request;
 use api::v1::{query_request, GreptimeRequest, QueryRequest};
 use async_trait::async_trait;
+use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
 use prost::Message;
 use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
-use servers::query_handler::{GrpcQueryHandler, PrometheusProtocolHandler, PrometheusResponse};
+use servers::query_handler::grpc::GrpcQueryHandler;
+use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
 use snafu::{OptionExt, ResultExt};
 
 use crate::instance::Instance;
@@ -90,7 +92,11 @@ impl Instance {
                     query: Some(query_request::Query::Sql(sql.to_string())),
                 })),
             };
-            let output = self.do_query(query).await?;
+            let output = self
+                .do_query(query)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?;
 
             results.push((table_name, output));
         }
@@ -102,7 +108,10 @@ impl Instance {
 impl PrometheusProtocolHandler for Instance {
     async fn write(&self, database: &str, request: WriteRequest) -> ServerResult<()> {
         let requests = prometheus::to_grpc_insert_requests(database, request.clone())?;
-        self.handle_inserts(requests).await?;
+        self.handle_inserts(requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
         Ok(())
     }
 
@@ -150,7 +159,7 @@ mod tests {
 
     use api::prometheus::remote::label_matcher::Type as MatcherType;
     use api::prometheus::remote::{Label, LabelMatcher, Sample};
-    use servers::query_handler::SqlQueryHandler;
+    use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
     use super::*;

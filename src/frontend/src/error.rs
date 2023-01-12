@@ -213,10 +213,10 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to insert values to table, source: {}", source))]
-    Insert {
+    #[snafu(display("Failed to create AlterExpr from Alter statement, source: {}", source))]
+    AlterExprFromStmt {
         #[snafu(backtrace)]
-        source: client::Error,
+        source: sql::error::Error,
     },
 
     #[snafu(display("Failed to build CreateExpr on insertion: {}", source))]
@@ -318,10 +318,10 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to convert Arrow schema, source: {}", source))]
-    ConvertArrowSchema {
+    #[snafu(display("{source}"))]
+    InvokeDatanode {
         #[snafu(backtrace)]
-        source: datatypes::error::Error,
+        source: datanode::error::Error,
     },
 
     #[snafu(display("Missing meta_client_opts section in config"))]
@@ -369,6 +369,15 @@ pub enum Error {
         source: table::metadata::TableMetaBuilderError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Not supported: {}", feat))]
+    NotSupported { feat: String },
+
+    #[snafu(display("Failed to find new columns on insertion: {}", source))]
+    FindNewColumnsOnInsertion {
+        #[snafu(backtrace)]
+        source: common_grpc_expr::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -385,17 +394,20 @@ impl ErrorExt for Error {
             | Error::ColumnValuesNumberMismatch { .. }
             | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
 
+            Error::NotSupported { .. } => StatusCode::Unsupported,
+
             Error::RuntimeResource { source, .. } => source.status_code(),
 
             Error::StartServer { source, .. } => source.status_code(),
 
-            Error::ParseSql { source } => source.status_code(),
+            Error::ParseSql { source } | Error::AlterExprFromStmt { source } => {
+                source.status_code()
+            }
 
             Error::Table { source } => source.status_code(),
 
             Error::ConvertColumnDefaultConstraint { source, .. }
-            | Error::ConvertScalarValue { source, .. }
-            | Error::ConvertArrowSchema { source } => source.status_code(),
+            | Error::ConvertScalarValue { source, .. } => source.status_code(),
 
             Error::RequestDatanode { source } => source.status_code(),
 
@@ -431,9 +443,11 @@ impl ErrorExt for Error {
             }
             Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
             Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
-            Error::Insert { source, .. } => source.status_code(),
-            Error::BuildCreateExprOnInsertion { source, .. } => source.status_code(),
-            Error::ToTableInsertRequest { source, .. } => source.status_code(),
+
+            Error::BuildCreateExprOnInsertion { source }
+            | Error::ToTableInsertRequest { source }
+            | Error::FindNewColumnsOnInsertion { source } => source.status_code(),
+
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteStatement { source, .. } => source.status_code(),
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
@@ -442,6 +456,7 @@ impl ErrorExt for Error {
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
             Error::BuildVector { source, .. } => source.status_code(),
+            Error::InvokeDatanode { source } => source.status_code(),
         }
     }
 

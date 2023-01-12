@@ -17,26 +17,29 @@ use api::v1::query_request::Query;
 use api::v1::GreptimeRequest;
 use async_trait::async_trait;
 use common_query::Output;
-use servers::error::{self, Result};
-use servers::query_handler::{GrpcQueryHandler, SqlQueryHandler};
+use servers::query_handler::grpc::GrpcQueryHandler;
+use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt};
 
+use crate::error::{self, Result};
 use crate::instance::Instance;
 
 #[async_trait]
 impl GrpcQueryHandler for Instance {
+    type Error = error::Error;
+
     async fn do_query(&self, query: GreptimeRequest) -> Result<Output> {
-        let request = query.request.context(error::GrpcRequestMissingFieldSnafu {
-            name: "GreptimeRequest.request",
+        let request = query.request.context(error::IncompleteGrpcResultSnafu {
+            err_msg: "Missing field 'GreptimeRequest.request'",
         })?;
         let output = match request {
             Request::Insert(request) => self.handle_insert(request).await?,
             Request::Query(query_request) => {
                 let query = query_request
                     .query
-                    .context(error::GrpcRequestMissingFieldSnafu {
-                        name: "QueryRequest.query",
+                    .context(error::IncompleteGrpcResultSnafu {
+                        err_msg: "Missing field 'QueryRequest.query'",
                     })?;
                 match query {
                     Query::Sql(sql) => {

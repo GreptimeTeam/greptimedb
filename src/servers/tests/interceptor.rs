@@ -15,13 +15,15 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use servers::error::Result;
+use servers::error::{self, Result};
 use servers::interceptor::SqlQueryInterceptor;
 use session::context::{QueryContext, QueryContextRef};
 
 pub struct NoopInterceptor;
 
 impl SqlQueryInterceptor for NoopInterceptor {
+    type Error = error::Error;
+
     fn pre_parsing<'a>(&self, query: &'a str, _query_ctx: QueryContextRef) -> Result<Cow<'a, str>> {
         let modified_query = format!("{query};");
         Ok(Cow::Owned(modified_query))

@@ -30,14 +30,14 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use session::context::QueryContext;
 
 use crate::error::{self, Error, Result};
-use crate::query_handler::SqlQueryHandlerRef;
+use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub struct PostgresServerHandler {
-    query_handler: SqlQueryHandlerRef,
+    query_handler: ServerSqlQueryHandlerRef,
 }
 
 impl PostgresServerHandler {
-    pub fn new(query_handler: SqlQueryHandlerRef) -> Self {
+    pub fn new(query_handler: ServerSqlQueryHandlerRef) -> Self {
         PostgresServerHandler { query_handler }
     }
 }

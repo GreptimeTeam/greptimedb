@@ -30,17 +30,17 @@ use tokio_stream::wrappers::TcpListenerStream;
 
 use crate::error::{AlreadyStartedSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::grpc::flight::FlightHandler;
-use crate::query_handler::GrpcQueryHandlerRef;
+use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::server::Server;
 
 pub struct GrpcServer {
-    query_handler: GrpcQueryHandlerRef,
+    query_handler: ServerGrpcQueryHandlerRef,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     runtime: Arc<Runtime>,
 }
 
 impl GrpcServer {
-    pub fn new(query_handler: GrpcQueryHandlerRef, runtime: Arc<Runtime>) -> Self {
+    pub fn new(query_handler: ServerGrpcQueryHandlerRef, runtime: Arc<Runtime>) -> Self {
         Self {
             query_handler,
             shutdown_tx: Mutex::new(None),

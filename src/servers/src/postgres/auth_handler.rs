@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use async_trait::async_trait;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
 use pgwire::api::{auth, ClientInfo, PgWireConnectionState};
@@ -29,7 +28,7 @@ use snafu::ResultExt;
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error;
 use crate::error::Result;
-use crate::query_handler::SqlQueryHandlerRef;
+use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 struct PgPwdVerifier {
     user_provider: Option<UserProviderRef>,
@@ -110,14 +109,14 @@ pub struct PgAuthStartupHandler {
     verifier: PgPwdVerifier,
     param_provider: GreptimeDBStartupParameters,
     force_tls: bool,
-    query_handler: SqlQueryHandlerRef,
+    query_handler: ServerSqlQueryHandlerRef,
 }
 
 impl PgAuthStartupHandler {
     pub fn new(
         user_provider: Option<UserProviderRef>,
         force_tls: bool,
-        query_handler: SqlQueryHandlerRef,
+        query_handler: ServerSqlQueryHandlerRef,
     ) -> Self {
         PgAuthStartupHandler {
             verifier: PgPwdVerifier { user_provider },
@@ -219,7 +218,7 @@ enum DbResolution {
 /// A function extracted to resolve lifetime and readability issues:
 fn resolve_db_info<C>(
     client: &mut C,
-    query_handler: SqlQueryHandlerRef,
+    query_handler: ServerSqlQueryHandlerRef,
 ) -> PgWireResult<DbResolution>
 where
     C: ClientInfo + Unpin + Send,
@@ -227,7 +226,6 @@ where
     let db_ref = client.metadata().get(super::METADATA_DATABASE);
     if let Some(db) = db_ref {
         let (catalog, schema) = crate::parse_catalog_and_schema_from_client_database_name(db);
-        let catalog = catalog.unwrap_or(DEFAULT_CATALOG_NAME);
         if query_handler
             .is_valid_schema(catalog, schema)
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?

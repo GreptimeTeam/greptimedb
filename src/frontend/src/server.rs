@@ -23,6 +23,8 @@ use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
 use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
+use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
+use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
 use snafu::ResultExt;
 use tokio::try_join;
@@ -56,7 +58,10 @@ impl Services {
                     .context(error::RuntimeResourceSnafu)?,
             );
 
-            let grpc_server = GrpcServer::new(instance.clone(), grpc_runtime);
+            let grpc_server = GrpcServer::new(
+                ServerGrpcQueryHandlerAdaptor::arc(instance.clone()),
+                grpc_runtime,
+            );
 
             Some((Box::new(grpc_server) as _, grpc_addr))
         } else {
@@ -75,7 +80,7 @@ impl Services {
             );
 
             let mysql_server = MysqlServer::create_server(
-                instance.clone(),
+                ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
                 mysql_io_runtime,
                 opts.tls.clone(),
                 user_provider.clone(),
@@ -98,7 +103,7 @@ impl Services {
             );
 
             let pg_server = Box::new(PostgresServer::new(
-                instance.clone(),
+                ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
                 opts.tls.clone(),
                 pg_io_runtime,
                 user_provider.clone(),
@@ -130,7 +135,10 @@ impl Services {
         let http_server_and_addr = if let Some(http_options) = &opts.http_options {
             let http_addr = parse_addr(&http_options.addr)?;
 
-            let mut http_server = HttpServer::new(instance.clone(), http_options.clone());
+            let mut http_server = HttpServer::new(
+                ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
+                http_options.clone(),
+            );
             if let Some(user_provider) = user_provider {
                 http_server.set_user_provider(user_provider);
             }

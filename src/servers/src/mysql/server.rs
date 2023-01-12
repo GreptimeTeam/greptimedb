@@ -31,7 +31,7 @@ use tokio_rustls::rustls::ServerConfig;
 use crate::auth::UserProviderRef;
 use crate::error::{Error, Result};
 use crate::mysql::handler::MysqlInstanceShim;
-use crate::query_handler::SqlQueryHandlerRef;
+use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::TlsOption;
 
@@ -40,14 +40,14 @@ const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;
 
 pub struct MysqlServer {
     base_server: BaseTcpServer,
-    query_handler: SqlQueryHandlerRef,
+    query_handler: ServerSqlQueryHandlerRef,
     tls: TlsOption,
     user_provider: Option<UserProviderRef>,
 }
 
 impl MysqlServer {
     pub fn create_server(
-        query_handler: SqlQueryHandlerRef,
+        query_handler: ServerSqlQueryHandlerRef,
         io_runtime: Arc<Runtime>,
         tls: TlsOption,
         user_provider: Option<UserProviderRef>,
@@ -102,7 +102,7 @@ impl MysqlServer {
     async fn handle(
         stream: TcpStream,
         io_runtime: Arc<Runtime>,
-        query_handler: SqlQueryHandlerRef,
+        query_handler: ServerSqlQueryHandlerRef,
         tls_conf: Option<Arc<ServerConfig>>,
         force_tls: bool,
         user_provider: Option<UserProviderRef>,
@@ -122,7 +122,7 @@ impl MysqlServer {
 
     async fn do_handle(
         stream: TcpStream,
-        query_handler: SqlQueryHandlerRef,
+        query_handler: ServerSqlQueryHandlerRef,
         tls_conf: Option<Arc<ServerConfig>>,
         force_tls: bool,
         user_provider: Option<UserProviderRef>,

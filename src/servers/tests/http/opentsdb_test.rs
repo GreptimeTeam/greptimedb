@@ -21,7 +21,8 @@ use common_query::Output;
 use servers::error::{self, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::opentsdb::codec::DataPoint;
-use servers::query_handler::{OpentsdbProtocolHandler, SqlQueryHandler};
+use servers::query_handler::sql::SqlQueryHandler;
+use servers::query_handler::OpentsdbProtocolHandler;
 use session::context::QueryContextRef;
 use tokio::sync::mpsc;
 
@@ -45,6 +46,8 @@ impl OpentsdbProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
+    type Error = error::Error;
+
     async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
         unimplemented!()
     }

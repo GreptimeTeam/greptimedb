@@ -17,6 +17,7 @@ mod grpc;
 mod influxdb;
 mod opentsdb;
 mod prometheus;
+mod standalone;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +32,6 @@ use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
-use common_error::prelude::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -42,10 +42,11 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
+use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
+use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
 use servers::query_handler::{
-    GrpcQueryHandler, GrpcQueryHandlerRef, InfluxdbLineProtocolHandler, OpentsdbProtocolHandler,
-    PrometheusProtocolHandler, ScriptHandler, ScriptHandlerRef, SqlQueryHandler,
-    SqlQueryHandlerRef,
+    InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
+    ScriptHandlerRef,
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -55,16 +56,17 @@ use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
-use crate::error::{self, MissingMetasrvOptsSnafu, Result};
+use crate::error::{self, Error, MissingMetasrvOptsSnafu, Result};
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
+use crate::instance::standalone::{StandaloneGrpcQueryHandler, StandaloneSqlQueryHandler};
 use crate::table::route::TableRoutes;
 use crate::Plugins;
 
 #[async_trait]
 pub trait FrontendInstance:
-    GrpcQueryHandler
-    + SqlQueryHandler
+    GrpcQueryHandler<Error = Error>
+    + SqlQueryHandler<Error = Error>
     + OpentsdbProtocolHandler
     + InfluxdbLineProtocolHandler
     + PrometheusProtocolHandler
@@ -84,8 +86,8 @@ pub struct Instance {
 
     /// Script handler is None in distributed mode, only works on standalone mode.
     script_handler: Option<ScriptHandlerRef>,
-    sql_handler: SqlQueryHandlerRef,
-    grpc_query_handler: GrpcQueryHandlerRef,
+    sql_handler: SqlQueryHandlerRef<Error>,
+    grpc_query_handler: GrpcQueryHandlerRef<Error>,
 
     create_expr_factory: CreateExprFactoryRef,
 
@@ -158,8 +160,8 @@ impl Instance {
             catalog_manager: dn_instance.catalog_manager().clone(),
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            sql_handler: dn_instance.clone(),
-            grpc_query_handler: dn_instance.clone(),
+            sql_handler: StandaloneSqlQueryHandler::arc(dn_instance.clone()),
+            grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
             plugins: Default::default(),
         }
     }
@@ -189,10 +191,7 @@ impl Instance {
     }
 
     /// Handle batch inserts
-    pub async fn handle_inserts(
-        &self,
-        requests: Vec<InsertRequest>,
-    ) -> server_error::Result<Output> {
+    pub async fn handle_inserts(&self, requests: Vec<InsertRequest>) -> Result<Output> {
         let mut success = 0;
         for request in requests {
             match self.handle_insert(request).await? {
@@ -203,7 +202,7 @@ impl Instance {
         Ok(Output::AffectedRows(success))
     }
 
-    async fn handle_insert(&self, request: InsertRequest) -> server_error::Result<Output> {
+    async fn handle_insert(&self, request: InsertRequest) -> Result<Output> {
         let schema_name = &request.schema_name;
         let table_name = &request.table_name;
         let catalog_name = DEFAULT_CATALOG_NAME;
@@ -228,11 +227,11 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         columns: &[Column],
-    ) -> server_error::Result<()> {
+    ) -> Result<()> {
         let table = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name)
-            .context(server_error::CatalogSnafu)?;
+            .context(error::CatalogSnafu)?;
         match table {
             None => {
                 info!(
@@ -250,7 +249,7 @@ impl Instance {
                 let schema = table.schema();
 
                 if let Some(add_columns) = common_grpc_expr::find_new_columns(&schema, columns)
-                    .context(server_error::FindNewColumnsOnInsertionSnafu)?
+                    .context(error::FindNewColumnsOnInsertionSnafu)?
                 {
                     info!(
                         "Find new columns {:?} on insertion, try to alter table: {}.{}.{}",
@@ -280,14 +279,12 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         columns: &[Column],
-    ) -> server_error::Result<Output> {
+    ) -> Result<Output> {
         // Create table automatically, build schema from data.
         let create_expr = self
             .create_expr_factory
             .create_expr_by_columns(catalog_name, schema_name, table_name, columns)
-            .await
-            .map_err(BoxedError::new)
-            .context(server_error::ExecuteGrpcQuerySnafu)?;
+            .await?;
 
         info!(
             "Try to create table: {} automatically with request: {:?}",
@@ -309,7 +306,7 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         add_columns: AddColumns,
-    ) -> server_error::Result<Output> {
+    ) -> Result<Output> {
         debug!(
             "Adding new columns: {:?} to table: {}",
             add_columns, table_name
@@ -369,11 +366,7 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 }
 
 impl Instance {
-    async fn query_statement(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> server_error::Result<Output> {
+    async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         // TODO(sunng87): provide a better form to log or track statement
         let query = &format!("{:?}", &stmt);
         match stmt.clone() {
@@ -388,9 +381,8 @@ impl Instance {
                 return self.sql_handler.do_statement_query(stmt, query_ctx).await;
             }
             Statement::Alter(alter_stmt) => {
-                let expr = AlterExpr::try_from(alter_stmt)
-                    .map_err(BoxedError::new)
-                    .context(server_error::ExecuteAlterSnafu { query })?;
+                let expr =
+                    AlterExpr::try_from(alter_stmt).context(error::AlterExprFromStmtSnafu)?;
                 return self
                     .grpc_query_handler
                     .do_query(GreptimeRequest {
@@ -415,32 +407,24 @@ impl Instance {
                     })
                     .await;
             }
-            Statement::ShowCreateTable(_) => {
-                return server_error::NotSupportedSnafu { feat: query }.fail();
-            }
+            Statement::ShowCreateTable(_) => error::NotSupportedSnafu { feat: query }.fail(),
             Statement::Use(db) => self.handle_use(db, query_ctx),
         }
-        .map_err(BoxedError::new)
-        .context(server_error::ExecuteQuerySnafu { query })
     }
 }
 
 #[async_trait]
 impl SqlQueryHandler for Instance {
-    async fn do_query(
-        &self,
-        query: &str,
-        query_ctx: QueryContextRef,
-    ) -> Vec<server_error::Result<Output>> {
-        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef>();
+    type Error = Error;
+
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
             Ok(q) => q,
             Err(e) => return vec![Err(e)],
         };
 
         match parse_stmt(query.as_ref())
-            .map_err(BoxedError::new)
-            .context(server_error::ExecuteQuerySnafu { query })
             .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
             Ok(stmts) => {
@@ -477,8 +461,8 @@ impl SqlQueryHandler for Instance {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> server_error::Result<Output> {
-        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef>();
+    ) -> Result<Output> {
+        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
 
         // TODO(sunng87): figure out at which stage we can call
         // this hook after ArrowFlight adoption. We need to provide
@@ -489,11 +473,11 @@ impl SqlQueryHandler for Instance {
             .and_then(|output| query_interceptor.post_execute(output, query_ctx.clone()))
     }
 
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.catalog_manager
             .schema(catalog, schema)
             .map(|s| s.is_some())
-            .context(server_error::CatalogSnafu)
+            .context(error::CatalogSnafu)
     }
 }
 
@@ -636,11 +620,13 @@ mod tests {
         }
 
         impl SqlQueryInterceptor for AssertionHook {
+            type Error = Error;
+
             fn pre_parsing<'a>(
                 &self,
                 query: &'a str,
                 _query_ctx: QueryContextRef,
-            ) -> server_error::Result<std::borrow::Cow<'a, str>> {
+            ) -> Result<Cow<'a, str>> {
                 self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 assert!(query.starts_with("CREATE TABLE demo"));
                 Ok(Cow::Borrowed(query))
@@ -650,7 +636,7 @@ mod tests {
                 &self,
                 statements: Vec<Statement>,
                 _query_ctx: QueryContextRef,
-            ) -> server_error::Result<Vec<Statement>> {
+            ) -> Result<Vec<Statement>> {
                 self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 assert!(matches!(statements[0], Statement::CreateTable(_)));
                 Ok(statements)
@@ -661,7 +647,7 @@ mod tests {
                 _statement: &Statement,
                 _plan: Option<&query::plan::LogicalPlan>,
                 _query_ctx: QueryContextRef,
-            ) -> server_error::Result<()> {
+            ) -> Result<()> {
                 self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
             }
@@ -670,7 +656,7 @@ mod tests {
                 &self,
                 mut output: Output,
                 _query_ctx: QueryContextRef,
-            ) -> server_error::Result<Output> {
+            ) -> Result<Output> {
                 self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 match &mut output {
                     Output::AffectedRows(rows) => {
@@ -689,7 +675,7 @@ mod tests {
 
         let mut plugins = Plugins::new();
         let counter_hook = Arc::new(AssertionHook::default());
-        plugins.insert::<SqlQueryInterceptorRef>(counter_hook.clone());
+        plugins.insert::<SqlQueryInterceptorRef<Error>>(counter_hook.clone());
         Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
 
         let sql = r#"CREATE TABLE demo(
@@ -720,15 +706,17 @@ mod tests {
         struct DisableDBOpHook;
 
         impl SqlQueryInterceptor for DisableDBOpHook {
+            type Error = Error;
+
             fn post_parsing(
                 &self,
                 statements: Vec<Statement>,
                 _query_ctx: QueryContextRef,
-            ) -> server_error::Result<Vec<Statement>> {
+            ) -> Result<Vec<Statement>> {
                 for s in &statements {
                     match s {
                         Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {
-                            return Err(server_error::Error::NotSupported {
+                            return Err(Error::NotSupported {
                                 feat: "Database operations".to_owned(),
                             })
                         }
@@ -747,7 +735,7 @@ mod tests {
 
         let mut plugins = Plugins::new();
         let hook = Arc::new(DisableDBOpHook::default());
-        plugins.insert::<SqlQueryInterceptorRef>(hook.clone());
+        plugins.insert::<SqlQueryInterceptorRef<Error>>(hook.clone());
         Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
 
         let sql = r#"CREATE TABLE demo(
@@ -774,7 +762,7 @@ mod tests {
             .await
             .remove(0)
         {
-            assert!(matches!(e, server_error::Error::NotSupported { .. }));
+            assert!(matches!(e, error::Error::NotSupported { .. }));
         } else {
             unreachable!();
         }
@@ -784,7 +772,7 @@ mod tests {
             .await
             .remove(0)
         {
-            assert!(matches!(e, server_error::Error::NotSupported { .. }));
+            assert!(matches!(e, error::Error::NotSupported { .. }));
         } else {
             unreachable!();
         }

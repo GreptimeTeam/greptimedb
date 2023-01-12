@@ -20,6 +20,8 @@ use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::tracing::log::info;
 use servers::grpc::GrpcServer;
 use servers::mysql::server::MysqlServer;
+use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
+use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
 use servers::Mode;
 use snafu::ResultExt;
@@ -60,7 +62,7 @@ impl Services {
                         .context(RuntimeResourceSnafu)?,
                 );
                 Some(MysqlServer::create_server(
-                    instance.clone(),
+                    ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
                     mysql_io_runtime,
                     Default::default(),
                     None,
@@ -69,7 +71,10 @@ impl Services {
         };
 
         Ok(Self {
-            grpc_server: GrpcServer::new(instance, grpc_runtime),
+            grpc_server: GrpcServer::new(
+                ServerGrpcQueryHandlerAdaptor::arc(instance),
+                grpc_runtime,
+            ),
             mysql_server,
         })
     }

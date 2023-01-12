@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod grpc;
+pub mod sql;
+
 use std::sync::Arc;
 
 use api::prometheus::remote::{ReadRequest, WriteRequest};
-use api::v1::GreptimeRequest;
 use async_trait::async_trait;
 use common_query::Output;
-use session::context::QueryContextRef;
-use sql::statements::statement::Statement;
 
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
@@ -36,36 +36,15 @@ use crate::prometheus::Metrics;
 /// used as some kind of "convention", it's the "Q" in "SQL". So we might better stick to the
 /// word "query".
 
-pub type SqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
-pub type GrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler + Send + Sync>;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PrometheusProtocolHandlerRef = Arc<dyn PrometheusProtocolHandler + Send + Sync>;
 pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 
 #[async_trait]
-pub trait SqlQueryHandler {
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>>;
-
-    async fn do_statement_query(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output>;
-
-    /// check if schema is valid
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool>;
-}
-
-#[async_trait]
 pub trait ScriptHandler {
     async fn insert_script(&self, name: &str, script: &str) -> Result<()>;
     async fn execute_script(&self, name: &str) -> Result<Output>;
-}
-
-#[async_trait]
-pub trait GrpcQueryHandler {
-    async fn do_query(&self, query: GreptimeRequest) -> Result<Output>;
 }
 
 #[async_trait]
