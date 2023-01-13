@@ -6,6 +6,14 @@ INSERT INTO test1 VALUES (DEFAULT);
 
 Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 3, values: 1
 
+INSERT INTO test1 VALUES (DEFAULT, DEFAULT, DEFAULT);
+
+Error: 1004(InvalidArguments), No valid default value can be build automatically, column: j
+
+INSERT INTO test1 VALUES (DEFAULT, DEFAULT, DEFAULT, DEFAULT);
+
+Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 3, values: 4
+
 INSERT INTO test1 VALUES (DEFAULT, 1, DEFAULT), (default, 2, default), (DeFaUlT, 3, DeFaUlT), (dEfAuLt, 4, dEfAuLt);
 
 Affected Rows: 4
