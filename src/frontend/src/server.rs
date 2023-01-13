@@ -112,6 +112,7 @@ impl Services {
                 opts.tls.clone(),
                 pg_io_runtime,
                 user_provider.clone(),
+                schema_validator.clone(),
             )) as Box<dyn Server>;
 
             Some((pg_server, pg_addr))
@@ -146,6 +147,10 @@ impl Services {
             );
             if let Some(user_provider) = user_provider {
                 http_server.set_user_provider(user_provider);
+            }
+
+            if let Some(schema_validator) = schema_validator {
+                http_server.set_schema_validator(schema_validator);
             }
 
             if opentsdb_server_and_addr.is_some() {
