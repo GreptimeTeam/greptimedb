@@ -1,6 +1,6 @@
 CREATE TABLE integers (i BIGINT);
 
-Error: 2000(InvalidSyntax), Invalid time index, error: invalid time index, expected one constraint but actual 0, sql:  CREATE TABLE integers (i BIGINT);.
+Error: 2000(InvalidSyntax), Missing time index constraint
 
 CREATE TABLE integers (i INT TIME INDEX);
 
@@ -9,6 +9,14 @@ Error: 1004(InvalidArguments), Invalid column option, column name: i, error: tim
 CREATE TABLE integers (i BIGINT TIME INDEX NULL);
 
 Error: 1004(InvalidArguments), Invalid column option, column name: i, error: time index column can't be null
+
+CREATE TABLE integers (i BIGINT TIME INDEX, j BIGINT, TIME INDEX(j));
+
+Error: 2000(InvalidSyntax), Invalid time index: expected only one time index constraint but actual 2
+
+CREATE TABLE integers (i BIGINT TIME INDEX, j BIGINT, TIME INDEX(i, j));
+
+Error: 2000(InvalidSyntax), Invalid time index: it should contain only one column in time index
 
 CREATE TABLE integers (i BIGINT TIME INDEX);
 
@@ -24,7 +32,7 @@ Affected Rows: 0
 
 CREATE TABLE test1 (i INTEGER, j INTEGER);
 
-Error: 2000(InvalidSyntax), Invalid time index, error: invalid time index, expected one constraint but actual 0, sql:  CREATE TABLE test1 (i INTEGER, j INTEGER);.
+Error: 2000(InvalidSyntax), Missing time index constraint
 
 CREATE TABLE test1 (i INTEGER, j BIGINT TIME INDEX NOT NULL);
 

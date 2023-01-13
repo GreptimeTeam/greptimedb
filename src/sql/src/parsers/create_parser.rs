@@ -25,7 +25,10 @@ use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Word};
 
 use crate::ast::{ColumnDef, Ident, TableConstraint, Value as SqlValue};
-use crate::error::{self, InvalidColumnOptionSnafu, InvalidTimeIndexSnafu, Result, SyntaxSnafu};
+use crate::error::{
+    self, InvalidColumnOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
+    SyntaxSnafu,
+};
 use crate::parser::ParserContext;
 use crate::statements::create::{
     CreateDatabase, CreateTable, PartitionEntry, Partitions, TIME_INDEX,
@@ -111,7 +114,7 @@ impl<'a> ParserContext<'a> {
             table_id: 0, // table id is assigned by catalog manager
             partitions,
         };
-        validate_create(self.sql, &create_table)?;
+        validate_create(&create_table)?;
 
         Ok(Statement::CreateTable(create_table))
     }
@@ -460,7 +463,6 @@ impl<'a> ParserContext<'a> {
                 ensure!(
                     columns.len() == 1,
                     InvalidTimeIndexSnafu {
-                        sql: self.sql,
                         msg: "it should contain only one column in time index",
                     }
                 );
@@ -508,16 +510,16 @@ impl<'a> ParserContext<'a> {
     }
 }
 
-fn validate_create(sql: &str, create_table: &CreateTable) -> Result<()> {
+fn validate_create(create_table: &CreateTable) -> Result<()> {
     if let Some(partitions) = &create_table.partitions {
         validate_partitions(&create_table.columns, partitions)?;
     }
-    validate_time_index(sql, create_table)?;
+    validate_time_index(create_table)?;
 
     Ok(())
 }
 
-fn validate_time_index(sql: &str, create_table: &CreateTable) -> Result<()> {
+fn validate_time_index(create_table: &CreateTable) -> Result<()> {
     let time_index_constraints: Vec<_> = create_table
         .constraints
         .iter()
@@ -541,21 +543,20 @@ fn validate_time_index(sql: &str, create_table: &CreateTable) -> Result<()> {
         .unique()
         .collect();
 
+    ensure!(!time_index_constraints.is_empty(), MissingTimeIndexSnafu);
     ensure!(
         time_index_constraints.len() == 1,
         InvalidTimeIndexSnafu {
             msg: format!(
-                "invalid time index, expected one constraint but actual {}",
+                "expected only one time index constraint but actual {}",
                 time_index_constraints.len()
             ),
-            sql,
         }
     );
     ensure!(
         time_index_constraints[0].len() == 1,
         InvalidTimeIndexSnafu {
             msg: "it should contain only one column in time index",
-            sql,
         }
     );
 

@@ -64,12 +64,11 @@ pub enum Error {
     #[snafu(display("Tokenizer error, sql: {}, source: {}", sql, source))]
     Tokenizer { sql: String, source: TokenizerError },
 
-    #[snafu(display("Invalid time index, error: {}, sql: {}.", msg, sql))]
-    InvalidTimeIndex {
-        sql: String,
-        msg: String,
-        backtrace: Backtrace,
-    },
+    #[snafu(display("Missing time index constraint"))]
+    MissingTimeIndex { backtrace: Backtrace },
+
+    #[snafu(display("Invalid time index: {}", msg))]
+    InvalidTimeIndex { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String, backtrace: Backtrace },
@@ -142,6 +141,7 @@ impl ErrorExt for Error {
             UnsupportedDefaultValue { .. } | Unsupported { .. } => StatusCode::Unsupported,
             Unexpected { .. }
             | Syntax { .. }
+            | MissingTimeIndex { .. }
             | InvalidTimeIndex { .. }
             | Tokenizer { .. }
             | InvalidSql { .. }
