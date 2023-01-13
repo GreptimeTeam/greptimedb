@@ -1,0 +1,58 @@
+CREATE TABLE test1 (i INTEGER, j BIGINT TIME INDEX, k STRING DEFAULT 'blabla');
+
+Affected Rows: 0
+
+INSERT INTO test1 VALUES (DEFAULT);
+
+Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 3, values: 1
+
+INSERT INTO test1 VALUES (DEFAULT, 1, DEFAULT), (default, 2, default), (DeFaUlT, 3, DeFaUlT), (dEfAuLt, 4, dEfAuLt);
+
+Affected Rows: 4
+
+SELECT * FROM test1;
+
++---+---+--------+
+| i | j | k      |
++---+---+--------+
+|   | 1 | blabla |
+|   | 2 | blabla |
+|   | 3 | blabla |
+|   | 4 | blabla |
++---+---+--------+
+
+CREATE TABLE test2 (i INTEGER, j BIGINT TIME INDEX DEFAULT CURRENT_TIMESTAMP, k STRING DEFAULT 'blabla');
+
+Affected Rows: 0
+
+INSERT INTO test2 VALUES (1,1,'a'), (default, 2, default), (3,3,'b'), (default, 4, default), (5, 5, 'c');
+
+Affected Rows: 5
+
+INSERT INTO test2 VALUES (6, 6, default), (7, 7, 'd'), (default, 8, 'e');
+
+Affected Rows: 3
+
+SELECT * FROM test2;
+
++---+---+--------+
+| i | j | k      |
++---+---+--------+
+| 1 | 1 | a      |
+|   | 2 | blabla |
+| 3 | 3 | b      |
+|   | 4 | blabla |
+| 5 | 5 | c      |
+| 6 | 6 | blabla |
+| 7 | 7 | d      |
+|   | 8 | e      |
++---+---+--------+
+
+DROP TABLE test1;
+
+Affected Rows: 1
+
+DROP TABLE test2;
+
+Affected Rows: 1
+
