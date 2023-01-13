@@ -15,7 +15,8 @@
 use std::sync::Arc;
 
 use servers::error::Result;
-use servers::query_handler::{ScriptHandler, SqlQueryHandler};
+use servers::query_handler::sql::SqlQueryHandler;
+use servers::query_handler::ScriptHandler;
 use session::context::QueryContext;
 use table::test_util::MemTable;
 
