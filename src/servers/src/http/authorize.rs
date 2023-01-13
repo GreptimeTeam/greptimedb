@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
@@ -25,6 +24,7 @@ use tower_http::auth::AsyncAuthorizeRequest;
 
 use crate::auth::{Identity, SchemaValidatorRef, UserProviderRef};
 use crate::error::{self, Result};
+use crate::http::handler::SqlQuery;
 use crate::http::HTTP_API_PREFIX;
 
 pub struct HttpAuth<RespBody> {
@@ -67,52 +67,121 @@ where
 
     fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
         let user_provider = self.user_provider.clone();
+        let schema_validator = self.schema_validator.clone();
         Box::pin(async move {
-            let need_auth = request.uri().path().starts_with(HTTP_API_PREFIX);
-            let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
-                user_provider
-            } else {
+            if !request.uri().path().starts_with(HTTP_API_PREFIX) {
                 request.extensions_mut().insert(UserInfo::default());
                 return Ok(request);
-            };
+            }
 
-            let (scheme, credential) = match auth_header(&request) {
-                Ok(auth_header) => auth_header,
-                Err(e) => {
-                    error!("failed to get http authorize header, err: {:?}", e);
-                    return Err(unauthorized_resp());
-                }
-            };
+            // do authenticate
+            if let Some(user_info) = authenticate(user_provider, &request).await {
+                request.extensions_mut().insert(user_info);
+            } else {
+                return Err(unauthorized_resp());
+            }
 
-            match scheme {
-                AuthScheme::Basic => {
-                    let (username, password) = match decode_basic(credential) {
-                        Ok(basic_auth) => basic_auth,
-                        Err(e) => {
-                            error!("failed to decode basic authorize, err: {:?}", e);
-                            return Err(unauthorized_resp());
-                        }
-                    };
-                    match user_provider
-                        .auth(
-                            Identity::UserId(&username, None),
-                            crate::auth::Password::PlainText(&password),
-                        )
-                        .await
-                    {
-                        Ok(user_info) => {
-                            request.extensions_mut().insert(user_info);
-                            Ok(request)
-                        }
-                        Err(e) => {
-                            error!("failed to auth, err: {:?}", e);
-                            Err(unauthorized_resp())
-                        }
-                    }
-                }
+            // do authorize
+            if authorize(schema_validator, &request).await {
+                Ok(request)
+            } else {
+                Err(unauthorized_resp())
             }
         })
     }
+}
+
+async fn authorize<B: Send + Sync + 'static>(
+    schema_validator: Option<SchemaValidatorRef>,
+    request: &Request<B>,
+) -> bool {
+    let schema_validator = if let Some(schema_validator) = schema_validator {
+        schema_validator
+    } else {
+        return true;
+    };
+
+    // try get database name
+    let query = request.uri().query().unwrap_or_default();
+    let input_database = match serde_urlencoded::from_str(query) {
+        Ok(SqlQuery { database, .. }) => {
+            if database.is_some() {
+                database.unwrap()
+            } else {
+                error!("failed to get valid database from http query");
+                return false;
+            }
+        }
+        Err(_) => {
+            error!("failed to parse http query");
+            return false;
+        }
+    };
+
+    let (catalog, database) =
+        crate::parse_catalog_and_schema_from_client_database_name(&input_database);
+
+    let user_info = request.extensions().get::<UserInfo>();
+    if user_info.is_none() {
+        error!("failed to extract user info from http extension");
+        return false;
+    }
+    let user_info = user_info.unwrap();
+
+    match schema_validator
+        .validate(catalog, database, user_info)
+        .await
+    {
+        Ok(_) => true,
+        Err(e) => {
+            error!("failed to authorize user to database, err: {:?}", e);
+            false
+        }
+    }
+}
+
+async fn authenticate<B: Send + Sync + 'static>(
+    user_provider: Option<UserProviderRef>,
+    request: &Request<B>,
+) -> Option<UserInfo> {
+    let user_provider = if let Some(user_provider) = user_provider {
+        user_provider
+    } else {
+        return Some(UserInfo::default());
+    };
+
+    let (scheme, credential) = match auth_header(request) {
+        Ok(auth_header) => auth_header,
+        Err(e) => {
+            error!("failed to get http authorize header, err: {:?}", e);
+            return None;
+        }
+    };
+
+    return match scheme {
+        AuthScheme::Basic => {
+            let (username, password) = match decode_basic(credential) {
+                Ok(basic_auth) => basic_auth,
+                Err(e) => {
+                    error!("failed to decode basic authorize, err: {:?}", e);
+                    return None;
+                }
+            };
+            match user_provider
+                .auth(
+                    Identity::UserId(&username, None),
+                    crate::auth::Password::PlainText(&password),
+                )
+                .await
+            {
+                Ok(user_info) => Some(user_info),
+                Err(e) => {
+                    error!("failed to auth, err: {:?}", e);
+                    None
+                }
+            }
+        }
+    };
 }
 
 fn unauthorized_resp<RespBody>() -> Response<RespBody>

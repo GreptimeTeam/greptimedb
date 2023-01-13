@@ -195,7 +195,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         if let Some(schema_validator) = &self.schema_validator {
             schema_validator
-                .validate(catalog, schema, self.session.clone())
+                .validate(catalog, schema, &self.session.user_info())
                 .await?;
         }
 

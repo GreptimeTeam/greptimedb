@@ -18,7 +18,6 @@ use common_error::ext::BoxedError;
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use session::context::UserInfo;
-use session::Session;
 use snafu::{Backtrace, ErrorCompat, OptionExt, Snafu};
 
 use crate::auth::user_provider::StaticUserProvider;
@@ -77,7 +76,7 @@ pub fn user_provider_from_option(opt: &String) -> Result<UserProviderRef> {
 /// so that the user's [`UserInfo`] should be already stored in the session.
 #[async_trait::async_trait]
 pub trait SchemaValidator: Send + Sync {
-    async fn validate(&self, catalog: &str, schema: &str, session: Arc<Session>) -> Result<()>;
+    async fn validate(&self, catalog: &str, schema: &str, user_info: &UserInfo) -> Result<()>;
 }
 
 pub type SchemaValidatorRef = Arc<dyn SchemaValidator>;
@@ -195,9 +194,10 @@ pub mod test_mock_user_provider {
 
 #[cfg(test)]
 pub mod test_mock_schema_validator {
-    use std::sync::Arc;
 
-    use super::{SchemaValidator, Session};
+    use session::context::UserInfo;
+
+    use super::SchemaValidator;
     use crate::auth::AccessDeniedSnafu;
 
     pub struct MockSchemaValidator {
@@ -222,18 +222,18 @@ pub mod test_mock_schema_validator {
             &self,
             catalog: &str,
             schema: &str,
-            session: Arc<Session>,
+            user_info: &UserInfo,
         ) -> Result<(), super::Error> {
             if catalog == self.catalog
                 && schema == self.schema
-                && session.user_info().username() == self.username
+                && user_info.username() == self.username
             {
                 Ok(())
             } else {
                 AccessDeniedSnafu {
                     catalog: catalog.to_string(),
                     schema: schema.to_string(),
-                    username: session.user_info().username().to_string(),
+                    username: user_info.username().to_string(),
                 }
                 .fail()
             }
@@ -243,10 +243,7 @@ pub mod test_mock_schema_validator {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-
-    use session::context::{Channel, UserInfo};
+    use session::context::UserInfo;
 
     use super::test_mock_user_provider::MockUserProvider;
     use super::{Identity, Password, UserProvider};
@@ -309,36 +306,24 @@ mod tests {
     #[tokio::test]
     async fn test_schema_validate() {
         let validator = MockSchemaValidator::new("greptime", "public", "test_user");
-        let session = session::Session::new(
-            SocketAddr::V4("127.0.0.1:3306".parse().unwrap()),
-            Channel::Mysql,
-        );
-        let session = Arc::new(session);
-        // check user first
-        let re = validator
-            .validate("greptime", "public", session.clone())
-            .await;
-        assert!(re.is_err());
-        // set user to correct
-        session.set_user_info(UserInfo::new("test_user"));
-        let re = validator
-            .validate("greptime", "public", session.clone())
-            .await;
-        assert!(re.is_ok());
+        let right_user = UserInfo::new("test_user");
+        let wrong_user = UserInfo::default();
+
         // check catalog
         let re = validator
-            .validate("greptime_wrong", "public", session.clone())
+            .validate("greptime_wrong", "public", &right_user)
             .await;
         assert!(re.is_err());
         // check schema
         let re = validator
-            .validate("greptime", "public_wrong", session.clone())
+            .validate("greptime", "public_wrong", &right_user)
             .await;
         assert!(re.is_err());
-        // check ok again
-        let re = validator
-            .validate("greptime", "public", session.clone())
-            .await;
+        // check username
+        let re = validator.validate("greptime", "public", &wrong_user).await;
+        assert!(re.is_err());
+        // check ok
+        let re = validator.validate("greptime", "public", &right_user).await;
         assert!(re.is_ok());
     }
 }
