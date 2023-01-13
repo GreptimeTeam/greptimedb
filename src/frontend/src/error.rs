@@ -378,6 +378,26 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_grpc_expr::error::Error,
     },
+
+    #[snafu(display(
+        "Failed to build default value, column: {}, source: {}",
+        column,
+        source
+    ))]
+    ColumnDefaultValue {
+        column: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "No valid default value can be build automatically, column: {}",
+        column,
+    ))]
+    ColumnNoneDefaultValue {
+        column: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -457,6 +477,8 @@ impl ErrorExt for Error {
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
             Error::BuildVector { source, .. } => source.status_code(),
             Error::InvokeDatanode { source } => source.status_code(),
+            Error::ColumnDefaultValue { source, .. } => source.status_code(),
+            Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
         }
     }
 

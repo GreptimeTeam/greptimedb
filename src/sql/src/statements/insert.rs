@@ -66,7 +66,13 @@ fn sql_exprs_to_values(exprs: &Vec<Vec<Expr>>) -> Result<Vec<Vec<Value>>> {
         for expr in es.iter() {
             vs.push(match expr {
                 Expr::Value(v) => v.clone(),
-                Expr::Identifier(ident) => Value::SingleQuotedString(ident.value.clone()),
+                Expr::Identifier(ident) => {
+                    if ident.quote_style.is_none() {
+                        Value::Placeholder(ident.value.clone())
+                    } else {
+                        Value::SingleQuotedString(ident.value.clone())
+                    }
+                }
                 Expr::UnaryOp { op, expr }
                     if matches!(op, UnaryOperator::Minus | UnaryOperator::Plus) =>
                 {
@@ -142,6 +148,63 @@ mod tests {
             Statement::Insert(insert) => {
                 let values = insert.values().unwrap();
                 assert_eq!(values, vec![vec![Value::Number("1".to_string(), false)]]);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_insert_value_with_default() {
+        use crate::statements::statement::Statement;
+
+        // insert "default"
+        let sql = "INSERT INTO my_table VALUES(default)";
+        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+            .unwrap()
+            .remove(0);
+        match stmt {
+            Statement::Insert(insert) => {
+                let values = insert.values().unwrap();
+                assert_eq!(values, vec![vec![Value::Placeholder("default".to_owned())]]);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_insert_value_with_default_uppercase() {
+        use crate::statements::statement::Statement;
+
+        // insert "DEFAULT"
+        let sql = "INSERT INTO my_table VALUES(DEFAULT)";
+        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+            .unwrap()
+            .remove(0);
+        match stmt {
+            Statement::Insert(insert) => {
+                let values = insert.values().unwrap();
+                assert_eq!(values, vec![vec![Value::Placeholder("DEFAULT".to_owned())]]);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_insert_value_with_quoted_string() {
+        use crate::statements::statement::Statement;
+
+        // insert "'default'"
+        let sql = "INSERT INTO my_table VALUES('default')";
+        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+            .unwrap()
+            .remove(0);
+        match stmt {
+            Statement::Insert(insert) => {
+                let values = insert.values().unwrap();
+                assert_eq!(
+                    values,
+                    vec![vec![Value::SingleQuotedString("default".to_owned())]]
+                );
             }
             _ => unreachable!(),
         }

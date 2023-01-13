@@ -295,6 +295,26 @@ pub enum Error {
 
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
+
+    #[snafu(display(
+        "Failed to build default value, column: {}, source: {}",
+        column,
+        source
+    ))]
+    ColumnDefaultValue {
+        column: String,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
+
+    #[snafu(display(
+        "No valid default value can be build automatically, column: {}",
+        column,
+    ))]
+    ColumnNoneDefaultValue {
+        column: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -363,6 +383,8 @@ impl ErrorExt for Error {
             Error::BumpTableId { source, .. } => source.status_code(),
             Error::MissingNodeId { .. } => StatusCode::InvalidArguments,
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
+            Error::ColumnDefaultValue { source, .. } => source.status_code(),
+            Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
         }
     }
 

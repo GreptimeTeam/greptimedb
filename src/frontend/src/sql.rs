@@ -14,7 +14,8 @@
 
 use common_error::snafu::ensure;
 use datatypes::data_type::DataType;
-use datatypes::prelude::{ConcreteDataType, MutableVector};
+use datatypes::prelude::MutableVector;
+use datatypes::schema::ColumnSchema;
 use snafu::{OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
 use sql::statements;
@@ -22,7 +23,9 @@ use sql::statements::insert::Insert;
 use table::requests::InsertRequest;
 use table::TableRef;
 
-use crate::error::{self, BuildVectorSnafu, Result};
+use crate::error::{self, Result};
+
+const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
 // TODO(fys): Extract the common logic in datanode and frontend in the future.
 #[allow(dead_code)]
@@ -40,17 +43,13 @@ pub(crate) fn insert_to_request(table: &TableRef, stmt: Insert) -> Result<Insert
     };
     let rows_num = values.len();
 
-    let mut columns_builders: Vec<(&String, &ConcreteDataType, Box<dyn MutableVector>)> =
+    let mut columns_builders: Vec<(&ColumnSchema, Box<dyn MutableVector>)> =
         Vec::with_capacity(columns_num);
 
     if columns.is_empty() {
         for column_schema in schema.column_schemas() {
             let data_type = &column_schema.data_type;
-            columns_builders.push((
-                &column_schema.name,
-                data_type,
-                data_type.create_mutable_vector(rows_num),
-            ));
+            columns_builders.push((column_schema, data_type.create_mutable_vector(rows_num)));
         }
     } else {
         for column_name in columns {
@@ -61,11 +60,7 @@ pub(crate) fn insert_to_request(table: &TableRef, stmt: Insert) -> Result<Insert
                 }
             })?;
             let data_type = &column_schema.data_type;
-            columns_builders.push((
-                column_name,
-                data_type,
-                data_type.create_mutable_vector(rows_num),
-            ));
+            columns_builders.push((column_schema, data_type.create_mutable_vector(rows_num)));
         }
     }
 
@@ -78,10 +73,8 @@ pub(crate) fn insert_to_request(table: &TableRef, stmt: Insert) -> Result<Insert
             }
         );
 
-        for (sql_val, (column_name, data_type, builder)) in
-            row.iter().zip(columns_builders.iter_mut())
-        {
-            add_row_to_vector(column_name, data_type, sql_val, builder)?;
+        for (sql_val, (column_schema, builder)) in row.iter().zip(columns_builders.iter_mut()) {
+            add_row_to_vector(column_schema, sql_val, builder)?;
         }
     }
 
@@ -91,21 +84,33 @@ pub(crate) fn insert_to_request(table: &TableRef, stmt: Insert) -> Result<Insert
         table_name,
         columns_values: columns_builders
             .into_iter()
-            .map(|(c, _, mut b)| (c.to_owned(), b.to_vector()))
+            .map(|(cs, mut b)| (cs.name.to_string(), b.to_vector()))
             .collect(),
     })
 }
 
 fn add_row_to_vector(
-    column_name: &str,
-    data_type: &ConcreteDataType,
+    column_schema: &ColumnSchema,
     sql_val: &SqlValue,
     builder: &mut Box<dyn MutableVector>,
 ) -> Result<()> {
-    let value = statements::sql_value_to_value(column_name, data_type, sql_val)
-        .context(error::ParseSqlSnafu)?;
-    builder
-        .push_value_ref(value.as_value_ref())
-        .context(BuildVectorSnafu { value })?;
+    let value = if replace_default(sql_val) {
+        column_schema
+            .create_default()
+            .context(error::ColumnDefaultValueSnafu {
+                column: column_schema.name.to_string(),
+            })?
+            .context(error::ColumnNoneDefaultValueSnafu {
+                column: column_schema.name.to_string(),
+            })?
+    } else {
+        statements::sql_value_to_value(&column_schema.name, &column_schema.data_type, sql_val)
+            .context(error::ParseSqlSnafu)?
+    };
+    builder.push_value_ref(value.as_value_ref()).unwrap();
     Ok(())
+}
+
+fn replace_default(sql_val: &SqlValue) -> bool {
+    matches!(sql_val, SqlValue::Placeholder(s) if s.to_lowercase() == DEFAULT_PLACEHOLDER_VALUE)
 }

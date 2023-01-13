@@ -131,6 +131,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: api::error::Error,
     },
+
+    #[snafu(display("Invalid sql value: {}", value))]
+    InvalidSqlValue { value: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -156,6 +159,7 @@ impl ErrorExt for Error {
             UnsupportedAlterTableStatement { .. } => StatusCode::InvalidSyntax,
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
+            InvalidSqlValue { .. } => StatusCode::InvalidArguments,
         }
     }
 
