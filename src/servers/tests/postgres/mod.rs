@@ -59,6 +59,7 @@ fn create_postgres_server(
         tls,
         io_runtime,
         user_provider,
+        None,
     )))
 }
 
