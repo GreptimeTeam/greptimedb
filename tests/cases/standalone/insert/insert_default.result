@@ -8,7 +8,7 @@ Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 3, v
 
 INSERT INTO test1 VALUES (DEFAULT, DEFAULT, DEFAULT);
 
-Error: 1004(InvalidArguments), No valid default value can be build automatically, column: j
+Error: 1004(InvalidArguments), No valid default value can be built automatically, column: j
 
 INSERT INTO test1 VALUES (DEFAULT, DEFAULT, DEFAULT, DEFAULT);
 
