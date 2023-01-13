@@ -93,6 +93,12 @@ impl From<Weak<dyn QueryEngine>> for QueryEngineWeakRef {
     }
 }
 
+impl From<&Arc<dyn QueryEngine>> for QueryEngineWeakRef {
+    fn from(value: &Arc<dyn QueryEngine>) -> Self {
+        Self(Arc::downgrade(value))
+    }
+}
+
 impl std::fmt::Debug for QueryEngineWeakRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("QueryEngineWeakRef")
@@ -352,7 +358,6 @@ pub struct PyQueryEngine {
 
 #[pyclass]
 impl PyQueryEngine {
-
     // TODO(discord9): find a better way to call sql query api, now we don't if we are in async contex or not
     #[pymethod]
     fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
@@ -363,6 +368,7 @@ impl PyQueryEngine {
                 let plan = engine
                     .statement_to_plan(stmt, Default::default())
                     .map_err(|e| e.to_string())?;
+                // To prevent the error of nested creating Runtime, because we don't know if we are being called from a async context
                 let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
                 let res = rt.block_on(async {
                     let res = engine
@@ -429,7 +435,12 @@ pub(crate) fn exec_with_cached_vm(
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
         if let Some(engine) = &copr.query_engine {
-            let query_engine = PyQueryEngine { inner: engine.clone() };
+            let query_engine = PyQueryEngine {
+                inner: engine.clone(),
+            };
+
+            // put a object named with query of class PyQueryEngine in scope
+            PyQueryEngine::make_class(&vm.ctx);
             set_query_engine_in_scope(&scope, vm, query_engine)?;
         }
 

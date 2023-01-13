@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use datatypes::arrow::datatypes::DataType;
+use datatypes::prelude::ConcreteDataType;
 use query::QueryEngineRef;
 use rustpython_parser::ast::{Arguments, Location};
 use rustpython_parser::{ast, parser};
