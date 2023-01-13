@@ -37,6 +37,8 @@ mod interceptor;
 mod opentsdb;
 mod postgres;
 
+mod py_script;
+
 struct DummyInstance {
     query_engine: QueryEngineRef,
     py_engine: Arc<PyEngine>,
@@ -88,6 +90,7 @@ impl ScriptHandler for DummyInstance {
             .compile(script, CompileContext::default())
             .await
             .unwrap();
+        script.register_udf();
         self.scripts
             .write()
             .unwrap()

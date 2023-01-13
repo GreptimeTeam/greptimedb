@@ -20,10 +20,15 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
+use common_function::scalars::{Function, FUNCTION_REGISTRY};
+use common_query::error::{PyUdfSnafu, UdfTempRecordBatchSnafu};
+use common_query::prelude::Signature;
 use common_query::Output;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use datatypes::schema::SchemaRef;
+use datafusion_expr::Volatility;
+use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::vectors::VectorRef;
 use futures::Stream;
 use query::parser::{QueryLanguageParser, QueryStatement};
 use query::QueryEngineRef;
@@ -32,14 +37,139 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::coprocessor::{exec_parsed, parse, CoprocessorRef};
+use crate::python::coprocessor::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
 use crate::python::error::{self, Result};
 
 const PY_ENGINE: &str = "python";
 
+#[derive(Debug)]
+pub struct PyUDF {
+    copr: CoprocessorRef,
+}
+
+impl std::fmt::Display for PyUDF {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}({})->",
+            &self.copr.name,
+            &self.copr.deco_args.arg_names.join(",")
+        )
+    }
+}
+
+impl PyUDF {
+    fn from_copr(copr: CoprocessorRef) -> Arc<Self> {
+        Arc::new(Self { copr })
+    }
+
+    /// Register to `FUNCTION_REGISTRY`
+    fn register_as_udf(zelf: Arc<Self>) {
+        FUNCTION_REGISTRY.register(zelf)
+    }
+    fn register_to_query_engine(zelf: Arc<Self>, engine: QueryEngineRef) {
+        engine.register_function(zelf)
+    }
+
+    /// Fake a schema, should only be used with dynamically eval a Python Udf
+    fn fake_schema(&self, columns: &[VectorRef]) -> SchemaRef {
+        let arg_names = &self.copr.deco_args.arg_names;
+        let col_sch: Vec<_> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| ColumnSchema::new(arg_names[i].to_owned(), col.data_type(), true))
+            .collect();
+        let schema = datatypes::schema::Schema::new(col_sch);
+        Arc::new(schema)
+    }
+}
+
+impl Function for PyUDF {
+    fn name(&self) -> &str {
+        &self.copr.name
+    }
+
+    fn return_type(
+        &self,
+        _input_types: &[datatypes::prelude::ConcreteDataType],
+    ) -> common_query::error::Result<datatypes::prelude::ConcreteDataType> {
+        // TODO(discord9): use correct return annotation if exist
+        match self.copr.return_types.get(0) {
+            Some(Some(AnnotationInfo {
+                datatype: Some(ty), ..
+            })) => Ok(ty.to_owned()),
+            _ => PyUdfSnafu {
+                msg: "Can't found return type for python UDF {self}",
+            }
+            .fail(),
+        }
+    }
+
+    fn signature(&self) -> common_query::prelude::Signature {
+        // try our best to get a type signature
+        let mut arg_types = Vec::with_capacity(self.copr.arg_types.len());
+        let mut know_all_types = true;
+        for ty in self.copr.arg_types.iter() {
+            match ty {
+                Some(AnnotationInfo {
+                    datatype: Some(ty), ..
+                }) => arg_types.push(ty.to_owned()),
+                _ => {
+                    know_all_types = false;
+                    break;
+                }
+            }
+        }
+        if know_all_types {
+            Signature::variadic(arg_types, Volatility::Immutable)
+        } else {
+            Signature::any(self.copr.arg_types.len(), Volatility::Immutable)
+        }
+    }
+
+    fn eval(
+        &self,
+        _func_ctx: common_function::scalars::function::FunctionContext,
+        columns: &[datatypes::vectors::VectorRef],
+    ) -> common_query::error::Result<datatypes::vectors::VectorRef> {
+        // FIXME(discord9): exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
+        let schema = self.fake_schema(columns);
+        let columns = columns.to_vec();
+        // TODO(discord9): remove unwrap
+        let rb = RecordBatch::new(schema, columns).context(UdfTempRecordBatchSnafu)?;
+        let res = exec_parsed(&self.copr, &rb).map_err(|err| {
+            PyUdfSnafu {
+                msg: format!("{err:#?}"),
+            }
+            .build()
+        })?;
+        let len = res.columns().len();
+        if len == 0 {
+            return PyUdfSnafu {
+                msg: "Python UDF should return exactly one column, found zero column".to_string(),
+            }
+            .fail();
+        } // if more than one columns, just return first one
+
+        // TODO(discord9): more error handling
+        let res0 = res.column(0);
+        Ok(res0.to_owned())
+    }
+}
+
 pub struct PyScript {
     query_engine: QueryEngineRef,
     copr: CoprocessorRef,
+}
+
+impl PyScript {
+    /// Register Current Script as UDF, register name is same as script name
+    /// FIXME(discord9): possible inject attack?
+    pub fn register_udf(&self) {
+        let udf = PyUDF::from_copr(self.copr.clone());
+        PyUDF::register_as_udf(udf.clone());
+        PyUDF::register_to_query_engine(udf, self.query_engine.to_owned());
+    }
 }
 
 pub struct CoprStream {

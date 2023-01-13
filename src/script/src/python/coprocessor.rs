@@ -24,7 +24,6 @@ use common_recordbatch::RecordBatch;
 use common_telemetry::info;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
-use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
@@ -55,7 +54,7 @@ thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::n
 pub struct AnnotationInfo {
     /// if None, use types inferred by PyVector
     // TODO(yingwen): We should use our data type. i.e. ConcreteDataType.
-    pub datatype: Option<ArrowDataType>,
+    pub datatype: Option<ConcreteDataType>,
     pub is_nullable: bool,
 }
 
@@ -122,14 +121,12 @@ impl Coprocessor {
                 } = anno[idx].to_owned().unwrap_or_else(|| {
                     // default to be not nullable and use DataType inferred by PyVector itself
                     AnnotationInfo {
-                        datatype: Some(real_ty.as_arrow_type()),
+                        datatype: Some(real_ty.clone()),
                         is_nullable: false,
                     }
                 });
                 let column_type = match ty {
-                    Some(arrow_type) => {
-                        ConcreteDataType::try_from(&arrow_type).context(TypeCastSnafu)?
-                    }
+                    Some(anno_type) => anno_type,
                     // if type is like `_` or `_ | None`
                     None => real_ty,
                 };
@@ -165,9 +162,10 @@ impl Coprocessor {
             {
                 let real_ty = col.data_type();
                 let anno_ty = datatype;
-                if real_ty.as_arrow_type() != *anno_ty {
+                if real_ty != *anno_ty {
                     let array = col.to_arrow_array();
-                    let array = compute::cast(&array, anno_ty).context(ArrowSnafu)?;
+                    let array =
+                        compute::cast(&array, &anno_ty.as_arrow_type()).context(ArrowSnafu)?;
                     *col = Helper::try_into_vector(array).context(TypeCastSnafu)?;
                 }
             }
@@ -223,6 +221,7 @@ fn check_args_anno_real_type(
     for (idx, arg) in args.iter().enumerate() {
         let anno_ty = copr.arg_types[idx].to_owned();
         let real_ty = arg.to_arrow_array().data_type().to_owned();
+        let real_ty = ConcreteDataType::from_arrow_type(&real_ty);
         let is_nullable: bool = rb.schema.column_schemas()[idx].is_nullable();
         ensure!(
             anno_ty
@@ -372,7 +371,11 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                 let native_module_allow_list = HashSet::from([
                     "array", "cmath", "gc", "hashlib", "_json", "_random", "math",
                 ]);
-                let interpreter = Arc::new(vm::Interpreter::with_init(Default::default(), |vm| {
+                // TODO(discord9): edge cases, can't use "..Default::default" because Settings is `#[non_exhaustive]`
+                // so more in here: https://internals.rust-lang.org/t/allow-constructing-non-exhaustive-structs-using-default-default/13868
+                let mut settings = vm::Settings::default();
+                settings.no_sig_int = true;
+                let interpreter = Arc::new(vm::Interpreter::with_init(settings, |vm| {
                     // not using full stdlib to prevent security issue, instead filter out a few simple util module
                     vm.add_native_modules(
                         rustpython_stdlib::get_module_inits()

@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use datatypes::arrow::datatypes::DataType;
+use datatypes::prelude::ConcreteDataType;
 use rustpython_parser::ast::{Arguments, Location};
 use rustpython_parser::{ast, parser};
 #[cfg(test)]
@@ -81,20 +81,20 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
     }
 }
 
-fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<DataType>> {
+fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<ConcreteDataType>> {
     match ty {
-        "bool" => Ok(Some(DataType::Boolean)),
-        "u8" => Ok(Some(DataType::UInt8)),
-        "u16" => Ok(Some(DataType::UInt16)),
-        "u32" => Ok(Some(DataType::UInt32)),
-        "u64" => Ok(Some(DataType::UInt64)),
-        "i8" => Ok(Some(DataType::Int8)),
-        "i16" => Ok(Some(DataType::Int16)),
-        "i32" => Ok(Some(DataType::Int32)),
-        "i64" => Ok(Some(DataType::Int64)),
-        "f16" => Ok(Some(DataType::Float16)),
-        "f32" => Ok(Some(DataType::Float32)),
-        "f64" => Ok(Some(DataType::Float64)),
+        "bool" => Ok(Some(ConcreteDataType::boolean_datatype())),
+        "u8" => Ok(Some(ConcreteDataType::uint8_datatype())),
+        "u16" => Ok(Some(ConcreteDataType::uint16_datatype())),
+        "u32" => Ok(Some(ConcreteDataType::uint32_datatype())),
+        "u64" => Ok(Some(ConcreteDataType::uint64_datatype())),
+        "i8" => Ok(Some(ConcreteDataType::int8_datatype())),
+        "i16" => Ok(Some(ConcreteDataType::int16_datatype())),
+        "i32" => Ok(Some(ConcreteDataType::int32_datatype())),
+        "i64" => Ok(Some(ConcreteDataType::int64_datatype())),
+        "f32" => Ok(Some(ConcreteDataType::float32_datatype())),
+        "f64" => Ok(Some(ConcreteDataType::float64_datatype())),
+        "str" => Ok(Some(ConcreteDataType::string_datatype())),
         // for any datatype
         "_" => Ok(None),
         // note the different between "_" and _
