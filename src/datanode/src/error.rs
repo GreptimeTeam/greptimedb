@@ -308,7 +308,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "No valid default value can be build automatically, column: {}",
+        "No valid default value can be built automatically, column: {}",
         column,
     ))]
     ColumnNoneDefaultValue {
