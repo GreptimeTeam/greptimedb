@@ -20,13 +20,14 @@ use std::collections::HashSet;
 use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
-use common_recordbatch::RecordBatch;
+use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::info;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
+use query::parser::QueryLanguageParser;
 use query::QueryEngine;
 use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
@@ -35,9 +36,10 @@ use rustpython_vm::AsObject;
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
-use vm::builtins::{PyBaseExceptionRef, PyTuple};
+use vm::builtins::{PyBaseExceptionRef, PyList, PyListRef, PyTuple};
+use vm::convert::ToPyObject;
 use vm::scope::Scope;
-use vm::{Interpreter, PyObjectRef, VirtualMachine};
+use vm::{pyclass, Interpreter, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
 use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::DecoratorArgs;
@@ -342,6 +344,79 @@ pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
     exec_parsed(&copr, rb)
 }
 
+#[pyclass(module = false, name = "query_engine")]
+#[derive(Debug, PyPayload)]
+pub struct PyQueryEngine {
+    inner: QueryEngineWeakRef,
+}
+
+#[pyclass]
+impl PyQueryEngine {
+
+    // TODO(discord9): find a better way to call sql query api, now we don't if we are in async contex or not
+    #[pymethod]
+    fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
+        let query = self.inner.0.upgrade();
+        let handle = std::thread::spawn(move || -> std::result::Result<RecordBatches, String> {
+            if let Some(engine) = query {
+                let stmt = QueryLanguageParser::parse_sql(s.as_str()).map_err(|e| e.to_string())?;
+                let plan = engine
+                    .statement_to_plan(stmt, Default::default())
+                    .map_err(|e| e.to_string())?;
+                let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+                let res = rt.block_on(async {
+                    let res = engine
+                        .clone()
+                        .execute(&plan)
+                        .await
+                        .map_err(|e| e.to_string());
+                    match res {
+                        Ok(common_query::Output::AffectedRows(_)) => todo!(),
+                        Ok(common_query::Output::RecordBatches(rbs)) => Ok(rbs),
+                        Ok(common_query::Output::Stream(s)) => {
+                            Ok(common_recordbatch::util::collect_batches(s).await.unwrap())
+                        }
+                        Err(e) => Err(e),
+                    }
+                })?;
+                Ok(res)
+            } else {
+                Err("Query Engine is already dropped".to_string())
+            }
+        });
+        handle
+            .join()
+            .unwrap()
+            .map_err(|e| vm.new_system_error(e))
+            .map(|rbs| {
+                let mut top_vec = Vec::with_capacity(rbs.iter().count());
+                for rb in rbs.iter() {
+                    let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
+                    for v in rb.columns() {
+                        let v = PyVector::from(v.to_owned());
+                        vec_of_vec.push(v.to_pyobject(vm));
+                    }
+                    let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);
+                    top_vec.push(vec_of_vec);
+                }
+                let top_vec = PyList::new_ref(top_vec, vm.as_ref());
+                top_vec
+            })
+    }
+}
+
+fn set_query_engine_in_scope(
+    scope: &Scope,
+    vm: &VirtualMachine,
+    query_engine: PyQueryEngine,
+) -> Result<()> {
+    scope
+        .locals
+        .as_object()
+        .set_item("query", query_engine.to_pyobject(vm), vm)
+        .map_err(|e| format_py_error(e, vm))
+}
+
 pub(crate) fn exec_with_cached_vm(
     copr: &Coprocessor,
     rb: &RecordBatch,
@@ -353,6 +428,10 @@ pub(crate) fn exec_with_cached_vm(
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
+        if let Some(engine) = &copr.query_engine {
+            let query_engine = PyQueryEngine { inner: engine.clone() };
+            set_query_engine_in_scope(&scope, vm, query_engine)?;
+        }
 
         // It's safe to unwrap code_object, it's already compiled before.
         let code_obj = vm.ctx.new_code(copr.code_obj.clone().unwrap());
