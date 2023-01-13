@@ -64,14 +64,21 @@ pub enum Error {
     #[snafu(display("Tokenizer error, sql: {}, source: {}", sql, source))]
     Tokenizer { sql: String, source: TokenizerError },
 
-    #[snafu(display(
-        "Invalid time index, it should contains only one column, sql: {}.",
-        sql
-    ))]
-    InvalidTimeIndex { sql: String, backtrace: Backtrace },
+    #[snafu(display("Missing time index constraint"))]
+    MissingTimeIndex { backtrace: Backtrace },
+
+    #[snafu(display("Invalid time index: {}", msg))]
+    InvalidTimeIndex { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Invalid column option, column name: {}, error: {}", name, msg))]
+    InvalidColumnOption {
+        name: String,
+        msg: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("SQL data type not supported yet: {:?}", t))]
     SqlTypeNotSupported {
@@ -134,6 +141,7 @@ impl ErrorExt for Error {
             UnsupportedDefaultValue { .. } | Unsupported { .. } => StatusCode::Unsupported,
             Unexpected { .. }
             | Syntax { .. }
+            | MissingTimeIndex { .. }
             | InvalidTimeIndex { .. }
             | Tokenizer { .. }
             | InvalidSql { .. }
@@ -141,9 +149,10 @@ impl ErrorExt for Error {
             | SqlTypeNotSupported { .. }
             | InvalidDefault { .. } => StatusCode::InvalidSyntax,
 
-            InvalidDatabaseName { .. } | ColumnTypeMismatch { .. } | InvalidTableName { .. } => {
-                StatusCode::InvalidArguments
-            }
+            InvalidColumnOption { .. }
+            | InvalidDatabaseName { .. }
+            | ColumnTypeMismatch { .. }
+            | InvalidTableName { .. } => StatusCode::InvalidArguments,
             UnsupportedAlterTableStatement { .. } => StatusCode::InvalidSyntax,
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),

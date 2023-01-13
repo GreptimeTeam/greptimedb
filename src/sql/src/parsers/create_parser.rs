@@ -18,14 +18,17 @@ use itertools::Itertools;
 use mito::engine;
 use once_cell::sync::Lazy;
 use snafu::{ensure, OptionExt, ResultExt};
-use sqlparser::ast::ColumnOption::NotNull;
-use sqlparser::ast::{ColumnOptionDef, DataType, Value};
+use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Value};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::parser::IsOptional::Mandatory;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Word};
 
 use crate::ast::{ColumnDef, Ident, TableConstraint, Value as SqlValue};
-use crate::error::{self, InvalidTimeIndexSnafu, Result, SyntaxSnafu};
+use crate::error::{
+    self, InvalidColumnOptionSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
+    SyntaxSnafu,
+};
 use crate::parser::ParserContext;
 use crate::statements::create::{
     CreateDatabase, CreateTable, PartitionEntry, Partitions, TIME_INDEX,
@@ -253,74 +256,167 @@ impl<'a> ParserContext<'a> {
         columns: &mut Vec<ColumnDef>,
         constraints: &mut Vec<TableConstraint>,
     ) -> Result<()> {
-        let column = self
-            .parser
+        let mut column = self
             .parse_column_def()
             .context(SyntaxSnafu { sql: self.sql })?;
 
-        if !matches!(
-            column.data_type,
-            DataType::Timestamp(_, _) | DataType::BigInt(_)
-        ) || matches!(self.parser.peek_token(), Token::Comma)
-        {
-            columns.push(column);
-            return Ok(());
+        let mut time_index_opt_idx = None;
+        for (index, opt) in column.options.iter().enumerate() {
+            if let ColumnOption::DialectSpecific(tokens) = &opt.option {
+                if matches!(
+                    &tokens[..],
+                    [
+                        Token::Word(Word {
+                            keyword: Keyword::TIME,
+                            ..
+                        }),
+                        Token::Word(Word {
+                            keyword: Keyword::INDEX,
+                            ..
+                        })
+                    ]
+                ) {
+                    ensure!(
+                        time_index_opt_idx.is_none(),
+                        InvalidColumnOptionSnafu {
+                            name: column.name.to_string(),
+                            msg: "duplicated time index",
+                        }
+                    );
+                    time_index_opt_idx = Some(index);
+
+                    let constraint = TableConstraint::Unique {
+                        name: Some(Ident {
+                            value: TIME_INDEX.to_owned(),
+                            quote_style: None,
+                        }),
+                        columns: vec![Ident {
+                            value: column.name.value.clone(),
+                            quote_style: None,
+                        }],
+                        is_primary: false,
+                    };
+                    constraints.push(constraint);
+                }
+            }
         }
 
-        // for supporting `ts TIMESTAMP TIME INDEX,` syntax.
-        self.parse_time_index(column, columns, constraints)
-    }
+        if let Some(index) = time_index_opt_idx {
+            ensure!(
+                !column.options.contains(&ColumnOptionDef {
+                    option: ColumnOption::Null,
+                    name: None,
+                }),
+                InvalidColumnOptionSnafu {
+                    name: column.name.to_string(),
+                    msg: "time index column can't be null",
+                }
+            );
+            ensure!(
+                matches!(
+                    column.data_type,
+                    DataType::Timestamp(_, _) | DataType::BigInt(_)
+                ),
+                InvalidColumnOptionSnafu {
+                    name: column.name.to_string(),
+                    msg: "time index column data type should be timestamp or bigint",
+                }
+            );
 
-    fn parse_time_index(
-        &mut self,
-        mut column: ColumnDef,
-        columns: &mut Vec<ColumnDef>,
-        constraints: &mut Vec<TableConstraint>,
-    ) -> Result<()> {
-        self.parser
-            .expect_keywords(&[Keyword::TIME, Keyword::INDEX])
-            .context(error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "TIME INDEX",
-                actual: self.peek_token_as_string(),
-            })?;
+            let not_null_opt = ColumnOptionDef {
+                option: ColumnOption::NotNull,
+                name: None,
+            };
 
-        let constraint = TableConstraint::Unique {
-            name: Some(Ident {
-                value: TIME_INDEX.to_owned(),
-                quote_style: None,
-            }),
-            columns: vec![Ident {
-                value: column.name.value.clone(),
-                quote_style: None,
-            }],
-            is_primary: false,
-        };
+            if !column.options.contains(&not_null_opt) {
+                column.options.push(not_null_opt);
+            }
 
-        // TIME INDEX option means NOT NULL implicitly.
-        column.options = vec![ColumnOptionDef {
-            name: None,
-            option: NotNull,
-        }];
+            column.options.remove(index);
+        }
+
         columns.push(column);
-        constraints.push(constraint);
-
-        if matches!(self.parser.peek_token(), Token::Comma | Token::RParen) {
-            return Ok(());
-        }
-
-        self.parser
-            .expect_keywords(&[Keyword::NOT, Keyword::NULL])
-            .context(error::UnexpectedSnafu {
-                sql: self.sql,
-                expected: "NOT NULL",
-                actual: self.peek_token_as_string(),
-            })?;
 
         Ok(())
     }
 
-    // Copy from sqlparser by boyan
+    pub fn parse_column_def(&mut self) -> std::result::Result<ColumnDef, ParserError> {
+        let parser = &mut self.parser;
+
+        let name = parser.parse_identifier()?;
+        let data_type = parser.parse_data_type()?;
+        let collation = if parser.parse_keyword(Keyword::COLLATE) {
+            Some(parser.parse_object_name()?)
+        } else {
+            None
+        };
+        let mut options = vec![];
+        loop {
+            if parser.parse_keyword(Keyword::CONSTRAINT) {
+                let name = Some(parser.parse_identifier()?);
+                if let Some(option) = Self::parse_optional_column_option(parser)? {
+                    options.push(ColumnOptionDef { name, option });
+                } else {
+                    return parser.expected(
+                        "constraint details after CONSTRAINT <name>",
+                        parser.peek_token(),
+                    );
+                }
+            } else if let Some(option) = Self::parse_optional_column_option(parser)? {
+                options.push(ColumnOptionDef { name: None, option });
+            } else {
+                break;
+            };
+        }
+        Ok(ColumnDef {
+            name,
+            data_type,
+            collation,
+            options,
+        })
+    }
+
+    fn parse_optional_column_option(
+        parser: &mut Parser<'a>,
+    ) -> std::result::Result<Option<ColumnOption>, ParserError> {
+        if parser.parse_keywords(&[Keyword::CHARACTER, Keyword::SET]) {
+            Ok(Some(ColumnOption::CharacterSet(
+                parser.parse_object_name()?,
+            )))
+        } else if parser.parse_keywords(&[Keyword::NOT, Keyword::NULL]) {
+            Ok(Some(ColumnOption::NotNull))
+        } else if parser.parse_keywords(&[Keyword::COMMENT]) {
+            match parser.next_token() {
+                Token::SingleQuotedString(value, ..) => Ok(Some(ColumnOption::Comment(value))),
+                unexpected => parser.expected("string", unexpected),
+            }
+        } else if parser.parse_keyword(Keyword::NULL) {
+            Ok(Some(ColumnOption::Null))
+        } else if parser.parse_keyword(Keyword::DEFAULT) {
+            Ok(Some(ColumnOption::Default(parser.parse_expr()?)))
+        } else if parser.parse_keywords(&[Keyword::PRIMARY, Keyword::KEY]) {
+            Ok(Some(ColumnOption::Unique { is_primary: true }))
+        } else if parser.parse_keyword(Keyword::UNIQUE) {
+            Ok(Some(ColumnOption::Unique { is_primary: false }))
+        } else if parser.parse_keywords(&[Keyword::TIME, Keyword::INDEX]) {
+            // Use a DialectSpecific option for time index
+            Ok(Some(ColumnOption::DialectSpecific(vec![
+                Token::Word(Word {
+                    value: "TIME".to_string(),
+                    quote_style: None,
+                    keyword: Keyword::TIME,
+                }),
+                Token::Word(Word {
+                    value: "INDEX".to_string(),
+                    quote_style: None,
+                    keyword: Keyword::INDEX,
+                }),
+            ])))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
         let name = if self.parser.parse_keyword(Keyword::CONSTRAINT) {
             Some(
@@ -364,7 +460,12 @@ impl<'a> ParserContext<'a> {
                     .parse_parenthesized_column_list(Mandatory)
                     .context(error::SyntaxSnafu { sql: self.sql })?;
 
-                ensure!(columns.len() == 1, InvalidTimeIndexSnafu { sql: self.sql });
+                ensure!(
+                    columns.len() == 1,
+                    InvalidTimeIndexSnafu {
+                        msg: "it should contain only one column in time index",
+                    }
+                );
 
                 // TODO(dennis): TableConstraint doesn't support dialect right now,
                 // so we use unique constraint with special key to represent TIME INDEX.
@@ -413,6 +514,52 @@ fn validate_create(create_table: &CreateTable) -> Result<()> {
     if let Some(partitions) = &create_table.partitions {
         validate_partitions(&create_table.columns, partitions)?;
     }
+    validate_time_index(create_table)?;
+
+    Ok(())
+}
+
+fn validate_time_index(create_table: &CreateTable) -> Result<()> {
+    let time_index_constraints: Vec<_> = create_table
+        .constraints
+        .iter()
+        .filter_map(|c| {
+            if let TableConstraint::Unique {
+                name: Some(ident),
+                columns,
+                is_primary: false,
+            } = c
+            {
+                if ident.value == TIME_INDEX {
+                    let column_names = columns.iter().map(|c| &c.value).collect::<Vec<_>>();
+                    Some(column_names)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .unique()
+        .collect();
+
+    ensure!(!time_index_constraints.is_empty(), MissingTimeIndexSnafu);
+    ensure!(
+        time_index_constraints.len() == 1,
+        InvalidTimeIndexSnafu {
+            msg: format!(
+                "expected only one time index constraint but actual {}",
+                time_index_constraints.len()
+            ),
+        }
+    );
+    ensure!(
+        time_index_constraints[0].len() == 1,
+        InvalidTimeIndexSnafu {
+            msg: "it should contain only one column in time index",
+        }
+    );
+
     Ok(())
 }
 
@@ -568,6 +715,7 @@ fn ensure_partition_names_no_duplicate(partitions: &Partitions) -> Result<()> {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use sqlparser::ast::ColumnOption::NotNull;
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
@@ -609,7 +757,7 @@ mod tests {
     #[test]
     fn test_validate_create() {
         let sql = r"
-CREATE TABLE rcx ( a INT, b STRING, c INT )
+CREATE TABLE rcx ( a INT, b STRING, c INT, ts BIGINT TIME INDEX)
 PARTITION BY RANGE COLUMNS(b, a) (
   PARTITION r0 VALUES LESS THAN ('hz', 1000),
   PARTITION r1 VALUES LESS THAN ('sh', 2000),
@@ -977,6 +1125,43 @@ ENGINE=mito";
 
         let result4 = ParserContext::create_with_dialect(sql4, &GenericDialect {});
         assert!(result4.is_err());
+
+        let sql = r"
+CREATE TABLE monitor (
+  host_id    INT,
+  idc        STRING,
+  ts         TIMESTAMP TIME INDEX DEFAULT CURRENT_TIMESTAMP,
+  cpu        DOUBLE DEFAULT 0,
+  memory     DOUBLE,
+  TIME INDEX (ts),
+  PRIMARY KEY (host),
+)
+ENGINE=mito";
+
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+
+        if let Statement::CreateTable(c) = &result[0] {
+            let tc = c.constraints[0].clone();
+            match tc {
+                TableConstraint::Unique {
+                    name,
+                    columns,
+                    is_primary,
+                } => {
+                    assert_eq!(name.unwrap().to_string(), "__time_index");
+                    assert_eq!(columns.len(), 1);
+                    assert_eq!(&columns[0].value, "ts");
+                    assert!(!is_primary);
+                }
+                _ => panic!("should be time index constraint"),
+            }
+            let ts = c.columns[2].clone();
+            assert_eq!(ts.name.to_string(), "ts");
+            assert!(matches!(ts.options[0].option, ColumnOption::Default(..)));
+            assert_eq!(ts.options[1].option, NotNull);
+        } else {
+            unreachable!("should be create table statement");
+        }
     }
 
     #[test]
@@ -1085,6 +1270,37 @@ ENGINE=mito";
                              cpu float64 default 0,
                              memory float64,
                              TIME INDEX (ts, host),
+                             PRIMARY KEY(ts, host)) engine=mito
+                             with(regions=1);
+         ";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result.is_err());
+        assert_matches!(result, Err(crate::error::Error::InvalidTimeIndex { .. }));
+    }
+
+    #[test]
+    fn test_duplicated_time_index() {
+        let sql = r"create table demo(
+                             host string,
+                             ts int64 time index,
+                             t timestamp time index,
+                             cpu float64 default 0,
+                             memory float64,
+                             TIME INDEX (ts, host),
+                             PRIMARY KEY(ts, host)) engine=mito
+                             with(regions=1);
+         ";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result.is_err());
+        assert_matches!(result, Err(crate::error::Error::InvalidColumnOption { .. }));
+
+        let sql = r"create table demo(
+                             host string,
+                             ts bigint time index,
+                             cpu float64 default 0,
+                             t timestamp,
+                             memory float64,
+                             TIME INDEX (t),
                              PRIMARY KEY(ts, host)) engine=mito
                              with(regions=1);
          ";

@@ -269,24 +269,6 @@ mod tests {
         assert_eq!(4, c.schema.column_schemas().len());
     }
 
-    /// Time index not specified in sql
-    #[tokio::test]
-    pub async fn test_time_index_not_specified() {
-        let handler = create_mock_sql_handler().await;
-        let parsed_stmt = sql_to_statement(
-            r#"create table demo_table(
-                      host string,
-                      ts bigint,
-                      cpu double default 0,
-                      memory double,
-                      PRIMARY KEY(host)) engine=mito with(regions=1);"#,
-        );
-        let error = handler
-            .create_to_request(42, parsed_stmt, TableReference::bare("demo_table"))
-            .unwrap_err();
-        assert_matches!(error, Error::MissingTimestampColumn { .. });
-    }
-
     #[tokio::test]
     pub async fn test_primary_key_not_specified() {
         let handler = create_mock_sql_handler().await;
