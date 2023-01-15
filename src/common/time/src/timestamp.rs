@@ -352,7 +352,7 @@ mod tests {
         }
     }
 
-    /// Generate timestamp less than or equal to `threshold`  
+    /// Generate timestamp less than or equal to `threshold`
     fn gen_ts_le(threshold: &Timestamp) -> Timestamp {
         let mut rng = rand::thread_rng();
         let timestamp = rng.gen_range(i64::MIN..=threshold.value);
