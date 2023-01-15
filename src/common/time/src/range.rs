@@ -223,6 +223,25 @@ mod tests {
     }
 
     #[test]
+    fn test_range_with_diff_unit() {
+        let r1 = TimestampRange::with_unit(1, 2, TimeUnit::Second).unwrap();
+        let r2 = TimestampRange::with_unit(1000, 2000, TimeUnit::Millisecond).unwrap();
+        assert_eq!(r2, r1);
+
+        let r3 = TimestampRange::with_unit(0, 0, TimeUnit::Second).unwrap();
+        let r4 = TimestampRange::with_unit(0, 0, TimeUnit::Millisecond).unwrap();
+        assert_eq!(r3, r4);
+
+        let r5 = TimestampRange::with_unit(0, 0, TimeUnit::Millisecond).unwrap();
+        let r6 = TimestampRange::with_unit(0, 0, TimeUnit::Microsecond).unwrap();
+        assert_eq!(r5, r6);
+
+        let r5 = TimestampRange::with_unit(-1, 1, TimeUnit::Second).unwrap();
+        let r6 = TimestampRange::with_unit(-1000, 1000, TimeUnit::Millisecond).unwrap();
+        assert_eq!(r5, r6);
+    }
+
+    #[test]
     fn test_range_and() {
         assert_eq!(
             TimestampRange::with_unit(5, 10, TimeUnit::Millisecond).unwrap(),
