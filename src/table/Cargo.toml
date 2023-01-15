@@ -13,6 +13,7 @@ common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }
 common-recordbatch = { path = "../common/recordbatch" }
 common-telemetry = { path = "../common/telemetry" }
+common-time = { path = "../common/time" }
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true

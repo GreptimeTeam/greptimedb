@@ -71,9 +71,37 @@ impl Timestamp {
         self.value
     }
 
-    pub fn convert_to(&self, unit: TimeUnit) -> i64 {
-        // TODO(hl): May result into overflow
-        self.value * self.unit.factor() / unit.factor()
+    /// Convert a timestamp to given time unit.
+    /// Conversion from a timestamp with smaller unit to a larger unit may cause rounding error.
+    /// Return `None` if conversion causes overflow.
+    pub fn convert_to(&self, unit: TimeUnit) -> Option<Timestamp> {
+        if self.unit().factor() >= unit.factor() {
+            let mul = self.unit().factor() / unit.factor();
+            let value = self.value.checked_mul(mul)?;
+            Some(Timestamp::new(value, unit))
+        } else {
+            let mul = unit.factor() / self.unit().factor();
+            Some(Timestamp::new(self.value.div_euclid(mul), unit))
+        }
+    }
+
+    /// Split a [Timestamp] into seconds part and nanoseconds part.
+    fn split(&self) -> (i64, i64) {
+        match self.unit {
+            TimeUnit::Second => (self.value, 0),
+            TimeUnit::Millisecond => {
+                let (div, mod_) = (self.value / 1000, self.value % 1000);
+                (div, mod_ * 1000_000)
+            }
+            TimeUnit::Microsecond => {
+                let (div, mod_) = (self.value / 1000_000, self.value % 1000_000);
+                (div, mod_ * 1000)
+            }
+            TimeUnit::Nanosecond => {
+                let (div, mod_) = (self.value / 1000_000_000, self.value % 1000_000_000);
+                (div, mod_)
+            }
+        }
     }
 
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
@@ -81,8 +109,7 @@ impl Timestamp {
     pub fn to_iso8601_string(&self) -> String {
         let nano_factor = TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor();
 
-        let mut secs = self.convert_to(TimeUnit::Second);
-        let mut nsecs = self.convert_to(TimeUnit::Nanosecond) % nano_factor;
+        let (mut secs, mut nsecs) = self.split();
 
         if nsecs < 0 {
             secs -= 1;
@@ -227,19 +254,28 @@ impl TimeUnit {
 
 impl PartialOrd for Timestamp {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        (self.value * self.unit.factor()).partial_cmp(&(other.value * other.unit.factor()))
+        Some(self.cmp(other))
     }
 }
 
+/// A proper implementation of total order requires antisymmetry, reflexivity, transitivity and totality.
+/// In this comparison implementation, we map a timestamp uniquely to a `(i64, i64)` tuple which is respectively
+/// total order.
 impl Ord for Timestamp {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.value * self.unit.factor()).cmp(&(other.value * other.unit.factor()))
+        let (s_sec, s_nsec) = self.split();
+        let (o_sec, o_nsec) = other.split();
+        match s_sec.cmp(&o_sec) {
+            Ordering::Less => Ordering::Less,
+            Ordering::Greater => Ordering::Greater,
+            Ordering::Equal => s_nsec.cmp(&o_nsec),
+        }
     }
 }
 
 impl PartialEq for Timestamp {
     fn eq(&self, other: &Self) -> bool {
-        self.convert_to(TimeUnit::Nanosecond) == other.convert_to(TimeUnit::Nanosecond)
+        self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -247,14 +283,18 @@ impl Eq for Timestamp {}
 
 impl Hash for Timestamp {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_i64(self.convert_to(TimeUnit::Nanosecond));
-        state.finish();
+        let (sec, nsec) = self.split();
+        state.write_i64(sec);
+        state.write_i64(nsec);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::hash_map::DefaultHasher;
+
     use chrono::Offset;
+    use rand::Rng;
     use serde_json::Value;
 
     use super::*;
@@ -282,6 +322,162 @@ mod tests {
         assert_eq!(1, t.value());
         assert_eq!(Timestamp::new(1000, TimeUnit::Microsecond), t);
         assert!(t > Timestamp::new(999, TimeUnit::Microsecond));
+    }
+
+    #[test]
+    fn test_timestamp_antisymmetry() {
+        let t1 = Timestamp::new(1, TimeUnit::Second);
+        let t2 = Timestamp::new(1000, TimeUnit::Millisecond);
+        assert!(t1 >= t2);
+        assert!(t2 >= t1);
+        assert_eq!(Ordering::Equal, t1.cmp(&t2));
+    }
+
+    fn gen_random_ts() -> Timestamp {
+        let units = [
+            TimeUnit::Second,
+            TimeUnit::Millisecond,
+            TimeUnit::Microsecond,
+            TimeUnit::Nanosecond,
+        ];
+        let mut rng = rand::thread_rng();
+        let unit_idx: usize = rng.gen_range(0..4);
+        let unit = units[unit_idx];
+        let value: i64 = rng.gen();
+        Timestamp::new(value, unit)
+    }
+
+    #[test]
+    fn test_timestamp_reflexivity() {
+        for _ in 0..1000 {
+            let ts = gen_random_ts();
+            assert!(ts >= ts, "ts: {:?}", ts);
+        }
+    }
+
+    /// Generate timestamp less than or equal to `threshold`  
+    fn gen_ts_le(threshold: &Timestamp) -> Timestamp {
+        let mut rng = rand::thread_rng();
+        let timestamp = rng.gen_range(i64::MIN..=threshold.value);
+        Timestamp::new(timestamp, threshold.unit)
+    }
+
+    #[test]
+    fn test_timestamp_transitivity() {
+        let t0 = Timestamp::new_millisecond(100);
+        let t1 = gen_ts_le(&t0);
+        let t2 = gen_ts_le(&t1);
+        assert!(t0 >= t1, "t0: {:?}, t1: {:?}", t0, t1);
+        assert!(t1 >= t2, "t1: {:?}, t2: {:?}", t1, t2);
+        assert!(t0 >= t2, "t0: {:?}, t2: {:?}", t0, t2);
+
+        let t0 = Timestamp::new_millisecond(-100);
+        let t1 = gen_ts_le(&t0); // t0 >= t1
+        let t2 = gen_ts_le(&t1); // t1 >= t2
+        assert!(t0 >= t1, "t0: {:?}, t1: {:?}", t0, t1);
+        assert!(t1 >= t2, "t1: {:?}, t2: {:?}", t1, t2);
+        assert!(t0 >= t2, "t0: {:?}, t2: {:?}", t0, t2); // check if t0 >= t2
+    }
+
+    #[test]
+    fn test_antisymmetry() {
+        let t0 = Timestamp::new(1, TimeUnit::Second);
+        let t1 = Timestamp::new(1000, TimeUnit::Millisecond);
+        assert!(t0 >= t1, "t0: {:?}, t1: {:?}", t0, t1);
+        assert!(t1 >= t0, "t0: {:?}, t1: {:?}", t0, t1);
+        assert_eq!(t1, t0, "t0: {:?}, t1: {:?}", t0, t1);
+    }
+
+    #[test]
+    fn test_strong_connectivity() {
+        let mut values = Vec::with_capacity(1000);
+        for _ in 0..1000 {
+            values.push(gen_random_ts());
+        }
+
+        for l in &values {
+            for r in &values {
+                assert!(l >= r || l <= r, "l: {:?}, r: {:?}", l, r);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cmp_timestamp() {
+        let t1 = Timestamp::new(0, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(0, TimeUnit::Second);
+        assert_eq!(t2, t1);
+
+        let t1 = Timestamp::new(1, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(-1, TimeUnit::Second);
+        assert!(t1 > t2);
+
+        let t1 = Timestamp::new(i64::MAX / 1000 * 1000, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(i64::MAX / 1000, TimeUnit::Second);
+        assert_eq!(t2, t1);
+
+        let t1 = Timestamp::new(i64::MAX, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(i64::MAX / 1000 + 1, TimeUnit::Second);
+        assert!(t2 > t1);
+
+        let t1 = Timestamp::new(i64::MAX, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(i64::MAX / 1000, TimeUnit::Second);
+        assert!(t2 < t1);
+
+        let t1 = Timestamp::new(100 * 1000_1, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(100, TimeUnit::Second);
+        assert!(t1 > t2);
+
+        let t1 = Timestamp::new(-100 * 1000_1, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(-100, TimeUnit::Second);
+        assert!(t2 > t1);
+
+        let t1 = Timestamp::new(i64::MIN, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(i64::MIN / 1000 - 1, TimeUnit::Second);
+        assert!(t1 > t2);
+
+        let t1 = Timestamp::new(i64::MIN, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(i64::MIN + 1, TimeUnit::Millisecond);
+        assert!(t2 > t1);
+
+        let t1 = Timestamp::new(i64::MAX, TimeUnit::Millisecond);
+        let t2 = Timestamp::new(i64::MIN, TimeUnit::Second);
+        assert!(t1 > t2);
+
+        let t1 = Timestamp::new(0, TimeUnit::Nanosecond);
+        let t2 = Timestamp::new(i64::MIN, TimeUnit::Second);
+        assert!(t1 > t2);
+    }
+
+    fn check_hash_eq(t1: Timestamp, t2: Timestamp) {
+        let mut hasher = DefaultHasher::new();
+        t1.hash(&mut hasher);
+        let t1_hash = hasher.finish();
+
+        let mut hasher = DefaultHasher::new();
+        t2.hash(&mut hasher);
+        let t2_hash = hasher.finish();
+        assert_eq!(t2_hash, t1_hash);
+    }
+
+    #[test]
+    fn test_hash() {
+        check_hash_eq(
+            Timestamp::new(0, TimeUnit::Millisecond),
+            Timestamp::new(0, TimeUnit::Second),
+        );
+        check_hash_eq(
+            Timestamp::new(1000, TimeUnit::Millisecond),
+            Timestamp::new(1, TimeUnit::Second),
+        );
+        check_hash_eq(
+            Timestamp::new(1000_000, TimeUnit::Microsecond),
+            Timestamp::new(1, TimeUnit::Second),
+        );
+        check_hash_eq(
+            Timestamp::new(1000_000_000, TimeUnit::Nanosecond),
+            Timestamp::new(1, TimeUnit::Second),
+        );
     }
 
     #[test]
@@ -436,5 +632,57 @@ mod tests {
                 _ => unreachable!(),
             }
         );
+    }
+
+    #[test]
+    fn test_convert_timestamp() {
+        let ts = Timestamp::new(1, TimeUnit::Second);
+        assert_eq!(
+            Timestamp::new(1000, TimeUnit::Millisecond),
+            ts.convert_to(TimeUnit::Millisecond).unwrap()
+        );
+        assert_eq!(
+            Timestamp::new(1000_000, TimeUnit::Microsecond),
+            ts.convert_to(TimeUnit::Microsecond).unwrap()
+        );
+        assert_eq!(
+            Timestamp::new(1000_000_000, TimeUnit::Nanosecond),
+            ts.convert_to(TimeUnit::Nanosecond).unwrap()
+        );
+
+        let ts = Timestamp::new(1000_100_100, TimeUnit::Nanosecond);
+        assert_eq!(
+            Timestamp::new(1000_100, TimeUnit::Microsecond),
+            ts.convert_to(TimeUnit::Microsecond).unwrap()
+        );
+        assert_eq!(
+            Timestamp::new(1000, TimeUnit::Millisecond),
+            ts.convert_to(TimeUnit::Millisecond).unwrap()
+        );
+        assert_eq!(
+            Timestamp::new(1, TimeUnit::Second),
+            ts.convert_to(TimeUnit::Second).unwrap()
+        );
+
+        let ts = Timestamp::new(1000_100_100, TimeUnit::Nanosecond);
+        assert_eq!(ts, ts.convert_to(TimeUnit::Nanosecond).unwrap());
+        let ts = Timestamp::new(1000_100_100, TimeUnit::Microsecond);
+        assert_eq!(ts, ts.convert_to(TimeUnit::Microsecond).unwrap());
+        let ts = Timestamp::new(1000_100_100, TimeUnit::Millisecond);
+        assert_eq!(ts, ts.convert_to(TimeUnit::Millisecond).unwrap());
+        let ts = Timestamp::new(1000_100_100, TimeUnit::Second);
+        assert_eq!(ts, ts.convert_to(TimeUnit::Second).unwrap());
+
+        // -9223372036854775808 in milliseconds should be rounded up to -9223372036854776 in seconds
+        assert_eq!(
+            Timestamp::new(-9223372036854776, TimeUnit::Second),
+            Timestamp::new(i64::MIN, TimeUnit::Millisecond)
+                .convert_to(TimeUnit::Second)
+                .unwrap()
+        );
+
+        assert!(Timestamp::new(i64::MAX, TimeUnit::Second)
+            .convert_to(TimeUnit::Millisecond)
+            .is_none());
     }
 }

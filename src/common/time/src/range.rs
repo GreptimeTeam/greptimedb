@@ -12,70 +12,173 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::timestamp::TimeUnit;
 use crate::timestamp_millis::TimestampMillis;
+use crate::Timestamp;
 
 /// A half-open time range.
 ///
 /// The time range contains all timestamp `ts` that `ts >= start` and `ts < end`. It is
-/// empty if `start == end`.
+/// empty if `start >= end`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TimeRange<T> {
-    start: T,
-    end: T,
+pub struct GenericRange<T> {
+    start: Option<T>,
+    end: Option<T>,
 }
 
-impl<T> TimeRange<T> {
+impl<T> GenericRange<T>
+where
+    T: Copy + PartialOrd,
+{
+    pub fn and(&self, other: &GenericRange<T>) -> GenericRange<T> {
+        let start = match (self.start(), other.start()) {
+            (Some(l), Some(r)) => {
+                if l > r {
+                    Some(*l)
+                } else {
+                    Some(*r)
+                }
+            }
+            (Some(l), None) => Some(*l),
+            (None, Some(r)) => Some(*r),
+            (None, None) => None,
+        };
+
+        let end = match (self.end(), other.end()) {
+            (Some(l), Some(r)) => {
+                if l > r {
+                    Some(*r)
+                } else {
+                    Some(*l)
+                }
+            }
+            (Some(l), None) => Some(*l),
+            (None, Some(r)) => Some(*r),
+            (None, None) => None,
+        };
+
+        Self { start, end }
+    }
+
+    /// Compute the OR'ed range of two ranges.
+    /// Notice: this method does not compute the exact OR'ed operation for simplicity.
+    /// For example, `[1, 2)` or'ed with `[4, 5)` will produce `[1, 5)`
+    /// instead of `[1, 2) ∪ [4, 5)`
+    pub fn or(&self, other: &GenericRange<T>) -> GenericRange<T> {
+        if self.is_empty() {
+            return other.clone();
+        }
+
+        if other.is_empty() {
+            return self.clone();
+        }
+        let start = match (self.start(), other.start()) {
+            (Some(l), Some(r)) => {
+                if l > r {
+                    Some(*r)
+                } else {
+                    Some(*l)
+                }
+            }
+            (Some(_), None) => None,
+            (None, Some(_)) => None,
+            (None, None) => None,
+        };
+
+        let end = match (self.end(), other.end()) {
+            (Some(l), Some(r)) => {
+                if l > r {
+                    Some(*l)
+                } else {
+                    Some(*r)
+                }
+            }
+            (Some(_), None) => None,
+            (None, Some(_)) => None,
+            (None, None) => None,
+        };
+
+        Self { start, end }
+    }
+}
+
+impl<T> GenericRange<T> {
     /// Creates a new range that contains timestamp in `[start, end)`.
     ///
     /// Returns `None` if `start` > `end`.
-    pub fn new<U: PartialOrd + Into<T>>(start: U, end: U) -> Option<TimeRange<T>> {
+    pub fn new<U: PartialOrd + Into<T>>(start: U, end: U) -> Option<GenericRange<T>> {
         if start <= end {
-            let (start, end) = (start.into(), end.into());
-            Some(TimeRange { start, end })
+            let (start, end) = (Some(start.into()), Some(end.into()));
+            Some(GenericRange { start, end })
         } else {
             None
         }
     }
 
     /// Given a value, creates an empty time range that `start == end == value`.
-    pub fn empty_with_value<U: Clone + Into<T>>(value: U) -> TimeRange<T> {
-        TimeRange {
-            start: value.clone().into(),
-            end: value.into(),
+    pub fn empty_with_value<U: Clone + Into<T>>(value: U) -> GenericRange<T> {
+        GenericRange {
+            start: Some(value.clone().into()),
+            end: Some(value.into()),
+        }
+    }
+
+    pub fn all() -> GenericRange<T> {
+        Self {
+            start: None,
+            end: None,
         }
     }
 
     /// Returns the lower bound of the range (inclusive).
     #[inline]
-    pub fn start(&self) -> &T {
+    pub fn start(&self) -> &Option<T> {
         &self.start
     }
 
     /// Returns the upper bound of the range (exclusive).
     #[inline]
-    pub fn end(&self) -> &T {
+    pub fn end(&self) -> &Option<T> {
         &self.end
     }
 
     /// Returns true if `timestamp` is contained in the range.
     pub fn contains<U: PartialOrd<T>>(&self, timestamp: &U) -> bool {
-        *timestamp >= self.start && *timestamp < self.end
+        match (&self.start, &self.end) {
+            (Some(start), Some(end)) => *timestamp >= *start && *timestamp < *end,
+            (Some(start), None) => *timestamp >= *start,
+            (None, Some(end)) => *timestamp < *end,
+            (None, None) => true,
+        }
     }
 }
 
-impl<T: PartialOrd> TimeRange<T> {
+impl<T: PartialOrd> GenericRange<T> {
     /// Returns true if the range contains no timestamps.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.start >= self.end
+        match (&self.start, &self.end) {
+            (Some(start), Some(end)) => start >= end,
+            _ => false,
+        }
+    }
+}
+
+pub type TimestampRange = GenericRange<Timestamp>;
+impl TimestampRange {
+    pub fn with_unit(start: i64, end: i64, unit: TimeUnit) -> Option<Self> {
+        let start = Timestamp::new(start, unit);
+        let end = Timestamp::new(end, unit);
+        Self::new(start, end)
     }
 }
 
 /// Time range in milliseconds.
-pub type RangeMillis = TimeRange<TimestampMillis>;
+pub type RangeMillis = GenericRange<TimestampMillis>;
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -83,8 +186,8 @@ mod tests {
         let (start, end) = (TimestampMillis::new(0), TimestampMillis::new(100));
         let range = RangeMillis::new(start, end).unwrap();
 
-        assert_eq!(start, *range.start());
-        assert_eq!(end, *range.end());
+        assert_eq!(Some(start), *range.start());
+        assert_eq!(Some(end), *range.end());
 
         let range2 = RangeMillis::new(0, 100).unwrap();
         assert_eq!(range, range2);
@@ -96,7 +199,7 @@ mod tests {
 
         let range = RangeMillis::empty_with_value(1024);
         assert_eq!(range.start(), range.end());
-        assert_eq!(1024, *range.start());
+        assert_eq!(Some(TimestampMillis::new(1024)), *range.start());
     }
 
     #[test]
@@ -117,5 +220,75 @@ mod tests {
         let range = RangeMillis::new(0, 0).unwrap();
         assert!(range.is_empty());
         assert!(!range.contains(&0));
+    }
+
+    #[test]
+    fn test_range_and() {
+        assert_eq!(
+            TimestampRange::with_unit(5, 10, TimeUnit::Millisecond).unwrap(),
+            TimestampRange::with_unit(1, 10, TimeUnit::Millisecond)
+                .unwrap()
+                .and(&TimestampRange::with_unit(5, 20, TimeUnit::Millisecond).unwrap())
+        );
+
+        let empty = TimestampRange::with_unit(0, 10, TimeUnit::Millisecond)
+            .unwrap()
+            .and(&TimestampRange::with_unit(11, 20, TimeUnit::Millisecond).unwrap());
+        assert!(empty.is_empty());
+
+        // whatever AND'ed with empty shall return empty
+        let empty_and_all = empty.and(&TimestampRange::all());
+        assert!(empty_and_all.is_empty());
+        assert!(empty.and(&empty).is_empty());
+        assert!(empty
+            .and(&TimestampRange::with_unit(0, 10, TimeUnit::Millisecond).unwrap())
+            .is_empty());
+
+        // AND TimestampRange with different unit
+        let anded = TimestampRange::with_unit(0, 10, TimeUnit::Millisecond)
+            .unwrap()
+            .and(&TimestampRange::with_unit(1000, 12000, TimeUnit::Microsecond).unwrap());
+        assert_eq!(
+            TimestampRange::with_unit(1, 10, TimeUnit::Millisecond).unwrap(),
+            anded
+        );
+
+        let anded = TimestampRange::with_unit(0, 10, TimeUnit::Millisecond)
+            .unwrap()
+            .and(&TimestampRange::with_unit(1000, 12000, TimeUnit::Microsecond).unwrap());
+        assert_eq!(
+            TimestampRange::with_unit(1, 10, TimeUnit::Millisecond).unwrap(),
+            anded
+        );
+    }
+
+    #[test]
+    fn test_range_or() {
+        assert_eq!(
+            TimestampRange::with_unit(1, 20, TimeUnit::Millisecond).unwrap(),
+            TimestampRange::with_unit(1, 10, TimeUnit::Millisecond)
+                .unwrap()
+                .or(&TimestampRange::with_unit(5, 20, TimeUnit::Millisecond).unwrap())
+        );
+
+        assert_eq!(
+            TimestampRange::all(),
+            TimestampRange::all().or(&TimestampRange::all())
+        );
+
+        let empty = TimestampRange::empty_with_value(Timestamp::new_millisecond(1)).or(
+            &TimestampRange::empty_with_value(Timestamp::new_millisecond(2)),
+        );
+        assert!(empty.is_empty());
+
+        let t1 = TimestampRange::with_unit(-10, 0, TimeUnit::Second).unwrap();
+        let t2 = TimestampRange::with_unit(-30, -20, TimeUnit::Second).unwrap();
+        assert_eq!(
+            TimestampRange::with_unit(-30, 0, TimeUnit::Second).unwrap(),
+            t1.or(&t2)
+        );
+
+        let t1 = TimestampRange::with_unit(-10, 0, TimeUnit::Second).unwrap();
+        assert_eq!(t1, t1.or(&t1));
     }
 }

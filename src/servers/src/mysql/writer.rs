@@ -126,8 +126,10 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Binary(v) => row_writer.write_col(v.deref())?,
                     Value::Date(v) => row_writer.write_col(v.val())?,
                     Value::DateTime(v) => row_writer.write_col(v.val())?,
-                    Value::Timestamp(v) => row_writer
-                        .write_col(DateTime::new(v.convert_to(TimeUnit::Second)).to_string())?,
+                    Value::Timestamp(v) => row_writer.write_col(
+                        // safety: converting timestamp with whatever unit to second will not cause overflow
+                        DateTime::new(v.convert_to(TimeUnit::Second).unwrap().value()).to_string(),
+                    )?,
                     Value::List(_) => {
                         return Err(Error::Internal {
                             err_msg: format!(

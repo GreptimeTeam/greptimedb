@@ -15,6 +15,8 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_time::timestamp::TimeUnit;
+use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use sqlparser::parser::ParserError;
 use sqlparser::tokenizer::TokenizerError;
@@ -134,6 +136,17 @@ pub enum Error {
 
     #[snafu(display("Invalid sql value: {}", value))]
     InvalidSqlValue { value: String, backtrace: Backtrace },
+
+    #[snafu(display(
+        "Converting timestamp {:?} to unit {:?} overflow",
+        timestamp,
+        target_unit
+    ))]
+    TimestampOverflow {
+        timestamp: Timestamp,
+        target_unit: TimeUnit,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {
@@ -160,6 +173,7 @@ impl ErrorExt for Error {
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             InvalidSqlValue { .. } => StatusCode::InvalidArguments,
+            TimestampOverflow { .. } => StatusCode::InvalidArguments,
         }
     }
 
