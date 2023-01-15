@@ -343,7 +343,7 @@ mod tests {
     fn test_timestamp_reflexivity() {
         for _ in 0..1000 {
             let ts = gen_random_ts();
-            assert!(ts >= ts, "ts: {:?}", ts);
+            assert!(ts >= ts, "ts: {ts:?}");
         }
     }
 
@@ -359,25 +359,25 @@ mod tests {
         let t0 = Timestamp::new_millisecond(100);
         let t1 = gen_ts_le(&t0);
         let t2 = gen_ts_le(&t1);
-        assert!(t0 >= t1, "t0: {:?}, t1: {:?}", t0, t1);
-        assert!(t1 >= t2, "t1: {:?}, t2: {:?}", t1, t2);
-        assert!(t0 >= t2, "t0: {:?}, t2: {:?}", t0, t2);
+        assert!(t0 >= t1, "t0: {t0:?}, t1: {t1:?}");
+        assert!(t1 >= t2, "t1: {t1:?}, t2: {t2:?}");
+        assert!(t0 >= t2, "t0: {t0:?}, t2: {t2:?}");
 
         let t0 = Timestamp::new_millisecond(-100);
         let t1 = gen_ts_le(&t0); // t0 >= t1
         let t2 = gen_ts_le(&t1); // t1 >= t2
-        assert!(t0 >= t1, "t0: {:?}, t1: {:?}", t0, t1);
-        assert!(t1 >= t2, "t1: {:?}, t2: {:?}", t1, t2);
-        assert!(t0 >= t2, "t0: {:?}, t2: {:?}", t0, t2); // check if t0 >= t2
+        assert!(t0 >= t1, "t0: {t0:?}, t1: {t1:?}");
+        assert!(t1 >= t2, "t1: {t1:?}, t2: {t2:?}");
+        assert!(t0 >= t2, "t0: {t0:?}, t2: {t2:?}"); // check if t0 >= t2
     }
 
     #[test]
     fn test_antisymmetry() {
         let t0 = Timestamp::new(1, TimeUnit::Second);
         let t1 = Timestamp::new(1000, TimeUnit::Millisecond);
-        assert!(t0 >= t1, "t0: {:?}, t1: {:?}", t0, t1);
-        assert!(t1 >= t0, "t0: {:?}, t1: {:?}", t0, t1);
-        assert_eq!(t1, t0, "t0: {:?}, t1: {:?}", t0, t1);
+        assert!(t0 >= t1, "t0: {t0:?}, t1: {t1:?}");
+        assert!(t1 >= t0, "t0: {t0:?}, t1: {t1:?}");
+        assert_eq!(t1, t0, "t0: {t0:?}, t1: {t1:?}");
     }
 
     #[test]
@@ -389,7 +389,7 @@ mod tests {
 
         for l in &values {
             for r in &values {
-                assert!(l >= r || l <= r, "l: {:?}, r: {:?}", l, r);
+                assert!(l >= r || l <= r, "l: {l:?}, r: {r:?}");
             }
         }
     }
@@ -416,11 +416,11 @@ mod tests {
         let t2 = Timestamp::new(i64::MAX / 1000, TimeUnit::Second);
         assert!(t2 < t1);
 
-        let t1 = Timestamp::new(100 * 1000_1, TimeUnit::Millisecond);
+        let t1 = Timestamp::new(10_010_001, TimeUnit::Millisecond);
         let t2 = Timestamp::new(100, TimeUnit::Second);
         assert!(t1 > t2);
 
-        let t1 = Timestamp::new(-100 * 1000_1, TimeUnit::Millisecond);
+        let t1 = Timestamp::new(-100 * 10_001, TimeUnit::Millisecond);
         let t2 = Timestamp::new(-100, TimeUnit::Second);
         assert!(t2 > t1);
 
@@ -463,11 +463,11 @@ mod tests {
             Timestamp::new(1, TimeUnit::Second),
         );
         check_hash_eq(
-            Timestamp::new(1000_000, TimeUnit::Microsecond),
+            Timestamp::new(1_000_000, TimeUnit::Microsecond),
             Timestamp::new(1, TimeUnit::Second),
         );
         check_hash_eq(
-            Timestamp::new(1000_000_000, TimeUnit::Nanosecond),
+            Timestamp::new(1_000_000_000, TimeUnit::Nanosecond),
             Timestamp::new(1, TimeUnit::Second),
         );
     }
@@ -634,17 +634,17 @@ mod tests {
             ts.convert_to(TimeUnit::Millisecond).unwrap()
         );
         assert_eq!(
-            Timestamp::new(1000_000, TimeUnit::Microsecond),
+            Timestamp::new(1_000_000, TimeUnit::Microsecond),
             ts.convert_to(TimeUnit::Microsecond).unwrap()
         );
         assert_eq!(
-            Timestamp::new(1000_000_000, TimeUnit::Nanosecond),
+            Timestamp::new(1_000_000_000, TimeUnit::Nanosecond),
             ts.convert_to(TimeUnit::Nanosecond).unwrap()
         );
 
-        let ts = Timestamp::new(1000_100_100, TimeUnit::Nanosecond);
+        let ts = Timestamp::new(1_000_100_100, TimeUnit::Nanosecond);
         assert_eq!(
-            Timestamp::new(1000_100, TimeUnit::Microsecond),
+            Timestamp::new(1_000_100, TimeUnit::Microsecond),
             ts.convert_to(TimeUnit::Microsecond).unwrap()
         );
         assert_eq!(
@@ -656,13 +656,13 @@ mod tests {
             ts.convert_to(TimeUnit::Second).unwrap()
         );
 
-        let ts = Timestamp::new(1000_100_100, TimeUnit::Nanosecond);
+        let ts = Timestamp::new(1_000_100_100, TimeUnit::Nanosecond);
         assert_eq!(ts, ts.convert_to(TimeUnit::Nanosecond).unwrap());
-        let ts = Timestamp::new(1000_100_100, TimeUnit::Microsecond);
+        let ts = Timestamp::new(1_000_100_100, TimeUnit::Microsecond);
         assert_eq!(ts, ts.convert_to(TimeUnit::Microsecond).unwrap());
-        let ts = Timestamp::new(1000_100_100, TimeUnit::Millisecond);
+        let ts = Timestamp::new(1_000_100_100, TimeUnit::Millisecond);
         assert_eq!(ts, ts.convert_to(TimeUnit::Millisecond).unwrap());
-        let ts = Timestamp::new(1000_100_100, TimeUnit::Second);
+        let ts = Timestamp::new(1_000_100_100, TimeUnit::Second);
         assert_eq!(ts, ts.convert_to(TimeUnit::Second).unwrap());
 
         // -9223372036854775808 in milliseconds should be rounded up to -9223372036854776 in seconds

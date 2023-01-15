@@ -66,11 +66,11 @@ where
     /// instead of `[1, 2) ∪ [4, 5)`
     pub fn or(&self, other: &GenericRange<T>) -> GenericRange<T> {
         if self.is_empty() {
-            return other.clone();
+            return *other;
         }
 
         if other.is_empty() {
-            return self.clone();
+            return *self;
         }
         let start = match (self.start(), other.start()) {
             (Some(l), Some(r)) => {
