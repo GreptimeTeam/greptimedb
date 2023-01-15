@@ -86,22 +86,14 @@ impl Timestamp {
     }
 
     /// Split a [Timestamp] into seconds part and nanoseconds part.
+    /// Notice the seconds part of split result is always rounded down to floor.
     fn split(&self) -> (i64, i64) {
-        match self.unit {
-            TimeUnit::Second => (self.value, 0),
-            TimeUnit::Millisecond => {
-                let (div, mod_) = (self.value / 1000, self.value % 1000);
-                (div, mod_ * 1000_000)
-            }
-            TimeUnit::Microsecond => {
-                let (div, mod_) = (self.value / 1000_000, self.value % 1000_000);
-                (div, mod_ * 1000)
-            }
-            TimeUnit::Nanosecond => {
-                let (div, mod_) = (self.value / 1000_000_000, self.value % 1000_000_000);
-                (div, mod_)
-            }
-        }
+        let sec_mul = TimeUnit::Second.factor() / self.unit.factor();
+        let nsec_mul = self.unit.factor() / TimeUnit::Nanosecond.factor();
+
+        let sec_div = self.value.div_euclid(sec_mul);
+        let sec_mod = self.value.rem_euclid(sec_mul);
+        (sec_div, sec_mod * nsec_mul)
     }
 
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
@@ -684,5 +676,41 @@ mod tests {
         assert!(Timestamp::new(i64::MAX, TimeUnit::Second)
             .convert_to(TimeUnit::Millisecond)
             .is_none());
+    }
+
+    #[test]
+    fn test_split() {
+        assert_eq!((0, 0), Timestamp::new(0, TimeUnit::Second).split());
+        assert_eq!((1, 0), Timestamp::new(1, TimeUnit::Second).split());
+        assert_eq!(
+            (0, 1_000_000),
+            Timestamp::new(1, TimeUnit::Millisecond).split()
+        );
+
+        assert_eq!((0, 1_000), Timestamp::new(1, TimeUnit::Microsecond).split());
+        assert_eq!((0, 1), Timestamp::new(1, TimeUnit::Nanosecond).split());
+
+        assert_eq!(
+            (1, 1_000_000),
+            Timestamp::new(1001, TimeUnit::Millisecond).split()
+        );
+
+        assert_eq!(
+            (-2, 999_000_000),
+            Timestamp::new(-1001, TimeUnit::Millisecond).split()
+        );
+
+        // check min value of nanos
+        let (sec, nsec) = Timestamp::new(i64::MIN, TimeUnit::Nanosecond).split();
+        assert_eq!(
+            i64::MIN as i128,
+            sec as i128 * (TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor()) as i128
+                + nsec as i128
+        );
+
+        assert_eq!(
+            (i64::MAX, 0),
+            Timestamp::new(i64::MAX, TimeUnit::Second).split()
+        );
     }
 }
