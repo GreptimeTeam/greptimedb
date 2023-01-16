@@ -114,7 +114,7 @@ async fn authorize<B: Send + Sync + 'static>(
             msg: "fail to get valid database from http query",
         })?,
         Err(e) => IllegalParamSnafu {
-            msg: format!("fail to parse http query: {}", e),
+            msg: format!("fail to parse http query: {e}"),
         }
         .fail()?,
     };
@@ -147,13 +147,13 @@ async fn authenticate<B: Send + Sync + 'static>(
     };
 
     let (scheme, credential) = auth_header(request).map_err(|e| IllegalParam {
-        msg: format!("failed to get http authorize header, err: {:?}", e),
+        msg: format!("failed to get http authorize header, err: {e:?}"),
     })?;
 
     match scheme {
         AuthScheme::Basic => {
             let (username, password) = decode_basic(credential).map_err(|e| IllegalParam {
-                msg: format!("failed to decode basic authorize, err: {:?}", e),
+                msg: format!("failed to decode basic authorize, err: {e:?}"),
             })?;
 
             Ok(user_provider
