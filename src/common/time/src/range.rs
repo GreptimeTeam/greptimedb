@@ -20,7 +20,7 @@ use crate::Timestamp;
 ///
 /// The time range contains all timestamp `ts` that `ts >= start` and `ts < end`. It is
 /// empty if `start >= end`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GenericRange<T> {
     start: Option<T>,
     end: Option<T>,
@@ -123,7 +123,7 @@ impl<T> GenericRange<T> {
         }
     }
 
-    pub fn all() -> GenericRange<T> {
+    pub fn min_to_max() -> GenericRange<T> {
         Self {
             start: None,
             end: None,
@@ -256,7 +256,7 @@ mod tests {
         assert!(empty.is_empty());
 
         // whatever AND'ed with empty shall return empty
-        let empty_and_all = empty.and(&TimestampRange::all());
+        let empty_and_all = empty.and(&TimestampRange::min_to_max());
         assert!(empty_and_all.is_empty());
         assert!(empty.and(&empty).is_empty());
         assert!(empty
@@ -291,8 +291,8 @@ mod tests {
         );
 
         assert_eq!(
-            TimestampRange::all(),
-            TimestampRange::all().or(&TimestampRange::all())
+            TimestampRange::min_to_max(),
+            TimestampRange::min_to_max().or(&TimestampRange::min_to_max())
         );
 
         let empty = TimestampRange::empty_with_value(Timestamp::new_millisecond(1)).or(
