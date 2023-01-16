@@ -29,7 +29,11 @@ use datafusion::scalar::ScalarValue;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::sql::TableReference;
 use promql_parser::label::{MatchOp, Matchers, METRIC_NAME};
-use promql_parser::parser::{token, EvalStmt, Expr as PromExpr, Function, TokenType};
+use promql_parser::parser::{
+    token, AggregateExpr, BinaryExpr as PromBinaryExpr, Call, EvalStmt, Expr as PromExpr, Function,
+    MatrixSelector, NumberLiteral, ParenExpr, StringLiteral, SubqueryExpr, TokenType, UnaryExpr,
+    VectorSelector,
+};
 use snafu::{OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -82,14 +86,14 @@ impl<S: ContextProvider> PromPlanner<S> {
 
     pub fn prom_expr_to_plan(&mut self, prom_expr: PromExpr) -> Result<LogicalPlan> {
         let res = match &prom_expr {
-            PromExpr::AggregateExpr {
+            PromExpr::Aggregate(AggregateExpr {
                 op,
                 expr,
                 // TODO(ruihang): support param
                 param: _param,
                 grouping,
                 without,
-            } => {
+            }) => {
                 let input = self.prom_expr_to_plan(*expr.clone())?;
 
                 // calculate columns to group by
@@ -131,11 +135,11 @@ impl<S: ContextProvider> PromPlanner<S> {
                     .build()
                     .context(DataFusionPlanningSnafu)?
             }
-            PromExpr::UnaryExpr { .. } => UnsupportedExprSnafu {
+            PromExpr::Unary(UnaryExpr { .. }) => UnsupportedExprSnafu {
                 name: "Prom Unary Expr",
             }
             .fail()?,
-            PromExpr::BinaryExpr { lhs, rhs, .. } => {
+            PromExpr::Binary(PromBinaryExpr { lhs, rhs, .. }) => {
                 let _left_input = self.prom_expr_to_plan(*lhs.clone())?;
                 let _right_input = self.prom_expr_to_plan(*rhs.clone())?;
 
@@ -144,28 +148,28 @@ impl<S: ContextProvider> PromPlanner<S> {
                 }
                 .fail()?
             }
-            PromExpr::ParenExpr { .. } => UnsupportedExprSnafu {
+            PromExpr::Paren(ParenExpr { .. }) => UnsupportedExprSnafu {
                 name: "Prom Paren Expr",
             }
             .fail()?,
-            PromExpr::SubqueryExpr { .. } => UnsupportedExprSnafu {
+            PromExpr::Subquery(SubqueryExpr { .. }) => UnsupportedExprSnafu {
                 name: "Prom Subquery",
             }
             .fail()?,
-            PromExpr::NumberLiteral { .. } => UnsupportedExprSnafu {
+            PromExpr::NumberLiteral(NumberLiteral { .. }) => UnsupportedExprSnafu {
                 name: "Prom Number Literal",
             }
             .fail()?,
-            PromExpr::StringLiteral { .. } => UnsupportedExprSnafu {
+            PromExpr::StringLiteral(StringLiteral { .. }) => UnsupportedExprSnafu {
                 name: "Prom String Literal",
             }
             .fail()?,
-            PromExpr::VectorSelector {
+            PromExpr::VectorSelector(VectorSelector {
                 name: _,
                 offset,
                 start_or_end: _,
                 label_matchers,
-            } => {
+            }) => {
                 let matchers = self.preprocess_label_matchers(label_matchers)?;
                 self.setup_context()?;
                 let normalize = self.selector_to_series_normalize_plan(*offset, matchers)?;
@@ -184,17 +188,17 @@ impl<S: ContextProvider> PromPlanner<S> {
                     node: Arc::new(manipulate),
                 })
             }
-            PromExpr::MatrixSelector {
+            PromExpr::MatrixSelector(MatrixSelector {
                 vector_selector,
                 range,
-            } => {
+            }) => {
                 let normalize = match &**vector_selector {
-                    PromExpr::VectorSelector {
+                    PromExpr::VectorSelector(VectorSelector {
                         name: _,
                         offset,
                         start_or_end: _,
                         label_matchers,
-                    } => {
+                    })=> {
                         let matchers = self.preprocess_label_matchers(label_matchers)?;
                         self.setup_context()?;
                         self.selector_to_series_normalize_plan(*offset, matchers)?
@@ -225,7 +229,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     node: Arc::new(manipulate),
                 })
             }
-            PromExpr::Call { func, args } => {
+            PromExpr::Call(Call { func, args }) => {
                 let args = self.create_function_args(args)?;
                 let input =
                     self.prom_expr_to_plan(args.input.with_context(|| ExpectExprSnafu {
@@ -393,24 +397,24 @@ impl<S: ContextProvider> PromPlanner<S> {
 
         for arg in args {
             match *arg.clone() {
-                PromExpr::AggregateExpr { .. }
-                | PromExpr::UnaryExpr { .. }
-                | PromExpr::BinaryExpr { .. }
-                | PromExpr::ParenExpr { .. }
-                | PromExpr::SubqueryExpr { .. }
-                | PromExpr::VectorSelector { .. }
-                | PromExpr::MatrixSelector { .. }
-                | PromExpr::Call { .. } => {
+                PromExpr::Aggregate(_)
+                | PromExpr::Unary(_)
+                | PromExpr::Binary(_)
+                | PromExpr::Paren(_)
+                | PromExpr::Subquery(_)
+                | PromExpr::VectorSelector(_)
+                | PromExpr::MatrixSelector(_)
+                | PromExpr::Call(_) => {
                     if result.input.replace(*arg.clone()).is_some() {
                         MultipleVectorSnafu { expr: *arg.clone() }.fail()?;
                     }
                 }
 
-                PromExpr::NumberLiteral { val, .. } => {
+                PromExpr::NumberLiteral(NumberLiteral { val, .. }) => {
                     let scalar_value = ScalarValue::Float64(Some(val));
                     result.literals.push(DfExpr::Literal(scalar_value));
                 }
-                PromExpr::StringLiteral { val, .. } => {
+                PromExpr::StringLiteral(StringLiteral { val, .. }) => {
                     let scalar_value = ScalarValue::Utf8(Some(val));
                     result.literals.push(DfExpr::Literal(scalar_value));
                 }
@@ -609,14 +613,14 @@ mod test {
     //     },
     // },
     async fn do_single_instant_function_call(fn_name: &'static str, plan_name: &str) {
-        let prom_expr = PromExpr::Call {
+        let prom_expr = PromExpr::Call(Call {
             func: Function {
                 name: fn_name,
                 arg_types: vec![ValueType::Vector],
                 variadic: false,
                 return_type: ValueType::Vector,
             },
-            args: vec![Box::new(PromExpr::VectorSelector {
+            args: vec![Box::new(PromExpr::VectorSelector(VectorSelector {
                 name: Some("some_metric".to_owned()),
                 offset: None,
                 start_or_end: None,
@@ -634,8 +638,8 @@ mod test {
                         },
                     ],
                 },
-            })],
-        };
+            }))],
+        });
         let eval_stmt = EvalStmt {
             expr: prom_expr,
             start: UNIX_EPOCH,
@@ -832,9 +836,9 @@ mod test {
     //     },
     // },
     async fn do_aggregate_expr_plan(op: TokenType, name: &str) {
-        let prom_expr = PromExpr::AggregateExpr {
+        let prom_expr = PromExpr::Aggregate(AggregateExpr {
             op,
-            expr: Box::new(PromExpr::VectorSelector {
+            expr: Box::new(PromExpr::VectorSelector(VectorSelector {
                 name: Some("some_metric".to_owned()),
                 offset: None,
                 start_or_end: None,
@@ -852,11 +856,11 @@ mod test {
                         },
                     ],
                 },
-            }),
+            })),
             param: Box::new(PromExpr::empty_vector_selector()),
             grouping: vec![String::from("tag_1")],
             without: false,
-        };
+        });
         let mut eval_stmt = EvalStmt {
             expr: prom_expr,
             start: UNIX_EPOCH,
@@ -883,7 +887,7 @@ mod test {
         );
 
         // test group without
-        if let PromExpr::AggregateExpr { without, .. } = &mut eval_stmt.expr {
+        if let PromExpr::Aggregate(AggregateExpr { without, .. }) = &mut eval_stmt.expr {
             *without = true;
         }
         let context_provider = build_test_context_provider("some_metric".to_string(), 2, 2).await;
