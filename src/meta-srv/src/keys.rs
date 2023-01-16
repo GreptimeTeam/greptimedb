@@ -232,11 +232,9 @@ impl StatValue {
     /// Get the region number from stat value.
     pub fn region_num(&self) -> Option<u64> {
         for stat in self.stats.iter() {
-            let region_num = stat.region_num;
-            if region_num < 0 {
-                continue;
-            } else {
-                return Some(region_num as u64);
+            match stat.region_num {
+                Some(region_num) => return Some(region_num),
+                None => continue,
             }
         }
         None
@@ -297,7 +295,7 @@ mod tests {
             cluster_id: 0,
             id: 101,
             is_leader: false,
-            region_num: 100,
+            region_num: Some(100),
             ..Default::default()
         };
 
@@ -313,7 +311,7 @@ mod tests {
         assert_eq!(0, stat.cluster_id);
         assert_eq!(101, stat.id);
         assert!(!stat.is_leader);
-        assert_eq!(100, stat.region_num);
+        assert_eq!(Some(100), stat.region_num);
     }
 
     #[test]
@@ -350,7 +348,7 @@ mod tests {
 
         let wrong = StatValue {
             stats: vec![Stat {
-                region_num: -1,
+                region_num: None,
                 ..Default::default()
             }],
         };
@@ -360,15 +358,15 @@ mod tests {
         let stat_val = StatValue {
             stats: vec![
                 Stat {
-                    region_num: 1,
+                    region_num: Some(1),
                     ..Default::default()
                 },
                 Stat {
-                    region_num: -1,
+                    region_num: None,
                     ..Default::default()
                 },
                 Stat {
-                    region_num: 2,
+                    region_num: Some(2),
                     ..Default::default()
                 },
             ],

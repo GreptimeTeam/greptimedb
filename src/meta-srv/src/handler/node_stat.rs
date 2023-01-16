@@ -33,7 +33,7 @@ pub struct Stat {
     /// How many tables on this node
     pub table_num: i64,
     /// How many regions on this node
-    pub region_num: i64,
+    pub region_num: Option<u64>,
     pub cpu_usage: f64,
     pub load: f64,
     /// Read disk IO on this node
@@ -83,22 +83,29 @@ impl TryFrom<HeartbeatRequest> for Stat {
         } = value;
 
         match (header, peer, node_stat) {
-            (Some(header), Some(peer), Some(node_stat)) => Ok(Self {
-                timestamp_millis: time_util::current_time_millis(),
-                cluster_id: header.cluster_id,
-                id: peer.id,
-                addr: peer.addr,
-                is_leader,
-                rcus: node_stat.rcus,
-                wcus: node_stat.wcus,
-                table_num: node_stat.table_num,
-                region_num: node_stat.region_num,
-                cpu_usage: node_stat.cpu_usage,
-                load: node_stat.load,
-                read_io_rate: node_stat.read_io_rate,
-                write_io_rate: node_stat.write_io_rate,
-                region_stats: region_stats.into_iter().map(RegionStat::from).collect(),
-            }),
+            (Some(header), Some(peer), Some(node_stat)) => {
+                let region_num = if node_stat.region_num > 0 {
+                    Some(node_stat.region_num as u64)
+                } else {
+                    None
+                };
+                Ok(Self {
+                    timestamp_millis: time_util::current_time_millis(),
+                    cluster_id: header.cluster_id,
+                    id: peer.id,
+                    addr: peer.addr,
+                    is_leader,
+                    rcus: node_stat.rcus,
+                    wcus: node_stat.wcus,
+                    table_num: node_stat.table_num,
+                    region_num,
+                    cpu_usage: node_stat.cpu_usage,
+                    load: node_stat.load,
+                    read_io_rate: node_stat.read_io_rate,
+                    write_io_rate: node_stat.write_io_rate,
+                    region_stats: region_stats.into_iter().map(RegionStat::from).collect(),
+                })
+            }
             _ => Err(()),
         }
     }
@@ -129,7 +136,7 @@ mod tests {
         let stat = Stat {
             cluster_id: 3,
             id: 101,
-            region_num: 10,
+            region_num: Some(10),
             ..Default::default()
         };
 

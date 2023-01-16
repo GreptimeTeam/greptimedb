@@ -161,7 +161,7 @@ mod tests {
             .into(),
             value: StatValue {
                 stats: vec![Stat {
-                    region_num: 100,
+                    region_num: Some(100),
                     ..Default::default()
                 }],
             }
@@ -179,7 +179,7 @@ mod tests {
             .into(),
             value: StatValue {
                 stats: vec![Stat {
-                    region_num: 99,
+                    region_num: Some(99),
                     ..Default::default()
                 }],
             }
@@ -197,7 +197,7 @@ mod tests {
             .into(),
             value: StatValue {
                 stats: vec![Stat {
-                    region_num: 98,
+                    region_num: Some(98),
                     ..Default::default()
                 }],
             }

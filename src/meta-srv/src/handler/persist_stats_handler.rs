@@ -90,7 +90,7 @@ mod tests {
             stats: vec![Stat {
                 cluster_id: 3,
                 id: 101,
-                region_num: 100,
+                region_num: Some(100),
                 ..Default::default()
             }],
             ..Default::default()
@@ -125,6 +125,6 @@ mod tests {
         let val: StatValue = kv.value.clone().try_into().unwrap();
 
         assert_eq!(1, val.stats.len());
-        assert_eq!(100, val.stats[0].region_num);
+        assert_eq!(Some(100), val.stats[0].region_num);
     }
 }
