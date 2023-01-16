@@ -157,7 +157,7 @@ fn resolve_addr(bind_addr: &str, hostname_addr: &Option<String>) -> String {
             } else {
                 // otherwise, resolve port from bind_addr
                 // should be safe to unwrap here because bind_addr is already validated
-                let port = &bind_addr.split(':').nth(1).unwrap();
+                let port = bind_addr.split(':').nth(1).unwrap();
                 format!("{hostname_addr}:{port}")
             }
         }
@@ -167,7 +167,6 @@ fn resolve_addr(bind_addr: &str, hostname_addr: &Option<String>) -> String {
 
 #[cfg(test)]
 mod tests {
-
     #[test]
     fn test_resolve_addr() {
         assert_eq!(
