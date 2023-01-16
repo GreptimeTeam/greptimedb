@@ -133,3 +133,50 @@ fn create_testing_script_handler(table: MemTable) -> ScriptHandlerRef {
 fn create_testing_sql_query_handler(table: MemTable) -> ServerSqlQueryHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }
+
+// copy from servers::auth::test_mock_schema_validator
+pub mod test_mock_schema_validator {
+    use servers::auth::{AccessDeniedSnafu, SchemaValidator};
+    use session::context::UserInfo;
+
+    pub struct MockSchemaValidator {
+        catalog: String,
+        schema: String,
+        username: String,
+    }
+
+    impl MockSchemaValidator {
+        pub fn new(catalog: &str, schema: &str, username: &str) -> Self {
+            Self {
+                catalog: catalog.to_string(),
+                schema: schema.to_string(),
+                username: username.to_string(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SchemaValidator for MockSchemaValidator {
+        async fn validate(
+            &self,
+            catalog: &str,
+            schema: &str,
+            user_info: &UserInfo,
+        ) -> Result<(), servers::auth::Error> {
+            println!("entering validator");
+            if catalog == self.catalog
+                && schema == self.schema
+                && user_info.username() == self.username
+            {
+                Ok(())
+            } else {
+                AccessDeniedSnafu {
+                    catalog: catalog.to_string(),
+                    schema: schema.to_string(),
+                    username: user_info.username().to_string(),
+                }
+                .fail()
+            }
+        }
+    }
+}

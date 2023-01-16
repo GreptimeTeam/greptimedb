@@ -256,8 +256,9 @@ mod tests {
     use tower_http::auth::AsyncAuthorizeRequest;
 
     use super::{auth_header, decode_basic, AuthScheme, HttpAuth};
+    use crate::auth::test_mock_schema_validator::MockSchemaValidator;
     use crate::auth::test_mock_user_provider::MockUserProvider;
-    use crate::auth::UserProvider;
+    use crate::auth::{SchemaValidator, UserProvider};
     use crate::error;
     use crate::error::Result;
 
@@ -299,6 +300,42 @@ mod tests {
         let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
         let auth_res = http_auth.authorize(wrong_req).await;
         assert!(auth_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_schema_validating() {
+        // In mock user provider, right username:password == "greptime:greptime"
+        let mock_user_provider = Some(Arc::new(MockUserProvider {}) as Arc<dyn UserProvider>);
+        let mock_schema_validator = Some(Arc::new(MockSchemaValidator::new(
+            "greptime", "greptime", "greptime",
+        )) as Arc<dyn SchemaValidator>);
+        let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
+            user_provider: mock_user_provider,
+            schema_validator: mock_schema_validator,
+            _ty: PhantomData,
+        };
+
+        // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
+        // http://localhost/{http_api_version}/sql?database=greptime
+        let version = crate::http::HTTP_API_VERSION;
+        let req = mock_http_request(
+            Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="),
+            Some(format!("http://localhost/{version}/sql?database=greptime").as_str()),
+        )
+        .unwrap();
+        let req = http_auth.authorize(req).await.unwrap();
+        let user_info: &UserInfo = req.extensions().get().unwrap();
+        let default = UserInfo::default();
+        assert_eq!(default.username(), user_info.username());
+
+        // wrong database
+        let req = mock_http_request(
+            Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="),
+            Some(format!("http://localhost/{version}/sql?database=wrong").as_str()),
+        )
+        .unwrap();
+        let result = http_auth.authorize(req).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

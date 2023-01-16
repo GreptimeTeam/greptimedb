@@ -23,7 +23,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
-use session::context::UserInfo;
+use session::context::{UserInfo, DEFAULT_USERNAME};
 use snafu::ResultExt;
 
 use crate::auth::{Identity, Password, SchemaValidatorRef, UserProviderRef};
@@ -207,6 +207,30 @@ impl StartupHandler for PgAuthStartupHandler {
                         ))
                         .await?;
                 } else {
+                    // no user is provided, use default user
+                    // and still do authorization
+                    let login_info = LoginInfo {
+                        user: Some(DEFAULT_USERNAME.to_string()),
+                        catalog: client
+                            .metadata()
+                            .get(super::METADATA_CATALOG)
+                            .map(Into::into),
+                        database: client
+                            .metadata()
+                            .get(super::METADATA_SCHEMA)
+                            .map(Into::into),
+                        host: client.socket_addr().ip().to_string(),
+                    };
+                    let authorize_result = self.verifier.authorize(&login_info).await;
+                    if authorize_result.is_err() || !authorize_result.unwrap() {
+                        return send_error(
+                            client,
+                            "FATAL",
+                            "28P01",
+                            "password authorization failed".to_owned(),
+                        )
+                        .await;
+                    }
                     auth::finish_authentication(client, &self.param_provider).await;
                 }
             }
@@ -231,7 +255,7 @@ impl StartupHandler for PgAuthStartupHandler {
                         client,
                         "FATAL",
                         "28P01",
-                        "password authentication failed".to_owned(),
+                        "password authorization failed".to_owned(),
                     )
                     .await;
                 }

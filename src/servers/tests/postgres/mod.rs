@@ -23,7 +23,7 @@ use rand::Rng;
 use rustls::client::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Certificate, Error, ServerName};
 use servers::auth::user_provider::StaticUserProvider;
-use servers::auth::UserProviderRef;
+use servers::auth::{SchemaValidatorRef, UserProviderRef};
 use servers::error::Result;
 use servers::postgres::PostgresServer;
 use servers::server::Server;
@@ -32,11 +32,13 @@ use table::test_util::MemTable;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
 use crate::create_testing_instance;
+use crate::test_mock_schema_validator::MockSchemaValidator;
 
 fn create_postgres_server(
     table: MemTable,
     check_pwd: bool,
     tls: TlsOption,
+    schema_validator: Option<SchemaValidatorRef>,
 ) -> Result<Box<dyn Server>> {
     let instance = Arc::new(create_testing_instance(table));
     let io_runtime = Arc::new(
@@ -59,7 +61,7 @@ fn create_postgres_server(
         tls,
         io_runtime,
         user_provider,
-        None,
+        schema_validator,
     )))
 }
 
@@ -67,7 +69,7 @@ fn create_postgres_server(
 pub async fn test_start_postgres_server() -> Result<()> {
     let table = MemTable::default_numbers_table();
 
-    let pg_server = create_postgres_server(table, false, Default::default())?;
+    let pg_server = create_postgres_server(table, false, Default::default(), None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let result = pg_server.start(listening).await;
     assert!(result.is_ok());
@@ -87,12 +89,48 @@ async fn test_shutdown_pg_server_range() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_schema_validating() -> Result<()> {
+    async fn generate_server(validator: SchemaValidatorRef) -> Result<(Box<dyn Server>, u16)> {
+        let table = MemTable::default_numbers_table();
+        let postgres_server =
+            create_postgres_server(table, false, Default::default(), Some(validator))?;
+        let listening = "127.0.0.1:5432".parse::<SocketAddr>().unwrap();
+        let server_addr = postgres_server.start(listening).await.unwrap();
+        let server_port = server_addr.port();
+        Ok((postgres_server, server_port))
+    }
+
+    common_telemetry::init_default_ut_logging();
+    let validator = Arc::new(MockSchemaValidator::new("greptime", "public", "greptime"));
+    let (pg_server, server_port) = generate_server(validator).await?;
+
+    let pass = create_plain_connection(server_port, false).await;
+    assert!(pass.is_ok());
+    let result = pg_server.shutdown().await;
+    assert!(result.is_ok());
+
+    let validator = Arc::new(MockSchemaValidator::new(
+        "greptime",
+        "public",
+        "no_right_user",
+    ));
+    let (pg_server, server_port) = generate_server(validator).await?;
+
+    let fail = create_plain_connection(server_port, false).await;
+    assert!(fail.is_err());
+    let result = pg_server.shutdown().await;
+    assert!(result.is_ok());
+
+    Ok(())
+}
+
 // #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_shutdown_pg_server(with_pwd: bool) -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
     let table = MemTable::default_numbers_table();
-    let postgres_server = create_postgres_server(table, with_pwd, Default::default())?;
+    let postgres_server = create_postgres_server(table, with_pwd, Default::default(), None)?;
     let result = postgres_server.shutdown().await;
     assert!(result
         .unwrap_err()
@@ -274,7 +312,7 @@ async fn test_using_db() -> Result<()> {
 async fn start_test_server(server_tls: TlsOption) -> Result<u16> {
     common_telemetry::init_default_ut_logging();
     let table = MemTable::default_numbers_table();
-    let pg_server = create_postgres_server(table, false, server_tls)?;
+    let pg_server = create_postgres_server(table, false, server_tls, None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = pg_server.start(listening).await.unwrap();
     Ok(server_addr.port())
