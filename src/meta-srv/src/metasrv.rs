@@ -25,7 +25,7 @@ use crate::handler::{
     OnLeaderStartHandler, PersistStatsHandler, ResponseHeaderHandler,
 };
 use crate::selector::lease_based::LeaseBasedSelector;
-use crate::selector::Selector;
+use crate::selector::{Selector, SelectorType};
 use crate::sequence::{Sequence, SequenceRef};
 use crate::service::store::kv::{KvStoreRef, ResetableKvStoreRef};
 use crate::service::store::memory::MemStore;
@@ -39,6 +39,7 @@ pub struct MetaSrvOptions {
     pub server_addr: String,
     pub store_addr: String,
     pub datanode_lease_secs: i64,
+    pub selector_type: SelectorType,
 }
 
 impl Default for MetaSrvOptions {
@@ -48,6 +49,7 @@ impl Default for MetaSrvOptions {
             server_addr: "127.0.0.1:3002".to_string(),
             store_addr: "127.0.0.1:2379".to_string(),
             datanode_lease_secs: 15,
+            selector_type: SelectorType::default(),
         }
     }
 }

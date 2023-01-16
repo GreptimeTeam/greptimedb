@@ -153,6 +153,12 @@ pub enum Error {
         key
     ))]
     MoveValue { key: String, backtrace: Backtrace },
+
+    #[snafu(display("Unsupported selector type, {}", selector_type))]
+    UnsupportedSelectorType {
+        selector_type: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -188,6 +194,7 @@ impl ErrorExt for Error {
             | Error::InvalidLeaseKey { .. }
             | Error::InvalidStatKey { .. }
             | Error::ParseNum { .. }
+            | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
             | Error::LeaseValueFromUtf8 { .. }

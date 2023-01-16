@@ -61,6 +61,13 @@ pub enum Error {
         #[snafu(backtrace)]
         source: servers::auth::Error,
     },
+
+    #[snafu(display("Unsupported selector type, {} source: {}", selector_type, source))]
+    UnsupportedSelectorType {
+        selector_type: String,
+        #[snafu(backtrace)]
+        source: meta_srv::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -71,6 +78,7 @@ impl ErrorExt for Error {
             Error::StartDatanode { source } => source.status_code(),
             Error::StartFrontend { source } => source.status_code(),
             Error::StartMetaServer { source } => source.status_code(),
+            Error::UnsupportedSelectorType { source, .. } => source.status_code(),
             Error::ReadConfig { .. } | Error::ParseConfig { .. } | Error::MissingConfig { .. } => {
                 StatusCode::InvalidArguments
             }
