@@ -94,7 +94,7 @@ impl TryFrom<StartCommand> for MetaSrvOptions {
             opts.store_addr = addr;
         }
         if let Some(selector_type) = &cmd.selector {
-            opts.selector_type = selector_type[..]
+            opts.selector = selector_type[..]
                 .try_into()
                 .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
             info!("Using {} selector", selector_type);
@@ -123,7 +123,7 @@ mod tests {
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
-        assert_eq!(SelectorType::LoadBased, options.selector_type);
+        assert_eq!(SelectorType::LoadBased, options.selector);
     }
 
     #[test]
@@ -143,6 +143,6 @@ mod tests {
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
         assert_eq!(15, options.datanode_lease_secs);
-        assert_eq!(SelectorType::LeaseBased, options.selector_type);
+        assert_eq!(SelectorType::LeaseBased, options.selector);
     }
 }
