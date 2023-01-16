@@ -48,8 +48,7 @@ impl Increase {
         assert_eq!(input.len(), 1);
         let input_array = extract_array(input.first().unwrap())?;
         let array_data = input_array.data().clone();
-        let range_array: RangeArray =
-            RangeArray::try_new(array_data.into()).map_err(Into::<DataFusionError>::into)?;
+        let range_array: RangeArray = RangeArray::try_new(array_data.into())?;
 
         // calculation
         let mut result_array = Vec::with_capacity(range_array.len());

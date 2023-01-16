@@ -88,10 +88,8 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
         let ts_array = extract_array(&input[0])?;
         let value_array = extract_array(&input[1])?;
 
-        let ts_range: RangeArray = RangeArray::try_new(ts_array.data().clone().into())
-            .map_err(Into::<DataFusionError>::into)?;
-        let value_range: RangeArray = RangeArray::try_new(value_array.data().clone().into())
-            .map_err(Into::<DataFusionError>::into)?;
+        let ts_range: RangeArray = RangeArray::try_new(ts_array.data().clone().into())?;
+        let value_range: RangeArray = RangeArray::try_new(value_array.data().clone().into())?;
         error::ensure(
             ts_range.len() == value_range.len(),
             DataFusionError::Execution(format!(
@@ -225,9 +223,9 @@ mod test {
         ]));
         let values_ranges = [(0, 2), (0, 5), (1, 1), (3, 3), (8, 1), (9, 0)];
 
-        let ts_range_array = RangeArray::from_ranges(ts_array.clone(), ts_ranges.clone()).unwrap();
+        let ts_range_array = RangeArray::from_ranges(ts_array.clone(), ts_ranges).unwrap();
         let value_range_array =
-            RangeArray::from_ranges(values_array.clone(), values_ranges.clone()).unwrap();
+            RangeArray::from_ranges(values_array.clone(), values_ranges).unwrap();
         idelta_runner(
             ts_range_array,
             value_range_array,

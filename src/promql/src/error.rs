@@ -127,9 +127,9 @@ impl ErrorExt for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-impl Into<DataFusionError> for Error {
-    fn into(self) -> DataFusionError {
-        DataFusionError::External(Box::new(self))
+impl From<Error> for DataFusionError {
+    fn from(err: Error) -> Self {
+        DataFusionError::External(Box::new(err))
     }
 }
 
