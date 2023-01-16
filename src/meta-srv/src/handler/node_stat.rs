@@ -84,7 +84,7 @@ impl TryFrom<HeartbeatRequest> for Stat {
 
         match (header, peer, node_stat) {
             (Some(header), Some(peer), Some(node_stat)) => {
-                let region_num = if node_stat.region_num > 0 {
+                let region_num = if node_stat.region_num >= 0 {
                     Some(node_stat.region_num as u64)
                 } else {
                     None
