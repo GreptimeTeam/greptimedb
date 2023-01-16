@@ -163,7 +163,6 @@ pub mod test_mock_schema_validator {
             schema: &str,
             user_info: &UserInfo,
         ) -> Result<(), servers::auth::Error> {
-            println!("entering validator");
             if catalog == self.catalog
                 && schema == self.schema
                 && user_info.username() == self.username
