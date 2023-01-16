@@ -1592,6 +1592,7 @@ name = "common-time"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "snafu",
@@ -7223,6 +7224,7 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-telemetry",
+ "common-time",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",

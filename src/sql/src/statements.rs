@@ -32,7 +32,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::DateTimeType;
 use datatypes::value::Value;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::ast::{
     ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, ObjectName,
@@ -40,7 +40,7 @@ use crate::ast::{
 };
 use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertToGrpcDataTypeSnafu, InvalidSqlValueSnafu,
-    ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu,
+    ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, TimestampOverflowSnafu,
     UnsupportedDefaultValueSnafu,
 };
 
@@ -112,10 +112,12 @@ fn parse_string_to_value(
         }
         ConcreteDataType::Timestamp(t) => {
             if let Ok(ts) = Timestamp::from_str(&s) {
-                Ok(Value::Timestamp(Timestamp::new(
-                    ts.convert_to(t.unit()),
-                    t.unit(),
-                )))
+                Ok(Value::Timestamp(ts.convert_to(t.unit()).context(
+                    TimestampOverflowSnafu {
+                        timestamp: ts,
+                        target_unit: t.unit(),
+                    },
+                )?))
             } else {
                 ParseSqlValueSnafu {
                     msg: format!("Failed to parse {s} to Timestamp value"),
