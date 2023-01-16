@@ -222,7 +222,7 @@ impl StartupHandler for PgAuthStartupHandler {
                         host: client.socket_addr().ip().to_string(),
                     };
                     let authorize_result = self.verifier.authorize(&login_info).await;
-                    if authorize_result.is_err() || !authorize_result.unwrap() {
+                    if !matches!(authorize_result, Ok(true)) {
                         return send_error(
                             client,
                             "FATAL",
@@ -239,7 +239,7 @@ impl StartupHandler for PgAuthStartupHandler {
                 // do authenticate
                 let authenticate_result =
                     self.verifier.verify_pwd(pwd.password(), &login_info).await;
-                if authenticate_result.is_err() || !authenticate_result.unwrap() {
+                if !matches!(authenticate_result, Ok(true)) {
                     return send_error(
                         client,
                         "FATAL",
@@ -250,7 +250,7 @@ impl StartupHandler for PgAuthStartupHandler {
                 }
                 // do authorize
                 let authorize_result = self.verifier.authorize(&login_info).await;
-                if authorize_result.is_err() || !authorize_result.unwrap() {
+                if !matches!(authorize_result, Ok(true)) {
                     return send_error(
                         client,
                         "FATAL",
