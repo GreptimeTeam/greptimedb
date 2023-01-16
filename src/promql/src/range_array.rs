@@ -71,6 +71,10 @@ impl RangeArray {
         DataType::Int64
     }
 
+    pub fn value_type(&self) -> DataType {
+        self.array.value_type()
+    }
+
     pub fn try_new(dict: DictionaryArray<Int64Type>) -> Result<Self> {
         let ranges_iter = dict
             .keys()
@@ -185,9 +189,14 @@ impl RangeArray {
         let value_type = Box::new(field.data_type().clone());
         Field::new(
             field.name(),
-            DataType::Dictionary(Box::new(Self::key_type()), value_type),
+            Self::convert_data_type(*value_type),
             field.is_nullable(),
         )
+    }
+
+    /// Build datatype of wrappered [RangeArray] on given value type.
+    pub fn convert_data_type(value_type: DataType) -> DataType {
+        DataType::Dictionary(Box::new(Self::key_type()), Box::new(value_type))
     }
 
     pub fn values(&self) -> &ArrayRef {

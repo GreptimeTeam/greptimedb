@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use datafusion::error::DataFusionError;
 use promql_parser::parser::{Expr as PromExpr, TokenType};
 
 #[derive(Debug, Snafu)]
@@ -125,3 +126,20 @@ impl ErrorExt for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Into<DataFusionError> for Error {
+    fn into(self) -> DataFusionError {
+        DataFusionError::External(Box::new(self))
+    }
+}
+
+pub(crate) fn ensure(
+    predicate: bool,
+    error: DataFusionError,
+) -> std::result::Result<(), DataFusionError> {
+    if predicate {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
