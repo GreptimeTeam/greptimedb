@@ -74,6 +74,7 @@ impl TryFrom<&str> for SelectorType {
 #[cfg(test)]
 mod tests {
     use super::SelectorType;
+    use crate::error::Result;
 
     #[test]
     fn test_default_selector_type() {
@@ -88,6 +89,10 @@ mod tests {
 
         let loadbased = "LoadBased";
         let selector_type = loadbased.try_into().unwrap();
-        assert_eq!(SelectorType::LeaseBased, selector_type);
+        assert_eq!(SelectorType::LoadBased, selector_type);
+
+        let unknow = "unknow";
+        let selector_type: Result<SelectorType> = unknow.try_into();
+        assert!(selector_type.is_err());
     }
 }

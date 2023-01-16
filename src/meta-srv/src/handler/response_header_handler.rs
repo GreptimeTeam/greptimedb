@@ -49,7 +49,6 @@ mod tests {
 
     use super::*;
     use crate::handler::Context;
-    use crate::metasrv::Attrs;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
@@ -63,7 +62,9 @@ mod tests {
             kv_store,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),
-            attrs: Attrs::new(),
+            catalog: None,
+            schema: None,
+            table: None,
         };
 
         let req = HeartbeatRequest {

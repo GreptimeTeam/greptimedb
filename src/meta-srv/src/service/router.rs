@@ -67,7 +67,14 @@ impl router_server::Router for MetaSrv {
 impl MetaSrv {
     fn create_ctx(&self, table_name: TableName) -> Context {
         let mut ctx = self.new_ctx();
-        ctx.attrs.insert(table_name);
+        let TableName {
+            catalog_name,
+            schema_name,
+            table_name,
+        } = table_name;
+        ctx.catalog = Some(catalog_name);
+        ctx.schema = Some(schema_name);
+        ctx.table = Some(table_name);
         ctx
     }
 }

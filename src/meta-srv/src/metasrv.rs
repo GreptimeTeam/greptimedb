@@ -54,8 +54,6 @@ impl Default for MetaSrvOptions {
     }
 }
 
-pub type Attrs = anymap::Map<dyn anymap::CloneAny + Send + Sync>;
-
 #[derive(Clone)]
 pub struct Context {
     pub datanode_lease_secs: i64,
@@ -64,7 +62,9 @@ pub struct Context {
     pub kv_store: KvStoreRef,
     pub election: Option<ElectionRef>,
     pub skip_all: Arc<AtomicBool>,
-    pub attrs: Attrs,
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub table: Option<String>,
 }
 
 impl Context {
@@ -224,7 +224,9 @@ impl MetaSrv {
             kv_store,
             election,
             skip_all,
-            attrs: Attrs::new(),
+            catalog: None,
+            schema: None,
+            table: None,
         }
     }
 }
