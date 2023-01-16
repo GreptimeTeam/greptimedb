@@ -255,6 +255,11 @@ impl PartialOrd for Timestamp {
 /// total order.
 impl Ord for Timestamp {
     fn cmp(&self, other: &Self) -> Ordering {
+        // fast path: most comparisons use the same unit.
+        if self.unit == other.unit {
+            return self.value.cmp(&other.value);
+        }
+
         let (s_sec, s_nsec) = self.split();
         let (o_sec, o_nsec) = other.split();
         match s_sec.cmp(&o_sec) {
