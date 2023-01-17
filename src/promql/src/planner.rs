@@ -24,7 +24,7 @@ use datafusion::logical_expr::{
     Filter, LogicalPlan, LogicalPlanBuilder, Operator,
 };
 use datafusion::optimizer::utils;
-use datafusion::prelude::{Column, Expr as DfExpr};
+use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::sql::TableReference;
@@ -139,9 +139,52 @@ impl<S: ContextProvider> PromPlanner<S> {
                 name: "Prom Unary Expr",
             }
             .fail()?,
-            PromExpr::Binary(PromBinaryExpr { lhs, rhs, .. }) => {
-                let _left_input = self.prom_expr_to_plan(*lhs.clone())?;
-                let _right_input = self.prom_expr_to_plan(*rhs.clone())?;
+            PromExpr::Binary(PromBinaryExpr { lhs, rhs, op, .. }) => {
+                match (
+                    Self::try_build_literal_expr(lhs),
+                    Self::try_build_literal_expr(rhs),
+                ) {
+                    (Some(_lhs), Some(_rhs)) => {
+                        todo!("is this a legal case?")
+                    }
+                    (Some(expr), None) => {
+                        let input = self.prom_expr_to_plan(*rhs.clone())?;
+                        let projection = self.projection_for_each_value_column(input, |col| {
+                            Ok(DfExpr::BinaryExpr(BinaryExpr {
+                                left: Box::new(expr.clone()),
+                                op: Self::prom_token_to_binary_op(*op)?,
+                                right: Box::new(DfExpr::Column(col.into())),
+                            }))
+                        })?;
+                        projection
+                    }
+                    (None, Some(expr)) => {
+                        let input = self.prom_expr_to_plan(*lhs.clone())?;
+                        let projection = self.projection_for_each_value_column(input, |col| {
+                            Ok(DfExpr::BinaryExpr(BinaryExpr {
+                                left: Box::new(expr.clone()),
+                                op: Self::prom_token_to_binary_op(*op)?,
+                                right: Box::new(DfExpr::Column(col.into())),
+                            }))
+                        })?;
+                        projection
+                    }
+                    (None, None) => {
+                        let left_input = self.prom_expr_to_plan(*lhs.clone())?;
+                        let right_input = self.prom_expr_to_plan(*rhs.clone())?;
+                        let join_plan = self.join_on_time_index(left_input, right_input)?;
+                        // TODO(ruihang): what's the table name (qualifier) of joined table
+                        let projection =
+                            self.projection_for_each_value_column(join_plan, |col| {
+                                Ok(DfExpr::BinaryExpr(BinaryExpr {
+                                    left: Box::new(DfExpr::Column(col.into())),
+                                    op: Self::prom_token_to_binary_op(*op)?,
+                                    right: Box::new(DfExpr::Column(col.into())),
+                                }))
+                            })?;
+                        projection
+                    }
+                };
 
                 UnsupportedExprSnafu {
                     name: "Prom Binary Expr",
@@ -510,6 +553,100 @@ impl<S: ContextProvider> PromPlanner<S> {
             })
             .collect();
         Ok(exprs)
+    }
+
+    fn try_build_literal_expr(expr: &PromExpr) -> Option<DfExpr> {
+        match expr {
+            PromExpr::NumberLiteral(NumberLiteral { val }) => {
+                let scalar_value = ScalarValue::Float64(Some(*val));
+                Some(DfExpr::Literal(scalar_value))
+            }
+            PromExpr::StringLiteral(StringLiteral { val }) => {
+                let scalar_value = ScalarValue::Utf8(Some(val.to_string()));
+                Some(DfExpr::Literal(scalar_value))
+            }
+            PromExpr::VectorSelector(_)
+            | PromExpr::MatrixSelector(_)
+            | PromExpr::Call(_)
+            | PromExpr::Aggregate(_)
+            | PromExpr::Subquery(_) => None,
+            PromExpr::Paren(ParenExpr { expr }) => Self::try_build_literal_expr(expr),
+            // TODO(ruihang): support Unary operator
+            PromExpr::Unary(UnaryExpr { expr, .. }) => Self::try_build_literal_expr(expr),
+            PromExpr::Binary(PromBinaryExpr { lhs, rhs, op, .. }) => {
+                let lhs = Self::try_build_literal_expr(lhs)?;
+                let rhs = Self::try_build_literal_expr(rhs)?;
+                let op = Self::prom_token_to_binary_op(*op).ok()?;
+                Some(DfExpr::BinaryExpr(BinaryExpr {
+                    left: Box::new(lhs),
+                    op,
+                    right: Box::new(rhs),
+                }))
+            }
+        }
+    }
+
+    fn prom_token_to_binary_op(token: TokenType) -> Result<Operator> {
+        match token {
+            token::T_ADD => Ok(Operator::Plus),
+            token::T_SUB => Ok(Operator::Minus),
+            token::T_MUL => Ok(Operator::Multiply),
+            token::T_DIV => Ok(Operator::Divide),
+            token::T_MOD => Ok(Operator::Modulo),
+            token::T_EQLC => Ok(Operator::Eq),
+            token::T_NEQ => Ok(Operator::NotEq),
+            token::T_GTR => Ok(Operator::Gt),
+            token::T_LSS => Ok(Operator::Lt),
+            token::T_GTE => Ok(Operator::GtEq),
+            token::T_LTE => Ok(Operator::LtEq),
+            // TODO(ruihang): support these two operators
+            // token::T_POW => Ok(Operator::Power),
+            // token::T_ATAN2 => Ok(Operator::Atan2),
+            _ => UnexpectedTokenSnafu { token }.fail(),
+        }
+    }
+
+    // Build a inner join on time index column to concat two logical plans.
+    fn join_on_time_index(&self, left: LogicalPlan, right: LogicalPlan) -> Result<LogicalPlan> {
+        let time_index_column = Column::from_name(
+            self.ctx
+                .time_index_column
+                .clone()
+                .context(TimeIndexNotFoundSnafu { table: "unknown" })?,
+        );
+        // Inner Join on time index column to concat two operator
+        LogicalPlanBuilder::from(left)
+            .join(
+                right,
+                JoinType::Inner,
+                (vec![time_index_column.clone()], vec![time_index_column]),
+                None,
+            )
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
+    }
+
+    // Build a projection that project and perform operation expr for every value columns.
+    fn projection_for_each_value_column<F>(
+        &self,
+        input: LogicalPlan,
+        name_to_expr: F,
+    ) -> Result<LogicalPlan>
+    where
+        F: Fn(&String) -> Result<DfExpr>,
+    {
+        let value_columns = self
+            .ctx
+            .value_columns
+            .iter()
+            .map(name_to_expr)
+            .collect::<Result<Vec<_>>>()?;
+        LogicalPlanBuilder::from(input)
+            .project(value_columns)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
     }
 }
 
