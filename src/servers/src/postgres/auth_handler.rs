@@ -86,7 +86,7 @@ impl PgLoginVerifier {
 
     async fn authorize(&self, login: &LoginInfo) -> Result<bool> {
         // at this time, username in login info should be valid
-        // todo(shuiyisong): change to use actually user_info from session
+        // TODO(shuiyisong): change to use actually user_info from session
         if let Some(schema_validator) = &self.schema_validator {
             let user_name = match &login.user {
                 Some(name) => name,
