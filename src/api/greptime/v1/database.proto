@@ -36,6 +36,10 @@ message InsertRequest {
   uint32 region_number = 5;
 }
 
-message FlightDataExt {
-  uint32 affected_rows = 1;
+message AffectedRows {
+  uint32 value = 1;
+}
+
+message FlightMetadata {
+  AffectedRows affected_rows = 1;
 }
