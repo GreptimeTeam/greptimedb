@@ -97,7 +97,7 @@ impl FlightDecoder {
                     return Ok(FlightMessage::AffectedRows(value as _));
                 }
                 InvalidFlightDataSnafu {
-                    reason: format!("Expecting FlightMetadata have some meaningful content."),
+                    reason: "Expecting FlightMetadata have some meaningful content.",
                 }
                 .fail()
             }
