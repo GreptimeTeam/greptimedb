@@ -161,13 +161,13 @@ impl FileHandle {
     /// Return the start timestamp of current SST file.
     #[inline]
     pub fn start_timestamp(&self) -> Option<Timestamp> {
-        self.inner.meta.start_timestamp.clone()
+        self.inner.meta.start_timestamp
     }
 
     /// Return the end timestamp of current SST file.
     #[inline]
     pub fn end_timestamp(&self) -> Option<Timestamp> {
-        self.inner.meta.start_timestamp.clone()
+        self.inner.meta.end_timestamp
     }
 }
 

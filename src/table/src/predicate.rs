@@ -120,7 +120,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         op: &Operator,
         right: &DfExpr,
     ) -> GenericRange<Timestamp> {
-        let range = match op {
+        match op {
             Operator::Eq => self
                 .get_timestamp_filter(left, right)
                 .map(TimestampRange::single)
@@ -135,11 +135,11 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 .unwrap_or_else(TimestampRange::min_to_max),
             Operator::Gt => self
                 .get_timestamp_filter(left, right)
-                .map(|ts| TimestampRange::from(ts))
+                .map(TimestampRange::from)
                 .unwrap_or_else(TimestampRange::min_to_max),
             Operator::GtEq => self
                 .get_timestamp_filter(left, right)
-                .map(|ts| TimestampRange::from(ts))
+                .map(TimestampRange::from)
                 .unwrap_or_else(TimestampRange::min_to_max),
             Operator::And => self
                 .extract_time_range_from_expr(left)
@@ -169,8 +169,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
             | Operator::BitwiseShiftRight
             | Operator::BitwiseShiftLeft
             | Operator::StringConcat => TimestampRange::min_to_max(),
-        };
-        range
+        }
     }
 
     fn get_timestamp_filter(&self, left: &DfExpr, right: &DfExpr) -> Option<Timestamp> {
@@ -178,11 +177,10 @@ impl<'a> TimeRangePredicateBuilder<'a> {
             (DfExpr::Column(column), DfExpr::Literal(scalar)) => (column, scalar),
             (DfExpr::Literal(scalar), DfExpr::Column(column)) => (column, scalar),
             _ => {
-                println!("left: {:?}, right: {:?}", left, right);
                 return None;
             }
         };
-        if &col.name != self.ts_col_name {
+        if col.name != self.ts_col_name {
             return None;
         }
         scalar_value_to_timestamp(lit)
@@ -190,12 +188,12 @@ impl<'a> TimeRangePredicateBuilder<'a> {
 
     fn extract_from_between_expr(
         &self,
-        expr: &Box<DfExpr>,
+        expr: &DfExpr,
         negated: &bool,
         low: &DfExpr,
         high: &DfExpr,
     ) -> GenericRange<Timestamp> {
-        let DfExpr::Column(col) = expr.as_ref() else { return TimestampRange::min_to_max(); };
+        let DfExpr::Column(col) = expr else { return TimestampRange::min_to_max(); };
         if col.name != self.ts_col_name {
             return TimestampRange::min_to_max();
         }
@@ -210,7 +208,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 let high_opt = scalar_value_to_timestamp(high);
                 TimestampRange::new_inclusive_unchecked(low_opt, high_opt)
             }
-            _ => return TimestampRange::min_to_max(),
+            _ => TimestampRange::min_to_max(),
         }
     }
 

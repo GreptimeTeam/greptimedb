@@ -128,6 +128,7 @@ impl ChunkReaderBuilder {
     }
 
     pub async fn build(mut self) -> Result<ChunkReaderImpl> {
+        let time_range_predicate = self.build_time_range_predicate();
         let schema = Arc::new(
             ProjectedSchema::new(self.schema, self.projection)
                 .context(error::InvalidProjectionSnafu)?,
@@ -142,8 +143,6 @@ impl ChunkReaderBuilder {
             let iter = mem.iter(&self.iter_ctx)?;
             reader_builder = reader_builder.push_batch_iter(iter);
         }
-
-        let time_range_predicate = self.build_time_range_predicate();
 
         let read_opts = ReadOptions {
             batch_size: self.iter_ctx.batch_size,
