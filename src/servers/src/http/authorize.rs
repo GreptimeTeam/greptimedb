@@ -23,25 +23,20 @@ use snafu::{OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
 use crate::auth::Error::IllegalParam;
-use crate::auth::{Identity, IllegalParamSnafu, SchemaValidatorRef, UserProviderRef};
+use crate::auth::{Identity, IllegalParamSnafu, UserProviderRef};
 use crate::error::{self, Result};
 use crate::http::handler::SqlQuery;
 use crate::http::HTTP_API_PREFIX;
 
 pub struct HttpAuth<RespBody> {
     user_provider: Option<UserProviderRef>,
-    schema_validator: Option<SchemaValidatorRef>,
     _ty: PhantomData<RespBody>,
 }
 
 impl<RespBody> HttpAuth<RespBody> {
-    pub fn new(
-        user_provider: Option<UserProviderRef>,
-        schema_validator: Option<SchemaValidatorRef>,
-    ) -> Self {
+    pub fn new(user_provider: Option<UserProviderRef>) -> Self {
         Self {
             user_provider,
-            schema_validator,
             _ty: PhantomData,
         }
     }
@@ -51,7 +46,6 @@ impl<RespBody> Clone for HttpAuth<RespBody> {
     fn clone(&self) -> Self {
         Self {
             user_provider: self.user_provider.clone(),
-            schema_validator: self.schema_validator.clone(),
             _ty: PhantomData,
         }
     }
@@ -68,15 +62,17 @@ where
 
     fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
         let user_provider = self.user_provider.clone();
-        let schema_validator = self.schema_validator.clone();
         Box::pin(async move {
-            if !request.uri().path().starts_with(HTTP_API_PREFIX) {
+            let need_auth = request.uri().path().starts_with(HTTP_API_PREFIX);
+            let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
+                user_provider
+            } else {
                 request.extensions_mut().insert(UserInfo::default());
                 return Ok(request);
-            }
+            };
 
             // do authenticate
-            match authenticate(user_provider, &request).await {
+            match authenticate(&user_provider, &request).await {
                 Ok(user_info) => {
                     request.extensions_mut().insert(user_info);
                 }
@@ -86,7 +82,7 @@ where
                 }
             }
 
-            match authorize(schema_validator, &request).await {
+            match authorize(&user_provider, &request).await {
                 Ok(_) => Ok(request),
                 Err(e) => {
                     error!("authorize failed: {}", e);
@@ -98,15 +94,9 @@ where
 }
 
 async fn authorize<B: Send + Sync + 'static>(
-    schema_validator: Option<SchemaValidatorRef>,
+    user_provider: &UserProviderRef,
     request: &Request<B>,
 ) -> crate::auth::Result<()> {
-    let schema_validator = if let Some(schema_validator) = schema_validator {
-        schema_validator
-    } else {
-        return Ok(());
-    };
-
     // try get database name
     let query = request.uri().query().unwrap_or_default();
     let input_database = match serde_urlencoded::from_str(query) {
@@ -131,21 +121,13 @@ async fn authorize<B: Send + Sync + 'static>(
             msg: "fail to get user info from request",
         })?;
 
-    schema_validator
-        .validate(catalog, database, user_info)
-        .await
+    user_provider.authorize(catalog, database, user_info).await
 }
 
 async fn authenticate<B: Send + Sync + 'static>(
-    user_provider: Option<UserProviderRef>,
+    user_provider: &UserProviderRef,
     request: &Request<B>,
 ) -> crate::auth::Result<UserInfo> {
-    let user_provider = if let Some(user_provider) = user_provider {
-        user_provider
-    } else {
-        return Ok(UserInfo::default());
-    };
-
     let (scheme, credential) = auth_header(request).map_err(|e| IllegalParam {
         msg: format!("failed to get http authorize header, err: {e:?}"),
     })?;
@@ -157,7 +139,7 @@ async fn authenticate<B: Send + Sync + 'static>(
             })?;
 
             Ok(user_provider
-                .auth(
+                .authenticate(
                     Identity::UserId(&username, None),
                     crate::auth::Password::PlainText(&password),
                 )
@@ -228,119 +210,7 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
 
 #[cfg(test)]
 mod tests {
-    use std::marker::PhantomData;
-    use std::sync::Arc;
-
-    use axum::body::BoxBody;
-    use axum::http;
-    use hyper::Request;
-    use session::context::UserInfo;
-    use tower_http::auth::AsyncAuthorizeRequest;
-
-    use super::{auth_header, decode_basic, AuthScheme, HttpAuth};
-    use crate::auth::test_mock_schema_validator::MockSchemaValidator;
-    use crate::auth::test_mock_user_provider::MockUserProvider;
-    use crate::auth::{SchemaValidator, UserProvider};
-    use crate::error;
-    use crate::error::Result;
-
-    #[tokio::test]
-    async fn test_http_auth() {
-        let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
-            user_provider: None,
-            schema_validator: None,
-            _ty: PhantomData,
-        };
-
-        // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
-        let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
-        let auth_res = http_auth.authorize(req).await.unwrap();
-        let user_info: &UserInfo = auth_res.extensions().get().unwrap();
-        let default = UserInfo::default();
-        assert_eq!(default.username(), user_info.username());
-
-        // In mock user provider, right username:password == "greptime:greptime"
-        let mock_user_provider = Some(Arc::new(MockUserProvider {}) as Arc<dyn UserProvider>);
-        let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
-            user_provider: mock_user_provider,
-            schema_validator: None,
-            _ty: PhantomData,
-        };
-
-        // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
-        let req = mock_http_request(Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="), None).unwrap();
-        let req = http_auth.authorize(req).await.unwrap();
-        let user_info: &UserInfo = req.extensions().get().unwrap();
-        let default = UserInfo::default();
-        assert_eq!(default.username(), user_info.username());
-
-        let req = mock_http_request(None, None).unwrap();
-        let auth_res = http_auth.authorize(req).await;
-        assert!(auth_res.is_err());
-
-        // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
-        let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
-        let auth_res = http_auth.authorize(wrong_req).await;
-        assert!(auth_res.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_schema_validating() {
-        // In mock user provider, right username:password == "greptime:greptime"
-        let mock_user_provider = Some(Arc::new(MockUserProvider {}) as Arc<dyn UserProvider>);
-        let mock_schema_validator = Some(Arc::new(MockSchemaValidator::new(
-            "greptime", "greptime", "greptime",
-        )) as Arc<dyn SchemaValidator>);
-        let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
-            user_provider: mock_user_provider,
-            schema_validator: mock_schema_validator,
-            _ty: PhantomData,
-        };
-
-        // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
-        // http://localhost/{http_api_version}/sql?database=greptime
-        let version = crate::http::HTTP_API_VERSION;
-        let req = mock_http_request(
-            Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="),
-            Some(format!("http://localhost/{version}/sql?database=greptime").as_str()),
-        )
-        .unwrap();
-        let req = http_auth.authorize(req).await.unwrap();
-        let user_info: &UserInfo = req.extensions().get().unwrap();
-        let default = UserInfo::default();
-        assert_eq!(default.username(), user_info.username());
-
-        // wrong database
-        let req = mock_http_request(
-            Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="),
-            Some(format!("http://localhost/{version}/sql?database=wrong").as_str()),
-        )
-        .unwrap();
-        let result = http_auth.authorize(req).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_whitelist_no_auth() {
-        // In mock user provider, right username:password == "greptime:greptime"
-        let mock_user_provider = Some(Arc::new(MockUserProvider {}) as Arc<dyn UserProvider>);
-        let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
-            user_provider: mock_user_provider,
-            schema_validator: None,
-            _ty: PhantomData,
-        };
-
-        // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
-        // try auth path first
-        let req = mock_http_request(None, None).unwrap();
-        let req = http_auth.authorize(req).await;
-        assert!(req.is_err());
-
-        // try whitelist path
-        let req = mock_http_request(None, Some("http://localhost/health")).unwrap();
-        let req = http_auth.authorize(req).await;
-        assert!(req.is_ok());
-    }
+    use super::*;
 
     #[test]
     fn test_decode_basic() {

@@ -99,7 +99,11 @@ impl UserProvider for StaticUserProvider {
         STATIC_USER_PROVIDER
     }
 
-    async fn auth(&self, input_id: Identity<'_>, input_pwd: Password<'_>) -> Result<UserInfo> {
+    async fn authenticate(
+        &self,
+        input_id: Identity<'_>,
+        input_pwd: Password<'_>,
+    ) -> Result<UserInfo> {
         match input_id {
             Identity::UserId(username, _) => {
                 let save_pwd = self.users.get(username).context(UserNotFoundSnafu {
@@ -128,6 +132,11 @@ impl UserProvider for StaticUserProvider {
                 }
             }
         }
+    }
+
+    async fn authorize(&self, _catalog: &str, _schema: &str, _user_info: &UserInfo) -> Result<()> {
+        // default allow all
+        Ok(())
     }
 }
 
@@ -209,7 +218,7 @@ pub mod test {
 
     async fn test_auth(provider: &dyn UserProvider, username: &str, password: &str) {
         let re = provider
-            .auth(
+            .authenticate(
                 Identity::UserId(username, None),
                 Password::PlainText(password),
             )

@@ -25,7 +25,7 @@ use pgwire::tokio::process_socket;
 use tokio;
 use tokio_rustls::TlsAcceptor;
 
-use crate::auth::{SchemaValidatorRef, UserProviderRef};
+use crate::auth::UserProviderRef;
 use crate::error::Result;
 use crate::postgres::auth_handler::PgAuthStartupHandler;
 use crate::postgres::handler::PostgresServerHandler;
@@ -47,12 +47,10 @@ impl PostgresServer {
         tls: TlsOption,
         io_runtime: Arc<Runtime>,
         user_provider: Option<UserProviderRef>,
-        schema_validator: Option<SchemaValidatorRef>,
     ) -> PostgresServer {
         let postgres_handler = Arc::new(PostgresServerHandler::new(query_handler.clone()));
         let startup_handler = Arc::new(PgAuthStartupHandler::new(
             user_provider,
-            schema_validator,
             tls.should_force_tls(),
             query_handler,
         ));

@@ -24,22 +24,20 @@ use mysql_async::prelude::*;
 use mysql_async::SslOpts;
 use rand::rngs::StdRng;
 use rand::Rng;
-use servers::auth::user_provider::StaticUserProvider;
-use servers::auth::SchemaValidatorRef;
 use servers::error::Result;
 use servers::mysql::server::MysqlServer;
 use servers::server::Server;
 use servers::tls::TlsOption;
 use table::test_util::MemTable;
 
+use crate::auth::{DatabaseAuthInfo, MockUserProvider};
 use crate::create_testing_sql_query_handler;
 use crate::mysql::{all_datatype_testing_data, MysqlTextRow, TestingData};
-use crate::test_mock_schema_validator::MockSchemaValidator;
 
 fn create_mysql_server(
     table: MemTable,
     tls: TlsOption,
-    schema_validator: Option<SchemaValidatorRef>,
+    auth_info: Option<DatabaseAuthInfo>,
 ) -> Result<Box<dyn Server>> {
     let query_handler = create_testing_sql_query_handler(table);
     let io_runtime = Arc::new(
@@ -50,14 +48,16 @@ fn create_mysql_server(
             .unwrap(),
     );
 
-    let provider = StaticUserProvider::try_from("cmd:greptime=greptime").unwrap();
+    let mut provider = MockUserProvider::default();
+    if let Some(auth_info) = auth_info {
+        provider.set_authorization_info(auth_info);
+    }
 
     Ok(MysqlServer::create_server(
         query_handler,
         io_runtime,
         tls,
         Some(Arc::new(provider)),
-        schema_validator,
     ))
 }
 
@@ -80,17 +80,21 @@ async fn test_start_mysql_server() -> Result<()> {
 
 #[tokio::test]
 async fn test_schema_validation() -> Result<()> {
-    async fn generate_server(validator: SchemaValidatorRef) -> Result<(Box<dyn Server>, u16)> {
+    async fn generate_server(auth_info: DatabaseAuthInfo<'_>) -> Result<(Box<dyn Server>, u16)> {
         let table = MemTable::default_numbers_table();
-        let mysql_server = create_mysql_server(table, Default::default(), Some(validator))?;
+        let mysql_server = create_mysql_server(table, Default::default(), Some(auth_info))?;
         let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
         let server_addr = mysql_server.start(listening).await.unwrap();
         Ok((mysql_server, server_addr.port()))
     }
 
     common_telemetry::init_default_ut_logging();
-    let validator = MockSchemaValidator::new("greptime", "public", "greptime");
-    let (mysql_server, server_port) = generate_server(Arc::new(validator)).await?;
+    let (mysql_server, server_port) = generate_server(DatabaseAuthInfo {
+        catalog: "greptime",
+        schema: "public",
+        username: "greptime",
+    })
+    .await?;
 
     //TODO(shuiyisong): mysql conn without dbname rejection is not implemented yet, add test later.
 
@@ -100,8 +104,12 @@ async fn test_schema_validation() -> Result<()> {
     assert!(result.is_ok());
 
     // change to another username
-    let validator = MockSchemaValidator::new("greptime", "public", "no_access_user");
-    let (mysql_server, server_port) = generate_server(Arc::new(validator)).await?;
+    let (mysql_server, server_port) = generate_server(DatabaseAuthInfo {
+        catalog: "greptime",
+        schema: "public",
+        username: "no_access_user",
+    })
+    .await?;
 
     let fail = create_connection(server_port, Some("public"), false).await;
     assert!(fail.is_err());
@@ -372,7 +380,7 @@ async fn create_connection(
         .tcp_port(port)
         .prefer_socket(false)
         .wait_timeout(Some(1000))
-        .db_name(db_name)
+        .db_name(db_name.or(Some(DEFAULT_SCHEMA_NAME)))
         .user(Some("greptime".to_string()))
         .pass(Some("greptime".to_string()));
 

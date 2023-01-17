@@ -26,14 +26,13 @@ use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use session::context::{UserInfo, DEFAULT_USERNAME};
 use snafu::ResultExt;
 
-use crate::auth::{Identity, Password, SchemaValidatorRef, UserProviderRef};
+use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error;
 use crate::error::Result;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 struct PgLoginVerifier {
     user_provider: Option<UserProviderRef>,
-    schema_validator: Option<SchemaValidatorRef>,
 }
 
 #[allow(dead_code)]
@@ -74,7 +73,7 @@ impl PgLoginVerifier {
 
             // TODO(fys): pass user_info to context
             let _user_info = user_provider
-                .auth(
+                .authenticate(
                     Identity::UserId(user_name, None),
                     Password::PlainText(password),
                 )
@@ -87,7 +86,7 @@ impl PgLoginVerifier {
     async fn authorize(&self, login: &LoginInfo) -> Result<bool> {
         // at this time, username in login info should be valid
         // TODO(shuiyisong): change to use actually user_info from session
-        if let Some(schema_validator) = &self.schema_validator {
+        if let Some(user_provider) = &self.user_provider {
             let user_name = match &login.user {
                 Some(name) => name,
                 None => return Ok(false),
@@ -100,8 +99,8 @@ impl PgLoginVerifier {
                 Some(name) => name,
                 None => return Ok(false),
             };
-            schema_validator
-                .validate(catalog, schema, &UserInfo::new(user_name))
+            user_provider
+                .authorize(catalog, schema, &UserInfo::new(user_name))
                 .await?;
         }
         Ok(true)
@@ -145,15 +144,11 @@ pub struct PgAuthStartupHandler {
 impl PgAuthStartupHandler {
     pub fn new(
         user_provider: Option<UserProviderRef>,
-        schema_validator: Option<SchemaValidatorRef>,
         force_tls: bool,
         query_handler: ServerSqlQueryHandlerRef,
     ) -> Self {
         PgAuthStartupHandler {
-            verifier: PgLoginVerifier {
-                user_provider,
-                schema_validator,
-            },
+            verifier: PgLoginVerifier { user_provider },
             param_provider: GreptimeDBStartupParameters::new(),
             force_tls,
             query_handler,

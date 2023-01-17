@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
-use servers::auth::{SchemaValidatorRef, UserProviderRef};
+use servers::auth::UserProviderRef;
 use servers::grpc::GrpcServer;
 use servers::http::HttpServer;
 use servers::mysql::server::MysqlServer;
@@ -49,7 +49,6 @@ impl Services {
     {
         info!("Starting frontend servers");
         let user_provider = plugins.get::<UserProviderRef>().cloned();
-        let schema_validator = plugins.get::<SchemaValidatorRef>().cloned();
 
         let grpc_server_and_addr = if let Some(opts) = &opts.grpc_options {
             let grpc_addr = parse_addr(&opts.addr)?;
@@ -88,7 +87,6 @@ impl Services {
                 mysql_io_runtime,
                 opts.tls.clone(),
                 user_provider.clone(),
-                schema_validator.clone(),
             );
 
             Some((mysql_server, mysql_addr))
@@ -112,7 +110,6 @@ impl Services {
                 opts.tls.clone(),
                 pg_io_runtime,
                 user_provider.clone(),
-                schema_validator.clone(),
             )) as Box<dyn Server>;
 
             Some((pg_server, pg_addr))
@@ -147,10 +144,6 @@ impl Services {
             );
             if let Some(user_provider) = user_provider {
                 http_server.set_user_provider(user_provider);
-            }
-
-            if let Some(schema_validator) = schema_validator {
-                http_server.set_schema_validator(schema_validator);
             }
 
             if opentsdb_server_and_addr.is_some() {

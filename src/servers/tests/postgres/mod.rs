@@ -22,8 +22,7 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rustls::client::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Certificate, Error, ServerName};
-use servers::auth::user_provider::StaticUserProvider;
-use servers::auth::{SchemaValidatorRef, UserProviderRef};
+use servers::auth::UserProviderRef;
 use servers::error::Result;
 use servers::postgres::PostgresServer;
 use servers::server::Server;
@@ -31,14 +30,14 @@ use servers::tls::TlsOption;
 use table::test_util::MemTable;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
+use crate::auth::{DatabaseAuthInfo, MockUserProvider};
 use crate::create_testing_instance;
-use crate::test_mock_schema_validator::MockSchemaValidator;
 
 fn create_postgres_server(
     table: MemTable,
     check_pwd: bool,
     tls: TlsOption,
-    schema_validator: Option<SchemaValidatorRef>,
+    auth_info: Option<DatabaseAuthInfo>,
 ) -> Result<Box<dyn Server>> {
     let instance = Arc::new(create_testing_instance(table));
     let io_runtime = Arc::new(
@@ -49,9 +48,11 @@ fn create_postgres_server(
             .unwrap(),
     );
     let user_provider: Option<UserProviderRef> = if check_pwd {
-        Some(Arc::new(
-            StaticUserProvider::try_from("cmd:test_user=test_pwd").unwrap(),
-        ))
+        let mut provider = MockUserProvider::default();
+        if let Some(info) = auth_info {
+            provider.set_authorization_info(info);
+        }
+        Some(Arc::new(provider))
     } else {
         None
     };
@@ -61,7 +62,6 @@ fn create_postgres_server(
         tls,
         io_runtime,
         user_provider,
-        schema_validator,
     )))
 }
 
@@ -91,10 +91,10 @@ async fn test_shutdown_pg_server_range() -> Result<()> {
 
 #[tokio::test]
 async fn test_schema_validating() -> Result<()> {
-    async fn generate_server(validator: SchemaValidatorRef) -> Result<(Box<dyn Server>, u16)> {
+    async fn generate_server(auth_info: DatabaseAuthInfo<'_>) -> Result<(Box<dyn Server>, u16)> {
         let table = MemTable::default_numbers_table();
         let postgres_server =
-            create_postgres_server(table, false, Default::default(), Some(validator))?;
+            create_postgres_server(table, true, Default::default(), Some(auth_info))?;
         let listening = "127.0.0.1:5432".parse::<SocketAddr>().unwrap();
         let server_addr = postgres_server.start(listening).await.unwrap();
         let server_port = server_addr.port();
@@ -102,22 +102,26 @@ async fn test_schema_validating() -> Result<()> {
     }
 
     common_telemetry::init_default_ut_logging();
-    let validator = Arc::new(MockSchemaValidator::new("greptime", "public", "greptime"));
-    let (pg_server, server_port) = generate_server(validator).await?;
+    let (pg_server, server_port) = generate_server(DatabaseAuthInfo {
+        catalog: "greptime",
+        schema: "public",
+        username: "greptime",
+    })
+    .await?;
 
-    let pass = create_plain_connection(server_port, false).await;
+    let pass = create_plain_connection(server_port, true).await;
     assert!(pass.is_ok());
     let result = pg_server.shutdown().await;
     assert!(result.is_ok());
 
-    let validator = Arc::new(MockSchemaValidator::new(
-        "greptime",
-        "public",
-        "no_right_user",
-    ));
-    let (pg_server, server_port) = generate_server(validator).await?;
+    let (pg_server, server_port) = generate_server(DatabaseAuthInfo {
+        catalog: "greptime",
+        schema: "public",
+        username: "no_right_user",
+    })
+    .await?;
 
-    let fail = create_plain_connection(server_port, false).await;
+    let fail = create_plain_connection(server_port, true).await;
     assert!(fail.is_err());
     let result = pg_server.shutdown().await;
     assert!(result.is_ok());
@@ -340,7 +344,7 @@ async fn create_secure_connection(
 ) -> std::result::Result<Client, PgError> {
     let url = if with_pwd {
         format!(
-            "sslmode=require host=127.0.0.1 port={port} user=test_user password=test_pwd connect_timeout=2, dbname={DEFAULT_SCHEMA_NAME}",
+            "sslmode=require host=127.0.0.1 port={port} user=greptime password=greptime connect_timeout=2, dbname={DEFAULT_SCHEMA_NAME}",
         )
     } else {
         format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
@@ -367,7 +371,7 @@ async fn create_plain_connection(
 ) -> std::result::Result<Client, PgError> {
     let url = if with_pwd {
         format!(
-            "host=127.0.0.1 port={port} user=test_user password=test_pwd connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}",
+            "host=127.0.0.1 port={port} user=greptime password=greptime connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}",
         )
     } else {
         format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")

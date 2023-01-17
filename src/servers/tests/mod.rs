@@ -22,21 +22,20 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::parser::QueryLanguageParser;
 use query::{QueryEngineFactory, QueryEngineRef};
-use servers::error::{Error, Result};
-use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
-use table::test_util::MemTable;
-
-mod http;
-mod mysql;
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
+use servers::error::{Error, Result};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
+use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
+use table::test_util::MemTable;
 
+mod auth;
+mod http;
 mod interceptor;
+mod mysql;
 mod opentsdb;
 mod postgres;
-
 mod py_script;
 
 struct DummyInstance {
@@ -132,50 +131,4 @@ fn create_testing_script_handler(table: MemTable) -> ScriptHandlerRef {
 
 fn create_testing_sql_query_handler(table: MemTable) -> ServerSqlQueryHandlerRef {
     Arc::new(create_testing_instance(table)) as _
-}
-
-// copy from servers::auth::test_mock_schema_validator
-pub mod test_mock_schema_validator {
-    use servers::auth::{AccessDeniedSnafu, SchemaValidator};
-    use session::context::UserInfo;
-
-    pub struct MockSchemaValidator {
-        catalog: String,
-        schema: String,
-        username: String,
-    }
-
-    impl MockSchemaValidator {
-        pub fn new(catalog: &str, schema: &str, username: &str) -> Self {
-            Self {
-                catalog: catalog.to_string(),
-                schema: schema.to_string(),
-                username: username.to_string(),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl SchemaValidator for MockSchemaValidator {
-        async fn validate(
-            &self,
-            catalog: &str,
-            schema: &str,
-            user_info: &UserInfo,
-        ) -> Result<(), servers::auth::Error> {
-            if catalog == self.catalog
-                && schema == self.schema
-                && user_info.username() == self.username
-            {
-                Ok(())
-            } else {
-                AccessDeniedSnafu {
-                    catalog: catalog.to_string(),
-                    schema: schema.to_string(),
-                    username: user_info.username().to_string(),
-                }
-                .fail()
-            }
-        }
-    }
 }

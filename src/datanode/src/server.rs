@@ -66,7 +66,6 @@ impl Services {
                     mysql_io_runtime,
                     Default::default(),
                     None,
-                    None,
                 ))
             }
         };

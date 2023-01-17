@@ -28,7 +28,7 @@ use session::Session;
 use snafu::ensure;
 use tokio::io::AsyncWrite;
 
-use crate::auth::{Identity, Password, SchemaValidatorRef, UserProviderRef};
+use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -39,7 +39,6 @@ pub struct MysqlInstanceShim {
     salt: [u8; 20],
     session: Arc<Session>,
     user_provider: Option<UserProviderRef>,
-    schema_validator: Option<SchemaValidatorRef>,
 }
 
 impl MysqlInstanceShim {
@@ -47,7 +46,6 @@ impl MysqlInstanceShim {
         query_handler: ServerSqlQueryHandlerRef,
         client_addr: SocketAddr,
         user_provider: Option<UserProviderRef>,
-        schema_validator: Option<SchemaValidatorRef>,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
@@ -67,7 +65,6 @@ impl MysqlInstanceShim {
             salt: scramble,
             session: Arc::new(Session::new(client_addr, Channel::Mysql)),
             user_provider,
-            schema_validator,
         }
     }
 
@@ -126,7 +123,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     return false;
                 }
             };
-            match user_provider.auth(user_id, password).await {
+            match user_provider.authenticate(user_id, password).await {
                 Ok(userinfo) => {
                     user_info = Some(userinfo);
                 }
@@ -193,9 +190,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             error::DatabaseNotFoundSnafu { catalog, schema }
         );
 
-        if let Some(schema_validator) = &self.schema_validator {
+        if let Some(schema_validator) = &self.user_provider {
             schema_validator
-                .validate(catalog, schema, &self.session.user_info())
+                .authorize(catalog, schema, &self.session.user_info())
                 .await?;
         }
 

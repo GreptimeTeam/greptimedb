@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod authorize;
+pub mod authorize;
 pub mod handler;
 pub mod influxdb;
 pub mod opentsdb;
@@ -52,7 +52,7 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::HttpAuth;
 use self::influxdb::influxdb_write;
-use crate::auth::{SchemaValidatorRef, UserProviderRef};
+use crate::auth::UserProviderRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::query_handler::{
@@ -92,8 +92,8 @@ pub(crate) fn query_context_from_db(
     }
 }
 
-const HTTP_API_VERSION: &str = "v1";
-const HTTP_API_PREFIX: &str = "/v1/";
+pub const HTTP_API_VERSION: &str = "v1";
+pub const HTTP_API_PREFIX: &str = "/v1/";
 
 pub struct HttpServer {
     sql_handler: ServerSqlQueryHandlerRef,
@@ -104,7 +104,6 @@ pub struct HttpServer {
     script_handler: Option<ScriptHandlerRef>,
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
-    schema_validator: Option<SchemaValidatorRef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -359,7 +358,6 @@ impl HttpServer {
             influxdb_handler: None,
             prom_handler: None,
             user_provider: None,
-            schema_validator: None,
             script_handler: None,
             shutdown_tx: Mutex::new(None),
         }
@@ -403,14 +401,6 @@ impl HttpServer {
             "User provider can be set only once!"
         );
         self.user_provider.get_or_insert(user_provider);
-    }
-
-    pub fn set_schema_validator(&mut self, schema_validator: SchemaValidatorRef) {
-        debug_assert!(
-            self.schema_validator.is_none(),
-            "Schema validator can be set only once!"
-        );
-        self.schema_validator.get_or_insert(schema_validator);
     }
 
     pub fn make_app(&self) -> Router {
@@ -475,10 +465,7 @@ impl HttpServer {
                     .layer(TimeoutLayer::new(self.options.timeout))
                     // custom layer
                     .layer(AsyncRequireAuthorizationLayer::new(
-                        HttpAuth::<BoxBody>::new(
-                            self.user_provider.clone(),
-                            self.schema_validator.clone(),
-                        ),
+                        HttpAuth::<BoxBody>::new(self.user_provider.clone()),
                     )),
             )
     }
