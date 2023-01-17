@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
+use common_telemetry::debug;
+use common_time::range::TimestampRange;
 use snafu::ResultExt;
 use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
@@ -141,12 +143,23 @@ impl ChunkReaderBuilder {
             reader_builder = reader_builder.push_batch_iter(iter);
         }
 
+        let time_range_predicate = self.build_time_range_predicate();
+
         let read_opts = ReadOptions {
             batch_size: self.iter_ctx.batch_size,
             projected_schema: schema.clone(),
             predicate: Predicate::new(self.filters),
         };
         for file in &self.files_to_read {
+            if !Self::file_in_range(file, time_range_predicate) {
+                debug!(
+                    "Skip file, start: {:?}, end: {:?}, predicate: {:?}",
+                    file.start_timestamp(),
+                    file.end_timestamp(),
+                    time_range_predicate
+                );
+                continue;
+            }
             let reader = self
                 .sst_layer
                 .read_sst(file.file_name(), &read_opts)
@@ -159,6 +172,20 @@ impl ChunkReaderBuilder {
         let reader = DedupReader::new(schema.clone(), reader);
 
         Ok(ChunkReaderImpl::new(schema, Box::new(reader)))
+    }
+
+    /// Build time range predicate from schema and filters.
+    pub fn build_time_range_predicate(&self) -> TimestampRange {
+        let Some(ts_col) = self.schema.user_schema().timestamp_column() else { return TimestampRange::min_to_max() };
+        TimeRangePredicateBuilder::new(&ts_col.name, &self.filters).build()
+    }
+
+    /// Check if SST file's time range matches predicate.
+    pub fn file_in_range(file: &FileHandle, predicate: TimestampRange) -> bool {
+        // end_timestamp of sst file is inclusive.
+        let file_ts_range =
+            TimestampRange::new_inclusive_unchecked(file.start_timestamp(), file.end_timestamp());
+        file_ts_range.intersects(&predicate)
     }
 }
 

@@ -100,6 +100,11 @@ where
 
         Self { start, end }
     }
+
+    /// Checks if current range intersect with target.
+    pub fn intersects(&self, target: &GenericRange<T>) -> bool {
+        !self.and(target).is_empty()
+    }
 }
 
 impl<T> GenericRange<T> {
@@ -143,11 +148,11 @@ impl<T> GenericRange<T> {
     }
 
     /// Returns true if `timestamp` is contained in the range.
-    pub fn contains<U: PartialOrd<T>>(&self, timestamp: &U) -> bool {
+    pub fn contains<U: PartialOrd<T>>(&self, target: &U) -> bool {
         match (&self.start, &self.end) {
-            (Some(start), Some(end)) => *timestamp >= *start && *timestamp < *end,
-            (Some(start), None) => *timestamp >= *start,
-            (None, Some(end)) => *timestamp < *end,
+            (Some(start), Some(end)) => *target >= *start && *target < *end,
+            (Some(start), None) => *target >= *start,
+            (None, Some(end)) => *target < *end,
             (None, None) => true,
         }
     }
@@ -348,5 +353,45 @@ mod tests {
 
         let t1 = TimestampRange::with_unit(-10, 0, TimeUnit::Second).unwrap();
         assert_eq!(t1, t1.or(&t1));
+    }
+
+    #[test]
+    fn test_intersect() {
+        let t1 = TimestampRange::with_unit(-10, 0, TimeUnit::Second).unwrap();
+        let t2 = TimestampRange::with_unit(-30, -20, TimeUnit::Second).unwrap();
+        assert!(!t1.intersects(&t2));
+
+        let t1 = TimestampRange::with_unit(10, 20, TimeUnit::Second).unwrap();
+        let t2 = TimestampRange::with_unit(0, 30, TimeUnit::Second).unwrap();
+        assert!(t1.intersects(&t2));
+
+        let t1 = TimestampRange::with_unit(-20, -10, TimeUnit::Second).unwrap();
+        let t2 = TimestampRange::with_unit(-10, 0, TimeUnit::Second).unwrap();
+        assert!(!t1.intersects(&t2));
+
+        let t1 = TimestampRange::with_unit(0, 1, TimeUnit::Second).unwrap();
+        let t2 = TimestampRange::with_unit(999, 1000, TimeUnit::Millisecond).unwrap();
+        assert!(t1.intersects(&t2));
+
+        let t1 = TimestampRange::with_unit(1, 2, TimeUnit::Second).unwrap();
+        let t2 = TimestampRange::with_unit(1000, 2000, TimeUnit::Millisecond).unwrap();
+        assert!(t1.intersects(&t2));
+
+        let t1 = TimestampRange::with_unit(0, 1, TimeUnit::Second).unwrap();
+        assert!(t1.intersects(&t1));
+
+        let t1 = TimestampRange::with_unit(0, 1, TimeUnit::Second).unwrap();
+        let t2 = TimestampRange::empty_with_value(Timestamp::new_millisecond(0));
+        assert!(!t1.intersects(&t2));
+
+        // empty range does not intersect with empty range
+        let empty = TimestampRange::empty_with_value(Timestamp::new_millisecond(0));
+        assert!(!empty.intersects(&empty));
+
+        // full range intersects with full range
+        let full = TimestampRange::min_to_max();
+        assert!(full.intersects(&full));
+
+        assert!(!full.intersects(&empty));
     }
 }

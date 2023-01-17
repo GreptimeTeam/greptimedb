@@ -5405,7 +5405,6 @@ dependencies = [
  "stats-cli",
  "streaming-stats",
  "table",
- "tempdir",
  "tokio",
  "tokio-stream",
 ]
