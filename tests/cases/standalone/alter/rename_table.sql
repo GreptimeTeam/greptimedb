@@ -1,0 +1,27 @@
+CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
+
+SHOW CREATE TABLE t;
+
+INSERT INTO TABLE t VALUES (1, 1), (3, 3), (NULL, 4);
+
+SELECT * from t;
+
+ALTER TABLE t RENAME new_table;
+
+SHOW CREATE TABLE t;
+
+SELECT * FROM t;
+
+CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
+
+SHOW CREATE TABLE new_table;
+
+SELECT * FROM new_table;
+
+ALTER TABLE new_table RENAME new_table;
+
+ALTER TABLE new_table RENAME t;
+
+DROP TABLE t;
+
+DROP TABLE new_table;
