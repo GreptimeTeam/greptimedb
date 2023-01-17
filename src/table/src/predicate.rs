@@ -227,10 +227,9 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         }
 
         if list.is_empty() {
-            // TODO(hl): returning empty range with explicit value is weired.
-            return TimestampRange::empty_with_value(Timestamp::new_millisecond(0));
+            return TimestampRange::empty();
         }
-        let mut init = TimestampRange::empty_with_value(Timestamp::new_millisecond(0));
+        let mut init = TimestampRange::empty();
         for expr in list {
             if let DfExpr::Literal(scalar) = expr {
                 if let Some(timestamp) = scalar_value_to_timestamp(scalar) {

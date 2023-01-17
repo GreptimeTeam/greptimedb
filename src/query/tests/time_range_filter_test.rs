@@ -230,5 +230,12 @@ async fn test_range_filter() {
             "select * from m where ts>='2023-01-16 17:01:57+08:00'",
             TimestampRange::from(Timestamp::new(1673859717000, TimeUnit::Millisecond)),
         )
-        .await
+        .await;
+
+    tester
+        .check(
+            "select * from m where ts > 10 and ts < 9",
+            TimestampRange::empty(),
+        )
+        .await;
 }
