@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use clap::Parser;
-use common_telemetry::logging;
+use common_telemetry::{info, logging};
 use meta_srv::bootstrap;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
@@ -56,6 +56,8 @@ struct StartCommand {
     store_addr: Option<String>,
     #[clap(short, long)]
     config_file: Option<String>,
+    #[clap(short, long)]
+    selector: Option<String>,
 }
 
 impl StartCommand {
@@ -91,6 +93,12 @@ impl TryFrom<StartCommand> for MetaSrvOptions {
         if let Some(addr) = cmd.store_addr {
             opts.store_addr = addr;
         }
+        if let Some(selector_type) = &cmd.selector {
+            opts.selector = selector_type[..]
+                .try_into()
+                .context(error::UnsupportedSelectorTypeSnafu { selector_type })?;
+            info!("Using {} selector", selector_type);
+        }
 
         Ok(opts)
     }
@@ -98,6 +106,8 @@ impl TryFrom<StartCommand> for MetaSrvOptions {
 
 #[cfg(test)]
 mod tests {
+    use meta_srv::selector::SelectorType;
+
     use super::*;
 
     #[test]
@@ -107,11 +117,13 @@ mod tests {
             server_addr: Some("127.0.0.1:3002".to_string()),
             store_addr: Some("127.0.0.1:2380".to_string()),
             config_file: None,
+            selector: Some("LoadBased".to_string()),
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2380".to_string(), options.store_addr);
+        assert_eq!(SelectorType::LoadBased, options.selector);
     }
 
     #[test]
@@ -120,6 +132,7 @@ mod tests {
             bind_addr: None,
             server_addr: None,
             store_addr: None,
+            selector: None,
             config_file: Some(format!(
                 "{}/../../config/metasrv.example.toml",
                 std::env::current_dir().unwrap().as_path().to_str().unwrap()
@@ -130,5 +143,6 @@ mod tests {
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
         assert_eq!(15, options.datanode_lease_secs);
+        assert_eq!(SelectorType::LeaseBased, options.selector);
     }
 }

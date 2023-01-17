@@ -23,7 +23,7 @@ mod check_leader_handler;
 mod collect_stats_handler;
 mod instruction;
 mod keep_lease_handler;
-pub(crate) mod node_stat;
+pub mod node_stat;
 mod on_leader_start;
 mod persist_stats_handler;
 mod response_header_handler;

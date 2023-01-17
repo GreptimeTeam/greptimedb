@@ -15,7 +15,7 @@
 use api::v1::meta::{
     router_server, CreateRequest, DeleteRequest, Error, MoveValueRequest, Peer, PeerDict,
     PutRequest, RangeRequest, Region, RegionRoute, ResponseHeader, RouteRequest, RouteResponse,
-    Table, TableRoute, TableRouteValue,
+    Table, TableName, TableRoute, TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_telemetry::warn;
@@ -34,9 +34,14 @@ use crate::service::GrpcResult;
 impl router_server::Router for MetaSrv {
     async fn create(&self, req: Request<CreateRequest>) -> GrpcResult<RouteResponse> {
         let req = req.into_inner();
-        let ctx = self.new_ctx();
+
+        let CreateRequest { table_name, .. } = &req;
+        let table_name = table_name.clone().context(error::EmptyTableNameSnafu)?;
+        let ctx = self.create_ctx(table_name);
+
         let selector = self.selector();
         let table_id_sequence = self.table_id_sequence();
+
         let res = handle_create(req, ctx, selector, table_id_sequence).await?;
 
         Ok(Response::new(res))
@@ -56,6 +61,21 @@ impl router_server::Router for MetaSrv {
         let res = handle_delete(req, ctx).await?;
 
         Ok(Response::new(res))
+    }
+}
+
+impl MetaSrv {
+    fn create_ctx(&self, table_name: TableName) -> Context {
+        let mut ctx = self.new_ctx();
+        let TableName {
+            catalog_name,
+            schema_name,
+            table_name,
+        } = table_name;
+        ctx.catalog = Some(catalog_name);
+        ctx.schema = Some(schema_name);
+        ctx.table = Some(table_name);
+        ctx
     }
 }
 

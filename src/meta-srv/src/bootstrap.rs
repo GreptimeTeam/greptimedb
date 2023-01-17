@@ -60,7 +60,8 @@ pub fn router(meta_srv: MetaSrv) -> Router {
 pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
     let kv_store = EtcdStore::with_endpoints([&opts.store_addr]).await?;
     let election = EtcdElection::with_endpoints(&opts.server_addr, [&opts.store_addr]).await?;
-    let meta_srv = MetaSrv::new(opts, kv_store, None, Some(election), None).await;
+    let selector = opts.selector.clone().into();
+    let meta_srv = MetaSrv::new(opts, kv_store, Some(selector), Some(election), None).await;
     meta_srv.start().await;
     Ok(meta_srv)
 }

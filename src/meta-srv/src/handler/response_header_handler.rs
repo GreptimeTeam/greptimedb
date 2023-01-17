@@ -62,6 +62,9 @@ mod tests {
             kv_store,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),
+            catalog: None,
+            schema: None,
+            table: None,
         };
 
         let req = HeartbeatRequest {

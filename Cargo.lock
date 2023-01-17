@@ -3818,6 +3818,7 @@ dependencies = [
 name = "meta-srv"
 version = "0.1.0"
 dependencies = [
+ "anymap",
  "api",
  "async-trait",
  "catalog",

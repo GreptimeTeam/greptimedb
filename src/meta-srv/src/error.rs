@@ -55,8 +55,29 @@ pub enum Error {
     #[snafu(display("Invalid datanode lease key: {}", key))]
     InvalidLeaseKey { key: String, backtrace: Backtrace },
 
+    #[snafu(display("Invalid datanode stat key: {}", key))]
+    InvalidStatKey { key: String, backtrace: Backtrace },
+
     #[snafu(display("Failed to parse datanode lease key from utf8: {}", source))]
     LeaseKeyFromUtf8 {
+        source: std::string::FromUtf8Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to parse datanode lease value from utf8: {}", source))]
+    LeaseValueFromUtf8 {
+        source: std::string::FromUtf8Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to parse datanode stat key from utf8: {}", source))]
+    StatKeyFromUtf8 {
+        source: std::string::FromUtf8Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to parse datanode stat value from utf8: {}", source))]
+    StatValueFromUtf8 {
         source: std::string::FromUtf8Error,
         backtrace: Backtrace,
     },
@@ -132,6 +153,12 @@ pub enum Error {
         key
     ))]
     MoveValue { key: String, backtrace: Backtrace },
+
+    #[snafu(display("Unsupported selector type, {}", selector_type))]
+    UnsupportedSelectorType {
+        selector_type: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -165,9 +192,14 @@ impl ErrorExt for Error {
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }
             | Error::InvalidLeaseKey { .. }
+            | Error::InvalidStatKey { .. }
             | Error::ParseNum { .. }
+            | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. } => StatusCode::InvalidArguments,
             Error::LeaseKeyFromUtf8 { .. }
+            | Error::LeaseValueFromUtf8 { .. }
+            | Error::StatKeyFromUtf8 { .. }
+            | Error::StatValueFromUtf8 { .. }
             | Error::UnexceptedSequenceValue { .. }
             | Error::TableRouteNotFound { .. }
             | Error::NextSequence { .. }

@@ -112,7 +112,7 @@ impl TryFrom<Vec<u8>> for LeaseValue {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self> {
         String::from_utf8(bytes)
-            .context(error::LeaseKeyFromUtf8Snafu {})
+            .context(error::LeaseValueFromUtf8Snafu {})
             .map(|x| x.parse())?
     }
 }
@@ -174,7 +174,7 @@ impl<'a> TableRouteKey<'a> {
     }
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Hash)]
 pub struct StatKey {
     pub cluster_id: u64,
     pub node_id: u64,
@@ -194,7 +194,7 @@ impl FromStr for StatKey {
             .captures(key)
             .context(error::InvalidLeaseKeySnafu { key })?;
 
-        ensure!(caps.len() == 3, error::InvalidLeaseKeySnafu { key });
+        ensure!(caps.len() == 3, error::InvalidStatKeySnafu { key });
 
         let cluster_id = caps[1].to_string();
         let node_id = caps[2].to_string();
@@ -217,7 +217,7 @@ impl TryFrom<Vec<u8>> for StatKey {
 
     fn try_from(bytes: Vec<u8>) -> Result<Self> {
         String::from_utf8(bytes)
-            .context(error::LeaseKeyFromUtf8Snafu {})
+            .context(error::StatKeyFromUtf8Snafu {})
             .map(|x| x.parse())?
     }
 }
@@ -226,6 +226,19 @@ impl TryFrom<Vec<u8>> for StatKey {
 #[serde(transparent)]
 pub struct StatValue {
     pub stats: Vec<Stat>,
+}
+
+impl StatValue {
+    /// Get the region number from stat value.
+    pub fn region_num(&self) -> Option<u64> {
+        for stat in self.stats.iter() {
+            match stat.region_num {
+                Some(region_num) => return Some(region_num),
+                None => continue,
+            }
+        }
+        None
+    }
 }
 
 impl TryFrom<StatValue> for Vec<u8> {
@@ -253,7 +266,7 @@ impl TryFrom<Vec<u8>> for StatValue {
 
     fn try_from(value: Vec<u8>) -> Result<Self> {
         String::from_utf8(value)
-            .context(error::LeaseKeyFromUtf8Snafu {})
+            .context(error::StatValueFromUtf8Snafu {})
             .map(|x| x.parse())?
     }
 }
@@ -282,7 +295,7 @@ mod tests {
             cluster_id: 0,
             id: 101,
             is_leader: false,
-            region_num: 100,
+            region_num: Some(100),
             ..Default::default()
         };
 
@@ -298,7 +311,7 @@ mod tests {
         assert_eq!(0, stat.cluster_id);
         assert_eq!(101, stat.id);
         assert!(!stat.is_leader);
-        assert_eq!(100, stat.region_num);
+        assert_eq!(Some(100), stat.region_num);
     }
 
     #[test]
@@ -325,5 +338,40 @@ mod tests {
         let new_value: LeaseValue = value_bytes.try_into().unwrap();
 
         assert_eq!(new_value, value);
+    }
+
+    #[test]
+    fn test_get_region_num_from_stat_val() {
+        let empty = StatValue { stats: vec![] };
+        let region_num = empty.region_num();
+        assert!(region_num.is_none());
+
+        let wrong = StatValue {
+            stats: vec![Stat {
+                region_num: None,
+                ..Default::default()
+            }],
+        };
+        let right = wrong.region_num();
+        assert!(right.is_none());
+
+        let stat_val = StatValue {
+            stats: vec![
+                Stat {
+                    region_num: Some(1),
+                    ..Default::default()
+                },
+                Stat {
+                    region_num: None,
+                    ..Default::default()
+                },
+                Stat {
+                    region_num: Some(2),
+                    ..Default::default()
+                },
+            ],
+        };
+        let region_num = stat_val.region_num().unwrap();
+        assert_eq!(1, region_num);
     }
 }
