@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use snafu::ResultExt;
 use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
-use table::predicate::Predicate;
+use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};

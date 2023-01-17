@@ -2210,6 +2210,7 @@ dependencies = [
  "arrow-schema",
  "common-base",
  "common-error",
+ "common-telemetry",
  "common-time",
  "datafusion-common",
  "enum_dispatch",
@@ -5404,6 +5405,7 @@ dependencies = [
  "stats-cli",
  "streaming-stats",
  "table",
+ "tempdir",
  "tokio",
  "tokio-stream",
 ]

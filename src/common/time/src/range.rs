@@ -165,11 +165,50 @@ impl<T: PartialOrd> GenericRange<T> {
 }
 
 pub type TimestampRange = GenericRange<Timestamp>;
+
 impl TimestampRange {
+    pub fn new_inclusive_unchecked(start: Option<Timestamp>, end: Option<Timestamp>) -> Self {
+        let end = if let Some(end) = end {
+            end.value()
+                .checked_add(1)
+                .map(|v| Timestamp::new(v, end.unit()))
+        } else {
+            None
+        };
+        Self { start, end }
+    }
+
     pub fn with_unit(start: i64, end: i64, unit: TimeUnit) -> Option<Self> {
         let start = Timestamp::new(start, unit);
         let end = Timestamp::new(end, unit);
         Self::new(start, end)
+    }
+
+    pub fn single(ts: Timestamp) -> Self {
+        let unit = ts.unit();
+        let start = Some(ts);
+        let end = ts.value().checked_add(1).map(|v| Timestamp::new(v, unit));
+
+        Self { start, end }
+    }
+
+    // we cannot represent exclusive start without missing any other value in a left-close range.
+    pub fn from(start: Timestamp) -> Self {
+        Self {
+            start: Some(start),
+            end: None,
+        }
+    }
+
+    pub fn until(end: Timestamp, inclusive: bool) -> Self {
+        let end = if inclusive {
+            end.value()
+                .checked_add(1)
+                .map(|v| Timestamp::new(v, end.unit()))
+        } else {
+            Some(end)
+        };
+        Self { start: None, end }
     }
 }
 
