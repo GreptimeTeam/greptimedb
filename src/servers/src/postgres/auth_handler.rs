@@ -209,18 +209,9 @@ impl StartupHandler for PgAuthStartupHandler {
                 } else {
                     // no user is provided, use default user
                     // and still do authorization
-                    let login_info = LoginInfo {
-                        user: Some(DEFAULT_USERNAME.to_string()),
-                        catalog: client
-                            .metadata()
-                            .get(super::METADATA_CATALOG)
-                            .map(Into::into),
-                        database: client
-                            .metadata()
-                            .get(super::METADATA_SCHEMA)
-                            .map(Into::into),
-                        host: client.socket_addr().ip().to_string(),
-                    };
+                    let mut login_info = LoginInfo::from_client_info(client);
+                    login_info.user = Some(DEFAULT_USERNAME.to_string());
+
                     let authorize_result = self.verifier.authorize(&login_info).await;
                     if !matches!(authorize_result, Ok(true)) {
                         return send_error(
