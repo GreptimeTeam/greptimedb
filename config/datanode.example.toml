@@ -1,6 +1,7 @@
 node_id = 42
 mode = 'distributed'
 rpc_addr = '127.0.0.1:3001'
+rpc_hostname = '127.0.0.1'
 rpc_runtime_size = 8
 mysql_addr = '127.0.0.1:4406'
 mysql_runtime_size = 4

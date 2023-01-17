@@ -54,6 +54,8 @@ struct StartCommand {
     #[clap(long)]
     rpc_addr: Option<String>,
     #[clap(long)]
+    rpc_hostname: Option<String>,
+    #[clap(long)]
     mysql_addr: Option<String>,
     #[clap(long)]
     metasrv_addr: Option<String>,
@@ -94,6 +96,11 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         if let Some(addr) = cmd.rpc_addr {
             opts.rpc_addr = addr;
         }
+
+        if cmd.rpc_hostname.is_some() {
+            opts.rpc_hostname = cmd.rpc_hostname;
+        }
+
         if let Some(addr) = cmd.mysql_addr {
             opts.mysql_addr = addr;
         }

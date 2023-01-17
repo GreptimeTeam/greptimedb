@@ -84,6 +84,7 @@ impl Default for WalConfig {
 pub struct DatanodeOptions {
     pub node_id: Option<u64>,
     pub rpc_addr: String,
+    pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
     pub mysql_addr: String,
     pub mysql_runtime_size: usize,
@@ -99,6 +100,7 @@ impl Default for DatanodeOptions {
         Self {
             node_id: None,
             rpc_addr: "127.0.0.1:3001".to_string(),
+            rpc_hostname: None,
             rpc_runtime_size: 8,
             mysql_addr: "127.0.0.1:4406".to_string(),
             mysql_runtime_size: 2,

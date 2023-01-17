@@ -86,6 +86,7 @@ impl Instance {
         let heartbeat_task = HeartbeatTask::new(
             opts.node_id.unwrap_or(42),
             opts.rpc_addr.clone(),
+            None,
             meta_client.clone(),
             catalog_manager.clone(),
         );
