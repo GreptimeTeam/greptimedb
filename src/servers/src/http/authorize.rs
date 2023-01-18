@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,7 +12,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
@@ -23,7 +23,8 @@ use session::context::UserInfo;
 use snafu::{OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
-use crate::auth::{Identity, UserProviderRef};
+use crate::auth::Error::IllegalParam;
+use crate::auth::{Identity, IllegalParamSnafu, InternalStateSnafu, UserProviderRef};
 use crate::error::{self, Result};
 use crate::http::HTTP_API_PREFIX;
 
@@ -70,42 +71,81 @@ where
                 return Ok(request);
             };
 
-            let (scheme, credential) = match auth_header(&request) {
-                Ok(auth_header) => auth_header,
+            // do authenticate
+            match authenticate(&user_provider, &request).await {
+                Ok(user_info) => {
+                    request.extensions_mut().insert(user_info);
+                }
                 Err(e) => {
-                    error!("failed to get http authorize header, err: {:?}", e);
+                    error!("authenticate failed: {}", e);
                     return Err(unauthorized_resp());
                 }
-            };
+            }
 
-            match scheme {
-                AuthScheme::Basic => {
-                    let (username, password) = match decode_basic(credential) {
-                        Ok(basic_auth) => basic_auth,
-                        Err(e) => {
-                            error!("failed to decode basic authorize, err: {:?}", e);
-                            return Err(unauthorized_resp());
-                        }
-                    };
-                    match user_provider
-                        .auth(
-                            Identity::UserId(&username, None),
-                            crate::auth::Password::PlainText(&password),
-                        )
-                        .await
-                    {
-                        Ok(user_info) => {
-                            request.extensions_mut().insert(user_info);
-                            Ok(request)
-                        }
-                        Err(e) => {
-                            error!("failed to auth, err: {:?}", e);
-                            Err(unauthorized_resp())
-                        }
-                    }
+            match authorize(&user_provider, &request).await {
+                Ok(_) => Ok(request),
+                Err(e) => {
+                    error!("authorize failed: {}", e);
+                    Err(unauthorized_resp())
                 }
             }
         })
+    }
+}
+
+async fn authorize<B: Send + Sync + 'static>(
+    user_provider: &UserProviderRef,
+    request: &Request<B>,
+) -> crate::auth::Result<()> {
+    // try get database name
+    let query = request.uri().query().unwrap_or_default();
+    let input_database = match serde_urlencoded::from_str::<HashMap<String, String>>(query) {
+        Ok(query_map) => query_map
+            .get("db")
+            .context(IllegalParamSnafu {
+                msg: "fail to get valid database from http query",
+            })?
+            .to_owned(),
+        Err(e) => IllegalParamSnafu {
+            msg: format!("fail to parse http query: {e}"),
+        }
+        .fail()?,
+    };
+
+    let (catalog, database) =
+        crate::parse_catalog_and_schema_from_client_database_name(&input_database);
+
+    let user_info = request
+        .extensions()
+        .get::<UserInfo>()
+        .context(InternalStateSnafu {
+            msg: "no user info provided while authorizing",
+        })?;
+
+    user_provider.authorize(catalog, database, user_info).await
+}
+
+async fn authenticate<B: Send + Sync + 'static>(
+    user_provider: &UserProviderRef,
+    request: &Request<B>,
+) -> crate::auth::Result<UserInfo> {
+    let (scheme, credential) = auth_header(request).map_err(|e| IllegalParam {
+        msg: format!("failed to get http authorize header, err: {e:?}"),
+    })?;
+
+    match scheme {
+        AuthScheme::Basic => {
+            let (username, password) = decode_basic(credential).map_err(|e| IllegalParam {
+                msg: format!("failed to decode basic authorize, err: {e:?}"),
+            })?;
+
+            Ok(user_provider
+                .authenticate(
+                    Identity::UserId(&username, None),
+                    crate::auth::Password::PlainText(&password),
+                )
+                .await?)
+        }
     }
 }
 
@@ -171,79 +211,7 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
 
 #[cfg(test)]
 mod tests {
-    use std::marker::PhantomData;
-    use std::sync::Arc;
-
-    use axum::body::BoxBody;
-    use axum::http;
-    use hyper::Request;
-    use session::context::UserInfo;
-    use tower_http::auth::AsyncAuthorizeRequest;
-
-    use super::{auth_header, decode_basic, AuthScheme, HttpAuth};
-    use crate::auth::test::MockUserProvider;
-    use crate::auth::UserProvider;
-    use crate::error;
-    use crate::error::Result;
-
-    #[tokio::test]
-    async fn test_http_auth() {
-        let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
-            user_provider: None,
-            _ty: PhantomData,
-        };
-
-        // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
-        let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
-        let auth_res = http_auth.authorize(req).await.unwrap();
-        let user_info: &UserInfo = auth_res.extensions().get().unwrap();
-        let default = UserInfo::default();
-        assert_eq!(default.username(), user_info.username());
-
-        // In mock user provider, right username:password == "greptime:greptime"
-        let mock_user_provider = Some(Arc::new(MockUserProvider {}) as Arc<dyn UserProvider>);
-        let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
-            user_provider: mock_user_provider,
-            _ty: PhantomData,
-        };
-
-        // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
-        let req = mock_http_request(Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="), None).unwrap();
-        let req = http_auth.authorize(req).await.unwrap();
-        let user_info: &UserInfo = req.extensions().get().unwrap();
-        let default = UserInfo::default();
-        assert_eq!(default.username(), user_info.username());
-
-        let req = mock_http_request(None, None).unwrap();
-        let auth_res = http_auth.authorize(req).await;
-        assert!(auth_res.is_err());
-
-        // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
-        let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
-        let auth_res = http_auth.authorize(wrong_req).await;
-        assert!(auth_res.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_whitelist_no_auth() {
-        // In mock user provider, right username:password == "greptime:greptime"
-        let mock_user_provider = Some(Arc::new(MockUserProvider {}) as Arc<dyn UserProvider>);
-        let mut http_auth: HttpAuth<BoxBody> = HttpAuth {
-            user_provider: mock_user_provider,
-            _ty: PhantomData,
-        };
-
-        // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
-        // try auth path first
-        let req = mock_http_request(None, None).unwrap();
-        let req = http_auth.authorize(req).await;
-        assert!(req.is_err());
-
-        // try whitelist path
-        let req = mock_http_request(None, Some("http://localhost/health")).unwrap();
-        let req = http_auth.authorize(req).await;
-        assert!(req.is_ok());
-    }
+    use super::*;
 
     #[test]
     fn test_decode_basic() {

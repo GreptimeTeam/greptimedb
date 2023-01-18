@@ -6633,6 +6633,7 @@ dependencies = [
  "script",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "session",
  "sha1",
  "snafu",

@@ -38,6 +38,15 @@ use crate::tls::TlsOption;
 // Default size of ResultSet write buffer: 100KB
 const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;
 
+struct MysqlRuntimeOption {
+    query_handler: ServerSqlQueryHandlerRef,
+    tls_conf: Option<Arc<ServerConfig>>,
+    force_tls: bool,
+    user_provider: Option<UserProviderRef>,
+}
+
+type MysqlRuntimeOptionRef = Arc<MysqlRuntimeOption>;
+
 pub struct MysqlServer {
     base_server: BaseTcpServer,
     query_handler: ServerSqlQueryHandlerRef,
@@ -77,19 +86,19 @@ impl MysqlServer {
             let user_provider = user_provider.clone();
             let tls_conf = tls_conf.clone();
 
+            let mysql_runtime_option = Arc::new(MysqlRuntimeOption {
+                query_handler,
+                tls_conf,
+                force_tls,
+                user_provider,
+            });
+
             async move {
                 match tcp_stream {
                     Err(error) => error!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
-                        if let Err(error) = Self::handle(
-                            io_stream,
-                            io_runtime,
-                            query_handler,
-                            tls_conf,
-                            force_tls,
-                            user_provider,
-                        )
-                        .await
+                        if let Err(error) =
+                            Self::handle(io_stream, io_runtime, mysql_runtime_option).await
                         {
                             error!(error; "Unexpected error when handling TcpStream");
                         };
@@ -102,15 +111,12 @@ impl MysqlServer {
     async fn handle(
         stream: TcpStream,
         io_runtime: Arc<Runtime>,
-        query_handler: ServerSqlQueryHandlerRef,
-        tls_conf: Option<Arc<ServerConfig>>,
-        force_tls: bool,
-        user_provider: Option<UserProviderRef>,
+        runtime_opts: MysqlRuntimeOptionRef,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
         io_runtime .spawn(async move {
             // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
-            if let Err(e)  = Self::do_handle(stream, query_handler, tls_conf, force_tls, user_provider).await {
+            if let Err(e)  = Self::do_handle(stream, runtime_opts).await {
                 // TODO(LFC): Write this error to client as well, in MySQL text protocol.
                 // Looks like we have to expose opensrv-mysql's `PacketWriter`?
                 error!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time.")
@@ -120,28 +126,31 @@ impl MysqlServer {
         Ok(())
     }
 
-    async fn do_handle(
-        stream: TcpStream,
-        query_handler: ServerSqlQueryHandlerRef,
-        tls_conf: Option<Arc<ServerConfig>>,
-        force_tls: bool,
-        user_provider: Option<UserProviderRef>,
-    ) -> Result<()> {
-        let mut shim = MysqlInstanceShim::create(query_handler, stream.peer_addr()?, user_provider);
+    async fn do_handle(stream: TcpStream, runtime_opts: MysqlRuntimeOptionRef) -> Result<()> {
+        let mut shim = MysqlInstanceShim::create(
+            runtime_opts.query_handler.clone(),
+            stream.peer_addr()?,
+            runtime_opts.user_provider.clone(),
+        );
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
         let ops = IntermediaryOptions::default();
 
-        let (client_tls, init_params) =
-            AsyncMysqlIntermediary::init_before_ssl(&mut shim, &mut r, &mut w, &tls_conf).await?;
+        let (client_tls, init_params) = AsyncMysqlIntermediary::init_before_ssl(
+            &mut shim,
+            &mut r,
+            &mut w,
+            &runtime_opts.tls_conf,
+        )
+        .await?;
 
-        if force_tls && !client_tls {
+        if runtime_opts.force_tls && !client_tls {
             return Err(Error::TlsRequired {
                 server: "mysql".to_owned(),
             });
         }
 
-        match tls_conf {
+        match runtime_opts.tls_conf.clone() {
             Some(tls_conf) if client_tls => {
                 secure_run_with_options(shim, w, ops, tls_conf, init_params).await
             }

@@ -22,21 +22,20 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::parser::QueryLanguageParser;
 use query::{QueryEngineFactory, QueryEngineRef};
-use servers::error::{Error, Result};
-use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
-use table::test_util::MemTable;
-
-mod http;
-mod mysql;
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
+use servers::error::{Error, Result};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
+use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
+use table::test_util::MemTable;
 
+mod auth;
+mod http;
 mod interceptor;
+mod mysql;
 mod opentsdb;
 mod postgres;
-
 mod py_script;
 
 struct DummyInstance {

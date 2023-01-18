@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod authorize;
+pub mod authorize;
 pub mod handler;
 pub mod influxdb;
 pub mod opentsdb;
@@ -92,8 +92,8 @@ pub(crate) fn query_context_from_db(
     }
 }
 
-const HTTP_API_VERSION: &str = "v1";
-const HTTP_API_PREFIX: &str = "/v1/";
+pub const HTTP_API_VERSION: &str = "v1";
+pub const HTTP_API_PREFIX: &str = "/v1/";
 
 pub struct HttpServer {
     sql_handler: ServerSqlQueryHandlerRef,

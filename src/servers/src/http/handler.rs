@@ -28,7 +28,7 @@ use crate::http::{ApiState, JsonResponse};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
-    pub database: Option<String>,
+    pub db: Option<String>,
     pub sql: Option<String>,
 }
 
@@ -43,7 +43,7 @@ pub async fn sql(
     let sql_handler = &state.sql_handler;
     let start = Instant::now();
     let resp = if let Some(sql) = &params.sql {
-        match super::query_context_from_db(sql_handler.clone(), params.database) {
+        match super::query_context_from_db(sql_handler.clone(), params.db) {
             Ok(query_ctx) => {
                 JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
             }

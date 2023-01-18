@@ -287,7 +287,7 @@ mod tests {
 
         let provider = provider.unwrap();
         let result = provider
-            .auth(Identity::UserId("test", None), Password::PlainText("test"))
+            .authenticate(Identity::UserId("test", None), Password::PlainText("test"))
             .await;
         assert!(result.is_ok());
     }

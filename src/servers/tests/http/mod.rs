@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod authorize;
 mod http_handler_test;
 mod influxdb_test;
 mod opentsdb_test;

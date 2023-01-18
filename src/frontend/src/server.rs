@@ -34,6 +34,7 @@ use crate::frontend::FrontendOptions;
 use crate::influxdb::InfluxdbOptions;
 use crate::instance::FrontendInstance;
 use crate::prometheus::PrometheusOptions;
+use crate::Plugins;
 
 pub(crate) struct Services;
 
@@ -41,12 +42,14 @@ impl Services {
     pub(crate) async fn start<T>(
         opts: &FrontendOptions,
         instance: Arc<T>,
-        user_provider: Option<UserProviderRef>,
+        plugins: Arc<Plugins>,
     ) -> Result<()>
     where
         T: FrontendInstance,
     {
         info!("Starting frontend servers");
+        let user_provider = plugins.get::<UserProviderRef>().cloned();
+
         let grpc_server_and_addr = if let Some(opts) = &opts.grpc_options {
             let grpc_addr = parse_addr(&opts.addr)?;
 

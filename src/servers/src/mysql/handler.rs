@@ -123,7 +123,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     return false;
                 }
             };
-            match user_provider.auth(user_id, password).await {
+            match user_provider.authenticate(user_id, password).await {
                 Ok(userinfo) => {
                     user_info = Some(userinfo);
                 }
@@ -189,6 +189,12 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             self.query_handler.is_valid_schema(catalog, schema)?,
             error::DatabaseNotFoundSnafu { catalog, schema }
         );
+
+        if let Some(schema_validator) = &self.user_provider {
+            schema_validator
+                .authorize(catalog, schema, &self.session.user_info())
+                .await?;
+        }
 
         let context = self.session.context();
         context.set_current_catalog(catalog);

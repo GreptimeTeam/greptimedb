@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod user_provider;
-
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
@@ -24,11 +22,19 @@ use snafu::{Backtrace, ErrorCompat, OptionExt, Snafu};
 
 use crate::auth::user_provider::StaticUserProvider;
 
+pub mod user_provider;
+
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
     fn name(&self) -> &str;
 
-    async fn auth(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfo>;
+    /// [`authenticate`] checks whether a user is valid and allowed to access the database.
+    async fn authenticate(&self, id: Identity<'_>, password: Password<'_>) -> Result<UserInfo>;
+
+    /// [`authorize`] checks whether a connection request
+    /// from a certain user to a certain catalog/schema is legal.
+    /// This method should be called after [`authenticate`].
+    async fn authorize(&self, catalog: &str, schema: &str, user_info: &UserInfo) -> Result<()>;
 }
 
 pub type UserProviderRef = Arc<dyn UserProvider>;
@@ -76,6 +82,12 @@ pub enum Error {
     #[snafu(display("Invalid config value: {}, {}", value, msg))]
     InvalidConfig { value: String, msg: String },
 
+    #[snafu(display("Illegal runtime param: {}", msg))]
+    IllegalParam { msg: String },
+
+    #[snafu(display("Internal state error: {}", msg))]
+    InternalState { msg: String },
+
     #[snafu(display("IO error, source: {}", source))]
     Io {
         source: std::io::Error,
@@ -96,18 +108,33 @@ pub enum Error {
 
     #[snafu(display("Username and password does not match, username: {}", username))]
     UserPasswordMismatch { username: String },
+
+    #[snafu(display(
+        "User {} is not allowed to access catalog {} and schema {}",
+        username,
+        catalog,
+        schema
+    ))]
+    AccessDenied {
+        catalog: String,
+        schema: String,
+        username: String,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::InvalidConfig { .. } => StatusCode::InvalidArguments,
+            Error::IllegalParam { .. } => StatusCode::InvalidArguments,
+            Error::InternalState { .. } => StatusCode::Unexpected,
             Error::Io { .. } => StatusCode::Internal,
             Error::AuthBackend { .. } => StatusCode::Internal,
 
             Error::UserNotFound { .. } => StatusCode::UserNotFound,
             Error::UnsupportedPasswordType { .. } => StatusCode::UnsupportedPasswordType,
             Error::UserPasswordMismatch { .. } => StatusCode::UserPasswordMismatch,
+            Error::AccessDenied { .. } => StatusCode::AccessDenied,
         }
     }
 
@@ -121,108 +148,3 @@ impl ErrorExt for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[cfg(test)]
-pub mod test {
-    use super::{Identity, Password, UserInfo, UserProvider};
-
-    pub struct MockUserProvider {}
-
-    #[async_trait::async_trait]
-    impl UserProvider for MockUserProvider {
-        fn name(&self) -> &str {
-            "mock_user_provider"
-        }
-
-        async fn auth(
-            &self,
-            id: Identity<'_>,
-            password: Password<'_>,
-        ) -> Result<UserInfo, super::Error> {
-            match id {
-                Identity::UserId(username, _host) => match password {
-                    Password::PlainText(password) => {
-                        if username == "greptime" {
-                            if password == "greptime" {
-                                return Ok(UserInfo::new("greptime"));
-                            } else {
-                                return super::UserPasswordMismatchSnafu {
-                                    username: username.to_string(),
-                                }
-                                .fail();
-                            }
-                        } else {
-                            return super::UserNotFoundSnafu {
-                                username: username.to_string(),
-                            }
-                            .fail();
-                        }
-                    }
-                    _ => super::UnsupportedPasswordTypeSnafu {
-                        password_type: "mysql_native_password",
-                    }
-                    .fail(),
-                },
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::test::MockUserProvider;
-    use super::{Identity, Password, UserProvider};
-    use crate::auth;
-
-    #[tokio::test]
-    async fn test_auth_by_plain_text() {
-        let user_provider = MockUserProvider {};
-        assert_eq!("mock_user_provider", user_provider.name());
-
-        // auth success
-        let auth_result = user_provider
-            .auth(
-                Identity::UserId("greptime", None),
-                Password::PlainText("greptime"),
-            )
-            .await;
-        assert!(auth_result.is_ok());
-        assert_eq!("greptime", auth_result.unwrap().username());
-
-        // auth failed, unsupported password type
-        let auth_result = user_provider
-            .auth(
-                Identity::UserId("greptime", None),
-                Password::MysqlNativePassword(b"hashed_value", b"salt"),
-            )
-            .await;
-        assert!(auth_result.is_err());
-        matches!(
-            auth_result.err().unwrap(),
-            auth::Error::UnsupportedPasswordType { .. }
-        );
-
-        // auth failed, err: user not exist.
-        let auth_result = user_provider
-            .auth(
-                Identity::UserId("not_exist_username", None),
-                Password::PlainText("greptime"),
-            )
-            .await;
-        assert!(auth_result.is_err());
-        matches!(auth_result.err().unwrap(), auth::Error::UserNotFound { .. });
-
-        // auth failed, err: wrong password
-        let auth_result = user_provider
-            .auth(
-                Identity::UserId("greptime", None),
-                Password::PlainText("wrong_password"),
-            )
-            .await;
-        assert!(auth_result.is_err());
-        matches!(
-            auth_result.err().unwrap(),
-            auth::Error::UserPasswordMismatch { .. }
-        );
-    }
-}
