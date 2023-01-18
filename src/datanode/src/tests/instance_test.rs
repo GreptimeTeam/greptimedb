@@ -343,7 +343,6 @@ pub async fn test_execute_create() {
 }
 
 #[tokio::test]
-#[should_panic]
 async fn test_rename_table() {
     let instance = MockInstance::new("test_rename_table_local").await;
 
@@ -394,7 +393,9 @@ async fn test_rename_table() {
     .to_string();
     check_output_stream(output, expected).await;
 
-    execute_sql_in_db(&instance, "select * from demo", "db").await;
+    try_execute_sql_in_db(&instance, "select * from demo", "db")
+        .await
+        .expect_err("no table found in expect");
 }
 
 #[tokio::test]
@@ -641,10 +642,18 @@ async fn execute_sql(instance: &MockInstance, sql: &str) -> Output {
     execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
 }
 
-async fn execute_sql_in_db(instance: &MockInstance, sql: &str, db: &str) -> Output {
+async fn try_execute_sql_in_db(
+    instance: &MockInstance,
+    sql: &str,
+    db: &str,
+) -> Result<Output, crate::error::Error> {
     let query_ctx = Arc::new(QueryContext::with(
         DEFAULT_CATALOG_NAME.to_owned(),
         db.to_string(),
     ));
-    instance.inner().execute_sql(sql, query_ctx).await.unwrap()
+    instance.inner().execute_sql(sql, query_ctx).await
+}
+
+async fn execute_sql_in_db(instance: &MockInstance, sql: &str, db: &str) -> Output {
+    try_execute_sql_in_db(instance, sql, db).await.unwrap()
 }
