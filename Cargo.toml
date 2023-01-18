@@ -74,6 +74,6 @@ debug = true
 [profile.weekly]
 inherits = "release"
 strip = true
-lto = true
+lto = "thin"
 debug = false
 incremental = false
