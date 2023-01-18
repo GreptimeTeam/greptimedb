@@ -114,7 +114,7 @@ impl MysqlServer {
         runtime_opts: MysqlRuntimeOptionRef,
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
-        io_runtime .spawn(async move {
+        io_runtime.spawn(async move {
             // TODO(LFC): Use `output_stream` to write large MySQL ResultSet to client.
             if let Err(e)  = Self::do_handle(stream, runtime_opts).await {
                 // TODO(LFC): Write this error to client as well, in MySQL text protocol.
@@ -167,9 +167,7 @@ impl Server for MysqlServer {
 
     async fn start(&self, listening: SocketAddr) -> Result<SocketAddr> {
         let (stream, addr) = self.base_server.bind(listening).await?;
-
         let io_runtime = self.base_server.io_runtime();
-
         let tls_conf = self.tls.setup()?.map(Arc::new);
 
         let join_handle = tokio::spawn(self.accept(io_runtime, stream, tls_conf));
