@@ -97,6 +97,7 @@ impl Services {
                             source: InternalIo { source: e },
                         })?
                         .map(Arc::new),
+                    opts.reject_no_database,
                 )),
             );
 

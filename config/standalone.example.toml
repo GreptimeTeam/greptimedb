@@ -26,6 +26,7 @@ runtime_size = 8
 [mysql_options]
 addr = '127.0.0.1:4002'
 runtime_size = 2
+reject_no_database = false
 
 [influxdb_options]
 enable = true

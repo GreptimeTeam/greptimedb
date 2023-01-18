@@ -66,20 +66,37 @@ impl MysqlSpawnRef {
 /// [`MysqlSpawnConfig`] stores config values
 /// which are used to initialize [`MysqlInstanceShim`]s.
 pub struct MysqlSpawnConfig {
+    // tls config
     force_tls: bool,
     tls: Option<Arc<ServerConfig>>,
+    // other shim config
+    reject_no_database: bool,
 }
 
 impl MysqlSpawnConfig {
-    pub fn new(force_tls: bool, tls: Option<Arc<ServerConfig>>) -> MysqlSpawnConfig {
-        MysqlSpawnConfig { force_tls, tls }
+    pub fn new(
+        force_tls: bool,
+        tls: Option<Arc<ServerConfig>>,
+        reject_no_database: bool,
+    ) -> MysqlSpawnConfig {
+        MysqlSpawnConfig {
+            force_tls,
+            tls,
+            reject_no_database,
+        }
     }
 
-    fn force_tls(&self) -> bool {
-        self.force_tls
-    }
     fn tls(&self) -> Option<Arc<ServerConfig>> {
         self.tls.clone()
+    }
+}
+
+impl From<&MysqlSpawnConfig> for IntermediaryOptions {
+    fn from(value: &MysqlSpawnConfig) -> Self {
+        IntermediaryOptions {
+            reject_connection_on_dbname_absence: value.reject_no_database,
+            ..Default::default()
+        }
     }
 }
 
@@ -161,13 +178,14 @@ impl MysqlServer {
         );
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
-        let ops = IntermediaryOptions::default();
+
+        let ops = spawn_config.as_ref().into();
 
         let (client_tls, init_params) =
             AsyncMysqlIntermediary::init_before_ssl(&mut shim, &mut r, &mut w, &spawn_config.tls())
                 .await?;
 
-        if spawn_config.force_tls() && !client_tls {
+        if spawn_config.force_tls && !client_tls {
             return Err(Error::TlsRequired {
                 server: "mysql".to_owned(),
             });
