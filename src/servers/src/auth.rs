@@ -85,6 +85,9 @@ pub enum Error {
     #[snafu(display("Illegal runtime param: {}", msg))]
     IllegalParam { msg: String },
 
+    #[snafu(display("Internal state error: {}", msg))]
+    InternalState { msg: String },
+
     #[snafu(display("IO error, source: {}", source))]
     Io {
         source: std::io::Error,
@@ -124,6 +127,7 @@ impl ErrorExt for Error {
         match self {
             Error::InvalidConfig { .. } => StatusCode::InvalidArguments,
             Error::IllegalParam { .. } => StatusCode::InvalidArguments,
+            Error::InternalState { .. } => StatusCode::Unexpected,
             Error::Io { .. } => StatusCode::Internal,
             Error::AuthBackend { .. } => StatusCode::Internal,
 

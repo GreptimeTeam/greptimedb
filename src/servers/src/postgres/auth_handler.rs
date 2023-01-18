@@ -39,7 +39,7 @@ struct PgLoginVerifier {
 struct LoginInfo {
     user: Option<String>,
     catalog: Option<String>,
-    database: Option<String>,
+    schema: Option<String>,
     host: String,
 }
 
@@ -54,9 +54,9 @@ impl LoginInfo {
                 .metadata()
                 .get(super::METADATA_CATALOG)
                 .map(Into::into),
-            database: client
+            schema: client
                 .metadata()
-                .get(super::METADATA_DATABASE)
+                .get(super::METADATA_SCHEMA)
                 .map(Into::into),
             host: client.socket_addr().ip().to_string(),
         }
@@ -95,7 +95,7 @@ impl PgLoginVerifier {
                 Some(name) => name,
                 None => return Ok(false),
             };
-            let schema = match &login.database {
+            let schema = match &login.schema {
                 Some(name) => name,
                 None => return Ok(false),
             };

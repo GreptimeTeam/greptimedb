@@ -24,7 +24,7 @@ use snafu::{OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
 use crate::auth::Error::IllegalParam;
-use crate::auth::{Identity, IllegalParamSnafu, UserProviderRef};
+use crate::auth::{Identity, IllegalParamSnafu, InternalStateSnafu, UserProviderRef};
 use crate::error::{self, Result};
 use crate::http::HTTP_API_PREFIX;
 
@@ -118,10 +118,8 @@ async fn authorize<B: Send + Sync + 'static>(
     let user_info = request
         .extensions()
         .get::<UserInfo>()
-        .context(IllegalParamSnafu {
-            // should not happen
-            // since authorize should happen after authenticate
-            msg: "fail to get user info from request",
+        .context(InternalStateSnafu {
+            msg: "no user info provided while authorizing",
         })?;
 
     user_provider.authorize(catalog, database, user_info).await
