@@ -64,11 +64,11 @@ async fn test_schema_validating() {
     let mut http_auth: HttpAuth<BoxBody> = HttpAuth::new(mock_user_provider);
 
     // base64encode("greptime:greptime") == "Z3JlcHRpbWU6Z3JlcHRpbWU="
-    // http://localhost/{http_api_version}/sql?database=greptime
+    // http://localhost/{http_api_version}/sql?db=greptime
     let version = servers::http::HTTP_API_VERSION;
     let req = mock_http_request(
         Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="),
-        Some(format!("http://localhost/{version}/sql?database=public").as_str()),
+        Some(format!("http://localhost/{version}/sql?db=public").as_str()),
     )
     .unwrap();
     let req = http_auth.authorize(req).await.unwrap();
@@ -79,7 +79,7 @@ async fn test_schema_validating() {
     // wrong database
     let req = mock_http_request(
         Some("Basic Z3JlcHRpbWU6Z3JlcHRpbWU="),
-        Some(format!("http://localhost/{version}/sql?database=wrong").as_str()),
+        Some(format!("http://localhost/{version}/sql?db=wrong").as_str()),
     )
     .unwrap();
     let result = http_auth.authorize(req).await;
@@ -110,9 +110,8 @@ fn mock_http_request(
     uri: Option<&str>,
 ) -> servers::error::Result<Request<()>> {
     let http_api_version = servers::http::HTTP_API_VERSION;
-    let mut req = Request::builder().uri(
-        uri.unwrap_or(format!("http://localhost/{http_api_version}/sql?database=public").as_str()),
-    );
+    let mut req = Request::builder()
+        .uri(uri.unwrap_or(format!("http://localhost/{http_api_version}/sql?db=public").as_str()));
     if let Some(auth_header) = auth_header {
         req = req.header(http::header::AUTHORIZATION, auth_header);
     }

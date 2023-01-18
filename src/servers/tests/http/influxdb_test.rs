@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use crate::auth::{DatabaseAuthInfo, MockUserProvider};
 
 struct DummyInstance {
-    tx: mpsc::Sender<(String, String)>,
+    tx: Arc<mpsc::Sender<(String, String)>>,
 }
 
 #[async_trait]
@@ -67,15 +67,17 @@ impl SqlQueryHandler for DummyInstance {
     }
 }
 
-fn make_test_app(tx: mpsc::Sender<(String, String)>) -> Router {
+fn make_test_app(tx: Arc<mpsc::Sender<(String, String)>>, db_name: Option<&str>) -> Router {
     let instance = Arc::new(DummyInstance { tx });
     let mut server = HttpServer::new(instance.clone(), HttpOptions::default());
     let mut user_provider = MockUserProvider::default();
-    user_provider.set_authorization_info(DatabaseAuthInfo {
-        catalog: "greptime",
-        schema: "public",
-        username: "greptime",
-    });
+    if let Some(name) = db_name {
+        user_provider.set_authorization_info(DatabaseAuthInfo {
+            catalog: "greptime",
+            schema: name,
+            username: "greptime",
+        })
+    }
     server.set_user_provider(Arc::new(user_provider));
 
     server.set_influxdb_handler(instance);
@@ -85,13 +87,14 @@ fn make_test_app(tx: mpsc::Sender<(String, String)>) -> Router {
 #[tokio::test]
 async fn test_influxdb_write() {
     let (tx, mut rx) = mpsc::channel(100);
+    let tx = Arc::new(tx);
 
-    let app = make_test_app(tx);
+    let app = make_test_app(tx.clone(), None);
     let client = TestClient::new(app);
 
     // right request
     let result = client
-        .post("/v1/influxdb/write?database=public")
+        .post("/v1/influxdb/write?db=public")
         .body("monitor,host=host1 cpu=1.2 1664370459457010101")
         .header(
             http::header::AUTHORIZATION,
@@ -102,8 +105,12 @@ async fn test_influxdb_write() {
     assert_eq!(result.status(), 204);
     assert!(result.text().await.is_empty());
 
+    // make new app for db=influxdb
+    let app = make_test_app(tx, Some("influxdb"));
+    let client = TestClient::new(app);
+
     let result = client
-        .post("/v1/influxdb/write?db=influxdb&database=public")
+        .post("/v1/influxdb/write?db=influxdb")
         .body("monitor,host=host1 cpu=1.2 1664370459457010101")
         .header(
             http::header::AUTHORIZATION,
@@ -116,7 +123,7 @@ async fn test_influxdb_write() {
 
     // bad request
     let result = client
-        .post("/v1/influxdb/write?db=influxdb&database=public")
+        .post("/v1/influxdb/write?db=influxdb")
         .body("monitor,   host=host1 cpu=1.2 1664370459457010101")
         .header(
             http::header::AUTHORIZATION,

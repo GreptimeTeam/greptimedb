@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,7 +26,6 @@ use tower_http::auth::AsyncAuthorizeRequest;
 use crate::auth::Error::IllegalParam;
 use crate::auth::{Identity, IllegalParamSnafu, UserProviderRef};
 use crate::error::{self, Result};
-use crate::http::handler::SqlQuery;
 use crate::http::HTTP_API_PREFIX;
 
 pub struct HttpAuth<RespBody> {
@@ -99,10 +99,13 @@ async fn authorize<B: Send + Sync + 'static>(
 ) -> crate::auth::Result<()> {
     // try get database name
     let query = request.uri().query().unwrap_or_default();
-    let input_database = match serde_urlencoded::from_str(query) {
-        Ok(SqlQuery { database, .. }) => database.context(IllegalParamSnafu {
-            msg: "fail to get valid database from http query",
-        })?,
+    let input_database = match serde_urlencoded::from_str::<HashMap<String, String>>(query) {
+        Ok(query_map) => query_map
+            .get("db")
+            .context(IllegalParamSnafu {
+                msg: "fail to get valid database from http query",
+            })?
+            .to_owned(),
         Err(e) => IllegalParamSnafu {
             msg: format!("fail to parse http query: {e}"),
         }
