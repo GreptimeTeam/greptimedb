@@ -25,7 +25,7 @@ use mysql_async::SslOpts;
 use rand::rngs::StdRng;
 use rand::Rng;
 use servers::error::Result;
-use servers::mysql::server::MysqlServer;
+use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::server::Server;
 use servers::tls::TlsOption;
 use table::test_util::MemTable;
@@ -54,10 +54,12 @@ fn create_mysql_server(
     }
 
     Ok(MysqlServer::create_server(
-        query_handler,
         io_runtime,
-        tls,
-        Some(Arc::new(provider)),
+        Arc::new(MysqlSpawnRef::new(query_handler, Some(Arc::new(provider)))),
+        Arc::new(MysqlSpawnConfig::new(
+            tls.should_force_tls(),
+            tls.setup()?.map(Arc::new),
+        )),
     ))
 }
 

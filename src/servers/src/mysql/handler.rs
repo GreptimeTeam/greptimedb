@@ -44,8 +44,8 @@ pub struct MysqlInstanceShim {
 impl MysqlInstanceShim {
     pub fn create(
         query_handler: ServerSqlQueryHandlerRef,
-        client_addr: SocketAddr,
         user_provider: Option<UserProviderRef>,
+        client_addr: SocketAddr,
     ) -> MysqlInstanceShim {
         // init a random salt
         let mut bs = vec![0u8; 20];
