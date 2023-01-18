@@ -150,28 +150,28 @@ async fn test_range_filter() {
     tester
         .check(
             "select * from m where ts >= 990;",
-            TimestampRange::from(Timestamp::new(990, TimeUnit::Millisecond)),
+            TimestampRange::from_start(Timestamp::new(990, TimeUnit::Millisecond)),
         )
         .await;
 
     tester
         .check(
             "select * from m where ts <=1000;",
-            TimestampRange::until(Timestamp::new(1000, TimeUnit::Millisecond), true),
+            TimestampRange::until_end(Timestamp::new(1000, TimeUnit::Millisecond), true),
         )
         .await;
 
     tester
         .check(
             "select * from m where ts > 1000;",
-            TimestampRange::from(Timestamp::new(1000, TimeUnit::Millisecond)),
+            TimestampRange::from_start(Timestamp::new(1000, TimeUnit::Millisecond)),
         )
         .await;
 
     tester
         .check(
             "select * from m where ts < 1000;",
-            TimestampRange::until(Timestamp::new(1000, TimeUnit::Millisecond), false),
+            TimestampRange::until_end(Timestamp::new(1000, TimeUnit::Millisecond), false),
         )
         .await;
 
@@ -228,7 +228,7 @@ async fn test_range_filter() {
     tester
         .check(
             "select * from m where ts>='2023-01-16 17:01:57+08:00'",
-            TimestampRange::from(Timestamp::new(1673859717000, TimeUnit::Millisecond)),
+            TimestampRange::from_start(Timestamp::new(1673859717000, TimeUnit::Millisecond)),
         )
         .await;
 

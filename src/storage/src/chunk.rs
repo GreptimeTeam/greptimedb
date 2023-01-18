@@ -183,7 +183,7 @@ impl ChunkReaderBuilder {
     pub fn file_in_range(file: &FileHandle, predicate: TimestampRange) -> bool {
         // end_timestamp of sst file is inclusive.
         let file_ts_range =
-            TimestampRange::new_inclusive_unchecked(file.start_timestamp(), file.end_timestamp());
+            TimestampRange::new_inclusive(file.start_timestamp(), file.end_timestamp());
         file_ts_range.intersects(&predicate)
     }
 }

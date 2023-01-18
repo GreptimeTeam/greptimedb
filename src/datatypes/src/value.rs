@@ -290,7 +290,7 @@ fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
 }
 
 /// Convert [ScalarValue] to [Timestamp].
-/// Return `None` if
+/// Return `None` if given scalar value cannot be converted to a valid timestamp.
 pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
     match scalar {
         ScalarValue::Int64(val) => val.map(Timestamp::new_millisecond),

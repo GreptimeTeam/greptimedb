@@ -194,7 +194,7 @@ impl<T: PartialOrd> GenericRange<T> {
 pub type TimestampRange = GenericRange<Timestamp>;
 
 impl TimestampRange {
-    pub fn new_inclusive_unchecked(start: Option<Timestamp>, end: Option<Timestamp>) -> Self {
+    pub fn new_inclusive(start: Option<Timestamp>, end: Option<Timestamp>) -> Self {
         let end = if let Some(end) = end {
             end.value()
                 .checked_add(1)
@@ -228,7 +228,7 @@ impl TimestampRange {
     /// ### Notice
     /// Left-close right-open range cannot properly represent range with exclusive start like: `(start, ...)`.
     /// You may resort to `[start-1, ...)` instead.
-    pub fn from(start: Timestamp) -> Self {
+    pub fn from_start(start: Timestamp) -> Self {
         Self {
             start: Some(start),
             end: None,
@@ -239,7 +239,7 @@ impl TimestampRange {
     /// ### Notice
     /// Left-close right-open range cannot properly represent range with inclusive end like: `[..., END]`.
     /// If `inclusive` is true, this method returns `[-INF, end+1)` instead.
-    pub fn until(end: Timestamp, inclusive: bool) -> Self {
+    pub fn until_end(end: Timestamp, inclusive: bool) -> Self {
         let end = if inclusive {
             end.value()
                 .checked_add(1)

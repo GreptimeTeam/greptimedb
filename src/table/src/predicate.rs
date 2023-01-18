@@ -70,7 +70,7 @@ impl Predicate {
     }
 }
 
-// tests for `TimeRangePredicateBuilder`locates in src/query/tests/time_range_filter_test.rs
+// tests for `TimeRangePredicateBuilder` locates in src/query/tests/time_range_filter_test.rs
 // since it requires query engine to convert sql to filters.
 pub struct TimeRangePredicateBuilder<'a> {
     ts_col_name: &'a str,
@@ -94,7 +94,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         res
     }
 
-    fn extract_time_range_from_expr(&self, expr: &DfExpr) -> GenericRange<Timestamp> {
+    fn extract_time_range_from_expr(&self, expr: &DfExpr) -> TimestampRange {
         match expr {
             DfExpr::BinaryExpr(BinaryExpr { left, op, right }) => {
                 self.extract_from_binary_expr(left, op, right)
@@ -127,19 +127,19 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 .unwrap_or_else(TimestampRange::min_to_max),
             Operator::Lt => self
                 .get_timestamp_filter(left, right)
-                .map(|ts| TimestampRange::until(ts, false))
+                .map(|ts| TimestampRange::until_end(ts, false))
                 .unwrap_or_else(TimestampRange::min_to_max),
             Operator::LtEq => self
                 .get_timestamp_filter(left, right)
-                .map(|ts| TimestampRange::until(ts, true))
+                .map(|ts| TimestampRange::until_end(ts, true))
                 .unwrap_or_else(TimestampRange::min_to_max),
             Operator::Gt => self
                 .get_timestamp_filter(left, right)
-                .map(TimestampRange::from)
+                .map(TimestampRange::from_start)
                 .unwrap_or_else(TimestampRange::min_to_max),
             Operator::GtEq => self
                 .get_timestamp_filter(left, right)
-                .map(TimestampRange::from)
+                .map(TimestampRange::from_start)
                 .unwrap_or_else(TimestampRange::min_to_max),
             Operator::And => self
                 .extract_time_range_from_expr(left)
@@ -206,7 +206,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
             (DfExpr::Literal(low), DfExpr::Literal(high)) => {
                 let low_opt = scalar_value_to_timestamp(low);
                 let high_opt = scalar_value_to_timestamp(high);
-                TimestampRange::new_inclusive_unchecked(low_opt, high_opt)
+                TimestampRange::new_inclusive(low_opt, high_opt)
             }
             _ => TimestampRange::min_to_max(),
         }
