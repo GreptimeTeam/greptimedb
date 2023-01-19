@@ -235,15 +235,28 @@ async fn test_query_pg_concurrently() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_server_secure_prefer_client_plain() -> Result<()> {
     common_telemetry::init_default_ut_logging();
+    do_simple_query_with_secure_server(servers::tls::TlsMode::Prefer, false, false).await?;
+    Ok(())
+}
 
-    let server_tls = TlsOption {
-        mode: servers::tls::TlsMode::Prefer,
-        cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
-    };
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_secure_prefer_client_plain_with_pkcs8_priv_key() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    do_simple_query_with_secure_server(servers::tls::TlsMode::Prefer, false, true).await?;
+    Ok(())
+}
 
-    let client_tls = false;
-    do_simple_query(server_tls, client_tls).await?;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_secure_require_client_secure() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    do_simple_query_with_secure_server(servers::tls::TlsMode::Require, true, false).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_secure_require_client_secure_with_pkcs8_priv_key() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    do_simple_query_with_secure_server(servers::tls::TlsMode::Require, true, true).await?;
     Ok(())
 }
 
@@ -254,7 +267,7 @@ async fn test_server_secure_require_client_plain() -> Result<()> {
     let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
+        key_path: "tests/ssl/server-rsa.key".to_owned(),
     };
     let server_port = start_test_server(server_tls).await?;
     let r = create_plain_connection(server_port, false).await;
@@ -263,17 +276,17 @@ async fn test_server_secure_require_client_plain() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_server_secure_require_client_secure() -> Result<()> {
+async fn test_server_secure_require_client_plain_with_pkcs8_priv_key() -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
     let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
+        key_path: "tests/ssl/server-pkcs8.key".to_owned(),
     };
-
-    let client_tls = true;
-    do_simple_query(server_tls, client_tls).await?;
+    let server_port = start_test_server(server_tls).await?;
+    let r = create_plain_connection(server_port, false).await;
+    assert!(r.is_err());
     Ok(())
 }
 
@@ -433,4 +446,24 @@ impl ServerCertVerifier for AcceptAllVerifier {
     ) -> std::result::Result<ServerCertVerified, Error> {
         Ok(ServerCertVerified::assertion())
     }
+}
+
+async fn do_simple_query_with_secure_server(
+    server_tls_mode: servers::tls::TlsMode,
+    client_tls: bool,
+    is_pkcs8_priv_key: bool,
+) -> Result<()> {
+    let server_tls = TlsOption {
+        mode: server_tls_mode,
+        cert_path: "tests/ssl/server.crt".to_owned(),
+        key_path: {
+            if is_pkcs8_priv_key {
+                "tests/ssl/server-pkcs8.key".to_owned()
+            } else {
+                "tests/ssl/server-rsa.key".to_owned()
+            }
+        },
+    };
+
+    do_simple_query(server_tls, client_tls).await
 }

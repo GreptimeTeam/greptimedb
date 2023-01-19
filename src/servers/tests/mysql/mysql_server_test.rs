@@ -183,40 +183,29 @@ async fn test_query_all_datatypes() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_server_prefer_secure_client_plain() -> Result<()> {
-    let server_tls = TlsOption {
-        mode: servers::tls::TlsMode::Prefer,
-        cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
-    };
-
-    let client_tls = false;
-    do_test_query_all_datatypes(server_tls, client_tls).await?;
+    do_test_query_all_datatypes_with_secure_server(servers::tls::TlsMode::Prefer, false, false)
+        .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_server_prefer_secure_client_secure() -> Result<()> {
-    let server_tls = TlsOption {
-        mode: servers::tls::TlsMode::Prefer,
-        cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
-    };
-
-    let client_tls = true;
-    do_test_query_all_datatypes(server_tls, client_tls).await?;
+async fn test_server_prefer_secure_client_plain_with_pkcs8_priv_key() -> Result<()> {
+    do_test_query_all_datatypes_with_secure_server(servers::tls::TlsMode::Prefer, false, true)
+        .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_server_require_secure_client_secure() -> Result<()> {
-    let server_tls = TlsOption {
-        mode: servers::tls::TlsMode::Require,
-        cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
-    };
+    do_test_query_all_datatypes_with_secure_server(servers::tls::TlsMode::Require, true, false)
+        .await?;
+    Ok(())
+}
 
-    let client_tls = true;
-    do_test_query_all_datatypes(server_tls, client_tls).await?;
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_server_require_secure_client_secure_with_pkcs8_priv_key() -> Result<()> {
+    do_test_query_all_datatypes_with_secure_server(servers::tls::TlsMode::Require, true, true)
+        .await?;
     Ok(())
 }
 
@@ -225,7 +214,38 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
+        key_path: "tests/ssl/server-rsa.key".to_owned(),
+    };
+
+    let client_tls = false;
+
+    #[allow(unused)]
+    let TestingData {
+        column_schemas,
+        mysql_columns_def,
+        columns,
+        mysql_text_output_rows,
+    } = all_datatype_testing_data();
+    let schema = Arc::new(Schema::new(column_schemas.clone()));
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    let table = MemTable::new("all_datatypes", recordbatch);
+
+    let mysql_server = create_mysql_server(table, server_tls)?;
+
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    let server_addr = mysql_server.start(listening).await.unwrap();
+
+    let r = create_connection(server_addr.port(), None, client_tls).await;
+    assert!(r.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_required_secure_client_plain_with_pkcs8_priv_key() -> Result<()> {
+    let server_tls = TlsOption {
+        mode: servers::tls::TlsMode::Require,
+        cert_path: "tests/ssl/server.crt".to_owned(),
+        key_path: "tests/ssl/server-pkcs8.key".to_owned(),
     };
 
     let client_tls = false;
@@ -392,4 +412,24 @@ async fn create_connection(
     }
 
     mysql_async::Conn::new(opts).await
+}
+
+async fn do_test_query_all_datatypes_with_secure_server(
+    server_tls_mode: servers::tls::TlsMode,
+    client_tls: bool,
+    is_pkcs8_priv_key: bool,
+) -> Result<()> {
+    let server_tls = TlsOption {
+        mode: server_tls_mode,
+        cert_path: "tests/ssl/server.crt".to_owned(),
+        key_path: {
+            if is_pkcs8_priv_key {
+                "tests/ssl/server-pkcs8.key".to_owned()
+            } else {
+                "tests/ssl/server-rsa.key".to_owned()
+            }
+        },
+    };
+
+    do_test_query_all_datatypes(server_tls, client_tls).await
 }
