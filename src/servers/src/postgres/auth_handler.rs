@@ -23,7 +23,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
-use session::context::{UserInfo, DEFAULT_USERNAME};
+use session::context::UserInfo;
 use snafu::ResultExt;
 
 use crate::auth::{Identity, Password, UserProviderRef};
@@ -202,21 +202,6 @@ impl StartupHandler for PgAuthStartupHandler {
                         ))
                         .await?;
                 } else {
-                    // no user is provided, use default user
-                    // and still do authorization
-                    let mut login_info = LoginInfo::from_client_info(client);
-                    login_info.user = Some(DEFAULT_USERNAME.to_string());
-
-                    let authorize_result = self.verifier.authorize(&login_info).await;
-                    if !matches!(authorize_result, Ok(true)) {
-                        return send_error(
-                            client,
-                            "FATAL",
-                            "28P01",
-                            "password authorization failed".to_owned(),
-                        )
-                        .await;
-                    }
                     auth::finish_authentication(client, &self.param_provider).await;
                 }
             }
