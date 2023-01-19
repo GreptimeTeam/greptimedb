@@ -392,6 +392,60 @@ async fn test_rename_table() {
 "
     .to_string();
     check_output_stream(output, expected).await;
+
+    try_execute_sql_in_db(&instance, "select * from demo", "db")
+        .await
+        .expect_err("no table found in expect");
+}
+
+#[tokio::test]
+async fn test_create_table_after_rename_table() {
+    let instance = MockInstance::new("test_rename_table_local").await;
+
+    let output = execute_sql(&instance, "create database db").await;
+    assert!(matches!(output, Output::AffectedRows(1)));
+
+    // create test table
+    let table_name = "demo";
+    let output = execute_sql_in_db(
+        &instance,
+        &format!("create table {table_name}(host string, cpu double, memory double, ts timestamp, time index(ts))"),
+        "db",
+    )
+        .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    // rename table
+    let new_table_name = "test_table";
+    let output = execute_sql_in_db(
+        &instance,
+        &format!("alter table {table_name} rename {new_table_name}"),
+        "db",
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    // create table with same name
+    // create test table
+    let output = execute_sql_in_db(
+        &instance,
+        &format!("create table {table_name}(host string, cpu double, memory double, ts timestamp, time index(ts))"),
+        "db",
+    )
+        .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let expect = "\
++------------+
+| Tables     |
++------------+
+| demo       |
+| test_table |
++------------+\
+"
+    .to_string();
+    let output = execute_sql_in_db(&instance, "show tables", "db").await;
+    check_output_stream(output, expect).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -588,10 +642,18 @@ async fn execute_sql(instance: &MockInstance, sql: &str) -> Output {
     execute_sql_in_db(instance, sql, DEFAULT_SCHEMA_NAME).await
 }
 
-async fn execute_sql_in_db(instance: &MockInstance, sql: &str, db: &str) -> Output {
+async fn try_execute_sql_in_db(
+    instance: &MockInstance,
+    sql: &str,
+    db: &str,
+) -> Result<Output, crate::error::Error> {
     let query_ctx = Arc::new(QueryContext::with(
         DEFAULT_CATALOG_NAME.to_owned(),
         db.to_string(),
     ));
-    instance.inner().execute_sql(sql, query_ctx).await.unwrap()
+    instance.inner().execute_sql(sql, query_ctx).await
+}
+
+async fn execute_sql_in_db(instance: &MockInstance, sql: &str, db: &str) -> Output {
+    try_execute_sql_in_db(instance, sql, db).await.unwrap()
 }
