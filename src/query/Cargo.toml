@@ -34,7 +34,7 @@ session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
 table = { path = "../table" }
-tokio = "1.0"
+tokio = "1.23"
 
 [dev-dependencies]
 approx_eq = "0.1"
@@ -47,5 +47,5 @@ rand = "0.8"
 statrs = "0.15"
 stats-cli = "3.0"
 streaming-stats = "0.2"
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.23", features = ["full"] }
 tokio-stream = "0.1"
