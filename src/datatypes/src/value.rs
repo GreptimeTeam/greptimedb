@@ -297,7 +297,7 @@ pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
         ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s) {
             Ok(t) => Some(t),
             Err(e) => {
-                logging::error!("Failed to convert string literal {s} to timestamp, error: {e:?}");
+                logging::error!(e;"Failed to convert string literal {s} to timestamp");
                 None
             }
         },
