@@ -111,6 +111,10 @@ impl LogStore for NoopLogStore {
         let _ = id;
         Ok(())
     }
+
+    fn get_disk_size(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[cfg(test)]

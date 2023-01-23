@@ -73,6 +73,9 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     /// the log files if all entries inside are obsolete. This method may not delete log
     /// files immediately.
     async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error>;
+
+    /// Get wal disk usage size.
+    fn get_disk_size(&self) -> Option<usize>;
 }
 
 #[derive(Debug)]

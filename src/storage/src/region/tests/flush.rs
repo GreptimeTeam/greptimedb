@@ -113,6 +113,7 @@ impl FlushStrategy for FlushSwitch {
         _shared: &SharedDataRef,
         _bytes_mutable: usize,
         _bytes_total: usize,
+        _wal_disk_usage: Option<usize>,
     ) -> bool {
         self.should_flush.load(Ordering::Relaxed)
     }

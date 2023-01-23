@@ -319,6 +319,10 @@ impl LogStore for RaftEngineLogStore {
         );
         Ok(())
     }
+
+    fn get_disk_size(&self) -> Option<usize> {
+        Some(self.engine.get_used_size())
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -484,6 +484,7 @@ impl WriterInner {
             writer_ctx.shared,
             version_control,
             writer_ctx.flush_strategy,
+            writer_ctx.wal,
         ) {
             self.trigger_flush(writer_ctx).await?;
         }
@@ -497,17 +498,24 @@ impl WriterInner {
         self.memtable_builder.build(memtable_schema)
     }
 
-    fn should_flush(
+    fn should_flush<S: LogStore>(
         &self,
         shared: &SharedDataRef,
         version_control: &VersionControlRef,
         flush_strategy: &FlushStrategyRef,
+        wal: &Wal<S>,
     ) -> bool {
         let current = version_control.current();
         let memtables = current.memtables();
         let mutable_bytes_allocated = memtables.mutable_bytes_allocated();
         let total_bytes_allocated = memtables.total_bytes_allocated();
-        flush_strategy.should_flush(shared, mutable_bytes_allocated, total_bytes_allocated)
+        let wal_disk_usage: Option<usize> = wal.get_store().get_disk_size();
+        flush_strategy.should_flush(
+            shared,
+            mutable_bytes_allocated,
+            total_bytes_allocated,
+            wal_disk_usage,
+        )
     }
 
     async fn trigger_flush<S: LogStore>(&mut self, ctx: &WriterContext<'_, S>) -> Result<()> {

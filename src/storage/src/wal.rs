@@ -73,6 +73,10 @@ impl<S: LogStore> Wal<S> {
             })
     }
 
+    pub fn get_store(&self) -> Arc<S> {
+        self.store.clone()
+    }
+
     #[inline]
     pub fn region_id(&self) -> RegionId {
         self.region_id

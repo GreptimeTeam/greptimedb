@@ -32,6 +32,7 @@ use crate::wal::Wal;
 
 /// Default write buffer size (32M).
 const DEFAULT_WRITE_BUFFER_SIZE: usize = 32 * 1024 * 1024;
+const DEFAULT_WAL_DISK_USAGE: usize = 2 * 1024 * 1024 * 1024;
 
 pub trait FlushStrategy: Send + Sync + std::fmt::Debug {
     fn should_flush(
@@ -39,6 +40,7 @@ pub trait FlushStrategy: Send + Sync + std::fmt::Debug {
         shared: &SharedDataRef,
         bytes_mutable: usize,
         bytes_total: usize,
+        wal_disk_usage: Option<usize>,
     ) -> bool;
 }
 
@@ -50,6 +52,8 @@ pub struct SizeBasedStrategy {
     max_write_buffer_size: usize,
     /// Mutable memtable memory size limitation
     mutable_limitation: usize,
+    /// Wal disk usage size limitation
+    wal_disk_usage_limitation: usize,
 }
 
 #[inline]
@@ -65,6 +69,7 @@ impl Default for SizeBasedStrategy {
         Self {
             max_write_buffer_size,
             mutable_limitation: get_mutable_limitation(max_write_buffer_size),
+            wal_disk_usage_limitation: DEFAULT_WAL_DISK_USAGE,
         }
     }
 }
@@ -75,6 +80,7 @@ impl FlushStrategy for SizeBasedStrategy {
         shared: &SharedDataRef,
         bytes_mutable: usize,
         bytes_total: usize,
+        wal_disk_usage: Option<usize>,
     ) -> bool {
         // Insipired by RocksDB flush strategy
         // https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L94
@@ -98,7 +104,11 @@ impl FlushStrategy for SizeBasedStrategy {
         // If the memory exceeds the buffer size, we trigger more aggressive
         // flush. But if already more than half memory is being flushed,
         // triggering more flush may not help. We will hold it instead.
-        let should_flush = bytes_total >= buffer_size && bytes_mutable >= buffer_size / 2;
+        let mut should_flush = bytes_total >= buffer_size && bytes_mutable >= buffer_size / 2;
+
+        if let Some(i) = wal_disk_usage {
+            should_flush = should_flush || (i > self.wal_disk_usage_limitation)
+        }
 
         if should_flush {
             logging::info!(
