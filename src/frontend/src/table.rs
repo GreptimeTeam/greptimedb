@@ -44,7 +44,7 @@ use partition::columns::RangeColumnsPartitionRule;
 use partition::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use partition::range::RangePartitionRule;
 use partition::route::TableRoutes;
-use partition::splitter::RequestSplitter;
+use partition::splitter::WriteSplitter;
 use partition::PartitionRuleRef;
 use snafu::prelude::*;
 use store_api::storage::RegionNumber;
@@ -96,7 +96,7 @@ impl Table for DistTable {
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
 
-        let spliter = RequestSplitter::with_partition_rule(partition_rule);
+        let spliter = WriteSplitter::with_partition_rule(partition_rule);
         let inserts = spliter
             .split_insert(request)
             .map_err(BoxedError::new)

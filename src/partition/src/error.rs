@@ -15,8 +15,10 @@
 use std::any::Any;
 
 use common_error::prelude::*;
-use datafusion_expr::Expr;
+use common_query::prelude::Expr;
+use datafusion_common::ScalarValue;
 use snafu::Snafu;
+use store_api::storage::RegionId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -33,9 +35,27 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
+    #[snafu(display("Failed to find Datanode, table: {} region: {:?}", table, region))]
+    FindDatanode {
+        table: String,
+        region: RegionId,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Failed to find table routes for table {}", table_name))]
     FindTableRoutes {
         table_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to find region routes for table {}, region id: {}",
+        table_name,
+        region_id
+    ))]
+    FindRegionRoutes {
+        table_name: String,
+        region_id: u64,
         backtrace: Backtrace,
     },
 
@@ -81,20 +101,46 @@ pub enum Error {
         reason: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display(
+        "Invalid table route data in meta, table name: {}, msg: {}",
+        table_name,
+        err_msg
+    ))]
+    InvalidTableRouteData {
+        table_name: String,
+        err_msg: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "Failed to convert DataFusion's ScalarValue: {:?}, source: {}",
+        value,
+        source
+    ))]
+    ConvertScalarValue {
+        value: ScalarValue,
+        #[snafu(backtrace)]
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
             Error::GetCache { .. } => StatusCode::StorageUnavailable,
+            Error::FindRegionRoutes { .. } => StatusCode::InvalidArguments,
+            Error::FindTableRoutes { .. } => StatusCode::InvalidArguments,
             Error::RequestMeta { source, .. } => source.status_code(),
             Error::FindRegion { .. }
             | Error::FindRegions { .. }
             | Error::RegionKeysSize { .. }
-            | Error::FindTableRoutes { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. } => StatusCode::InvalidArguments,
             Error::SerializeJson { .. } | Error::DeserializeJson { .. } => StatusCode::Internal,
+            Error::InvalidTableRouteData { .. } => StatusCode::Internal,
+            Error::ConvertScalarValue { .. } => StatusCode::Internal,
+            Error::FindDatanode { .. } => StatusCode::InvalidArguments,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

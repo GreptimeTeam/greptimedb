@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 common-error = {path = "../common/error"}
+common-query = {path = "../common/query"}
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true

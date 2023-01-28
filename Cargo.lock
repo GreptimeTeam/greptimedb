@@ -4721,6 +4721,7 @@ name = "partition"
 version = "0.1.0"
 dependencies = [
  "common-error",
+ "common-query",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",

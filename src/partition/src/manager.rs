@@ -12,18 +12,267 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use meta_client::rpc::TableName;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
+use common_query::prelude::Expr;
+use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
+use datatypes::prelude::Value;
+use meta_client::rpc::{Peer, TableName, TableRoute};
+use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
+
+use crate::columns::RangeColumnsPartitionRule;
 use crate::error::Result;
+use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
+use crate::range::RangePartitionRule;
 use crate::route::TableRoutes;
-use crate::PartitionRuleRef;
+use crate::{error, PartitionRuleRef};
 
 pub struct PartitionManager {
     table_routes: TableRoutes,
 }
 
+/// Provides methods to find regions by:
+/// - values (in case of insertion)
+/// - filters (in case of deletion and update)
 impl PartitionManager {
-    pub async fn find_partition(&self, _table: TableName) -> Result<Option<PartitionRuleRef>> {
-        todo!()
+    // TODO(hl): refactor DistTable::alter_by_expr
+    pub async fn find_table_routes(&self, table: TableName) -> Result<Arc<TableRoute>> {
+        self.table_routes.get_route(&table).await
+    }
+
+    // TODO(hl): remove DistTable::find_datanodes
+    pub async fn find_region_datanodes(
+        &self,
+        table: TableName,
+        regions: Vec<RegionNumber>,
+    ) -> Result<HashMap<Peer, Vec<RegionNumber>>> {
+        let route = self.table_routes.get_route(&table).await?;
+
+        let mut datanodes = HashMap::new();
+        for region in regions.iter() {
+            let datanode = route
+                .region_routes
+                .iter()
+                .find_map(|x| {
+                    if x.region.id == *region as u64 {
+                        x.leader_peer.clone()
+                    } else {
+                        None
+                    }
+                })
+                .context(error::FindDatanodeSnafu {
+                    table: table.to_string(),
+                    region: *region,
+                })?;
+            datanodes
+                .entry(datanode)
+                .or_insert_with(Vec::new)
+                .push(*region);
+        }
+        Ok(datanodes)
+    }
+
+    /// Get partition rule of given table.
+    // TODO(hl): Replace DistTable::find_partition_rule
+    pub async fn find_table_partition_rule(
+        &self,
+        table: TableName,
+    ) -> Result<Option<PartitionRuleRef>> {
+        let route = self.table_routes.get_route(&table).await?;
+        ensure!(
+            !route.region_routes.is_empty(),
+            error::FindTableRoutesSnafu {
+                table_name: table.to_string()
+            }
+        );
+
+        let mut partitions = Vec::with_capacity(route.region_routes.len());
+        for r in route.region_routes.iter() {
+            let partition = r
+                .region
+                .partition
+                .clone()
+                .context(error::FindRegionRoutesSnafu {
+                    region_id: r.region.id,
+                    table_name: table.to_string(),
+                })?;
+            let partition_def = PartitionDef::try_from(partition)?;
+            partitions.push((r.region.id, partition_def));
+        }
+        partitions.sort_by(|a, b| a.1.partition_bounds().cmp(b.1.partition_bounds()));
+
+        ensure!(
+            partitions
+                .windows(2)
+                .all(|w| w[0].1.partition_columns() == w[1].1.partition_columns()),
+            error::InvalidTableRouteDataSnafu {
+                table_name: table.to_string(),
+                err_msg: "partition columns of all regions are not the same"
+            }
+        );
+        let partition_columns = partitions[0].1.partition_columns();
+        ensure!(
+            !partition_columns.is_empty(),
+            error::InvalidTableRouteDataSnafu {
+                table_name: table.to_string(),
+                err_msg: "no partition columns found"
+            }
+        );
+
+        let regions = partitions
+            .iter()
+            .map(|x| x.0 as u32)
+            .collect::<Vec<RegionNumber>>();
+
+        // TODO(LFC): Serializing and deserializing partition rule is ugly, must find a much more elegant way.
+        let partition_rule: PartitionRuleRef = match partition_columns.len() {
+            1 => {
+                // Omit the last "MAXVALUE".
+                let bounds = partitions
+                    .iter()
+                    .filter_map(|(_, p)| match &p.partition_bounds()[0] {
+                        PartitionBound::Value(v) => Some(v.clone()),
+                        PartitionBound::MaxValue => None,
+                    })
+                    .collect::<Vec<Value>>();
+                Arc::new(RangePartitionRule::new(
+                    partition_columns[0].clone(),
+                    bounds,
+                    regions,
+                )) as _
+            }
+            _ => {
+                let bounds = partitions
+                    .iter()
+                    .map(|x| x.1.partition_bounds().clone())
+                    .collect::<Vec<Vec<PartitionBound>>>();
+                Arc::new(RangeColumnsPartitionRule::new(
+                    partition_columns.clone(),
+                    bounds,
+                    regions,
+                )) as _
+            }
+        };
+        Ok(Some(partition_rule))
+    }
+
+    // TODO(hl): replace DistTable::find_regions
+    // TODO(hl): table argument is not used. Maybe we can get partition_rule by table name from meta
+    pub async fn find_regions_by_filters(
+        &self,
+        table: TableName,
+        partition_rule: PartitionRuleRef,
+        filters: &[Expr],
+    ) -> Result<Vec<RegionNumber>> {
+        let regions = if let Some((first, rest)) = filters.split_first() {
+            let mut target = self.find_regions0(partition_rule.clone(), first)?;
+            for filter in rest {
+                let regions = self.find_regions0(partition_rule.clone(), filter)?;
+
+                // When all filters are provided as a collection, it often implicitly states that
+                // "all filters must be satisfied". So we join all the results here.
+                target.retain(|x| regions.contains(x));
+
+                // Failed fast, empty collection join any is empty.
+                if target.is_empty() {
+                    break;
+                }
+            }
+            target.into_iter().collect::<Vec<_>>()
+        } else {
+            partition_rule.find_regions(&[])?
+        };
+        ensure!(
+            !regions.is_empty(),
+            error::FindRegionsSnafu {
+                filters: filters.to_vec()
+            }
+        );
+        Ok(regions)
+    }
+
+    pub fn find_regions0(
+        &self,
+        partition_rule: PartitionRuleRef,
+        filter: &Expr,
+    ) -> Result<HashSet<RegionNumber>> {
+        let expr = filter.df_expr();
+        match expr {
+            DfExpr::BinaryExpr(BinaryExpr { left, op, right }) if is_compare_op(op) => {
+                let column_op_value = match (left.as_ref(), right.as_ref()) {
+                    (DfExpr::Column(c), DfExpr::Literal(v)) => Some((&c.name, *op, v)),
+                    (DfExpr::Literal(v), DfExpr::Column(c)) => {
+                        Some((&c.name, reverse_operator(op), v))
+                    }
+                    _ => None,
+                };
+                if let Some((column, op, scalar)) = column_op_value {
+                    let value = Value::try_from(scalar.clone()).with_context(|_| {
+                        error::ConvertScalarValueSnafu {
+                            value: scalar.clone(),
+                        }
+                    })?;
+                    return Ok(partition_rule
+                        .find_regions(&[PartitionExpr::new(column, op, value)])?
+                        .into_iter()
+                        .collect::<HashSet<RegionNumber>>());
+                }
+            }
+            DfExpr::BinaryExpr(BinaryExpr { left, op, right })
+                if matches!(op, Operator::And | Operator::Or) =>
+            {
+                let left_regions =
+                    self.find_regions0(partition_rule.clone(), &(*left.clone()).into())?;
+                let right_regions =
+                    self.find_regions0(partition_rule.clone(), &(*right.clone()).into())?;
+                let regions = match op {
+                    Operator::And => left_regions
+                        .intersection(&right_regions)
+                        .cloned()
+                        .collect::<HashSet<RegionNumber>>(),
+                    Operator::Or => left_regions
+                        .union(&right_regions)
+                        .cloned()
+                        .collect::<HashSet<RegionNumber>>(),
+                    _ => unreachable!(),
+                };
+                return Ok(regions);
+            }
+            _ => (),
+        }
+
+        // Returns all regions for not supported partition expr as a safety hatch.
+        Ok(partition_rule
+            .find_regions(&[])?
+            .into_iter()
+            .collect::<HashSet<RegionNumber>>())
+    }
+}
+
+// TODO(hl): remove src/frontend/src/table.rs:525
+#[inline]
+fn is_compare_op(op: &Operator) -> bool {
+    matches!(
+        *op,
+        Operator::Eq
+            | Operator::NotEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Gt
+            | Operator::GtEq
+    )
+}
+
+// TODO(hl): remove src/frontend/src/table.rs:537
+#[inline]
+fn reverse_operator(op: &Operator) -> Operator {
+    match *op {
+        Operator::Lt => Operator::Gt,
+        Operator::Gt => Operator::Lt,
+        Operator::LtEq => Operator::GtEq,
+        Operator::GtEq => Operator::LtEq,
+        _ => *op,
     }
 }

@@ -28,11 +28,11 @@ use crate::PartitionRuleRef;
 pub type InsertRequestSplit = HashMap<RegionNumber, InsertRequest>;
 pub type DeleteRequestSplit = HashMap<RegionNumber, DeleteRequest>;
 
-pub struct RequestSplitter {
+pub struct WriteSplitter {
     partition_rule: PartitionRuleRef,
 }
 
-impl RequestSplitter {
+impl WriteSplitter {
     pub fn with_partition_rule(rule: PartitionRuleRef) -> Self {
         Self {
             partition_rule: rule,
@@ -192,8 +192,7 @@ mod tests {
     use table::requests::InsertRequest;
 
     use super::{
-        check_req, find_partitioning_values, partition_values, split_insert_request,
-        RequestSplitter,
+        check_req, find_partitioning_values, partition_values, split_insert_request, WriteSplitter,
     };
     use crate::error::Error;
     use crate::partition::{PartitionExpr, PartitionRule};
@@ -214,7 +213,7 @@ mod tests {
     fn test_writer_spliter() {
         let insert = mock_insert_request();
         let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
-        let spliter = RequestSplitter::with_partition_rule(rule);
+        let spliter = WriteSplitter::with_partition_rule(rule);
         let ret = spliter.split_insert(insert).unwrap();
 
         assert_eq!(2, ret.len());
