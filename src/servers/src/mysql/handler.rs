@@ -190,10 +190,18 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             error::DatabaseNotFoundSnafu { catalog, schema }
         );
 
+        let user_info = &self.session.user_info();
+
         if let Some(schema_validator) = &self.user_provider {
-            schema_validator
-                .authorize(catalog, schema, &self.session.user_info())
-                .await?;
+            if let Err(e) = schema_validator.authorize(catalog, schema, user_info).await {
+                return w
+                    .error(
+                        ErrorKind::ER_DBACCESS_DENIED_ERROR,
+                        e.to_string().as_bytes(),
+                    )
+                    .await
+                    .map_err(|e| e.into());
+            }
         }
 
         let context = self.session.context();

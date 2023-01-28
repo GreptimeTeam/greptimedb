@@ -110,7 +110,7 @@ pub enum Error {
     UserPasswordMismatch { username: String },
 
     #[snafu(display(
-        "User {} is not allowed to access catalog {} and schema {}",
+        "Access denied for user '{}' to database '{}-{}'",
         username,
         catalog,
         schema
