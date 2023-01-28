@@ -152,10 +152,8 @@ impl ChunkReaderBuilder {
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range_predicate) {
                 debug!(
-                    "Skip file, start: {:?}, end: {:?}, predicate: {:?}",
-                    file.start_timestamp(),
-                    file.end_timestamp(),
-                    time_range_predicate
+                    "Skip file {:?}, predicate: {:?}",
+                    file, time_range_predicate
                 );
                 continue;
             }
@@ -180,7 +178,11 @@ impl ChunkReaderBuilder {
     }
 
     /// Check if SST file's time range matches predicate.
-    pub fn file_in_range(file: &FileHandle, predicate: TimestampRange) -> bool {
+    #[inline]
+    fn file_in_range(file: &FileHandle, predicate: TimestampRange) -> bool {
+        if predicate == TimestampRange::min_to_max() {
+            return true;
+        }
         // end_timestamp of sst file is inclusive.
         let file_ts_range =
             TimestampRange::new_inclusive(file.start_timestamp(), file.end_timestamp());

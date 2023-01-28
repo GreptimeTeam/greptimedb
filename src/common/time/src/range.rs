@@ -185,7 +185,7 @@ impl<T: PartialOrd> GenericRange<T> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         match (&self.start, &self.end) {
-            (Some(start), Some(end)) => start >= end,
+            (Some(start), Some(end)) => start == end,
             _ => false,
         }
     }

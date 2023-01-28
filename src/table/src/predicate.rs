@@ -152,9 +152,8 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 Some(left.and(&right))
             }
             Operator::Or => {
-                let Some(left) = self
-                    .extract_time_range_from_expr(left) else { return None };
-                let Some(right) = self.extract_time_range_from_expr(right) else { return None };
+                let left = self.extract_time_range_from_expr(left)?;
+                let right = self.extract_time_range_from_expr(right)?;
                 Some(left.or(&right))
             }
             Operator::NotEq
@@ -240,11 +239,11 @@ impl<'a> TimeRangePredicateBuilder<'a> {
         if list.is_empty() {
             return Some(TimestampRange::empty());
         }
-        let mut init = TimestampRange::empty();
+        let mut init_range = TimestampRange::empty();
         for expr in list {
             if let DfExpr::Literal(scalar) = expr {
                 if let Some(timestamp) = scalar_value_to_timestamp(scalar) {
-                    init = init.or(&TimestampRange::single(timestamp))
+                    init_range = init_range.or(&TimestampRange::single(timestamp))
                 } else {
                     // TODO(hl): maybe we should raise an error here since cannot parse
                     // timestamp value from in list expr
@@ -252,7 +251,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 }
             }
         }
-        Some(init)
+        Some(init_range)
     }
 }
 
