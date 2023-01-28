@@ -26,7 +26,9 @@ use arrow::datatypes::{DataType, Float64Type, Int64Type};
 use arrow::record_batch::RecordBatch;
 use clap::Parser;
 use client::api::v1::column::Values;
-use client::api::v1::{Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertRequest, TableId};
+use client::api::v1::{
+    Column, ColumnDataType, ColumnDef, CreateTableExpr, FullTableName, InsertRequest, TableId,
+};
 use client::{Client, Database};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -100,8 +102,11 @@ async fn write_data(
         let record_batch = record_batch.unwrap();
         let (columns, row_count) = convert_record_batch(record_batch);
         let request = InsertRequest {
-            schema_name: "public".to_string(),
-            table_name: TABLE_NAME.to_string(),
+            full_tablename: Some(FullTableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: TABLE_NAME.to_string(),
+            }),
             region_number: 0,
             columns,
             row_count,

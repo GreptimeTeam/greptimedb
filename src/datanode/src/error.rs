@@ -315,6 +315,9 @@ pub enum Error {
         column: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Empty full table name"))]
+    EmptyFullTableName { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -358,6 +361,7 @@ impl ErrorExt for Error {
             | Error::ConstraintNotSupported { .. }
             | Error::SchemaExists { .. }
             | Error::ParseTimestamp { .. }
+            | Error::EmptyFullTableName { .. }
             | Error::DatabaseNotFound { .. } => StatusCode::InvalidArguments,
 
             // TODO(yingwen): Further categorize http error.

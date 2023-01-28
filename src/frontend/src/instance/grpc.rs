@@ -81,7 +81,8 @@ mod test {
     use api::v1::ddl_request::Expr as DdlExpr;
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-        CreateDatabaseExpr, CreateTableExpr, DdlRequest, InsertRequest, QueryRequest,
+        CreateDatabaseExpr, CreateTableExpr, DdlRequest, FullTableName, InsertRequest,
+        QueryRequest,
     };
     use catalog::helper::{TableGlobalKey, TableGlobalValue};
     use common_query::Output;
@@ -340,8 +341,11 @@ CREATE TABLE {table_name} (
 
     async fn test_insert_and_query_on_existing_table(instance: &Arc<Instance>, table_name: &str) {
         let insert = InsertRequest {
-            schema_name: "public".to_string(),
-            table_name: table_name.to_string(),
+            full_tablename: Some(FullTableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: table_name.to_string(),
+            }),
             columns: vec![
                 Column {
                     column_name: "a".to_string(),
@@ -461,8 +465,11 @@ CREATE TABLE {table_name} (
 
     async fn test_insert_and_query_on_auto_created_table(instance: &Arc<Instance>) {
         let insert = InsertRequest {
-            schema_name: "public".to_string(),
-            table_name: "auto_created_table".to_string(),
+            full_tablename: Some(FullTableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "auto_created_table".to_string(),
+            }),
             columns: vec![
                 Column {
                     column_name: "a".to_string(),
@@ -499,8 +506,11 @@ CREATE TABLE {table_name} (
         assert!(matches!(output, Output::AffectedRows(3)));
 
         let insert = InsertRequest {
-            schema_name: "public".to_string(),
-            table_name: "auto_created_table".to_string(),
+            full_tablename: Some(FullTableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "auto_created_table".to_string(),
+            }),
             columns: vec![
                 Column {
                     column_name: "b".to_string(),

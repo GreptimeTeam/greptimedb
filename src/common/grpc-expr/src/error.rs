@@ -90,6 +90,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: api::error::Error,
     },
+
+    #[snafu(display("Empty full table name"))]
+    EmptyFullTableName { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -104,6 +107,7 @@ impl ErrorExt for Error {
             Error::ColumnDataType { .. } => StatusCode::Internal,
             Error::CreateSchema { .. }
             | Error::DuplicatedTimestampColumn { .. }
+            | Error::EmptyFullTableName { .. }
             | Error::MissingTimestampColumn { .. } => StatusCode::InvalidArguments,
             Error::InvalidColumnProto { .. } => StatusCode::InvalidArguments,
             Error::CreateVector { .. } => StatusCode::InvalidArguments,

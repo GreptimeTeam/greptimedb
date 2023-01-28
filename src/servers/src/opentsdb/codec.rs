@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use api::v1::column::SemanticType;
-use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use api::v1::{column, Column, ColumnDataType, FullTableName, InsertRequest as GrpcInsertRequest};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 
 use crate::error::{self, Result};
 
@@ -126,6 +126,7 @@ impl DataPoint {
     }
 
     pub fn as_grpc_insert(&self) -> GrpcInsertRequest {
+        let catalog_name = DEFAULT_CATALOG_NAME.to_string();
         let schema_name = DEFAULT_SCHEMA_NAME.to_string();
         let mut columns = Vec::with_capacity(2 + self.tags.len());
 
@@ -167,8 +168,11 @@ impl DataPoint {
         }
 
         GrpcInsertRequest {
-            schema_name,
-            table_name: self.metric.clone(),
+            full_tablename: Some(FullTableName {
+                catalog_name,
+                schema_name,
+                table_name: self.metric.clone(),
+            }),
             region_number: 0,
             columns,
             row_count: 1,
@@ -262,7 +266,10 @@ mod test {
         };
 
         let grpc_insert = data_point.as_grpc_insert();
-        assert_eq!(grpc_insert.table_name, "my_metric_1");
+        assert_eq!(
+            grpc_insert.full_tablename.unwrap().table_name,
+            "my_metric_1"
+        );
 
         let columns = &grpc_insert.columns;
         let row_count = grpc_insert.row_count;

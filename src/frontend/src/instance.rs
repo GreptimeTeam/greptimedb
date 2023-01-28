@@ -26,7 +26,8 @@ use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::{
-    AddColumns, AlterExpr, Column, DdlRequest, DropTableExpr, GreptimeRequest, InsertRequest,
+    AddColumns, AlterExpr, Column, DdlRequest, DropTableExpr, FullTableName, GreptimeRequest,
+    InsertRequest,
 };
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
@@ -56,7 +57,7 @@ use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Error, MissingMetasrvOptsSnafu, Result};
+use crate::error::{self, EmptyFullTableNameSnafu, Error, MissingMetasrvOptsSnafu, Result};
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::instance::standalone::{StandaloneGrpcQueryHandler, StandaloneSqlQueryHandler};
@@ -203,13 +204,14 @@ impl Instance {
     }
 
     async fn handle_insert(&self, request: InsertRequest) -> Result<Output> {
-        let schema_name = &request.schema_name;
-        let table_name = &request.table_name;
-        let catalog_name = DEFAULT_CATALOG_NAME;
-
         let columns = &request.columns;
 
-        self.create_or_alter_table_on_demand(catalog_name, schema_name, table_name, columns)
+        let full_tablename = request
+            .full_tablename
+            .as_ref()
+            .context(EmptyFullTableNameSnafu)?;
+
+        self.create_or_alter_table_on_demand(full_tablename, columns)
             .await?;
 
         let query = GreptimeRequest {
@@ -223,11 +225,14 @@ impl Instance {
     // - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
     async fn create_or_alter_table_on_demand(
         &self,
-        catalog_name: &str,
-        schema_name: &str,
-        table_name: &str,
+        full_tablename: &FullTableName,
         columns: &[Column],
     ) -> Result<()> {
+        let FullTableName {
+            catalog_name,
+            schema_name,
+            table_name,
+        } = full_tablename;
         let table = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name)

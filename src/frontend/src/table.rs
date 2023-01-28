@@ -605,7 +605,7 @@ impl PartitionExec {
 #[cfg(test)]
 mod test {
     use api::v1::column::SemanticType;
-    use api::v1::{column, Column, ColumnDataType, InsertRequest};
+    use api::v1::{column, Column, ColumnDataType, FullTableName, InsertRequest};
     use catalog::error::Result;
     use catalog::remote::{KvBackend, ValueIter};
     use common_query::physical_plan::DfPhysicalPlanAdapter;
@@ -1158,8 +1158,11 @@ mod test {
             },
         ];
         let request = InsertRequest {
-            schema_name: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
+            full_tablename: Some(FullTableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: table_name.schema_name.clone(),
+                table_name: table_name.table_name.clone(),
+            }),
             columns,
             row_count,
             region_number: 0,

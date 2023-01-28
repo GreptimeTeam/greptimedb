@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{AlterExpr, CreateDatabaseExpr, CreateTableExpr, InsertRequest, TableId};
+use api::v1::{
+    AlterExpr, CreateDatabaseExpr, CreateTableExpr, FullTableName, InsertRequest, TableId,
+};
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
 use catalog::{CatalogList, CatalogManager};
@@ -51,9 +53,9 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    ColumnDataTypeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu,
-    RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu, TableNotFoundSnafu,
-    TableSnafu, ToTableInsertRequestSnafu,
+    ColumnDataTypeSnafu, EmptyFullTableNameSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
+    TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
 use crate::instance::parse_stmt;
@@ -347,11 +349,18 @@ impl DistInstance {
     // should operate on GRPC InsertRequest directly.
     // Also remember to check the "region_number" carried in InsertRequest, too.
     async fn handle_dist_insert(&self, request: InsertRequest) -> Result<Output> {
-        let table_name = &request.table_name;
-        // TODO(LFC): InsertRequest should carry catalog name, too.
+        let FullTableName {
+            catalog_name,
+            schema_name,
+            table_name,
+        } = request
+            .full_tablename
+            .as_ref()
+            .context(EmptyFullTableNameSnafu)?;
+
         let table = self
             .catalog_manager
-            .table(DEFAULT_CATALOG_NAME, &request.schema_name, table_name)
+            .table(catalog_name, schema_name, table_name)
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu { table_name })?;
 

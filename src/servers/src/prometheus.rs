@@ -20,7 +20,8 @@ use std::hash::{Hash, Hasher};
 use api::prometheus::remote::label_matcher::Type as MatcherType;
 use api::prometheus::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::column::SemanticType;
-use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
+use api::v1::{column, Column, ColumnDataType, FullTableName, InsertRequest as GrpcInsertRequest};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
@@ -355,10 +356,13 @@ fn to_grpc_insert_request(database: &str, mut timeseries: TimeSeries) -> Result<
     }
 
     Ok(GrpcInsertRequest {
-        schema_name,
-        table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
-            msg: "missing '__name__' label in timeseries",
-        })?,
+        full_tablename: Some(FullTableName {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name,
+            table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
+                msg: "missing '__name__' label in timeseries",
+            })?,
+        }),
         region_number: 0,
         columns,
         row_count: row_count as u32,
@@ -520,12 +524,30 @@ mod tests {
 
         let exprs = to_grpc_insert_requests("prometheus", write_request).unwrap();
         assert_eq!(3, exprs.len());
-        assert_eq!("prometheus", exprs[0].schema_name);
-        assert_eq!("prometheus", exprs[1].schema_name);
-        assert_eq!("prometheus", exprs[2].schema_name);
-        assert_eq!("metric1", exprs[0].table_name);
-        assert_eq!("metric2", exprs[1].table_name);
-        assert_eq!("metric3", exprs[2].table_name);
+        assert_eq!(
+            "prometheus",
+            exprs[0].full_tablename.as_ref().unwrap().schema_name
+        );
+        assert_eq!(
+            "prometheus",
+            exprs[1].full_tablename.as_ref().unwrap().schema_name
+        );
+        assert_eq!(
+            "prometheus",
+            exprs[2].full_tablename.as_ref().unwrap().schema_name
+        );
+        assert_eq!(
+            "metric1",
+            exprs[0].full_tablename.as_ref().unwrap().table_name
+        );
+        assert_eq!(
+            "metric2",
+            exprs[1].full_tablename.as_ref().unwrap().table_name
+        );
+        assert_eq!(
+            "metric3",
+            exprs[2].full_tablename.as_ref().unwrap().table_name
+        );
 
         let expr = exprs.get(0).unwrap();
 

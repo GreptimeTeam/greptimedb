@@ -17,11 +17,10 @@ use std::collections::{HashMap, HashSet};
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::{SemanticType, Values};
 use api::v1::{
-    AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateTableExpr,
+    AddColumn, AddColumns, Column, ColumnDataType, ColumnDef, CreateTableExpr, FullTableName,
     InsertRequest as GrpcInsertRequest,
 };
 use common_base::BitVec;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_time::timestamp::Timestamp;
 use common_time::{Date, DateTime};
 use datatypes::data_type::{ConcreteDataType, DataType};
@@ -34,8 +33,9 @@ use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
 
 use crate::error::{
-    ColumnDataTypeSnafu, CreateVectorSnafu, DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu,
-    InvalidColumnProtoSnafu, MissingTimestampColumnSnafu, Result,
+    ColumnDataTypeSnafu, CreateVectorSnafu, DuplicatedTimestampColumnSnafu,
+    EmptyFullTableNameSnafu, IllegalInsertDataSnafu, InvalidColumnProtoSnafu,
+    MissingTimestampColumnSnafu, Result,
 };
 const TAG_SEMANTIC_TYPE: i32 = SemanticType::Tag as i32;
 const TIMESTAMP_SEMANTIC_TYPE: i32 = SemanticType::Timestamp as i32;
@@ -282,9 +282,11 @@ pub fn build_create_expr_from_insertion(
 }
 
 pub fn to_table_insert_request(request: GrpcInsertRequest) -> Result<InsertRequest> {
-    let catalog_name = DEFAULT_CATALOG_NAME;
-    let schema_name = &request.schema_name;
-    let table_name = &request.table_name;
+    let FullTableName {
+        catalog_name,
+        schema_name,
+        table_name,
+    } = request.full_tablename.context(EmptyFullTableNameSnafu)?;
     let row_count = request.row_count as usize;
 
     let mut columns_values = HashMap::with_capacity(request.columns.len());
@@ -315,9 +317,9 @@ pub fn to_table_insert_request(request: GrpcInsertRequest) -> Result<InsertReque
     }
 
     Ok(InsertRequest {
-        catalog_name: catalog_name.to_string(),
-        schema_name: schema_name.to_string(),
-        table_name: table_name.to_string(),
+        catalog_name,
+        schema_name,
+        table_name,
         columns_values,
     })
 }
@@ -455,7 +457,7 @@ mod tests {
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::column::{self, SemanticType, Values};
-    use api::v1::{Column, ColumnDataType};
+    use api::v1::{Column, ColumnDataType, FullTableName};
     use common_base::BitVec;
     use common_query::physical_plan::PhysicalPlanRef;
     use common_query::prelude::Expr;
@@ -617,8 +619,11 @@ mod tests {
     fn test_to_table_insert_request() {
         let (columns, row_count) = mock_insert_batch();
         let request = GrpcInsertRequest {
-            schema_name: "public".to_string(),
-            table_name: "demo".to_string(),
+            full_tablename: Some(FullTableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "demo".to_string(),
+            }),
             columns,
             row_count,
             region_number: 0,

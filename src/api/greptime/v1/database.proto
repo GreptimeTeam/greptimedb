@@ -21,21 +21,26 @@ message QueryRequest {
 }
 
 message InsertRequest {
-  string schema_name = 1;
-  string table_name = 2;
+  FullTableName full_tablename = 1;
 
   // Data is represented here.
-  repeated Column columns = 3;
+  repeated Column columns = 2;
 
   // The row_count of all columns, which include null and non-null values.
   //
   // Note: the row_count of all columns in a InsertRequest must be same.
-  uint32 row_count = 4;
+  uint32 row_count = 3;
 
   // The region number of current insert request.
-  uint32 region_number = 5;
+  uint32 region_number = 4;
 }
 
 message FlightDataExt {
   uint32 affected_rows = 1;
+}
+
+message FullTableName {
+  string catalog_name = 1;
+  string schema_name = 2;
+  string table_name = 3;
 }

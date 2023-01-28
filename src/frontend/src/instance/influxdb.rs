@@ -68,6 +68,7 @@ monitor1,host=host1 cpu=66.6,memory=1024 1663840496100023100
 monitor1,host=host2 memory=1027 1663840496400340001";
         let request = InfluxdbRequest {
             precision: None,
+            tenant: "greptime".to_string(),
             db: "public".to_string(),
             lines: lines.to_string(),
         };

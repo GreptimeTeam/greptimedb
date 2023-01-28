@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::v1::InsertRequest;
+use api::v1::{FullTableName, InsertRequest};
 use async_trait::async_trait;
 use axum::{http, Router};
 use axum_test_helper::TestClient;
@@ -39,7 +39,13 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
         let requests: Vec<InsertRequest> = request.try_into()?;
 
         for expr in requests {
-            let _ = self.tx.send((expr.schema_name, expr.table_name)).await;
+            let FullTableName {
+                schema_name,
+                table_name,
+                ..
+            } = expr.full_tablename.unwrap();
+
+            let _ = self.tx.send((schema_name, table_name)).await;
         }
 
         Ok(())

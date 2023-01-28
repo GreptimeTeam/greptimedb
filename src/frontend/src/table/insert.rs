@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::SemanticType;
-use api::v1::{Column, InsertRequest as GrpcInsertRequest};
+use api::v1::{Column, FullTableName, InsertRequest as GrpcInsertRequest};
 use client::Database;
 use common_query::Output;
 use datatypes::prelude::ConcreteDataType;
@@ -131,8 +131,11 @@ fn to_grpc_insert_request(
     let table_name = insert.table_name.clone();
     let (columns, row_count) = insert_request_to_insert_batch(&insert)?;
     Ok(GrpcInsertRequest {
-        schema_name: insert.schema_name,
-        table_name,
+        full_tablename: Some(FullTableName {
+            catalog_name: insert.catalog_name,
+            schema_name: insert.schema_name,
+            table_name,
+        }),
         region_number,
         columns,
         row_count,
@@ -143,7 +146,7 @@ fn to_grpc_insert_request(
 mod tests {
     use std::collections::HashMap;
 
-    use api::v1::ColumnDataType;
+    use api::v1::{ColumnDataType, FullTableName};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ScalarVectorBuilder;
     use datatypes::vectors::{Int16VectorBuilder, MutableVector, StringVectorBuilder};
@@ -184,7 +187,7 @@ mod tests {
     }
 
     fn verify_grpc_insert_request(request: GrpcInsertRequest) {
-        let table_name = request.table_name;
+        let FullTableName { table_name, .. } = request.full_tablename.unwrap();
         assert_eq!("demo", table_name);
 
         for column in request.columns {

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::writer::Precision;
 
 use crate::error::{Result, TimePrecisionSnafu};
@@ -29,6 +29,9 @@ pub async fn influxdb_write(
     Query(mut params): Query<HashMap<String, String>>,
     lines: String,
 ) -> Result<(StatusCode, ())> {
+    let tenant = params
+        .remove("tenant")
+        .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
     let db = params
         .remove("db")
         .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
@@ -38,6 +41,7 @@ pub async fn influxdb_write(
         .map(|val| parse_time_precision(val))
         .transpose()?;
     let request = InfluxdbRequest {
+        tenant,
         precision,
         lines,
         db,

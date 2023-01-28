@@ -15,9 +15,8 @@
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::query_request::Query;
-use api::v1::{CreateDatabaseExpr, DdlRequest, GreptimeRequest, InsertRequest};
+use api::v1::{CreateDatabaseExpr, DdlRequest, FullTableName, GreptimeRequest, InsertRequest};
 use async_trait::async_trait;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
@@ -27,7 +26,9 @@ use snafu::prelude::*;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::CreateDatabaseRequest;
 
-use crate::error::{self, DecodeLogicalPlanSnafu, ExecuteSqlSnafu, Result};
+use crate::error::{
+    self, DecodeLogicalPlanSnafu, EmptyFullTableNameSnafu, ExecuteSqlSnafu, Result,
+};
 use crate::instance::Instance;
 
 impl Instance {
@@ -61,13 +62,23 @@ impl Instance {
     }
 
     pub async fn handle_insert(&self, request: InsertRequest) -> Result<Output> {
-        let table_name = &request.table_name.clone();
-        // TODO(LFC): InsertRequest should carry catalog name, too.
+        let FullTableName {
+            catalog_name,
+            schema_name,
+            table_name,
+        } = request
+            .full_tablename
+            .as_ref()
+            .context(EmptyFullTableNameSnafu)?;
+        let table_name = table_name.to_string();
+
         let table = self
             .catalog_manager
-            .table(DEFAULT_CATALOG_NAME, &request.schema_name, table_name)
+            .table(catalog_name, schema_name, &table_name)
             .context(error::CatalogSnafu)?
-            .context(error::TableNotFoundSnafu { table_name })?;
+            .context(error::TableNotFoundSnafu {
+                table_name: &table_name,
+            })?;
 
         let request = common_grpc_expr::insert::to_table_insert_request(request)
             .context(error::InsertDataSnafu)?;
@@ -232,8 +243,11 @@ mod test {
             .unwrap();
 
         let insert = InsertRequest {
-            schema_name: "public".to_string(),
-            table_name: "demo".to_string(),
+            full_tablename: Some(FullTableName {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "demo".to_string(),
+            }),
             columns: vec![
                 Column {
                     column_name: "host".to_string(),

@@ -15,7 +15,7 @@ use api::v1::alter_expr::Kind;
 use api::v1::column::SemanticType;
 use api::v1::{
     column, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef, CreateTableExpr,
-    InsertRequest, TableId,
+    FullTableName, InsertRequest, TableId,
 };
 use client::{Client, Database};
 use common_catalog::consts::MIN_USER_TABLE_ID;
@@ -173,8 +173,11 @@ async fn insert_and_assert(db: &Database) {
     let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
 
     let request = InsertRequest {
-        schema_name: "public".to_string(),
-        table_name: "demo".to_string(),
+        full_tablename: Some(FullTableName {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "demo".to_string(),
+        }),
         region_number: 0,
         columns: vec![
             expected_host_col.clone(),

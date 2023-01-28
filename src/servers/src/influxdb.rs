@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use api::v1::InsertRequest as GrpcInsertRequest;
+use api::v1::{FullTableName, InsertRequest as GrpcInsertRequest};
 use common_grpc::writer::{LinesWriter, Precision};
 use influxdb_line_protocol::{parse_lines, FieldValue};
 use snafu::ResultExt;
@@ -27,6 +27,7 @@ pub const DEFAULT_TIME_PRECISION: Precision = Precision::Nanosecond;
 #[derive(Debug)]
 pub struct InfluxdbRequest {
     pub precision: Option<Precision>,
+    pub tenant: String,
     pub db: String,
     pub lines: String,
 }
@@ -111,8 +112,11 @@ impl TryFrom<&InfluxdbRequest> for Vec<GrpcInsertRequest> {
             .map(|(table_name, writer)| {
                 let (columns, row_count) = writer.finish();
                 GrpcInsertRequest {
-                    schema_name: schema_name.clone(),
-                    table_name,
+                    full_tablename: Some(FullTableName {
+                        catalog_name: value.tenant.clone(),
+                        schema_name: schema_name.clone(),
+                        table_name,
+                    }),
                     region_number: 0,
                     columns,
                     row_count,
@@ -140,6 +144,7 @@ monitor2,host=host3 cpu=66.5 1663840496100023102
 monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
 
         let influxdb_req = &InfluxdbRequest {
+            tenant: "greptime".to_string(),
             db: "public".to_string(),
             precision: None,
             lines: lines.to_string(),
@@ -149,8 +154,14 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
         assert_eq!(2, requests.len());
 
         for request in requests {
-            assert_eq!("public", request.schema_name);
-            match &request.table_name[..] {
+            let FullTableName {
+                catalog_name,
+                schema_name,
+                table_name,
+            } = request.full_tablename.unwrap();
+            assert_eq!("greptime", catalog_name);
+            assert_eq!("public", schema_name);
+            match &table_name[..] {
                 "monitor1" => assert_monitor_1(&request.columns),
                 "monitor2" => assert_monitor_2(&request.columns),
                 _ => panic!(),

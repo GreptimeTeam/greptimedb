@@ -398,6 +398,9 @@ pub enum Error {
         column: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Empty full table name"))]
+    EmptyFullTableName { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -412,6 +415,7 @@ impl ErrorExt for Error {
             | Error::InvalidInsertRequest { .. }
             | Error::FindPartitionColumn { .. }
             | Error::ColumnValuesNumberMismatch { .. }
+            | Error::EmptyFullTableName { .. }
             | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
