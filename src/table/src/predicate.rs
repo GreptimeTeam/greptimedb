@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod stats;
-
-use common_query::logical_plan::Expr;
+use common_query::logical_plan::{DfExpr, Expr};
 use common_telemetry::{error, warn};
+use common_time::range::TimestampRange;
+use common_time::Timestamp;
 use datafusion::parquet::file::metadata::RowGroupMetaData;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion_expr::{Between, BinaryExpr, Operator};
 use datatypes::schema::SchemaRef;
+use datatypes::value::scalar_value_to_timestamp;
 
 use crate::predicate::stats::RowGroupPruningStatistics;
+
+mod stats;
 
 #[derive(Default, Clone)]
 pub struct Predicate {
@@ -63,6 +67,191 @@ impl Predicate {
             }
         }
         res
+    }
+}
+
+// tests for `TimeRangePredicateBuilder` locates in src/query/tests/time_range_filter_test.rs
+// since it requires query engine to convert sql to filters.
+pub struct TimeRangePredicateBuilder<'a> {
+    ts_col_name: &'a str,
+    filters: &'a [Expr],
+}
+
+impl<'a> TimeRangePredicateBuilder<'a> {
+    pub fn new(ts_col_name: &'a str, filters: &'a [Expr]) -> Self {
+        Self {
+            ts_col_name,
+            filters,
+        }
+    }
+
+    pub fn build(&self) -> TimestampRange {
+        let mut res = TimestampRange::min_to_max();
+        for expr in self.filters {
+            let range = self
+                .extract_time_range_from_expr(expr.df_expr())
+                .unwrap_or_else(TimestampRange::min_to_max);
+            res = res.and(&range);
+        }
+        res
+    }
+
+    /// Extract time range filter from `WHERE`/`IN (...)`/`BETWEEN` clauses.
+    /// Return None if no time range can be found in expr.
+    fn extract_time_range_from_expr(&self, expr: &DfExpr) -> Option<TimestampRange> {
+        match expr {
+            DfExpr::BinaryExpr(BinaryExpr { left, op, right }) => {
+                self.extract_from_binary_expr(left, op, right)
+            }
+            DfExpr::Between(Between {
+                expr,
+                negated,
+                low,
+                high,
+            }) => self.extract_from_between_expr(expr, negated, low, high),
+            DfExpr::InList {
+                expr,
+                list,
+                negated,
+            } => self.extract_from_in_list_expr(expr, *negated, list),
+            _ => None,
+        }
+    }
+
+    fn extract_from_binary_expr(
+        &self,
+        left: &DfExpr,
+        op: &Operator,
+        right: &DfExpr,
+    ) -> Option<TimestampRange> {
+        match op {
+            Operator::Eq => self
+                .get_timestamp_filter(left, right)
+                .map(TimestampRange::single),
+            Operator::Lt => self
+                .get_timestamp_filter(left, right)
+                .map(|ts| TimestampRange::until_end(ts, false)),
+            Operator::LtEq => self
+                .get_timestamp_filter(left, right)
+                .map(|ts| TimestampRange::until_end(ts, true)),
+            Operator::Gt => self
+                .get_timestamp_filter(left, right)
+                .map(TimestampRange::from_start),
+            Operator::GtEq => self
+                .get_timestamp_filter(left, right)
+                .map(TimestampRange::from_start),
+            Operator::And => {
+                // instead of return none when failed to extract time range from left/right, we unwrap the none into
+                // `TimestampRange::min_to_max`.
+                let left = self
+                    .extract_time_range_from_expr(left)
+                    .unwrap_or_else(TimestampRange::min_to_max);
+                let right = self
+                    .extract_time_range_from_expr(right)
+                    .unwrap_or_else(TimestampRange::min_to_max);
+                Some(left.and(&right))
+            }
+            Operator::Or => {
+                let left = self.extract_time_range_from_expr(left)?;
+                let right = self.extract_time_range_from_expr(right)?;
+                Some(left.or(&right))
+            }
+            Operator::NotEq
+            | Operator::Plus
+            | Operator::Minus
+            | Operator::Multiply
+            | Operator::Divide
+            | Operator::Modulo
+            | Operator::Like
+            | Operator::NotLike
+            | Operator::ILike
+            | Operator::NotILike
+            | Operator::IsDistinctFrom
+            | Operator::IsNotDistinctFrom
+            | Operator::RegexMatch
+            | Operator::RegexIMatch
+            | Operator::RegexNotMatch
+            | Operator::RegexNotIMatch
+            | Operator::BitwiseAnd
+            | Operator::BitwiseOr
+            | Operator::BitwiseXor
+            | Operator::BitwiseShiftRight
+            | Operator::BitwiseShiftLeft
+            | Operator::StringConcat => None,
+        }
+    }
+
+    fn get_timestamp_filter(&self, left: &DfExpr, right: &DfExpr) -> Option<Timestamp> {
+        let (col, lit) = match (left, right) {
+            (DfExpr::Column(column), DfExpr::Literal(scalar)) => (column, scalar),
+            (DfExpr::Literal(scalar), DfExpr::Column(column)) => (column, scalar),
+            _ => {
+                return None;
+            }
+        };
+        if col.name != self.ts_col_name {
+            return None;
+        }
+        scalar_value_to_timestamp(lit)
+    }
+
+    fn extract_from_between_expr(
+        &self,
+        expr: &DfExpr,
+        negated: &bool,
+        low: &DfExpr,
+        high: &DfExpr,
+    ) -> Option<TimestampRange> {
+        let DfExpr::Column(col) = expr else { return None; };
+        if col.name != self.ts_col_name {
+            return None;
+        }
+
+        if *negated {
+            return None;
+        }
+
+        match (low, high) {
+            (DfExpr::Literal(low), DfExpr::Literal(high)) => {
+                let low_opt = scalar_value_to_timestamp(low);
+                let high_opt = scalar_value_to_timestamp(high);
+                Some(TimestampRange::new_inclusive(low_opt, high_opt))
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract time range filter from `IN (...)` expr.
+    fn extract_from_in_list_expr(
+        &self,
+        expr: &DfExpr,
+        negated: bool,
+        list: &[DfExpr],
+    ) -> Option<TimestampRange> {
+        if negated {
+            return None;
+        }
+        let DfExpr::Column(col) = expr else { return None; };
+        if col.name != self.ts_col_name {
+            return None;
+        }
+
+        if list.is_empty() {
+            return Some(TimestampRange::empty());
+        }
+        let mut init_range = TimestampRange::empty();
+        for expr in list {
+            if let DfExpr::Literal(scalar) = expr {
+                if let Some(timestamp) = scalar_value_to_timestamp(scalar) {
+                    init_range = init_range.or(&TimestampRange::single(timestamp))
+                } else {
+                    // TODO(hl): maybe we should raise an error here since cannot parse
+                    // timestamp value from in list expr
+                    return None;
+                }
+            }
+        }
+        Some(init_range)
     }
 }
 

@@ -1592,6 +1592,7 @@ name = "common-time"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "common-error",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -2210,6 +2211,7 @@ dependencies = [
  "arrow-schema",
  "common-base",
  "common-error",
+ "common-telemetry",
  "common-time",
  "datafusion-common",
  "enum_dispatch",

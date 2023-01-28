@@ -16,9 +16,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::logical_plan::Expr;
+use common_telemetry::debug;
+use common_time::range::TimestampRange;
 use snafu::ResultExt;
 use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
-use table::predicate::Predicate;
+use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};
@@ -126,6 +128,7 @@ impl ChunkReaderBuilder {
     }
 
     pub async fn build(mut self) -> Result<ChunkReaderImpl> {
+        let time_range_predicate = self.build_time_range_predicate();
         let schema = Arc::new(
             ProjectedSchema::new(self.schema, self.projection)
                 .context(error::InvalidProjectionSnafu)?,
@@ -147,6 +150,13 @@ impl ChunkReaderBuilder {
             predicate: Predicate::new(self.filters),
         };
         for file in &self.files_to_read {
+            if !Self::file_in_range(file, time_range_predicate) {
+                debug!(
+                    "Skip file {:?}, predicate: {:?}",
+                    file, time_range_predicate
+                );
+                continue;
+            }
             let reader = self
                 .sst_layer
                 .read_sst(file.file_name(), &read_opts)
@@ -159,6 +169,24 @@ impl ChunkReaderBuilder {
         let reader = DedupReader::new(schema.clone(), reader);
 
         Ok(ChunkReaderImpl::new(schema, Box::new(reader)))
+    }
+
+    /// Build time range predicate from schema and filters.
+    pub fn build_time_range_predicate(&self) -> TimestampRange {
+        let Some(ts_col) = self.schema.user_schema().timestamp_column() else { return TimestampRange::min_to_max() };
+        TimeRangePredicateBuilder::new(&ts_col.name, &self.filters).build()
+    }
+
+    /// Check if SST file's time range matches predicate.
+    #[inline]
+    fn file_in_range(file: &FileHandle, predicate: TimestampRange) -> bool {
+        if predicate == TimestampRange::min_to_max() {
+            return true;
+        }
+        // end_timestamp of sst file is inclusive.
+        let file_ts_range =
+            TimestampRange::new_inclusive(file.start_timestamp(), file.end_timestamp());
+        file_ts_range.intersects(&predicate)
     }
 }
 

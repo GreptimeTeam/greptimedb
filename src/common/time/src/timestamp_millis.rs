@@ -17,7 +17,7 @@ use std::cmp::Ordering;
 /// Unix timestamp in millisecond resolution.
 ///
 /// Negative timestamp is allowed, which represents timestamp before '1970-01-01T00:00:00'.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct TimestampMillis(i64);
 
 impl TimestampMillis {

@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
+
 use chrono::ParseError;
-use snafu::{Backtrace, Snafu};
+use common_error::ext::ErrorExt;
+use common_error::prelude::StatusCode;
+use snafu::{Backtrace, ErrorCompat, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -22,6 +26,24 @@ pub enum Error {
     ParseDateStr { raw: String, source: ParseError },
     #[snafu(display("Failed to parse a string into Timestamp, raw string: {}", raw))]
     ParseTimestamp { raw: String, backtrace: Backtrace },
+}
+
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Error::ParseDateStr { .. } | Error::ParseTimestamp { .. } => {
+                StatusCode::InvalidArguments
+            }
+        }
+    }
+
+    fn backtrace_opt(&self) -> Option<&Backtrace> {
+        ErrorCompat::backtrace(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

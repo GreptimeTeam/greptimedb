@@ -14,9 +14,11 @@
 
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use common_base::bytes::{Bytes, StringBytes};
+use common_telemetry::logging;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::{TimeUnit, Timestamp};
@@ -25,7 +27,8 @@ pub use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
-use crate::error::{self, Result};
+use crate::error;
+use crate::error::Result;
 use crate::prelude::*;
 use crate::type_id::LogicalTypeId;
 use crate::types::ListType;
@@ -283,6 +286,26 @@ fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
         TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(val, None),
         TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(val, None),
         TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(val, None),
+    }
+}
+
+/// Convert [ScalarValue] to [Timestamp].
+/// Return `None` if given scalar value cannot be converted to a valid timestamp.
+pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
+    match scalar {
+        ScalarValue::Int64(val) => val.map(Timestamp::new_millisecond),
+        ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                logging::error!(e;"Failed to convert string literal {s} to timestamp");
+                None
+            }
+        },
+        ScalarValue::TimestampSecond(v, _) => v.map(Timestamp::new_second),
+        ScalarValue::TimestampMillisecond(v, _) => v.map(Timestamp::new_millisecond),
+        ScalarValue::TimestampMicrosecond(v, _) => v.map(Timestamp::new_microsecond),
+        ScalarValue::TimestampNanosecond(v, _) => v.map(Timestamp::new_nanosecond),
+        _ => None,
     }
 }
 
