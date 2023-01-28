@@ -265,7 +265,13 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let table = MemTable::new("all_datatypes", recordbatch);
 
-    let mysql_server = create_mysql_server(table, server_tls, None)?;
+    let mysql_server = create_mysql_server(
+        table,
+        MysqlOpts {
+            tls: server_tls,
+            ..Default::default()
+        },
+    )?;
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = mysql_server.start(listening).await.unwrap();
