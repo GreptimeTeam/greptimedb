@@ -1210,4 +1210,56 @@ mod test {
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
+
+    #[tokio::test]
+    async fn binary_op_literal_column() {
+        let prom_expr = PromExpr::Binary(PromBinaryExpr {
+            lhs: Box::new(PromExpr::NumberLiteral(NumberLiteral { val: 1.0 })),
+            op: token::T_ADD,
+            rhs: Box::new(PromExpr::VectorSelector(VectorSelector {
+                name: Some("some_metric".to_owned()),
+                offset: None,
+                start_or_end: None,
+                label_matchers: Matchers {
+                    matchers: vec![
+                        Matcher {
+                            op: MatchOp::Equal,
+                            name: "tag_0".to_string(),
+                            value: "bar".to_string(),
+                        },
+                        Matcher {
+                            op: MatchOp::Equal,
+                            name: METRIC_NAME.to_string(),
+                            value: "some_metric".to_string(),
+                        },
+                    ],
+                },
+            })),
+            matching: None,
+            return_bool: false,
+        });
+
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let context_provider = build_test_context_provider("some_metric".to_string(), 1, 1).await;
+        let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
+
+        let  expected = String::from(
+            "Projection: Float64(1) + some_metric.field_0 [Float64(1) + some_metric.field_0:Float64;N]\
+            \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n    PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n      Filter: tag_0 = Utf8(\"bar\") AND timestamp >= TimestampMillisecond(0, None) AND timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n        TableScan: some_metric, unsupported_filters=[tag_0 = Utf8(\"bar\"), timestamp >= TimestampMillisecond(0, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+        );
+
+        assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
 }
