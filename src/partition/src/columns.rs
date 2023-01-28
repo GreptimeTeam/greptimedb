@@ -20,7 +20,7 @@ use snafu::ensure;
 use store_api::storage::RegionNumber;
 
 use crate::error::{self, Error};
-use crate::partitioning::{PartitionBound, PartitionExpr, PartitionRule};
+use crate::partition::{PartitionBound, PartitionExpr, PartitionRule};
 
 /// A [RangeColumnsPartitionRule] is very similar to [RangePartitionRule] except that it allows
 /// partitioning by multiple columns.
@@ -77,7 +77,7 @@ pub struct RangeColumnsPartitionRule {
 impl RangeColumnsPartitionRule {
     // It's assured that input arguments are valid because they are checked in SQL parsing stage.
     // So we can skip validating them.
-    pub(crate) fn new(
+    pub fn new(
         column_list: Vec<String>,
         value_lists: Vec<Vec<PartitionBound>>,
         regions: Vec<RegionNumber>,
@@ -123,18 +123,18 @@ impl RangeColumnsPartitionRule {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn column_list(&self) -> &Vec<String> {
+    // #[cfg(test)]
+    pub fn column_list(&self) -> &Vec<String> {
         &self.column_list
     }
 
-    #[cfg(test)]
-    pub(crate) fn value_lists(&self) -> &Vec<Vec<PartitionBound>> {
+    // #[cfg(test)]
+    pub fn value_lists(&self) -> &Vec<Vec<PartitionBound>> {
         &self.value_lists
     }
 
-    #[cfg(test)]
-    pub(crate) fn regions(&self) -> &Vec<RegionNumber> {
+    // #[cfg(test)]
+    pub fn regions(&self) -> &Vec<RegionNumber> {
         &self.regions
     }
 }
@@ -220,6 +220,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use super::*;
+    use crate::partition::{PartitionBound, PartitionExpr};
 
     #[test]
     fn test_find_regions() {

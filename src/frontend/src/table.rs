@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod route;
-
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -38,10 +36,15 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::DataFusionError;
 use datafusion_expr::expr::Expr as DfExpr;
-use datafusion_expr::BinaryExpr;
+use datafusion_expr::{BinaryExpr, Operator};
 use datatypes::prelude::Value;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use meta_client::rpc::{Peer, TableName};
+use partition::columns::RangeColumnsPartitionRule;
+use partition::partition::{PartitionBound, PartitionDef, PartitionExpr};
+use partition::range::RangePartitionRule;
+use partition::route::TableRoutes;
+use partition::PartitionRuleRef;
 use snafu::prelude::*;
 use store_api::storage::RegionNumber;
 use table::error::TableOperationSnafu;
@@ -54,15 +57,10 @@ use tokio::sync::RwLock;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, BuildTableMetaSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ContextValueNotFoundSnafu,
-    Error, LeaderNotFoundSnafu, RequestDatanodeSnafu, Result, TableNotFoundSnafu, TableSnafu,
-};
-use crate::partitioning::columns::RangeColumnsPartitionRule;
-use crate::partitioning::range::RangePartitionRule;
-use crate::partitioning::{
-    Operator, PartitionBound, PartitionDef, PartitionExpr, PartitionRuleRef,
+    DeserializePartitionSnafu, FindPartitionSnafu, LeaderNotFoundSnafu, RequestDatanodeSnafu,
+    Result, TableNotFoundSnafu, TableSnafu,
 };
 use crate::spliter::WriteSpliter;
-use crate::table::route::TableRoutes;
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
 
 pub mod insert;
@@ -191,13 +189,13 @@ impl DistTable {
     // TODO(LFC): Finding regions now seems less efficient, should be further looked into.
     fn find_regions(
         &self,
-        partition_rule: PartitionRuleRef<Error>,
+        partition_rule: PartitionRuleRef,
         filters: &[Expr],
     ) -> Result<Vec<RegionNumber>> {
         let regions = if let Some((first, rest)) = filters.split_first() {
-            let mut target = Self::find_regions0(partition_rule.clone(), first)?;
+            let mut target = self.find_regions0(partition_rule.clone(), first)?;
             for filter in rest {
-                let regions = Self::find_regions0(partition_rule.clone(), filter)?;
+                let regions = self.find_regions0(partition_rule.clone(), filter)?;
 
                 // When all filters are provided as a collection, it often implicitly states that
                 // "all filters must be satisfied". So we join all the results here.
@@ -210,7 +208,11 @@ impl DistTable {
             }
             target.into_iter().collect::<Vec<_>>()
         } else {
-            partition_rule.find_regions(&[])?
+            partition_rule
+                .find_regions(&[])
+                .with_context(|_| FindPartitionSnafu {
+                    table: self.table_name.to_string(),
+                })?
         };
         ensure!(
             !regions.is_empty(),
@@ -226,7 +228,8 @@ impl DistTable {
     //   - expr with arithmetic like "a + 1 < 10" (should have been optimized in logic plan?)
     //   - not comparison or neither "AND" nor "OR" operations, for example, "a LIKE x"
     fn find_regions0(
-        partition_rule: PartitionRuleRef<Error>,
+        &self,
+        partition_rule: PartitionRuleRef,
         filter: &Expr,
     ) -> Result<HashSet<RegionNumber>> {
         let expr = filter.df_expr();
@@ -245,7 +248,10 @@ impl DistTable {
                         .try_into()
                         .with_context(|_| error::ConvertScalarValueSnafu { value: sv.clone() })?;
                     return Ok(partition_rule
-                        .find_regions(&[PartitionExpr::new(column, op, value)])?
+                        .find_regions(&[PartitionExpr::new(column, op, value)])
+                        .with_context(|_| FindPartitionSnafu {
+                            table: self.table_name.to_string(),
+                        })?
                         .into_iter()
                         .collect::<HashSet<RegionNumber>>());
                 }
@@ -254,9 +260,9 @@ impl DistTable {
                 if matches!(op, Operator::And | Operator::Or) =>
             {
                 let left_regions =
-                    Self::find_regions0(partition_rule.clone(), &(*left.clone()).into())?;
+                    self.find_regions0(partition_rule.clone(), &(*left.clone()).into())?;
                 let right_regions =
-                    Self::find_regions0(partition_rule.clone(), &(*right.clone()).into())?;
+                    self.find_regions0(partition_rule.clone(), &(*right.clone()).into())?;
                 let regions = match op {
                     Operator::And => left_regions
                         .intersection(&right_regions)
@@ -275,7 +281,10 @@ impl DistTable {
 
         // Returns all regions for not supported partition expr as a safety hatch.
         Ok(partition_rule
-            .find_regions(&[])?
+            .find_regions(&[])
+            .with_context(|_| FindPartitionSnafu {
+                table: self.table_name.to_string(),
+            })?
             .into_iter()
             .collect::<HashSet<RegionNumber>>())
     }
@@ -284,7 +293,13 @@ impl DistTable {
         &self,
         regions: Vec<RegionNumber>,
     ) -> Result<HashMap<Peer, Vec<RegionNumber>>> {
-        let route = self.table_routes.get_route(&self.table_name).await?;
+        let route = self
+            .table_routes
+            .get_route(&self.table_name)
+            .await
+            .with_context(|_| FindPartitionSnafu {
+                table: self.table_name.to_string(),
+            })?;
 
         let mut datanodes = HashMap::new();
         for region in regions.iter() {
@@ -307,8 +322,14 @@ impl DistTable {
         Ok(datanodes)
     }
 
-    async fn find_partition_rule(&self) -> Result<PartitionRuleRef<Error>> {
-        let route = self.table_routes.get_route(&self.table_name).await?;
+    async fn find_partition_rule(&self) -> Result<PartitionRuleRef> {
+        let route = self
+            .table_routes
+            .get_route(&self.table_name)
+            .await
+            .with_context(|_| FindPartitionSnafu {
+                table: self.table_name.to_string(),
+            })?;
         ensure!(
             !route.region_routes.is_empty(),
             error::FindRegionRoutesSnafu {
@@ -326,7 +347,8 @@ impl DistTable {
                         region: r.region.id,
                         table_name: self.table_name.to_string(),
                     })?;
-            let partition_def: PartitionDef = partition.try_into()?;
+            let partition_def =
+                PartitionDef::try_from(partition).context(DeserializePartitionSnafu)?;
             partitions.push((r.region.id, partition_def));
         }
         partitions.sort_by(|a, b| a.1.partition_bounds().cmp(b.1.partition_bounds()));
@@ -355,7 +377,7 @@ impl DistTable {
             .collect::<Vec<RegionNumber>>();
 
         // TODO(LFC): Serializing and deserializing partition rule is ugly, must find a much more elegant way.
-        let partition_rule: PartitionRuleRef<Error> = match partition_columns.len() {
+        let partition_rule: PartitionRuleRef = match partition_columns.len() {
             1 => {
                 // Omit the last "MAXVALUE".
                 let bounds = partitions
@@ -456,7 +478,13 @@ impl DistTable {
     /// Define a `alter_by_expr` instead of impl [`Table::alter`] to avoid redundant conversion between
     /// [`table::requests::AlterTableRequest`] and [`AlterExpr`].
     async fn alter_by_expr(&self, expr: &AlterExpr) -> Result<()> {
-        let table_routes = self.table_routes.get_route(&self.table_name).await?;
+        let table_routes = self
+            .table_routes
+            .get_route(&self.table_name)
+            .await
+            .with_context(|_| FindPartitionSnafu {
+                table: self.table_name.to_string(),
+            })?;
         let leaders = table_routes.find_leaders();
         ensure!(
             !leaders.is_empty(),
@@ -617,7 +645,7 @@ mod test {
     use datafusion::prelude::SessionContext;
     use datafusion::sql::sqlparser;
     use datafusion_expr::expr_fn::{and, binary_expr, col, or};
-    use datafusion_expr::lit;
+    use datafusion_expr::{lit, Operator};
     use datanode::instance::Instance;
     use datatypes::arrow::compute::SortOptions;
     use datatypes::prelude::ConcreteDataType;
@@ -626,6 +654,8 @@ mod test {
     use meta_client::client::MetaClient;
     use meta_client::rpc::router::RegionRoute;
     use meta_client::rpc::{Region, Table, TableRoute};
+    use partition::columns::RangeColumnsPartitionRule;
+    use partition::partition::PartitionDef;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
@@ -633,7 +663,6 @@ mod test {
 
     use super::*;
     use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
-    use crate::partitioning::range::RangePartitionRule;
 
     struct DummyKvBackend;
 
@@ -1200,7 +1229,7 @@ mod test {
         //   PARTITION r3 VALUES LESS THAN (50),
         //   PARTITION r4 VALUES LESS THAN (MAXVALUE),
         // )
-        let partition_rule: PartitionRuleRef<Error> = Arc::new(RangePartitionRule::new(
+        let partition_rule: PartitionRuleRef = Arc::new(RangePartitionRule::new(
             "a",
             vec![10_i32.into(), 20_i32.into(), 50_i32.into()],
             vec![0_u32, 1, 2, 3],

@@ -34,6 +34,7 @@ use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
     TableName, TableRoute,
 };
+use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::QueryStatement;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
@@ -51,13 +52,12 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    ColumnDataTypeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu,
-    RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu, TableNotFoundSnafu,
-    TableSnafu, ToTableInsertRequestSnafu,
+    ColumnDataTypeSnafu, DeserializePartitionSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
+    TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
 use crate::instance::parse_stmt;
-use crate::partitioning::{PartitionBound, PartitionDef};
 use crate::sql::insert_to_request;
 
 #[derive(Clone)]
@@ -509,7 +509,10 @@ fn parse_partitions(
 
     partition_entries
         .into_iter()
-        .map(|x| PartitionDef::new(partition_columns.clone(), x).try_into())
+        .map(|x| {
+            MetaPartition::try_from(PartitionDef::new(partition_columns.clone(), x))
+                .context(DeserializePartitionSnafu)
+        })
         .collect::<Result<Vec<MetaPartition>>>()
 }
 

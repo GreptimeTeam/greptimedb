@@ -28,6 +28,7 @@ use meta_srv::metasrv::MetaSrvOptions;
 use meta_srv::mocks::MockInfo;
 use meta_srv::service::store::kv::KvStoreRef;
 use meta_srv::service::store::memory::MemStore;
+use partition::route::TableRoutes;
 use servers::grpc::GrpcServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::Mode;
@@ -39,7 +40,6 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::instance::distributed::DistInstance;
 use crate::instance::Instance;
-use crate::table::route::TableRoutes;
 
 /// Guard against the `TempDir`s that used in unit tests.
 /// (The `TempDir` will be deleted once it goes out of scope.)

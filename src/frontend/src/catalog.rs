@@ -29,11 +29,11 @@ use catalog::{
 };
 use futures::StreamExt;
 use meta_client::rpc::TableName;
+use partition::route::TableRoutes;
 use snafu::prelude::*;
 use table::TableRef;
 
 use crate::datanode::DatanodeClients;
-use crate::table::route::TableRoutes;
 use crate::table::DistTable;
 
 #[derive(Clone)]

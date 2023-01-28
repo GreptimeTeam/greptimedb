@@ -12,25 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+use meta_client::rpc::TableName;
 
-pub type Plugins = anymap::Map<dyn core::any::Any + Send + Sync>;
+use crate::error::Result;
+use crate::route::TableRoutes;
+use crate::PartitionRuleRef;
 
-mod catalog;
-mod datanode;
-pub mod error;
-mod expr_factory;
-pub mod frontend;
-pub mod grpc;
-pub mod influxdb;
-pub mod instance;
-pub mod mysql;
-pub mod opentsdb;
-pub mod postgres;
-pub mod prometheus;
-mod server;
-pub mod spliter;
-mod sql;
-mod table;
-#[cfg(test)]
-mod tests;
+pub struct PartitionManager {
+    table_routes: TableRoutes,
+}
+
+impl PartitionManager {
+    pub async fn find_partition(&self, _table: TableName) -> Result<Option<PartitionRuleRef>> {
+        todo!()
+    }
+}

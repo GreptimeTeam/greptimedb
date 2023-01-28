@@ -18,23 +18,21 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::MutableVector;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+use partition::PartitionRuleRef;
 use snafu::{ensure, OptionExt};
 use store_api::storage::RegionNumber;
 use table::requests::InsertRequest;
 
-use crate::error::{
-    Error, FindPartitionColumnSnafu, FindRegionSnafu, InvalidInsertRequestSnafu, Result,
-};
-use crate::partitioning::PartitionRuleRef;
+use crate::error::{FindPartitionColumnSnafu, FindRegionSnafu, InvalidInsertRequestSnafu, Result};
 
 pub type DistInsertRequest = HashMap<RegionNumber, InsertRequest>;
 
 pub struct WriteSpliter {
-    partition_rule: PartitionRuleRef<Error>,
+    partition_rule: PartitionRuleRef,
 }
 
 impl WriteSpliter {
-    pub fn with_partition_rule(rule: PartitionRuleRef<Error>) -> Self {
+    pub fn with_partition_rule(rule: PartitionRuleRef) -> Self {
         Self {
             partition_rule: rule,
         }
@@ -193,6 +191,8 @@ mod tests {
     use datatypes::vectors::{
         BooleanVectorBuilder, Int16VectorBuilder, MutableVector, StringVectorBuilder,
     };
+    use partition::partition::{PartitionExpr, PartitionRule};
+    use partition::PartitionRuleRef;
     use serde::{Deserialize, Serialize};
     use store_api::storage::RegionNumber;
     use table::requests::InsertRequest;
@@ -201,8 +201,6 @@ mod tests {
         check_req, find_partitioning_values, partition_insert_request, partition_values,
         WriteSpliter,
     };
-    use crate::error::Error;
-    use crate::partitioning::{PartitionExpr, PartitionRule, PartitionRuleRef};
 
     #[test]
     fn test_insert_req_check() {
@@ -218,7 +216,7 @@ mod tests {
     #[test]
     fn test_writer_spliter() {
         let insert = mock_insert_request();
-        let rule = Arc::new(MockPartitionRule) as PartitionRuleRef<Error>;
+        let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
         let spliter = WriteSpliter::with_partition_rule(rule);
         let ret = spliter.split(insert).unwrap();
 
@@ -444,7 +442,7 @@ mod tests {
     //     PARTITION r1 VALUES IN(2, 3),
     // );
     impl PartitionRule for MockPartitionRule {
-        type Error = Error;
+        type Error = partition::error::Error;
 
         fn as_any(&self) -> &dyn Any {
             self
@@ -468,7 +466,7 @@ mod tests {
             unreachable!()
         }
 
-        fn find_regions(&self, _: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
+        fn find_regions(&self, _: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Self::Error> {
             unimplemented!()
         }
     }
