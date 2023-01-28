@@ -25,4 +25,4 @@ version = "0.2"
 [dev-dependencies]
 datatypes = { path = "../../datatypes" }
 table = { path = "../../table" }
-tokio = { version = "1.0", features = ["full"] }
+tokio.workspace = true

@@ -19,5 +19,5 @@ snafu = { version = "0.7", features = ["backtraces"] }
 table = { path = "../table" }
 
 [dev-dependencies]
-tokio = { version = "1.23", features = ["full"] }
+tokio.workspace = true
 query = { path = "../query" }

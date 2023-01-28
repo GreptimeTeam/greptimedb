@@ -33,8 +33,7 @@ storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
 tempdir = { version = "0.3", optional = true }
-tokio = { version = "1.0", features = ["full"] }
+tokio.workspace = true
 
 [dev-dependencies]
 tempdir = { version = "0.3" }
-tokio = { version = "1.18", features = ["full"] }
