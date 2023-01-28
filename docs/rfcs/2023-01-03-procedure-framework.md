@@ -45,16 +45,21 @@ trait Procedure {
 The `Status` is an enum that has the following variants:
 ```rust
 enum Status {
-    Executing,
-    Suspend,
+    Executing {
+        persist: bool,
+    },
+    Suspended {
+        subprocedures: Vec<ProcedureWithId>,
+        persist: bool,
+    },
     Done,
 }
 ```
 
 A call to `execute()` can result in the following possibilities:
 - `Ok(Status::Done)`: we are done
-- `Ok(Status::Executing)`: there are remaining steps to do
-- `Ok(Status::Suspend)`: execution is suspended and can be resumed later
+- `Ok(Status::Executing { .. })`: there are remaining steps to do
+- `Ok(Status::Suspend { .. })`: execution is suspended and can be resumed later
 - `Err(e)`: error occurs during execution and the procedure is unable to proceed anymore.
 
 The framework assigns a unique id for each procedure and the procedure can get this id via the `Context`.
@@ -66,21 +71,32 @@ struct Context {
 }
 ```
 
-The framework calls `Procedure::dump()` to serialize the internal state of the procedure and writes to the `ProcedureStore`. The procedure can return an empty string to skip persistence.
+The framework calls `Procedure::dump()` to serialize the internal state of the procedure and writes to the `ProcedureStore`. The `Status` has a field `persist` to tell the framework whether it needs persistence.
+
+## Sub-procedures
+A procedure may need to create some sub-procedures to process its subtasks. For example, creating a distributed table with multiple regions (partitions) needs to set up the regions in each node, thus the parent procedure should instantiate a sub-procedure for each region. The framework makes sure that the parent procedure does not proceed till all sub-procedures are successfully finished.
+
+The procedure can submit sub-procedures to the framework by returning `Status::Suspended`. It needs to assign a procedure id to each procedure manually so it can track the status of the sub-procedures.
+```rust
+struct ProcedureWithId {
+    id: ProcedureId,
+    procedure: BoxedProcedure,
+}
+```
 
 ## ProcedureStore
 We might need to provide two different ProcedureStore implementations:
-- `LocalProcedureStore`, for standalone mode, stores data on the local disk.
-- `RemoteProcedureStore`, for distributed mode, stores data on the meta server or the object store service.
+- In standalone mode, it stores data on the local disk.
+- In distributed mode, it stores data on the meta server or the object store service.
 
 These implementations should share the same storage structure. They store each procedure's state in a unique path based on the procedure id:
 
 ```
 Sample paths:
 
-/procedures/{PROCEDURE_ID}-000001.step
-/procedures/{PROCEDURE_ID}-000002.step
-/procedures/{PROCEDURE_ID}-000003.commit
+/procedures/{PROCEDURE_ID}_000001.step
+/procedures/{PROCEDURE_ID}_000002.step
+/procedures/{PROCEDURE_ID}_000003.commit
 ```
 
 `ProcedureStore` behaves like a WAL. Before performing each step, the framework can write the procedure's current state to the ProcedureStore, which stores the state in the `.step` file. The `000001` in the path is a monotonic increasing sequence of the step. After the procedure is done, the framework puts a `.commit` file to indicate the procedure is finished (committed).
@@ -92,20 +108,20 @@ The framework can remove the procedure's files once the procedure is done, but i
 
 ```rust
 trait ProcedureManager {
-    fn register_loader(&self, name: &str, loader: Box<dyn ProcedureLoader>) -> Result<()>;
+    fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()>;
 
-    fn submit(&self, procedure: Box<dyn Procedure>) -> Result<Handle>;
+    async fn submit(&self, procedure: BoxedProcedure) -> Result<ProcedureId>;
 }
 ```
 
 It supports the following operations:
 - Register a `ProcedureLoader` by the type name of the `Procedure`.
-- Submit a `Procedure` to the manager and execute it. The returned `Handle` provides a `join()` method that can be used to join the `Procedure`.
+- Submit a `Procedure` to the manager and execute it.
 
 When `ProcedureManager` starts, it loads procedures from the `ProcedureStore` and restores the procedures by the `ProcedureLoader`. The manager stores the type name from `Procedure::type_name()` with the data from `Procedure::dump()` in the `.step` file and uses the type name to find a `ProcedureLoader` to recover the procedure from its data.
 
 ```rust
-type ProcedureLoader = dyn Fn(&str) -> Result<Box<dyn Procedure>>;
+type BoxedProcedureLoader = Box<dyn Fn(&str) -> Result<BoxedProcedure> + Send>;
 ```
 
 ## Rollback
@@ -113,8 +129,8 @@ The rollback step is supposed to clean up the resources created during the execu
 
 
 ```text
-/procedures/{PROCEDURE_ID}-000001.step
-/procedures/{PROCEDURE_ID}-000002.rollback
+/procedures/{PROCEDURE_ID}_000001.step
+/procedures/{PROCEDURE_ID}_000002.rollback
 ```
 
 Rollback is complicated to implement so some procedures might not support rollback or only provide a best-efforts approach.
@@ -122,8 +138,7 @@ Rollback is complicated to implement so some procedures might not support rollba
 ## Locking
 The procedure framework can provide a locking mechanism that gives a procedure read/write access to a database object such as a table so other procedures are unable to modify the same table while the current one is executing.
 
-## Sub-procedures
-A procedure may need to create some sub-procedures to process its subtasks. For example, creating a distributed table with multiple regions (partitions) needs to set up the regions in each node, thus the parent procedure should instantiate a sub-procedure for each region. The framework makes sure that the parent procedure does not proceed till all sub-procedures are successfully finished.
+Sub-procedures always inherit their parents' locks. The framework only acquires locks for a procedure if its parent doesn't hold the lock.
 
 # Drawbacks
 The `Procedure` framework introduces additional complexity and overhead to our database.
