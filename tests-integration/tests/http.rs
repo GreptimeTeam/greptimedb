@@ -195,7 +195,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     // test database given
     let res = client
-        .get("/v1/sql?database=public&sql=select cpu, ts from demo limit 1")
+        .get("/v1/sql?db=public&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -214,7 +214,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     // test database not found
     let res = client
-        .get("/v1/sql?database=notfound&sql=select cpu, ts from demo limit 1")
+        .get("/v1/sql?db=notfound&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -223,7 +223,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     // test catalog-schema given
     let res = client
-        .get("/v1/sql?database=greptime-public&sql=select cpu, ts from demo limit 1")
+        .get("/v1/sql?db=greptime-public&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -242,7 +242,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     // test invalid catalog
     let res = client
-        .get("/v1/sql?database=notfound2-schema&sql=select cpu, ts from demo limit 1")
+        .get("/v1/sql?db=notfound2-schema&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -251,7 +251,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     // test invalid schema
     let res = client
-        .get("/v1/sql?database=greptime-schema&sql=select cpu, ts from demo limit 1")
+        .get("/v1/sql?db=greptime-schema&sql=select cpu, ts from demo limit 1")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);

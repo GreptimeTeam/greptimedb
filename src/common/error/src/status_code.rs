@@ -77,6 +77,8 @@ pub enum StatusCode {
     AuthHeaderNotFound = 7003,
     /// Invalid http authorization header
     InvalidAuthHeader = 7004,
+    /// Illegal request to connect catalog-schema
+    AccessDenied = 7005,
     // ====== End of auth related status code =====
 }
 

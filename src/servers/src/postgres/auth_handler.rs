@@ -23,6 +23,7 @@ use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
+use session::context::{UserInfo, DEFAULT_USERNAME};
 use snafu::ResultExt;
 
 use crate::auth::{Identity, Password, UserProviderRef};
@@ -30,14 +31,15 @@ use crate::error;
 use crate::error::Result;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
-struct PgPwdVerifier {
+struct PgLoginVerifier {
     user_provider: Option<UserProviderRef>,
 }
 
 #[allow(dead_code)]
 struct LoginInfo {
     user: Option<String>,
-    database: Option<String>,
+    catalog: Option<String>,
+    schema: Option<String>,
     host: String,
 }
 
@@ -48,31 +50,58 @@ impl LoginInfo {
     {
         LoginInfo {
             user: client.metadata().get(super::METADATA_USER).map(Into::into),
-            database: client
+            catalog: client
                 .metadata()
-                .get(super::METADATA_DATABASE)
+                .get(super::METADATA_CATALOG)
+                .map(Into::into),
+            schema: client
+                .metadata()
+                .get(super::METADATA_SCHEMA)
                 .map(Into::into),
             host: client.socket_addr().ip().to_string(),
         }
     }
 }
 
-impl PgPwdVerifier {
-    async fn verify_pwd(&self, password: &str, login: LoginInfo) -> Result<bool> {
+impl PgLoginVerifier {
+    async fn verify_pwd(&self, password: &str, login: &LoginInfo) -> Result<bool> {
         if let Some(user_provider) = &self.user_provider {
-            let user_name = match login.user {
+            let user_name = match &login.user {
                 Some(name) => name,
                 None => return Ok(false),
             };
 
             // TODO(fys): pass user_info to context
             let _user_info = user_provider
-                .auth(
-                    Identity::UserId(&user_name, None),
+                .authenticate(
+                    Identity::UserId(user_name, None),
                     Password::PlainText(password),
                 )
                 .await
                 .context(error::AuthSnafu)?;
+        }
+        Ok(true)
+    }
+
+    async fn authorize(&self, login: &LoginInfo) -> Result<bool> {
+        // at this time, username in login info should be valid
+        // TODO(shuiyisong): change to use actually user_info from session
+        if let Some(user_provider) = &self.user_provider {
+            let user_name = match &login.user {
+                Some(name) => name,
+                None => return Ok(false),
+            };
+            let catalog = match &login.catalog {
+                Some(name) => name,
+                None => return Ok(false),
+            };
+            let schema = match &login.schema {
+                Some(name) => name,
+                None => return Ok(false),
+            };
+            user_provider
+                .authorize(catalog, schema, &UserInfo::new(user_name))
+                .await?;
         }
         Ok(true)
     }
@@ -106,7 +135,7 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 }
 
 pub struct PgAuthStartupHandler {
-    verifier: PgPwdVerifier,
+    verifier: PgLoginVerifier,
     param_provider: GreptimeDBStartupParameters,
     force_tls: bool,
     query_handler: ServerSqlQueryHandlerRef,
@@ -119,7 +148,7 @@ impl PgAuthStartupHandler {
         query_handler: ServerSqlQueryHandlerRef,
     ) -> Self {
         PgAuthStartupHandler {
-            verifier: PgPwdVerifier { user_provider },
+            verifier: PgLoginVerifier { user_provider },
             param_provider: GreptimeDBStartupParameters::new(),
             force_tls,
             query_handler,
@@ -173,22 +202,50 @@ impl StartupHandler for PgAuthStartupHandler {
                         ))
                         .await?;
                 } else {
+                    // no user is provided, use default user
+                    // and still do authorization
+                    let mut login_info = LoginInfo::from_client_info(client);
+                    login_info.user = Some(DEFAULT_USERNAME.to_string());
+
+                    let authorize_result = self.verifier.authorize(&login_info).await;
+                    if !matches!(authorize_result, Ok(true)) {
+                        return send_error(
+                            client,
+                            "FATAL",
+                            "28P01",
+                            "password authorization failed".to_owned(),
+                        )
+                        .await;
+                    }
                     auth::finish_authentication(client, &self.param_provider).await;
                 }
             }
             PgWireFrontendMessage::Password(ref pwd) => {
                 let login_info = LoginInfo::from_client_info(client);
-                if let Ok(true) = self.verifier.verify_pwd(pwd.password(), login_info).await {
-                    auth::finish_authentication(client, &self.param_provider).await
-                } else {
-                    send_error(
+                // do authenticate
+                let authenticate_result =
+                    self.verifier.verify_pwd(pwd.password(), &login_info).await;
+                if !matches!(authenticate_result, Ok(true)) {
+                    return send_error(
                         client,
                         "FATAL",
                         "28P01",
-                        "Password authentication failed".to_owned(),
+                        "password authentication failed".to_owned(),
                     )
-                    .await?;
+                    .await;
                 }
+                // do authorize
+                let authorize_result = self.verifier.authorize(&login_info).await;
+                if !matches!(authorize_result, Ok(true)) {
+                    return send_error(
+                        client,
+                        "FATAL",
+                        "28P01",
+                        "password authorization failed".to_owned(),
+                    )
+                    .await;
+                }
+                auth::finish_authentication(client, &self.param_provider).await;
             }
             _ => {}
         }

@@ -135,7 +135,7 @@ fn create_invalid_script_query() -> Query<script_handler::ScriptQuery> {
 fn create_query() -> Query<http_handler::SqlQuery> {
     Query(http_handler::SqlQuery {
         sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
-        database: None,
+        db: None,
     })
 }
 

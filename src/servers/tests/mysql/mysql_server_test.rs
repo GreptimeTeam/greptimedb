@@ -24,17 +24,21 @@ use mysql_async::prelude::*;
 use mysql_async::SslOpts;
 use rand::rngs::StdRng;
 use rand::Rng;
-use servers::auth::user_provider::StaticUserProvider;
 use servers::error::Result;
 use servers::mysql::server::MysqlServer;
 use servers::server::Server;
 use servers::tls::TlsOption;
 use table::test_util::MemTable;
 
+use crate::auth::{DatabaseAuthInfo, MockUserProvider};
 use crate::create_testing_sql_query_handler;
 use crate::mysql::{all_datatype_testing_data, MysqlTextRow, TestingData};
 
-fn create_mysql_server(table: MemTable, tls: TlsOption) -> Result<Box<dyn Server>> {
+fn create_mysql_server(
+    table: MemTable,
+    tls: TlsOption,
+    auth_info: Option<DatabaseAuthInfo>,
+) -> Result<Box<dyn Server>> {
     let query_handler = create_testing_sql_query_handler(table);
     let io_runtime = Arc::new(
         RuntimeBuilder::default()
@@ -44,7 +48,10 @@ fn create_mysql_server(table: MemTable, tls: TlsOption) -> Result<Box<dyn Server
             .unwrap(),
     );
 
-    let provider = StaticUserProvider::try_from("cmd:greptime=greptime").unwrap();
+    let mut provider = MockUserProvider::default();
+    if let Some(auth_info) = auth_info {
+        provider.set_authorization_info(auth_info);
+    }
 
     Ok(MysqlServer::create_server(
         query_handler,
@@ -58,7 +65,7 @@ fn create_mysql_server(table: MemTable, tls: TlsOption) -> Result<Box<dyn Server
 async fn test_start_mysql_server() -> Result<()> {
     let table = MemTable::default_numbers_table();
 
-    let mysql_server = create_mysql_server(table, Default::default())?;
+    let mysql_server = create_mysql_server(table, Default::default(), None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let result = mysql_server.start(listening).await;
     assert!(result.is_ok());
@@ -71,13 +78,54 @@ async fn test_start_mysql_server() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_schema_validation() -> Result<()> {
+    async fn generate_server(auth_info: DatabaseAuthInfo<'_>) -> Result<(Box<dyn Server>, u16)> {
+        let table = MemTable::default_numbers_table();
+        let mysql_server = create_mysql_server(table, Default::default(), Some(auth_info))?;
+        let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+        let server_addr = mysql_server.start(listening).await.unwrap();
+        Ok((mysql_server, server_addr.port()))
+    }
+
+    common_telemetry::init_default_ut_logging();
+    let (mysql_server, server_port) = generate_server(DatabaseAuthInfo {
+        catalog: "greptime",
+        schema: "public",
+        username: "greptime",
+    })
+    .await?;
+
+    //TODO(shuiyisong): mysql conn without dbname rejection is not implemented yet, add test later.
+
+    let pass = create_connection(server_port, Some("public"), false).await;
+    assert!(pass.is_ok());
+    let result = mysql_server.shutdown().await;
+    assert!(result.is_ok());
+
+    // change to another username
+    let (mysql_server, server_port) = generate_server(DatabaseAuthInfo {
+        catalog: "greptime",
+        schema: "public",
+        username: "no_access_user",
+    })
+    .await?;
+
+    let fail = create_connection(server_port, Some("public"), false).await;
+    assert!(fail.is_err());
+    let result = mysql_server.shutdown().await;
+    assert!(result.is_ok());
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_shutdown_mysql_server() -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
     let table = MemTable::default_numbers_table();
 
-    let mysql_server = create_mysql_server(table, Default::default())?;
+    let mysql_server = create_mysql_server(table, Default::default(), None)?;
     let result = mysql_server.shutdown().await;
     assert!(result
         .unwrap_err()
@@ -135,40 +183,29 @@ async fn test_query_all_datatypes() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_server_prefer_secure_client_plain() -> Result<()> {
-    let server_tls = TlsOption {
-        mode: servers::tls::TlsMode::Prefer,
-        cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
-    };
-
-    let client_tls = false;
-    do_test_query_all_datatypes(server_tls, client_tls).await?;
+    do_test_query_all_datatypes_with_secure_server(servers::tls::TlsMode::Prefer, false, false)
+        .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_server_prefer_secure_client_secure() -> Result<()> {
-    let server_tls = TlsOption {
-        mode: servers::tls::TlsMode::Prefer,
-        cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
-    };
-
-    let client_tls = true;
-    do_test_query_all_datatypes(server_tls, client_tls).await?;
+async fn test_server_prefer_secure_client_plain_with_pkcs8_priv_key() -> Result<()> {
+    do_test_query_all_datatypes_with_secure_server(servers::tls::TlsMode::Prefer, false, true)
+        .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_server_require_secure_client_secure() -> Result<()> {
-    let server_tls = TlsOption {
-        mode: servers::tls::TlsMode::Require,
-        cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
-    };
+    do_test_query_all_datatypes_with_secure_server(servers::tls::TlsMode::Require, true, false)
+        .await?;
+    Ok(())
+}
 
-    let client_tls = true;
-    do_test_query_all_datatypes(server_tls, client_tls).await?;
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_server_require_secure_client_secure_with_pkcs8_priv_key() -> Result<()> {
+    do_test_query_all_datatypes_with_secure_server(servers::tls::TlsMode::Require, true, true)
+        .await?;
     Ok(())
 }
 
@@ -177,7 +214,7 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
+        key_path: "tests/ssl/server-rsa.key".to_owned(),
     };
 
     let client_tls = false;
@@ -193,7 +230,38 @@ async fn test_server_required_secure_client_plain() -> Result<()> {
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let table = MemTable::new("all_datatypes", recordbatch);
 
-    let mysql_server = create_mysql_server(table, server_tls)?;
+    let mysql_server = create_mysql_server(table, server_tls, None)?;
+
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    let server_addr = mysql_server.start(listening).await.unwrap();
+
+    let r = create_connection(server_addr.port(), None, client_tls).await;
+    assert!(r.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_required_secure_client_plain_with_pkcs8_priv_key() -> Result<()> {
+    let server_tls = TlsOption {
+        mode: servers::tls::TlsMode::Require,
+        cert_path: "tests/ssl/server.crt".to_owned(),
+        key_path: "tests/ssl/server-pkcs8.key".to_owned(),
+    };
+
+    let client_tls = false;
+
+    #[allow(unused)]
+    let TestingData {
+        column_schemas,
+        mysql_columns_def,
+        columns,
+        mysql_text_output_rows,
+    } = all_datatype_testing_data();
+    let schema = Arc::new(Schema::new(column_schemas.clone()));
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    let table = MemTable::new("all_datatypes", recordbatch);
+
+    let mysql_server = create_mysql_server(table, server_tls, None)?;
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = mysql_server.start(listening).await.unwrap();
@@ -219,7 +287,7 @@ async fn test_db_name() -> Result<()> {
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let table = MemTable::new("all_datatypes", recordbatch);
 
-    let mysql_server = create_mysql_server(table, server_tls)?;
+    let mysql_server = create_mysql_server(table, server_tls, None)?;
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = mysql_server.start(listening).await.unwrap();
@@ -247,7 +315,7 @@ async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) ->
     let recordbatch = RecordBatch::new(schema, columns).unwrap();
     let table = MemTable::new("all_datatypes", recordbatch);
 
-    let mysql_server = create_mysql_server(table, server_tls)?;
+    let mysql_server = create_mysql_server(table, server_tls, None)?;
 
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = mysql_server.start(listening).await.unwrap();
@@ -282,7 +350,7 @@ async fn test_query_concurrently() -> Result<()> {
 
     let table = MemTable::default_numbers_table();
 
-    let mysql_server = create_mysql_server(table, Default::default())?;
+    let mysql_server = create_mysql_server(table, Default::default(), None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = mysql_server.start(listening).await.unwrap();
     let server_port = server_addr.port();
@@ -332,7 +400,7 @@ async fn create_connection(
         .tcp_port(port)
         .prefer_socket(false)
         .wait_timeout(Some(1000))
-        .db_name(db_name)
+        .db_name(db_name.or(Some(DEFAULT_SCHEMA_NAME)))
         .user(Some("greptime".to_string()))
         .pass(Some("greptime".to_string()));
 
@@ -344,4 +412,24 @@ async fn create_connection(
     }
 
     mysql_async::Conn::new(opts).await
+}
+
+async fn do_test_query_all_datatypes_with_secure_server(
+    server_tls_mode: servers::tls::TlsMode,
+    client_tls: bool,
+    is_pkcs8_priv_key: bool,
+) -> Result<()> {
+    let server_tls = TlsOption {
+        mode: server_tls_mode,
+        cert_path: "tests/ssl/server.crt".to_owned(),
+        key_path: {
+            if is_pkcs8_priv_key {
+                "tests/ssl/server-pkcs8.key".to_owned()
+            } else {
+                "tests/ssl/server-rsa.key".to_owned()
+            }
+        },
+    };
+
+    do_test_query_all_datatypes(server_tls, client_tls).await
 }

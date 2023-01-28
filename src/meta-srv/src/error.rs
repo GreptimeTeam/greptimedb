@@ -159,6 +159,12 @@ pub enum Error {
         selector_type: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("An error occurred in Meta, source: {}", source))]
+    MetaBoxedError {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -207,6 +213,7 @@ impl ErrorExt for Error {
             | Error::InvalidTxnResult { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
+            Error::MetaBoxedError { source } => source.status_code(),
         }
     }
 }

@@ -22,7 +22,6 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use rustls::client::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Certificate, Error, ServerName};
-use servers::auth::user_provider::StaticUserProvider;
 use servers::auth::UserProviderRef;
 use servers::error::Result;
 use servers::postgres::PostgresServer;
@@ -31,12 +30,14 @@ use servers::tls::TlsOption;
 use table::test_util::MemTable;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
+use crate::auth::{DatabaseAuthInfo, MockUserProvider};
 use crate::create_testing_instance;
 
 fn create_postgres_server(
     table: MemTable,
     check_pwd: bool,
     tls: TlsOption,
+    auth_info: Option<DatabaseAuthInfo>,
 ) -> Result<Box<dyn Server>> {
     let instance = Arc::new(create_testing_instance(table));
     let io_runtime = Arc::new(
@@ -47,9 +48,11 @@ fn create_postgres_server(
             .unwrap(),
     );
     let user_provider: Option<UserProviderRef> = if check_pwd {
-        Some(Arc::new(
-            StaticUserProvider::try_from("cmd:test_user=test_pwd").unwrap(),
-        ))
+        let mut provider = MockUserProvider::default();
+        if let Some(info) = auth_info {
+            provider.set_authorization_info(info);
+        }
+        Some(Arc::new(provider))
     } else {
         None
     };
@@ -66,7 +69,7 @@ fn create_postgres_server(
 pub async fn test_start_postgres_server() -> Result<()> {
     let table = MemTable::default_numbers_table();
 
-    let pg_server = create_postgres_server(table, false, Default::default())?;
+    let pg_server = create_postgres_server(table, false, Default::default(), None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let result = pg_server.start(listening).await;
     assert!(result.is_ok());
@@ -86,12 +89,52 @@ async fn test_shutdown_pg_server_range() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_schema_validating() -> Result<()> {
+    async fn generate_server(auth_info: DatabaseAuthInfo<'_>) -> Result<(Box<dyn Server>, u16)> {
+        let table = MemTable::default_numbers_table();
+        let postgres_server =
+            create_postgres_server(table, true, Default::default(), Some(auth_info))?;
+        let listening = "127.0.0.1:5432".parse::<SocketAddr>().unwrap();
+        let server_addr = postgres_server.start(listening).await.unwrap();
+        let server_port = server_addr.port();
+        Ok((postgres_server, server_port))
+    }
+
+    common_telemetry::init_default_ut_logging();
+    let (pg_server, server_port) = generate_server(DatabaseAuthInfo {
+        catalog: "greptime",
+        schema: "public",
+        username: "greptime",
+    })
+    .await?;
+
+    let pass = create_plain_connection(server_port, true).await;
+    assert!(pass.is_ok());
+    let result = pg_server.shutdown().await;
+    assert!(result.is_ok());
+
+    let (pg_server, server_port) = generate_server(DatabaseAuthInfo {
+        catalog: "greptime",
+        schema: "public",
+        username: "no_right_user",
+    })
+    .await?;
+
+    let fail = create_plain_connection(server_port, true).await;
+    assert!(fail.is_err());
+    let result = pg_server.shutdown().await;
+    assert!(result.is_ok());
+
+    Ok(())
+}
+
 // #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_shutdown_pg_server(with_pwd: bool) -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
     let table = MemTable::default_numbers_table();
-    let postgres_server = create_postgres_server(table, with_pwd, Default::default())?;
+    let postgres_server = create_postgres_server(table, with_pwd, Default::default(), None)?;
     let result = postgres_server.shutdown().await;
     assert!(result
         .unwrap_err()
@@ -192,15 +235,28 @@ async fn test_query_pg_concurrently() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_server_secure_prefer_client_plain() -> Result<()> {
     common_telemetry::init_default_ut_logging();
+    do_simple_query_with_secure_server(servers::tls::TlsMode::Prefer, false, false).await?;
+    Ok(())
+}
 
-    let server_tls = TlsOption {
-        mode: servers::tls::TlsMode::Prefer,
-        cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
-    };
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_secure_prefer_client_plain_with_pkcs8_priv_key() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    do_simple_query_with_secure_server(servers::tls::TlsMode::Prefer, false, true).await?;
+    Ok(())
+}
 
-    let client_tls = false;
-    do_simple_query(server_tls, client_tls).await?;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_secure_require_client_secure() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    do_simple_query_with_secure_server(servers::tls::TlsMode::Require, true, false).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_server_secure_require_client_secure_with_pkcs8_priv_key() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    do_simple_query_with_secure_server(servers::tls::TlsMode::Require, true, true).await?;
     Ok(())
 }
 
@@ -211,7 +267,7 @@ async fn test_server_secure_require_client_plain() -> Result<()> {
     let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
+        key_path: "tests/ssl/server-rsa.key".to_owned(),
     };
     let server_port = start_test_server(server_tls).await?;
     let r = create_plain_connection(server_port, false).await;
@@ -220,17 +276,17 @@ async fn test_server_secure_require_client_plain() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_server_secure_require_client_secure() -> Result<()> {
+async fn test_server_secure_require_client_plain_with_pkcs8_priv_key() -> Result<()> {
     common_telemetry::init_default_ut_logging();
 
     let server_tls = TlsOption {
         mode: servers::tls::TlsMode::Require,
         cert_path: "tests/ssl/server.crt".to_owned(),
-        key_path: "tests/ssl/server.key".to_owned(),
+        key_path: "tests/ssl/server-pkcs8.key".to_owned(),
     };
-
-    let client_tls = true;
-    do_simple_query(server_tls, client_tls).await?;
+    let server_port = start_test_server(server_tls).await?;
+    let r = create_plain_connection(server_port, false).await;
+    assert!(r.is_err());
     Ok(())
 }
 
@@ -273,7 +329,7 @@ async fn test_using_db() -> Result<()> {
 async fn start_test_server(server_tls: TlsOption) -> Result<u16> {
     common_telemetry::init_default_ut_logging();
     let table = MemTable::default_numbers_table();
-    let pg_server = create_postgres_server(table, false, server_tls)?;
+    let pg_server = create_postgres_server(table, false, server_tls, None)?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = pg_server.start(listening).await.unwrap();
     Ok(server_addr.port())
@@ -301,7 +357,7 @@ async fn create_secure_connection(
 ) -> std::result::Result<Client, PgError> {
     let url = if with_pwd {
         format!(
-            "sslmode=require host=127.0.0.1 port={port} user=test_user password=test_pwd connect_timeout=2, dbname={DEFAULT_SCHEMA_NAME}",
+            "sslmode=require host=127.0.0.1 port={port} user=greptime password=greptime connect_timeout=2, dbname={DEFAULT_SCHEMA_NAME}",
         )
     } else {
         format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
@@ -328,7 +384,7 @@ async fn create_plain_connection(
 ) -> std::result::Result<Client, PgError> {
     let url = if with_pwd {
         format!(
-            "host=127.0.0.1 port={port} user=test_user password=test_pwd connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}",
+            "host=127.0.0.1 port={port} user=greptime password=greptime connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}",
         )
     } else {
         format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
@@ -390,4 +446,24 @@ impl ServerCertVerifier for AcceptAllVerifier {
     ) -> std::result::Result<ServerCertVerified, Error> {
         Ok(ServerCertVerified::assertion())
     }
+}
+
+async fn do_simple_query_with_secure_server(
+    server_tls_mode: servers::tls::TlsMode,
+    client_tls: bool,
+    is_pkcs8_priv_key: bool,
+) -> Result<()> {
+    let server_tls = TlsOption {
+        mode: server_tls_mode,
+        cert_path: "tests/ssl/server.crt".to_owned(),
+        key_path: {
+            if is_pkcs8_priv_key {
+                "tests/ssl/server-pkcs8.key".to_owned()
+            } else {
+                "tests/ssl/server-rsa.key".to_owned()
+            }
+        },
+    };
+
+    do_simple_query(server_tls, client_tls).await
 }
