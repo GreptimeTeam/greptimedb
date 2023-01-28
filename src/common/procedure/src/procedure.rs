@@ -44,10 +44,12 @@ impl Status {
         Status::Executing { persist }
     }
 
-    /// Returns `true` if the procedure needs the framework to persist its state.
+    /// Returns `true` if the procedure needs the framework to persist its intermediate state.
     pub fn need_persist(&self) -> bool {
         match self {
             Status::Executing { persist } | Status::Suspended { persist, .. } => *persist,
+            // If the procedure is done, the framework doesn't need to persist the procedure
+            // anymore. It only needs to mark the procedure as committed.
             Status::Done => false,
         }
     }
@@ -179,4 +181,54 @@ struct ProcedureMessage {
     data: String,
     /// Parent procedure id.
     parent_id: Option<ProcedureId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_status() {
+        let status = Status::Executing {
+            persist: false,
+        };
+        assert!(!status.need_persist());
+
+        let status = Status::Executing {
+            persist: true,
+        };
+        assert!(status.need_persist());
+
+        let status = Status::Suspended {
+            subprocedures: Vec::new(),
+            persist: false,
+        };
+        assert!(!status.need_persist());
+
+        let status = Status::Suspended {
+            subprocedures: Vec::new(),
+            persist: true,
+        };
+        assert!(status.need_persist());
+
+        let status = Status::Done;
+        assert!(!status.need_persist());
+    }
+
+    #[test]
+    fn test_lock_key() {
+        let entity = "catalog.schema.my_table";
+        let key = LockKey::new(entity);
+        assert_eq!(entity, key.key());
+    }
+
+    #[test]
+    fn test_procedure_id() {
+        let id = ProcedureId::random();
+        let uuid_str = id.to_string();
+        assert_eq!(id.0.to_string(), uuid_str);
+
+        let parsed = ProcedureId::parse_str(&uuid_str).unwrap();
+        assert_eq!(id, parsed);
+    }
 }

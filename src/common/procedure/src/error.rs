@@ -18,6 +18,7 @@ use common_error::prelude::*;
 
 use crate::procedure::ProcedureId;
 
+/// Procedure error.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
