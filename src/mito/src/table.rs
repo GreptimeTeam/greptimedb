@@ -288,30 +288,33 @@ impl<R: Region> Table for MitoTable<R> {
         if request.key_column_values.is_empty() {
             return Ok(0);
         }
+        let mut rows_deleted = 0;
+        // TODO(hl): Should be tracked by procedure.
+        // TODO(hl): Parse delete request into region->keys instead of delete in each region
+        for (_, region) in &self.regions {
+            let mut write_request = region.write_request();
+            let key_column_values = request.key_column_values.clone();
+            // Safety: key_column_values isn't empty.
+            let rows_num = key_column_values.values().next().unwrap().len();
 
-        let mut write_request = self.region.write_request();
+            logging::trace!(
+                "Delete from table {} where key_columns are: {:?}",
+                self.table_info().name,
+                key_column_values
+            );
 
-        let key_column_values = request.key_column_values;
-        // Safety: key_column_values isn't empty.
-        let rows_num = key_column_values.values().next().unwrap().len();
-
-        logging::trace!(
-            "Delete from table {} where key_columns are: {:?}",
-            self.table_info().name,
-            key_column_values
-        );
-
-        write_request
-            .delete(key_column_values)
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
-        self.region
-            .write(&WriteContext::default(), write_request)
-            .await
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
-
-        Ok(rows_num)
+            write_request
+                .delete(key_column_values)
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+            region
+                .write(&WriteContext::default(), write_request)
+                .await
+                .map_err(BoxedError::new)
+                .context(table_error::TableOperationSnafu)?;
+            rows_deleted += rows_num;
+        }
+        Ok(rows_deleted)
     }
 }
 

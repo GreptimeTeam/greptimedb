@@ -125,8 +125,6 @@ impl ErrorExt for Error {
             Error::TableOperation { source } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
-            Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
-            Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
         }
     }
