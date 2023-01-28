@@ -1518,6 +1518,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-procedure"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "common-error",
+ "common-runtime",
+ "common-telemetry",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "common-query"
 version = "0.1.0"
 dependencies = [
