@@ -68,8 +68,7 @@ snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.28"
 tokio = { version = "1.24.2", features = ["full"] }
 tonic = "0.8"
-# TODO(yingwen): Consider using fast-rng feature
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 
 [profile.release]
 debug = true

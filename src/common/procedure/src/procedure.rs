@@ -189,14 +189,10 @@ mod tests {
 
     #[test]
     fn test_status() {
-        let status = Status::Executing {
-            persist: false,
-        };
+        let status = Status::Executing { persist: false };
         assert!(!status.need_persist());
 
-        let status = Status::Executing {
-            persist: true,
-        };
+        let status = Status::Executing { persist: true };
         assert!(status.need_persist());
 
         let status = Status::Suspended {
