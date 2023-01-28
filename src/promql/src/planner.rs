@@ -44,6 +44,8 @@ use crate::error::{
 };
 use crate::extension_plan::{InstantManipulate, Millisecond, RangeManipulate, SeriesNormalize};
 
+const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
+
 #[derive(Default, Debug, Clone)]
 struct PromPlannerContext {
     // query parameters
@@ -147,49 +149,48 @@ impl<S: ContextProvider> PromPlanner<S> {
                     (Some(_lhs), Some(_rhs)) => {
                         todo!("is this a legal case?")
                     }
+                    // lhs is a literal, rhs is a column
                     (Some(expr), None) => {
                         let input = self.prom_expr_to_plan(*rhs.clone())?;
-                        let projection = self.projection_for_each_value_column(input, |col| {
+                        self.projection_for_each_value_column(input, |col| {
                             Ok(DfExpr::BinaryExpr(BinaryExpr {
                                 left: Box::new(expr.clone()),
                                 op: Self::prom_token_to_binary_op(*op)?,
                                 right: Box::new(DfExpr::Column(col.into())),
                             }))
-                        })?;
-                        projection
+                        })?
                     }
+                    // lhs is a column, rhs is a literal
                     (None, Some(expr)) => {
                         let input = self.prom_expr_to_plan(*lhs.clone())?;
-                        let projection = self.projection_for_each_value_column(input, |col| {
+                        self.projection_for_each_value_column(input, |col| {
                             Ok(DfExpr::BinaryExpr(BinaryExpr {
-                                left: Box::new(expr.clone()),
+                                left: Box::new(DfExpr::Column(col.into())),
                                 op: Self::prom_token_to_binary_op(*op)?,
-                                right: Box::new(DfExpr::Column(col.into())),
+                                right: Box::new(expr.clone()),
                             }))
-                        })?;
-                        projection
+                        })?
                     }
+                    // both are columns. join them on time index
                     (None, None) => {
                         let left_input = self.prom_expr_to_plan(*lhs.clone())?;
                         let right_input = self.prom_expr_to_plan(*rhs.clone())?;
                         let join_plan = self.join_on_time_index(left_input, right_input)?;
-                        // TODO(ruihang): what's the table name (qualifier) of joined table
-                        let projection =
-                            self.projection_for_each_value_column(join_plan, |col| {
-                                Ok(DfExpr::BinaryExpr(BinaryExpr {
-                                    left: Box::new(DfExpr::Column(col.into())),
-                                    op: Self::prom_token_to_binary_op(*op)?,
-                                    right: Box::new(DfExpr::Column(col.into())),
-                                }))
-                            })?;
-                        projection
+                        self.projection_for_each_value_column(join_plan, |col| {
+                            Ok(DfExpr::BinaryExpr(BinaryExpr {
+                                left: Box::new(DfExpr::Column(Column::new(
+                                    Some(LEFT_PLAN_JOIN_ALIAS),
+                                    col,
+                                ))),
+                                op: Self::prom_token_to_binary_op(*op)?,
+                                right: Box::new(DfExpr::Column(Column::new(
+                                    self.ctx.table_name.as_ref(),
+                                    col,
+                                ))),
+                            }))
+                        })?
                     }
-                };
-
-                UnsupportedExprSnafu {
-                    name: "Prom Binary Expr",
                 }
-                .fail()?
             }
             PromExpr::Paren(ParenExpr { .. }) => UnsupportedExprSnafu {
                 name: "Prom Paren Expr",
@@ -555,6 +556,8 @@ impl<S: ContextProvider> PromPlanner<S> {
         Ok(exprs)
     }
 
+    /// Try to build a DataFusion Literal Expression from PromQL Expr, return
+    /// `None` if the input is not a literal expression.
     fn try_build_literal_expr(expr: &PromExpr) -> Option<DfExpr> {
         match expr {
             PromExpr::NumberLiteral(NumberLiteral { val }) => {
@@ -606,7 +609,8 @@ impl<S: ContextProvider> PromPlanner<S> {
         }
     }
 
-    // Build a inner join on time index column to concat two logical plans.
+    /// Build a inner join on time index column to concat two logical plans.
+    /// The left plan will be alised as [`LEFT_PLAN_JOIN_ALIAS`].
     fn join_on_time_index(&self, left: LogicalPlan, right: LogicalPlan) -> Result<LogicalPlan> {
         let time_index_column = Column::from_name(
             self.ctx
@@ -616,6 +620,8 @@ impl<S: ContextProvider> PromPlanner<S> {
         );
         // Inner Join on time index column to concat two operator
         LogicalPlanBuilder::from(left)
+            .alias(LEFT_PLAN_JOIN_ALIAS)
+            .context(DataFusionPlanningSnafu)?
             .join(
                 right,
                 JoinType::Inner,
@@ -1107,4 +1113,101 @@ mod test {
     }
 
     // TODO(ruihang): add range fn tests once exprs are ready.
+
+    // {
+    //     input: "some_metric{tag_0="foo"} + some_metric{tag_0="bar"}",
+    //     expected: &BinaryExpr{
+    //         Op: ADD,
+    //         LHS: &VectorSelector{
+    //             Name: "a",
+    //             LabelMatchers: []*labels.Matcher{
+    //                     MustLabelMatcher(labels.MatchEqual, "tag_0", "foo"),
+    //                     MustLabelMatcher(labels.MatchEqual, model.MetricNameLabel, "some_metric"),
+    //             },
+    //         },
+    //         RHS: &VectorSelector{
+    //             Name: "sum",
+    //             LabelMatchers: []*labels.Matcher{
+    //                     MustLabelMatcher(labels.MatchxEqual, "tag_0", "bar"),
+    //                     MustLabelMatcher(labels.MatchEqual, model.MetricNameLabel, "some_metric"),
+    //             },
+    //         },
+    //         VectorMatching: &VectorMatching{},
+    //     },
+    // },
+    #[tokio::test]
+    async fn binary_op_column_column() {
+        let prom_expr = PromExpr::Binary(PromBinaryExpr {
+            lhs: Box::new(PromExpr::VectorSelector(VectorSelector {
+                name: Some("some_metric".to_owned()),
+                offset: None,
+                start_or_end: None,
+                label_matchers: Matchers {
+                    matchers: vec![
+                        Matcher {
+                            op: MatchOp::Equal,
+                            name: "tag_0".to_string(),
+                            value: "foo".to_string(),
+                        },
+                        Matcher {
+                            op: MatchOp::Equal,
+                            name: METRIC_NAME.to_string(),
+                            value: "some_metric".to_string(),
+                        },
+                    ],
+                },
+            })),
+            op: token::T_ADD,
+            rhs: Box::new(PromExpr::VectorSelector(VectorSelector {
+                name: Some("some_metric".to_owned()),
+                offset: None,
+                start_or_end: None,
+                label_matchers: Matchers {
+                    matchers: vec![
+                        Matcher {
+                            op: MatchOp::Equal,
+                            name: "tag_0".to_string(),
+                            value: "bar".to_string(),
+                        },
+                        Matcher {
+                            op: MatchOp::Equal,
+                            name: METRIC_NAME.to_string(),
+                            value: "some_metric".to_string(),
+                        },
+                    ],
+                },
+            })),
+            matching: None,
+            return_bool: false,
+        });
+
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let context_provider = build_test_context_provider("some_metric".to_string(), 1, 1).await;
+        let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
+
+        let  expected = String::from(
+            "Projection: lhs.field_0 + some_metric.field_0 [lhs.field_0 + some_metric.field_0:Float64;N]\
+            \n  Inner Join: lhs.timestamp = some_metric.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n    SubqueryAlias: lhs [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n        PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n          Filter: tag_0 = Utf8(\"foo\") AND timestamp >= TimestampMillisecond(0, None) AND timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            TableScan: some_metric, unsupported_filters=[tag_0 = Utf8(\"foo\"), timestamp >= TimestampMillisecond(0, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n      PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n        Filter: tag_0 = Utf8(\"bar\") AND timestamp >= TimestampMillisecond(0, None) AND timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n          TableScan: some_metric, unsupported_filters=[tag_0 = Utf8(\"bar\"), timestamp >= TimestampMillisecond(0, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+        );
+
+        assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
 }
