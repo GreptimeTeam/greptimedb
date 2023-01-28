@@ -2,9 +2,14 @@ CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
 
 Affected Rows: 0
 
-SHOW CREATE TABLE t;
+DESC TABLE t;
 
-Error: 1001(Unsupported), Not supported: ShowCreateTable(ShowCreateTable { table_name: "t" })
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int32 | YES  |         | VALUE         |
+| j     | Int64 | NO   |         | TIME INDEX    |
++-------+-------+------+---------+---------------+
 
 INSERT INTO TABLE t VALUES (1, 1), (3, 3), (NULL, 4);
 
@@ -24,9 +29,9 @@ ALTER TABLE t RENAME new_table;
 
 Affected Rows: 0
 
-SHOW CREATE TABLE t;
+DESC TABLE t;
 
-Error: 1001(Unsupported), Not supported: ShowCreateTable(ShowCreateTable { table_name: "t" })
+Error: 1004(InvalidArguments), Table not found: t
 
 SELECT * FROM t;
 
@@ -36,9 +41,14 @@ CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
 
 Affected Rows: 0
 
-SHOW CREATE TABLE new_table;
+DESC TABLE new_table;
 
-Error: 1001(Unsupported), Not supported: ShowCreateTable(ShowCreateTable { table_name: "new_table" })
++-------+-------+------+---------+---------------+
+| Field | Type  | Null | Default | Semantic Type |
++-------+-------+------+---------+---------------+
+| i     | Int32 | YES  |         | VALUE         |
+| j     | Int64 | NO   |         | TIME INDEX    |
++-------+-------+------+---------+---------------+
 
 SELECT * FROM new_table;
 
