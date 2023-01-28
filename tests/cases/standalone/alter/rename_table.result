@@ -34,7 +34,7 @@ Error: 3000(PlanQuery), Error during planning: table 'greptime.public.t' not fou
 
 CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
 
-Error: 1004(InvalidArguments), Table already exists: greptime.public.t
+Affected Rows: 0
 
 SHOW CREATE TABLE new_table;
 
