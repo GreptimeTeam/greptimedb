@@ -103,8 +103,8 @@ async fn write_data(
         let (columns, row_count) = convert_record_batch(record_batch);
         let request = InsertRequest {
             full_tablename: Some(FullTableName {
-                catalog_name: "greptime".to_string(),
-                schema_name: "public".to_string(),
+                catalog_name: CATALOG_NAME.to_string(),
+                schema_name: SCHEMA_NAME.to_string(),
                 table_name: TABLE_NAME.to_string(),
             }),
             region_number: 0,
