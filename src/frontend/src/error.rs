@@ -17,7 +17,6 @@ use std::any::Any;
 use common_error::prelude::*;
 use common_query::logical_plan::Expr;
 use datafusion_common::ScalarValue;
-use datatypes::prelude::Value;
 use store_api::storage::RegionId;
 
 #[derive(Debug, Snafu)]
@@ -110,12 +109,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to find region, reason: {}", reason))]
-    FindRegion {
-        reason: String,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to find regions by filters: {:?}", filters))]
     FindRegions {
         filters: Vec<Expr>,
@@ -131,13 +124,6 @@ pub enum Error {
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
     InvalidInsertRequest {
         reason: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Expect {} region keys, actual {}", expect, actual))]
-    RegionKeysSize {
-        expect: usize,
-        actual: usize,
         backtrace: Backtrace,
     },
 
@@ -195,12 +181,6 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to get cache, error: {}", err_msg))]
-    GetCache {
-        err_msg: String,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to find table routes for table {}", table_name))]
     FindTableRoutes {
         table_name: String,
@@ -249,18 +229,6 @@ pub enum Error {
     #[snafu(display("Failed to find region routes for table {}", table_name))]
     FindRegionRoutes {
         table_name: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to serialize value to json, source: {}", source))]
-    SerializeJson {
-        source: serde_json::Error,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to deserialize value from json, source: {}", source))]
-    DeserializeJson {
-        source: serde_json::Error,
         backtrace: Backtrace,
     },
 
@@ -339,17 +307,6 @@ pub enum Error {
         source: substrait::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to build a vector from values, value: {}, source: {}",
-        value,
-        source
-    ))]
-    BuildVector {
-        value: Value,
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Failed to found context value: {}", key))]
     ContextValueNotFound { key: String, backtrace: Backtrace },
 
@@ -416,11 +373,9 @@ impl ErrorExt for Error {
         match self {
             Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
-            | Error::FindRegion { .. }
             | Error::FindRegions { .. }
             | Error::InvalidInsertRequest { .. }
-            | Error::ColumnValuesNumberMismatch { .. }
-            | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
+            | Error::ColumnValuesNumberMismatch { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -446,10 +401,7 @@ impl ErrorExt for Error {
             }
 
             Error::FindDatanode { .. }
-            | Error::GetCache { .. }
             | Error::FindTableRoutes { .. }
-            | Error::SerializeJson { .. }
-            | Error::DeserializeJson { .. }
             | Error::FindRegionRoutes { .. }
             | Error::FindLeaderPeer { .. }
             | Error::FindRegionPartition { .. }
@@ -485,7 +437,6 @@ impl ErrorExt for Error {
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
-            Error::BuildVector { source, .. } => source.status_code(),
             Error::InvokeDatanode { source } => source.status_code(),
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
             Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,

@@ -28,25 +28,25 @@ use crate::PartitionRuleRef;
 pub type InsertRequestSplit = HashMap<RegionNumber, InsertRequest>;
 pub type DeleteRequestSplit = HashMap<RegionNumber, DeleteRequest>;
 
-pub struct WriteSplitter {
+pub struct RequestSplitter {
     partition_rule: PartitionRuleRef,
 }
 
-impl WriteSplitter {
+impl RequestSplitter {
     pub fn with_partition_rule(rule: PartitionRuleRef) -> Self {
         Self {
             partition_rule: rule,
         }
     }
 
-    pub fn split(&self, insert: InsertRequest) -> Result<InsertRequestSplit> {
+    pub fn split_insert(&self, insert: InsertRequest) -> Result<InsertRequestSplit> {
         check_req(&insert)?;
 
         let column_names = self.partition_rule.partition_columns();
         let partition_columns = find_partitioning_values(&insert, &column_names)?;
         let region_map = self.split_partitioning_values(&partition_columns)?;
 
-        Ok(partition_insert_request(&insert, region_map))
+        Ok(split_insert_request(&insert, region_map))
     }
 
     fn split_partitioning_values(
@@ -79,10 +79,6 @@ impl WriteSplitter {
 }
 
 fn check_req(insert: &InsertRequest) -> Result<()> {
-    check_vectors_len(insert)
-}
-
-fn check_vectors_len(insert: &InsertRequest) -> Result<()> {
     let mut len: Option<usize> = None;
     for vector in insert.columns_values.values() {
         match len {
@@ -122,7 +118,7 @@ fn partition_values(partition_columns: &[VectorRef], idx: usize) -> Vec<Value> {
         .collect()
 }
 
-fn partition_insert_request(
+fn split_insert_request(
     insert: &InsertRequest,
     region_map: HashMap<RegionNumber, Vec<usize>>,
 ) -> InsertRequestSplit {
@@ -196,8 +192,8 @@ mod tests {
     use table::requests::InsertRequest;
 
     use super::{
-        check_req, find_partitioning_values, partition_insert_request, partition_values,
-        WriteSplitter,
+        check_req, find_partitioning_values, partition_values, split_insert_request,
+        RequestSplitter,
     };
     use crate::error::Error;
     use crate::partition::{PartitionExpr, PartitionRule};
@@ -218,8 +214,8 @@ mod tests {
     fn test_writer_spliter() {
         let insert = mock_insert_request();
         let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
-        let spliter = WriteSplitter::with_partition_rule(rule);
-        let ret = spliter.split(insert).unwrap();
+        let spliter = RequestSplitter::with_partition_rule(rule);
+        let ret = spliter.split_insert(insert).unwrap();
 
         assert_eq!(2, ret.len());
 
@@ -276,7 +272,7 @@ mod tests {
         region_map.insert(1, vec![2, 0]);
         region_map.insert(2, vec![1]);
 
-        let dist_insert = partition_insert_request(&insert, region_map);
+        let dist_insert = split_insert_request(&insert, region_map);
 
         let r1_insert = dist_insert.get(&1_u32).unwrap();
         assert_eq!("demo", r1_insert.table_name);
