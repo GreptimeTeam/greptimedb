@@ -31,45 +31,27 @@ use crate::range_array::RangeArray;
 #[derive(Debug)]
 pub struct IDelta<const IS_RATE: bool> {}
 
-impl IDelta<true> {
-    pub fn name() -> &'static str {
-        "prom_irate"
-    }
-
-    // pool compliler doesn't know bool can only be true or false.
-    pub fn scalar_udf() -> ScalarUDF {
-        ScalarUDF {
-            name: Self::name().to_string(),
-            signature: Signature::new(
-                TypeSignature::Exact(Self::input_type()),
-                Volatility::Immutable,
-            ),
-            return_type: Arc::new(|_| Ok(Arc::new(Self::return_type()))),
-            fun: Arc::new(Self::calc),
-        }
-    }
-}
-
-impl IDelta<false> {
-    pub fn name() -> &'static str {
-        "prom_idelta"
-    }
-
-    // pool compliler doesn't know bool can only be true or false.
-    pub fn scalar_udf() -> ScalarUDF {
-        ScalarUDF {
-            name: Self::name().to_string(),
-            signature: Signature::new(
-                TypeSignature::Exact(Self::input_type()),
-                Volatility::Immutable,
-            ),
-            return_type: Arc::new(|_| Ok(Arc::new(Self::return_type()))),
-            fun: Arc::new(Self::calc),
-        }
-    }
-}
-
 impl<const IS_RATE: bool> IDelta<IS_RATE> {
+    pub const fn name() -> &'static str {
+        if IS_RATE {
+            "prom_irate"
+        } else {
+            "prom_idelta"
+        }
+    }
+
+    pub fn scalar_udf() -> ScalarUDF {
+        ScalarUDF {
+            name: Self::name().to_string(),
+            signature: Signature::new(
+                TypeSignature::Exact(Self::input_type()),
+                Volatility::Immutable,
+            ),
+            return_type: Arc::new(|_| Ok(Arc::new(Self::return_type()))),
+            fun: Arc::new(Self::calc),
+        }
+    }
+
     // time index column and value column
     fn input_type() -> Vec<DataType> {
         vec![
@@ -93,7 +75,8 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
         error::ensure(
             ts_range.len() == value_range.len(),
             DataFusionError::Execution(format!(
-                "input arrays should have the same length, found {} and {}",
+                "{}: input arrays should have the same length, found {} and {}",
+                Self::name(),
                 ts_range.len(),
                 value_range.len()
             )),
@@ -101,14 +84,16 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
         error::ensure(
             ts_range.value_type() == DataType::Int64,
             DataFusionError::Execution(format!(
-                "expect Int64 as time index array's type, found {} ",
+                "{}: expect Int64 as time index array's type, found {}",
+                Self::name(),
                 ts_range.value_type()
             )),
         )?;
         error::ensure(
             value_range.value_type() == DataType::Float64,
             DataFusionError::Execution(format!(
-                "expect Int64 as time index array's type, found {} ",
+                "{}: expect Int64 as time index array's type, found {}",
+                Self::name(),
                 value_range.value_type()
             )),
         )?;
@@ -133,7 +118,8 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
             error::ensure(
                 timestamps.len() == values.len(),
                 DataFusionError::Execution(format!(
-                    "input arrays should have the same length, found {} and {}",
+                    "{}: input arrays should have the same length, found {} and {}",
+                    Self::name(),
                     timestamps.len(),
                     values.len()
                 )),
@@ -152,6 +138,8 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
             }
 
             // else is rate
+            // TODO(ruihang): "divide 1000" converts the timestamp from millisecond to second.
+            //     it should consider other percisions.
             let sampled_interval = (timestamps[len - 1] - timestamps[len - 2]) / 1000;
             let last_value = values[len - 1];
             let prev_value = values[len - 2];
