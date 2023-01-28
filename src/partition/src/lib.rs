@@ -10,5 +10,6 @@ pub mod manager;
 pub mod partition;
 pub mod range;
 pub mod route;
+pub mod splitter;
 
 pub type PartitionRuleRef = Arc<dyn PartitionRule<Error = error::Error>>;

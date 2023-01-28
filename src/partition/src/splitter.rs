@@ -18,27 +18,28 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::MutableVector;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
-use partition::PartitionRuleRef;
 use snafu::{ensure, OptionExt};
 use store_api::storage::RegionNumber;
-use table::requests::InsertRequest;
+use table::requests::{DeleteRequest, InsertRequest};
 
 use crate::error::{FindPartitionColumnSnafu, FindRegionSnafu, InvalidInsertRequestSnafu, Result};
+use crate::PartitionRuleRef;
 
-pub type DistInsertRequest = HashMap<RegionNumber, InsertRequest>;
+pub type InsertRequestSplit = HashMap<RegionNumber, InsertRequest>;
+pub type DeleteRequestSplit = HashMap<RegionNumber, DeleteRequest>;
 
-pub struct WriteSpliter {
+pub struct WriteSplitter {
     partition_rule: PartitionRuleRef,
 }
 
-impl WriteSpliter {
+impl WriteSplitter {
     pub fn with_partition_rule(rule: PartitionRuleRef) -> Self {
         Self {
             partition_rule: rule,
         }
     }
 
-    pub fn split(&self, insert: InsertRequest) -> Result<DistInsertRequest> {
+    pub fn split(&self, insert: InsertRequest) -> Result<InsertRequestSplit> {
         check_req(&insert)?;
 
         let column_names = self.partition_rule.partition_columns();
@@ -124,7 +125,7 @@ fn partition_values(partition_columns: &[VectorRef], idx: usize) -> Vec<Value> {
 fn partition_insert_request(
     insert: &InsertRequest,
     region_map: HashMap<RegionNumber, Vec<usize>>,
-) -> DistInsertRequest {
+) -> InsertRequestSplit {
     let mut dist_insert: HashMap<RegionNumber, HashMap<&str, Box<dyn MutableVector>>> =
         HashMap::with_capacity(region_map.len());
 
@@ -183,7 +184,6 @@ mod tests {
     use std::result::Result;
     use std::sync::Arc;
 
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::prelude::ScalarVectorBuilder;
     use datatypes::types::StringType;
@@ -191,16 +191,17 @@ mod tests {
     use datatypes::vectors::{
         BooleanVectorBuilder, Int16VectorBuilder, MutableVector, StringVectorBuilder,
     };
-    use partition::partition::{PartitionExpr, PartitionRule};
-    use partition::PartitionRuleRef;
     use serde::{Deserialize, Serialize};
     use store_api::storage::RegionNumber;
     use table::requests::InsertRequest;
 
     use super::{
         check_req, find_partitioning_values, partition_insert_request, partition_values,
-        WriteSpliter,
+        WriteSplitter,
     };
+    use crate::error::Error;
+    use crate::partition::{PartitionExpr, PartitionRule};
+    use crate::PartitionRuleRef;
 
     #[test]
     fn test_insert_req_check() {
@@ -217,7 +218,7 @@ mod tests {
     fn test_writer_spliter() {
         let insert = mock_insert_request();
         let rule = Arc::new(MockPartitionRule) as PartitionRuleRef;
-        let spliter = WriteSpliter::with_partition_rule(rule);
+        let spliter = WriteSplitter::with_partition_rule(rule);
         let ret = spliter.split(insert).unwrap();
 
         assert_eq!(2, ret.len());
@@ -400,8 +401,8 @@ mod tests {
         columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
             table_name: "demo".to_string(),
             columns_values,
         }
@@ -427,8 +428,8 @@ mod tests {
         columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
             table_name: "demo".to_string(),
             columns_values,
         }
@@ -442,7 +443,7 @@ mod tests {
     //     PARTITION r1 VALUES IN(2, 3),
     // );
     impl PartitionRule for MockPartitionRule {
-        type Error = partition::error::Error;
+        type Error = Error;
 
         fn as_any(&self) -> &dyn Any {
             self

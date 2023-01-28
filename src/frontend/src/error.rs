@@ -110,12 +110,6 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to find partition column: {}", column_name))]
-    FindPartitionColumn {
-        column_name: String,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to find region, reason: {}", reason))]
     FindRegion {
         reason: String,
@@ -425,7 +419,6 @@ impl ErrorExt for Error {
             | Error::FindRegion { .. }
             | Error::FindRegions { .. }
             | Error::InvalidInsertRequest { .. }
-            | Error::FindPartitionColumn { .. }
             | Error::ColumnValuesNumberMismatch { .. }
             | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
 

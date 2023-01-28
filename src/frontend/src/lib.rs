@@ -29,7 +29,6 @@ pub mod opentsdb;
 pub mod postgres;
 pub mod prometheus;
 mod server;
-pub mod spliter;
 mod sql;
 mod table;
 #[cfg(test)]

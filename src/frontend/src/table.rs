@@ -44,6 +44,7 @@ use partition::columns::RangeColumnsPartitionRule;
 use partition::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use partition::range::RangePartitionRule;
 use partition::route::TableRoutes;
+use partition::splitter::WriteSplitter;
 use partition::PartitionRuleRef;
 use snafu::prelude::*;
 use store_api::storage::RegionNumber;
@@ -60,7 +61,6 @@ use crate::error::{
     DeserializePartitionSnafu, FindPartitionSnafu, LeaderNotFoundSnafu, RequestDatanodeSnafu,
     Result, TableNotFoundSnafu, TableSnafu,
 };
-use crate::spliter::WriteSpliter;
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
 
 pub mod insert;
@@ -96,7 +96,7 @@ impl Table for DistTable {
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
 
-        let spliter = WriteSpliter::with_partition_rule(partition_rule);
+        let spliter = WriteSplitter::with_partition_rule(partition_rule);
         let inserts = spliter
             .split(request)
             .map_err(BoxedError::new)

@@ -69,6 +69,18 @@ pub enum Error {
         filters: Vec<Expr>,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to find partition column: {}", column_name))]
+    FindPartitionColumn {
+        column_name: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
+    InvalidInsertRequest {
+        reason: String,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {
@@ -79,7 +91,9 @@ impl ErrorExt for Error {
             Error::FindRegion { .. }
             | Error::FindRegions { .. }
             | Error::RegionKeysSize { .. }
-            | Error::FindTableRoutes { .. } => StatusCode::InvalidArguments,
+            | Error::FindTableRoutes { .. }
+            | Error::InvalidInsertRequest { .. }
+            | Error::FindPartitionColumn { .. } => StatusCode::InvalidArguments,
             Error::SerializeJson { .. } | Error::DeserializeJson { .. } => StatusCode::Internal,
         }
     }
