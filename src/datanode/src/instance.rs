@@ -202,7 +202,7 @@ impl Instance {
 
 pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
     let object_store = match store_config {
-        ObjectStoreConfig::File { data_dir } => new_fs_object_store(data_dir).await,
+        ObjectStoreConfig::File { .. } => new_fs_object_store(store_config).await,
         ObjectStoreConfig::S3 { .. } => new_s3_object_store(store_config).await,
         ObjectStoreConfig::Oss { .. } => new_oss_object_store(store_config).await,
     };
@@ -217,27 +217,24 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
 }
 
 pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
-    let (root, secret_key, key_id, bucket, endpoint) = match store_config {
-        ObjectStoreConfig::Oss {
-            bucket,
-            root,
-            access_key_id,
-            access_key_secret,
-            endpoint,
-        } => (root, access_key_secret, access_key_id, bucket, endpoint),
+    let oss_config = match store_config {
+        ObjectStoreConfig::Oss(config) => config,
         _ => unreachable!(),
     };
 
-    let root = util::normalize_dir(root);
-    info!("The oss storage bucket is: {}, root is: {}", bucket, &root);
+    let root = util::normalize_dir(&oss_config.root);
+    info!(
+        "The oss storage bucket is: {}, root is: {}",
+        oss_config.bucket, &root
+    );
 
     let mut builder = OSSBuilder::default();
     let builder = builder
         .root(&root)
-        .bucket(bucket)
-        .endpoint(endpoint)
-        .access_key_id(key_id)
-        .access_key_secret(secret_key);
+        .bucket(&oss_config.bucket)
+        .endpoint(&oss_config.endpoint)
+        .access_key_id(&oss_config.access_key_id)
+        .access_key_secret(&oss_config.access_key_secret);
 
     let accessor = builder.build().with_context(|_| error::InitBackendSnafu {
         config: store_config.clone(),
@@ -247,40 +244,29 @@ pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Re
 }
 
 pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
-    let (root, secret_key, key_id, bucket, endpoint, region) = match store_config {
-        ObjectStoreConfig::S3 {
-            bucket,
-            root,
-            access_key_id,
-            secret_access_key,
-            endpoint,
-            region,
-        } => (
-            root,
-            secret_access_key,
-            access_key_id,
-            bucket,
-            endpoint,
-            region,
-        ),
+    let s3_config = match store_config {
+        ObjectStoreConfig::S3(config) => config,
         _ => unreachable!(),
     };
 
-    let root = util::normalize_dir(root);
-    info!("The s3 storage bucket is: {}, root is: {}", bucket, &root);
+    let root = util::normalize_dir(&s3_config.root);
+    info!(
+        "The s3 storage bucket is: {}, root is: {}",
+        s3_config.bucket, &root
+    );
 
     let mut builder = S3Builder::default();
     let mut builder = builder
         .root(&root)
-        .bucket(bucket)
-        .access_key_id(key_id)
-        .secret_access_key(secret_key);
+        .bucket(&s3_config.bucket)
+        .access_key_id(&s3_config.access_key_id)
+        .secret_access_key(&s3_config.secret_access_key);
 
-    if let Some(endpoint) = endpoint {
-        builder = builder.endpoint(endpoint);
+    if s3_config.endpoint.is_some() {
+        builder = builder.endpoint(&s3_config.endpoint.as_ref().unwrap());
     }
-    if let Some(region) = region {
-        builder = builder.region(region);
+    if s3_config.region.is_some() {
+        builder = builder.region(&s3_config.region.as_ref().unwrap());
     }
 
     let accessor = builder.build().with_context(|_| error::InitBackendSnafu {
@@ -290,8 +276,12 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
     Ok(ObjectStore::new(accessor))
 }
 
-pub(crate) async fn new_fs_object_store(data_dir: &str) -> Result<ObjectStore> {
-    let data_dir = util::normalize_dir(data_dir);
+pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
+    let file_config = match store_config {
+        ObjectStoreConfig::File(config) => config,
+        _ => unreachable!(),
+    };
+    let data_dir = util::normalize_dir(&file_config.data_dir);
     fs::create_dir_all(path::Path::new(&data_dir))
         .context(error::CreateDirSnafu { dir: &data_dir })?;
     info!("The file storage directory is: {}", &data_dir);
@@ -303,7 +293,7 @@ pub(crate) async fn new_fs_object_store(data_dir: &str) -> Result<ObjectStore> {
         .atomic_write_dir(&atomic_write_dir)
         .build()
         .context(error::InitBackendSnafu {
-            config: ObjectStoreConfig::File { data_dir },
+            config: store_config.clone(),
         })?;
 
     Ok(ObjectStore::new(accessor))

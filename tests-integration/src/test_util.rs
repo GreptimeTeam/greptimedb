@@ -23,7 +23,9 @@ use axum::Router;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_runtime::Builder as RuntimeBuilder;
-use datanode::datanode::{DatanodeOptions, ObjectStoreConfig, WalConfig};
+use datanode::datanode::{
+    DatanodeOptions, FileConfig, ObjectStoreConfig, OssConfig, S3Config, WalConfig,
+};
 use datanode::error::{CreateTableSnafu, Result};
 use datanode::instance::{Instance, InstanceRef};
 use datanode::sql::SqlHandler;
@@ -93,28 +95,24 @@ fn get_test_store_config(
 
     match store_type {
         StorageType::OSS => {
-            let root = uuid::Uuid::new_v4().to_string();
-            let key_id = env::var("GT_OSS_ACCESS_KEY_ID").unwrap();
-            let secret_key = env::var("GT_OSS_ACCESS_KEY").unwrap();
-            let bucket = env::var("GT_OSS_BUCKET").unwrap();
-            let endpoint = env::var("GT_OSS_ENDPOINT").unwrap();
+            let oss_config = OssConfig {
+                root: uuid::Uuid::new_v4().to_string(),
+                access_key_id: env::var("GT_OSS_ACCESS_KEY_ID").unwrap(),
+                access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap(),
+                bucket: env::var("GT_OSS_BUCKET").unwrap(),
+                endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
+            };
 
             let accessor = oss::Builder::default()
-                .root(&root)
-                .endpoint(&endpoint)
-                .access_key_id(&key_id)
-                .access_key_secret(&secret_key)
-                .bucket(&bucket)
+                .root(&oss_config.root)
+                .endpoint(&oss_config.endpoint)
+                .access_key_id(&oss_config.access_key_id)
+                .access_key_secret(&oss_config.access_key_secret)
+                .bucket(&oss_config.bucket)
                 .build()
                 .unwrap();
 
-            let config = ObjectStoreConfig::Oss {
-                root,
-                bucket,
-                access_key_id: key_id,
-                access_key_secret: secret_key,
-                endpoint,
-            };
+            let config = ObjectStoreConfig::Oss(oss_config);
 
             let store = ObjectStore::new(accessor);
 
@@ -124,27 +122,24 @@ fn get_test_store_config(
             )
         }
         StorageType::S3 => {
-            let root = uuid::Uuid::new_v4().to_string();
-            let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
-            let secret_key = env::var("GT_S3_ACCESS_KEY").unwrap();
-            let bucket = env::var("GT_S3_BUCKET").unwrap();
-
-            let accessor = s3::Builder::default()
-                .root(&root)
-                .access_key_id(&key_id)
-                .secret_access_key(&secret_key)
-                .bucket(&bucket)
-                .build()
-                .unwrap();
-
-            let config = ObjectStoreConfig::S3 {
-                root,
-                bucket,
-                access_key_id: key_id,
-                secret_access_key: secret_key,
+            let s3_config = S3Config {
+                root: uuid::Uuid::new_v4().to_string(),
+                access_key_id: env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
+                secret_access_key: env::var("GT_S3_ACCESS_KEY").unwrap(),
+                bucket: env::var("GT_S3_BUCKET").unwrap(),
                 endpoint: None,
                 region: None,
             };
+
+            let accessor = s3::Builder::default()
+                .root(&s3_config.root)
+                .access_key_id(&s3_config.access_key_id)
+                .secret_access_key(&s3_config.secret_access_key)
+                .bucket(&s3_config.bucket)
+                .build()
+                .unwrap();
+
+            let config = ObjectStoreConfig::S3(s3_config);
 
             let store = ObjectStore::new(accessor);
 
@@ -154,9 +149,9 @@ fn get_test_store_config(
             let data_tmp_dir = TempDir::new(&format!("gt_data_{name}")).unwrap();
 
             (
-                ObjectStoreConfig::File {
+                ObjectStoreConfig::File(FileConfig {
                     data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
-                },
+                }),
                 Some(TempDirGuard::File(data_tmp_dir)),
             )
         }
