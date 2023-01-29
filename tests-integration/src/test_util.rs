@@ -31,6 +31,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder};
 use frontend::instance::Instance as FeInstance;
 use object_store::backend::s3;
+use object_store::services::oss;
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use once_cell::sync::OnceCell;
@@ -45,7 +46,6 @@ use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::CreateTableRequest;
 use tempdir::TempDir;
-use object_store::services::oss;
 
 static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
 
@@ -73,7 +73,7 @@ impl StorageType {
                 } else {
                     false
                 }
-            },
+            }
             StorageType::OSS => {
                 if let Ok(b) = env::var("GT_OSS_BUCKET") {
                     !b.is_empty()
@@ -118,7 +118,10 @@ fn get_test_store_config(
 
             let store = ObjectStore::new(accessor);
 
-            (config, Some(TempDirGuard::OSS(TempFolder::new(&store, "/"))))
+            (
+                config,
+                Some(TempDirGuard::Oss(TempFolder::new(&store, "/"))),
+            )
         }
         StorageType::S3 => {
             let root = uuid::Uuid::new_v4().to_string();
@@ -163,7 +166,7 @@ fn get_test_store_config(
 enum TempDirGuard {
     File(TempDir),
     S3(TempFolder),
-    OSS(TempFolder),
+    Oss(TempFolder),
 }
 
 /// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
@@ -178,7 +181,7 @@ impl TestGuard {
         if let Some(TempDirGuard::S3(mut guard)) = self.data_tmp_dir.take() {
             guard.remove_all().await.unwrap();
         }
-        if let Some(TempDirGuard::OSS(mut guard)) = self.data_tmp_dir.take() {
+        if let Some(TempDirGuard::Oss(mut guard)) = self.data_tmp_dir.take() {
             guard.remove_all().await.unwrap();
         }
     }

@@ -45,7 +45,7 @@ pub enum ObjectStoreConfig {
         access_key_id: String,
         access_key_secret: String,
         endpoint: String,
-    }
+    },
 }
 
 impl Default for ObjectStoreConfig {

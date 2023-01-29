@@ -30,8 +30,8 @@ use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
 use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::fs::Builder as FsBuilder;
-use object_store::services::s3::Builder as S3Builder;
 use object_store::services::oss::Builder as OSSBuilder;
+use object_store::services::s3::Builder as S3Builder;
 use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
@@ -224,13 +224,7 @@ pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Re
             access_key_id,
             access_key_secret,
             endpoint,
-        } => (
-            root,
-            access_key_secret,
-            access_key_id,
-            bucket,
-            endpoint,
-        ),
+        } => (root, access_key_secret, access_key_id, bucket, endpoint),
         _ => unreachable!(),
     };
 
