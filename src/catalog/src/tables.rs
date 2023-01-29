@@ -38,9 +38,14 @@ use table::metadata::{TableId, TableInfoRef};
 use table::table::scan::SimpleTableScan;
 use table::{Table, TableRef};
 
-use crate::error::{Error, InsertCatalogRecordSnafu};
-use crate::system::{build_schema_insert_request, build_table_insert_request, SystemCatalogTable};
-use crate::{CatalogListRef, CatalogProvider, SchemaProvider, SchemaProviderRef};
+use crate::error::{self, Error, InsertCatalogRecordSnafu, Result as CatalogResult};
+use crate::system::{
+    build_schema_insert_request, build_table_deletion_request, build_table_insert_request,
+    SystemCatalogTable,
+};
+use crate::{
+    CatalogListRef, CatalogProvider, DeregisterTableRequest, SchemaProvider, SchemaProviderRef,
+};
 
 /// Tables holds all tables created by user.
 pub struct Tables {
@@ -277,6 +282,21 @@ impl SystemCatalog {
             .insert(request)
             .await
             .context(InsertCatalogRecordSnafu)
+    }
+
+    pub(crate) async fn deregister_table(
+        &self,
+        request: &DeregisterTableRequest,
+        table_id: TableId,
+    ) -> CatalogResult<bool> {
+        self.information_schema
+            .system
+            .delete(build_table_deletion_request(request, table_id))
+            .await
+            .map(|x| x == 1)
+            .with_context(|_| error::DeregisterTableSnafu {
+                request: request.clone(),
+            })
     }
 
     pub async fn register_schema(

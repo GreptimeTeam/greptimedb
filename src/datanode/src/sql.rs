@@ -117,7 +117,7 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
-    use catalog::{CatalogList, SchemaProvider};
+    use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::logical_plan::Expr;
     use common_query::physical_plan::PhysicalPlanRef;
@@ -137,7 +137,7 @@ mod tests {
     use storage::EngineImpl;
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
-    use table::{Table, TableRef};
+    use table::Table;
     use tempdir::TempDir;
 
     use super::*;
@@ -185,43 +185,6 @@ mod tests {
         }
     }
 
-    struct MockSchemaProvider;
-
-    impl SchemaProvider for MockSchemaProvider {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
-        fn table_names(&self) -> catalog::error::Result<Vec<String>> {
-            Ok(vec!["demo".to_string()])
-        }
-
-        fn table(&self, name: &str) -> catalog::error::Result<Option<TableRef>> {
-            assert_eq!(name, "demo");
-            Ok(Some(Arc::new(DemoTable {})))
-        }
-
-        fn register_table(
-            &self,
-            _name: String,
-            _table: TableRef,
-        ) -> catalog::error::Result<Option<TableRef>> {
-            unimplemented!();
-        }
-
-        fn rename_table(&self, _name: &str, _new_name: String) -> catalog::error::Result<TableRef> {
-            unimplemented!()
-        }
-
-        fn deregister_table(&self, _name: &str) -> catalog::error::Result<Option<TableRef>> {
-            unimplemented!();
-        }
-
-        fn table_exist(&self, name: &str) -> catalog::error::Result<bool> {
-            Ok(name == "demo")
-        }
-    }
-
     #[tokio::test]
     async fn test_statement_to_request() {
         let dir = TempDir::new("setup_test_engine_and_table").unwrap();
@@ -249,12 +212,16 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let catalog_provider = catalog_list.catalog(DEFAULT_CATALOG_NAME).unwrap().unwrap();
-        catalog_provider
-            .register_schema(
-                DEFAULT_SCHEMA_NAME.to_string(),
-                Arc::new(MockSchemaProvider {}),
-            )
+        catalog_list.start().await.unwrap();
+        catalog_list
+            .register_table(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "demo".to_string(),
+                table_id: 1,
+                table: Arc::new(DemoTable),
+            })
+            .await
             .unwrap();
 
         let factory = QueryEngineFactory::new(catalog_list.clone());

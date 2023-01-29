@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::fmt::Debug;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::prelude::{Snafu, StatusCode};
@@ -20,6 +21,8 @@ use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use snafu::{Backtrace, ErrorCompat};
+
+use crate::DeregisterTableRequest;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -96,6 +99,9 @@ pub enum Error {
     #[snafu(display("Table `{}` already exists", table))]
     TableExists { table: String, backtrace: Backtrace },
 
+    #[snafu(display("Table `{}` not exist", table))]
+    TableNotExist { table: String, backtrace: Backtrace },
+
     #[snafu(display("Schema {} already exists", schema))]
     SchemaExists {
         schema: String,
@@ -138,6 +144,17 @@ pub enum Error {
         source
     ))]
     InsertCatalogRecord {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to deregister table, request: {:?}, source: {}",
+        request,
+        source
+    ))]
+    DeregisterTable {
+        request: DeregisterTableRequest,
         #[snafu(backtrace)]
         source: table::error::Error,
     },
@@ -232,13 +249,16 @@ impl ErrorExt for Error {
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
 
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
+            Error::TableNotExist { .. } => StatusCode::TableNotFound,
             Error::SchemaExists { .. } => StatusCode::InvalidArguments,
 
             Error::OpenSystemCatalog { source, .. }
             | Error::CreateSystemCatalog { source, .. }
             | Error::InsertCatalogRecord { source, .. }
             | Error::OpenTable { source, .. }
-            | Error::CreateTable { source, .. } => source.status_code(),
+            | Error::CreateTable { source, .. }
+            | Error::DeregisterTable { source, .. } => source.status_code(),
+
             Error::MetaSrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),

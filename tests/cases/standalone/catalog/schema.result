@@ -1,41 +1,41 @@
-CREATE SCHEMA test;
+CREATE SCHEMA test_schema;
 
 Affected Rows: 1
 
 SHOW DATABASES;
 
-+---------+
-| Schemas |
-+---------+
-| public  |
-| test    |
-+---------+
++-------------+
+| Schemas     |
++-------------+
+| public      |
+| test_schema |
++-------------+
 
-CREATE TABLE test.hello(i BIGINT TIME INDEX);
-
-Affected Rows: 0
-
-DROP TABLE test.hello;
-
-Affected Rows: 1
-
-DROP SCHEMA test;
-
-Error: 1001(Unsupported), SQL statement is not supported:  DROP SCHEMA test;, keyword: SCHEMA
-
-CREATE SCHEMA test;
-
-Affected Rows: 1
-
-CREATE TABLE test.hello(i BIGINT TIME INDEX);
+CREATE TABLE test_schema.hello(i BIGINT TIME INDEX);
 
 Affected Rows: 0
 
-INSERT INTO test.hello VALUES (2), (3), (4);
+DROP TABLE test_schema.hello;
+
+Affected Rows: 1
+
+DROP SCHEMA test_schema;
+
+Error: 1001(Unsupported), SQL statement is not supported:  DROP SCHEMA test_schema;, keyword: SCHEMA
+
+CREATE SCHEMA test_schema;
+
+Error: 1003(Internal), Schema test_schema already exists
+
+CREATE TABLE test_schema.hello(i BIGINT TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test_schema.hello VALUES (2), (3), (4);
 
 Affected Rows: 3
 
-SELECT * FROM test.hello;
+SELECT * FROM test_schema.hello;
 
 +---+
 | i |
@@ -51,9 +51,10 @@ SHOW TABLES;
 | Tables  |
 +---------+
 | numbers |
+| scripts |
 +---------+
 
-SHOW TABLES FROM test;
+SHOW TABLES FROM test_schema;
 
 +--------+
 | Tables |
@@ -61,15 +62,26 @@ SHOW TABLES FROM test;
 | hello  |
 +--------+
 
-DROP TABLE test.hello;
+DROP TABLE test_schema.hello;
 
 Affected Rows: 1
 
-DROP SCHEMA test;
+DROP TABLE test_schema.hello;
 
-Error: 1001(Unsupported), SQL statement is not supported:  DROP SCHEMA test;, keyword: SCHEMA
+Error: 4001(TableNotFound), Table `greptime.test_schema.hello` not exist
 
-SELECT * FROM test.hello;
+SHOW TABLES FROM test_schema;
 
-Error: 3000(PlanQuery), Error during planning: table 'greptime.test.hello' not found
++--------+
+| Tables |
++--------+
++--------+
+
+DROP SCHEMA test_schema;
+
+Error: 1001(Unsupported), SQL statement is not supported:  DROP SCHEMA test_schema;, keyword: SCHEMA
+
+SELECT * FROM test_schema.hello;
+
+Error: 3000(PlanQuery), Error during planning: table 'greptime.test_schema.hello' not found
 

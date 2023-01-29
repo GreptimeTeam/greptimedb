@@ -1,16 +1,16 @@
-CREATE TABLE strings(i STRING, t BIGINT, time index(t));
+CREATE TABLE insert_invalid_strings(i STRING, t BIGINT, time index(t));
 
 Affected Rows: 0
 
-INSERT INTO strings VALUES ('â‚(', 1);
+INSERT INTO insert_invalid_strings VALUES ('â‚(', 1);
 
 Affected Rows: 1
 
-INSERT INTO strings VALUES (3, 4);
+INSERT INTO insert_invalid_strings VALUES (3, 4);
 
 Error: 2000(InvalidSyntax), Failed to parse value: Fail to parse number 3, invalid column type: String(StringType)
 
-SELECT * FROM strings WHERE i = 'â‚(';
+SELECT * FROM insert_invalid_strings WHERE i = 'â‚(';
 
 +-----+---+
 | i   | t |

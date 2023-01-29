@@ -20,13 +20,13 @@ use std::sync::{Arc, RwLock};
 
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_telemetry::error;
-use snafu::OptionExt;
+use snafu::{ensure, OptionExt};
 use table::metadata::TableId;
 use table::table::TableIdProvider;
 use table::TableRef;
 
 use crate::error::{
-    CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, TableNotFoundSnafu,
+    self, CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
 use crate::schema::SchemaProvider;
 use crate::{
@@ -250,6 +250,10 @@ impl CatalogProvider for MemoryCatalogProvider {
         schema: SchemaProviderRef,
     ) -> Result<Option<SchemaProviderRef>> {
         let mut schemas = self.schemas.write().unwrap();
+        ensure!(
+            !schemas.contains_key(&name),
+            error::SchemaExistsSnafu { schema: &name }
+        );
         Ok(schemas.insert(name, schema))
     }
 
