@@ -130,8 +130,7 @@ impl ProcedureId {
     }
 
     /// Parses id from string.
-    #[allow(dead_code)]
-    fn parse_str(input: &str) -> Option<ProcedureId> {
+    pub fn parse_str(input: &str) -> Option<ProcedureId> {
         Uuid::parse_str(input).map(ProcedureId).ok()
     }
 }
