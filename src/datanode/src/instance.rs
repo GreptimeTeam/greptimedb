@@ -263,10 +263,10 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
         .secret_access_key(&s3_config.secret_access_key);
 
     if s3_config.endpoint.is_some() {
-        builder = builder.endpoint(&s3_config.endpoint.as_ref().unwrap());
+        builder = builder.endpoint(s3_config.endpoint.as_ref().unwrap());
     }
     if s3_config.region.is_some() {
-        builder = builder.region(&s3_config.region.as_ref().unwrap());
+        builder = builder.region(s3_config.region.as_ref().unwrap());
     }
 
     let accessor = builder.build().with_context(|_| error::InitBackendSnafu {
