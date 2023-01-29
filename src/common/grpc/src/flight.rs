@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::FlightDataExt;
+use api::v1::{AffectedRows, FlightMetadata};
 use arrow_flight::utils::{flight_data_from_arrow_batch, flight_data_to_arrow_batch};
 use arrow_flight::{FlightData, IpcMessage, SchemaAsIpc};
 use common_recordbatch::{RecordBatch, RecordBatches};
@@ -66,11 +66,11 @@ impl FlightEncoder {
                 flight_batch
             }
             FlightMessage::AffectedRows(rows) => {
-                let ext_data = FlightDataExt {
-                    affected_rows: rows as _,
+                let metadata = FlightMetadata {
+                    affected_rows: Some(AffectedRows { value: rows as _ }),
                 }
                 .encode_to_vec();
-                FlightData::new(None, IpcMessage(build_none_flight_msg()), vec![], ext_data)
+                FlightData::new(None, IpcMessage(build_none_flight_msg()), metadata, vec![])
             }
         }
     }
@@ -91,9 +91,15 @@ impl FlightDecoder {
         })?;
         match message.header_type() {
             MessageHeader::NONE => {
-                let ext_data = FlightDataExt::decode(flight_data.data_body.as_slice())
+                let metadata = FlightMetadata::decode(flight_data.app_metadata.as_slice())
                     .context(DecodeFlightDataSnafu)?;
-                Ok(FlightMessage::AffectedRows(ext_data.affected_rows as _))
+                if let Some(AffectedRows { value }) = metadata.affected_rows {
+                    return Ok(FlightMessage::AffectedRows(value as _));
+                }
+                InvalidFlightDataSnafu {
+                    reason: "Expecting FlightMetadata have some meaningful content.",
+                }
+                .fail()
             }
             MessageHeader::Schema => {
                 let arrow_schema = ArrowSchema::try_from(&flight_data).map_err(|e| {
