@@ -6910,6 +6910,7 @@ dependencies = [
  "common-query",
  "sqlness",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
