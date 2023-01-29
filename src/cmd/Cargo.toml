@@ -24,7 +24,7 @@ meta-srv = { path = "../meta-srv" }
 serde.workspace = true
 servers = { path = "../servers" }
 snafu.workspace = true
-tokio = { version = "1.18", features = ["full"] }
+tokio.workspace = true
 toml = "0.5"
 
 [dev-dependencies]

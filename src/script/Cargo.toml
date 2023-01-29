@@ -62,7 +62,7 @@ session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }
 table = { path = "../table" }
-tokio = { version = "1.0", features = ["full"] }
+tokio.workspace = true
 
 [dev-dependencies]
 log-store = { path = "../log-store" }
@@ -72,5 +72,4 @@ serde = { version = "1.0", features = ["derive"] }
 storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 tempdir = "0.3"
-tokio = { version = "1.18", features = ["full"] }
 tokio-test = "0.4"
