@@ -92,7 +92,7 @@ impl DistInstance {
         let table_routes = response.table_routes;
         ensure!(
             table_routes.len() == 1,
-            error::CreateTableRoutesSnafu {
+            error::CreateTableRouteSnafu {
                 table_name: create_table.table_name.to_string()
             }
         );
@@ -107,7 +107,7 @@ impl DistInstance {
         let region_routes = &table_route.region_routes;
         ensure!(
             !region_routes.is_empty(),
-            error::FindRegionRoutesSnafu {
+            error::FindRegionRouteSnafu {
                 table_name: create_table.table_name.to_string()
             }
         );
@@ -509,11 +509,9 @@ fn parse_partitions(
 
     partition_entries
         .into_iter()
-        .map(|x| {
-            MetaPartition::try_from(PartitionDef::new(partition_columns.clone(), x))
-                .context(DeserializePartitionSnafu)
-        })
-        .collect::<Result<Vec<MetaPartition>>>()
+        .map(|x| MetaPartition::try_from(PartitionDef::new(partition_columns.clone(), x)))
+        .collect::<std::result::Result<_, _>>()
+        .context(DeserializePartitionSnafu)
 }
 
 fn find_partition_entries(

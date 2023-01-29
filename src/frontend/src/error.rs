@@ -15,8 +15,6 @@
 use std::any::Any;
 
 use common_error::prelude::*;
-use common_query::logical_plan::Expr;
-use datafusion_common::ScalarValue;
 use store_api::storage::RegionId;
 
 #[derive(Debug, Snafu)]
@@ -98,23 +96,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display(
-        "Failed to convert DataFusion's ScalarValue: {:?}, source: {}",
-        value,
-        source
-    ))]
-    ConvertScalarValue {
-        value: ScalarValue,
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Failed to find regions by filters: {:?}", filters))]
-    FindRegions {
-        filters: Vec<Expr>,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to find Datanode by region: {:?}", region))]
     FindDatanode {
         region: RegionId,
@@ -181,13 +162,13 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to create table routes for table {}", table_name))]
-    CreateTableRoutes {
+    #[snafu(display("Failed to create table route for table {}", table_name))]
+    CreateTableRoute {
         table_name: String,
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to find table routes for table {}", table_name))]
+    #[snafu(display("Failed to find table route for table {}", table_name))]
     FindTableRoute {
         table_name: String,
         #[snafu(backtrace)]
@@ -233,8 +214,8 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to find region routes for table {}", table_name))]
-    FindRegionRoutes {
+    #[snafu(display("Failed to find region route for table {}", table_name))]
+    FindRegionRoute {
         table_name: String,
         backtrace: Backtrace,
     },
@@ -247,28 +228,6 @@ pub enum Error {
     FindLeaderPeer {
         region: u64,
         table_name: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display(
-        "Failed to find partition info for region {} in table {}",
-        region,
-        table_name
-    ))]
-    FindRegionPartition {
-        region: u64,
-        table_name: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display(
-        "Illegal table routes data for table {}, error message: {}",
-        table_name,
-        err_msg
-    ))]
-    IllegalTableRoutesData {
-        table_name: String,
-        err_msg: String,
         backtrace: Backtrace,
     },
 
@@ -363,9 +322,12 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to find partition route for table {}", table))]
-    FindPartition {
-        table: String,
+    #[snafu(display(
+        "Failed to deserialize partition in meta to partition def, source: {}",
+        source
+    ))]
+    DeserializePartition {
+        #[snafu(backtrace)]
         source: partition::error::Error,
     },
 
@@ -380,7 +342,6 @@ impl ErrorExt for Error {
         match self {
             Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
-            | Error::FindRegions { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::ColumnValuesNumberMismatch { .. } => StatusCode::InvalidArguments,
 
@@ -398,8 +359,7 @@ impl ErrorExt for Error {
 
             Error::Table { source } => source.status_code(),
 
-            Error::ConvertColumnDefaultConstraint { source, .. }
-            | Error::ConvertScalarValue { source, .. } => source.status_code(),
+            Error::ConvertColumnDefaultConstraint { source, .. } => source.status_code(),
 
             Error::RequestDatanode { source } => source.status_code(),
 
@@ -408,11 +368,9 @@ impl ErrorExt for Error {
             }
 
             Error::FindDatanode { .. }
-            | Error::CreateTableRoutes { .. }
-            | Error::FindRegionRoutes { .. }
+            | Error::CreateTableRoute { .. }
+            | Error::FindRegionRoute { .. }
             | Error::FindLeaderPeer { .. }
-            | Error::FindRegionPartition { .. }
-            | Error::IllegalTableRoutesData { .. }
             | Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. } => StatusCode::Internal,
 
@@ -447,7 +405,6 @@ impl ErrorExt for Error {
             Error::InvokeDatanode { source } => source.status_code(),
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
             Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
-            Error::FindPartition { source, .. } => source.status_code(),
             Error::DeserializePartition { source, .. } => source.status_code(),
             Error::FindTableRoute { source, .. } => source.status_code(),
         }

@@ -45,10 +45,12 @@ impl PartitionRuleManager {
         Self { table_routes }
     }
 
+    /// Find table route of given table name.
     pub async fn find_table_route(&self, table: &TableName) -> Result<Arc<TableRoute>> {
         self.table_routes.get_route(table).await
     }
 
+    /// Find datanodes of corresponding regions of given table.
     pub async fn find_region_datanodes(
         &self,
         table: &TableName,
@@ -159,6 +161,7 @@ impl PartitionRuleManager {
         Ok(partition_rule)
     }
 
+    /// Find regions in partition rule by filters.
     pub fn find_regions_by_filters(
         &self,
         partition_rule: PartitionRuleRef,
