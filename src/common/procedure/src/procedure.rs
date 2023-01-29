@@ -46,10 +46,10 @@ impl Status {
 
     /// Returns `true` if the procedure needs the framework to persist its intermediate state.
     pub fn need_persist(&self) -> bool {
+        // If the procedure is done, the framework doesn't need to persist the procedure
+        // anymore. It only needs to mark the procedure as committed.
         match self {
             Status::Executing { persist } | Status::Suspended { persist, .. } => *persist,
-            // If the procedure is done, the framework doesn't need to persist the procedure
-            // anymore. It only needs to mark the procedure as committed.
             Status::Done => false,
         }
     }
@@ -108,17 +108,27 @@ pub struct ProcedureWithId {
     pub procedure: BoxedProcedure,
 }
 
+impl ProcedureWithId {
+    /// Returns a new [ProcedureWithId] that holds specific `procedure`
+    /// and a random [ProcedureId].
+    pub fn with_random_id(procedure: BoxedProcedure) -> ProcedureWithId {
+        ProcedureWithId {
+            id: ProcedureId::random(),
+            procedure,
+        }
+    }
+}
+
 /// Unique id for [Procedure].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcedureId(Uuid);
 
 impl ProcedureId {
-    /// Returns a new ProcedureId randomly.
+    /// Returns a new unique [ProcedureId] randomly.
     pub fn random() -> ProcedureId {
         ProcedureId(Uuid::new_v4())
     }
 
-    // TODO(yingwen): Remove this once we use this method.
     /// Parses id from string.
     #[allow(dead_code)]
     fn parse_str(input: &str) -> Option<ProcedureId> {
@@ -154,8 +164,8 @@ pub trait ProcedureManager: Send + Sync + 'static {
     /// Registers loader for specific procedure type `name`.
     fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()>;
 
-    /// Submits a [Procedure] to execute.
-    async fn submit(&self, procedure: BoxedProcedure) -> Result<ProcedureId>;
+    /// Submits a procedure to execute.
+    async fn submit(&self, procedure: ProcedureWithId) -> Result<()>;
 
     /// Recovers unfinished procedures and reruns them.
     ///
