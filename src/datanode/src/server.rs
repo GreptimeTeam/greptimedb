@@ -18,15 +18,18 @@ use std::sync::Arc;
 
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::tracing::log::info;
+use servers::error::Error::InternalIo;
 use servers::grpc::GrpcServer;
-use servers::mysql::server::MysqlServer;
+use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
+use servers::tls::TlsOption;
 use servers::Mode;
 use snafu::ResultExt;
 
 use crate::datanode::DatanodeOptions;
+use crate::error::Error::StartServer;
 use crate::error::{ParseAddrSnafu, Result, RuntimeResourceSnafu, StartServerSnafu};
 use crate::instance::InstanceRef;
 
@@ -61,11 +64,24 @@ impl Services {
                         .build()
                         .context(RuntimeResourceSnafu)?,
                 );
+                let tls = TlsOption::default();
+                // default tls config returns None
+                // but try to think a better way to do this
                 Some(MysqlServer::create_server(
-                    ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
                     mysql_io_runtime,
-                    Default::default(),
-                    None,
+                    Arc::new(MysqlSpawnRef::new(
+                        ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
+                        None,
+                    )),
+                    Arc::new(MysqlSpawnConfig::new(
+                        tls.should_force_tls(),
+                        tls.setup()
+                            .map_err(|e| StartServer {
+                                source: InternalIo { source: e },
+                            })?
+                            .map(Arc::new),
+                        false,
+                    )),
                 ))
             }
         };

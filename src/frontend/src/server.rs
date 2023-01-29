@@ -18,9 +18,10 @@ use std::sync::Arc;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
 use servers::auth::UserProviderRef;
+use servers::error::Error::InternalIo;
 use servers::grpc::GrpcServer;
 use servers::http::HttpServer;
-use servers::mysql::server::MysqlServer;
+use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
@@ -29,6 +30,7 @@ use servers::server::Server;
 use snafu::ResultExt;
 use tokio::try_join;
 
+use crate::error::Error::StartServer;
 use crate::error::{self, Result};
 use crate::frontend::FrontendOptions;
 use crate::influxdb::InfluxdbOptions;
@@ -81,12 +83,22 @@ impl Services {
                     .build()
                     .context(error::RuntimeResourceSnafu)?,
             );
-
             let mysql_server = MysqlServer::create_server(
-                ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
                 mysql_io_runtime,
-                opts.tls.clone(),
-                user_provider.clone(),
+                Arc::new(MysqlSpawnRef::new(
+                    ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
+                    user_provider.clone(),
+                )),
+                Arc::new(MysqlSpawnConfig::new(
+                    opts.tls.should_force_tls(),
+                    opts.tls
+                        .setup()
+                        .map_err(|e| StartServer {
+                            source: InternalIo { source: e },
+                        })?
+                        .map(Arc::new),
+                    opts.reject_no_database.unwrap_or(false),
+                )),
             );
 
             Some((mysql_server, mysql_addr))

@@ -323,6 +323,10 @@ mod tests {
             fe_opts.mysql_options.as_ref().unwrap().addr
         );
         assert_eq!(2, fe_opts.mysql_options.as_ref().unwrap().runtime_size);
+        assert_eq!(
+            None,
+            fe_opts.mysql_options.as_ref().unwrap().reject_no_database
+        );
         assert!(fe_opts.influxdb_options.as_ref().unwrap().enable);
     }
 
