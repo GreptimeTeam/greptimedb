@@ -28,24 +28,43 @@ use crate::server::Services;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ObjectStoreConfig {
-    File {
-        data_dir: String,
-    },
-    S3 {
-        bucket: String,
-        root: String,
-        access_key_id: String,
-        secret_access_key: String,
-        endpoint: Option<String>,
-        region: Option<String>,
-    },
+    File(FileConfig),
+    S3(S3Config),
+    Oss(OssConfig),
+}
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize)]
+#[serde(default)]
+pub struct FileConfig {
+    pub data_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize)]
+#[serde(default)]
+pub struct S3Config {
+    pub bucket: String,
+    pub root: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, Deserialize)]
+#[serde(default)]
+pub struct OssConfig {
+    pub bucket: String,
+    pub root: String,
+    pub access_key_id: String,
+    pub access_key_secret: String,
+    pub endpoint: String,
 }
 
 impl Default for ObjectStoreConfig {
     fn default() -> Self {
-        ObjectStoreConfig::File {
+        ObjectStoreConfig::File(FileConfig {
             data_dir: "/tmp/greptimedb/data/".to_string(),
-        }
+        })
     }
 }
 

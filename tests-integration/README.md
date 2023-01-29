@@ -11,6 +11,7 @@ GT_S3_ACCESS_KEY_ID=S3 access key id
 GT_S3_ACCESS_KEY=S3 secret access key
 ```
 
+
 ## Run
 
 Execute the following command in the project root folder:
@@ -23,4 +24,10 @@ Test s3 storage:
 
 ```
 cargo test s3
+```
+
+Test oss storage:
+
+```
+cargo test oss
 ```

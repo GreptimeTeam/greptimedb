@@ -14,7 +14,7 @@
 
 use clap::Parser;
 use common_telemetry::logging;
-use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig};
+use datanode::datanode::{Datanode, DatanodeOptions, FileConfig, ObjectStoreConfig};
 use meta_client::MetaClientOpts;
 use servers::Mode;
 use snafu::ResultExt;
@@ -128,7 +128,7 @@ impl TryFrom<StartCommand> for DatanodeOptions {
         }
 
         if let Some(data_dir) = cmd.data_dir {
-            opts.storage = ObjectStoreConfig::File { data_dir };
+            opts.storage = ObjectStoreConfig::File(FileConfig { data_dir });
         }
 
         if let Some(wal_dir) = cmd.wal_dir {
@@ -175,10 +175,11 @@ mod tests {
         assert!(!tcp_nodelay);
 
         match options.storage {
-            ObjectStoreConfig::File { data_dir } => {
+            ObjectStoreConfig::File(FileConfig { data_dir }) => {
                 assert_eq!("/tmp/greptimedb/data/".to_string(), data_dir)
             }
             ObjectStoreConfig::S3 { .. } => unreachable!(),
+            ObjectStoreConfig::Oss { .. } => unreachable!(),
         };
     }
 

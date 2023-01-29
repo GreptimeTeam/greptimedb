@@ -29,7 +29,7 @@ use table::engine::{EngineContext, TableEngineRef};
 use table::requests::CreateTableRequest;
 use tempdir::TempDir;
 
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig, WalConfig};
+use crate::datanode::{DatanodeOptions, FileConfig, ObjectStoreConfig, WalConfig};
 use crate::error::{CreateTableSnafu, Result};
 use crate::instance::Instance;
 use crate::sql::SqlHandler;
@@ -67,9 +67,9 @@ fn create_tmp_dir_and_datanode_opts(name: &str) -> (DatanodeOptions, TestGuard) 
             dir: wal_tmp_dir.path().to_str().unwrap().to_string(),
             ..Default::default()
         },
-        storage: ObjectStoreConfig::File {
+        storage: ObjectStoreConfig::File(FileConfig {
             data_dir: data_tmp_dir.path().to_str().unwrap().to_string(),
-        },
+        }),
         mode: Mode::Standalone,
         ..Default::default()
     };

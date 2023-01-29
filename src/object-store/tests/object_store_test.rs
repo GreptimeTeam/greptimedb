@@ -19,6 +19,7 @@ use common_telemetry::logging;
 use object_store::backend::{fs, s3};
 use object_store::test_util::TempFolder;
 use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore};
+use opendal::services::oss;
 use tempdir::TempDir;
 
 async fn test_object_crud(store: &ObjectStore) -> Result<()> {
@@ -117,6 +118,34 @@ async fn test_s3_backend() -> Result<()> {
                 .root(&root)
                 .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
                 .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
+                .bucket(&bucket)
+                .build()?;
+
+            let store = ObjectStore::new(accessor);
+
+            let mut guard = TempFolder::new(&store, "/");
+            test_object_crud(&store).await?;
+            test_object_list(&store).await?;
+            guard.remove_all().await?;
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_oss_backend() -> Result<()> {
+    logging::init_default_ut_logging();
+    if let Ok(bucket) = env::var("GT_OSS_BUCKET") {
+        if !bucket.is_empty() {
+            logging::info!("Running oss test.");
+
+            let root = uuid::Uuid::new_v4().to_string();
+
+            let accessor = oss::Builder::default()
+                .root(&root)
+                .access_key_id(&env::var("GT_OSS_ACCESS_KEY_ID")?)
+                .access_key_secret(&env::var("GT_OSS_ACCESS_KEY")?)
                 .bucket(&bucket)
                 .build()?;
 
