@@ -17,5 +17,5 @@ mod grpc;
 #[macro_use]
 mod http;
 
-grpc_tests!(File, S3);
-http_tests!(File, S3);
+grpc_tests!(File, S3, OSS);
+http_tests!(File, S3, OSS);

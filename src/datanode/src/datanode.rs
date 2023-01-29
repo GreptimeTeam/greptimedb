@@ -39,6 +39,13 @@ pub enum ObjectStoreConfig {
         endpoint: Option<String>,
         region: Option<String>,
     },
+    OSS {
+        bucket: String,
+        root: String,
+        access_key_id: String,
+        access_key_secret: String,
+        endpoint: String,
+    }
 }
 
 impl Default for ObjectStoreConfig {

@@ -31,6 +31,7 @@ use mito::engine::MitoEngine;
 use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::fs::Builder as FsBuilder;
 use object_store::services::s3::Builder as S3Builder;
+use object_store::services::oss::Builder as OSSBuilder;
 use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
@@ -203,6 +204,7 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
     let object_store = match store_config {
         ObjectStoreConfig::File { data_dir } => new_fs_object_store(data_dir).await,
         ObjectStoreConfig::S3 { .. } => new_s3_object_store(store_config).await,
+        ObjectStoreConfig::OSS { .. } => new_oss_object_store(store_config).await,
     };
 
     object_store.map(|object_store| {
@@ -212,6 +214,42 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
             .layer(LoggingLayer::default())
             .layer(TracingLayer)
     })
+}
+
+pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
+    let (root, secret_key, key_id, bucket, endpoint) = match store_config {
+        ObjectStoreConfig::OSS {
+            bucket,
+            root,
+            access_key_id,
+            access_key_secret,
+            endpoint,
+        } => (
+            root,
+            access_key_secret,
+            access_key_id,
+            bucket,
+            endpoint,
+        ),
+        _ => unreachable!(),
+    };
+
+    let root = util::normalize_dir(root);
+    info!("The oss storage bucket is: {}, root is: {}", bucket, &root);
+
+    let mut builder = OSSBuilder::default();
+    let builder = builder
+        .root(&root)
+        .bucket(bucket)
+        .endpoint(endpoint)
+        .access_key_id(key_id)
+        .access_key_secret(secret_key);
+
+    let accessor = builder.build().with_context(|_| error::InitBackendSnafu {
+        config: store_config.clone(),
+    })?;
+
+    Ok(ObjectStore::new(accessor))
 }
 
 pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {

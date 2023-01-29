@@ -45,6 +45,7 @@ use snafu::ResultExt;
 use table::engine::{EngineContext, TableEngineRef};
 use table::requests::CreateTableRequest;
 use tempdir::TempDir;
+use object_store::services::oss;
 
 static PORTS: OnceCell<AtomicUsize> = OnceCell::new();
 
@@ -57,6 +58,7 @@ fn get_port() -> usize {
 pub enum StorageType {
     S3,
     File,
+    OSS,
 }
 
 impl StorageType {
@@ -67,6 +69,13 @@ impl StorageType {
             StorageType::File => true, // always test file
             StorageType::S3 => {
                 if let Ok(b) = env::var("GT_S3_BUCKET") {
+                    !b.is_empty()
+                } else {
+                    false
+                }
+            },
+            StorageType::OSS => {
+                if let Ok(b) = env::var("GT_OSS_BUCKET") {
                     !b.is_empty()
                 } else {
                     false
@@ -83,6 +92,34 @@ fn get_test_store_config(
     let _ = dotenv::dotenv();
 
     match store_type {
+        StorageType::OSS => {
+            let root = uuid::Uuid::new_v4().to_string();
+            let key_id = env::var("GT_OSS_ACCESS_KEY_ID").unwrap();
+            let secret_key = env::var("GT_OSS_ACCESS_KEY").unwrap();
+            let bucket = env::var("GT_OSS_BUCKET").unwrap();
+            let endpoint = env::var("GT_OSS_ENDPOINT").unwrap();
+
+            let accessor = oss::Builder::default()
+                .root(&root)
+                .endpoint(&endpoint)
+                .access_key_id(&key_id)
+                .access_key_secret(&secret_key)
+                .bucket(&bucket)
+                .build()
+                .unwrap();
+
+            let config = ObjectStoreConfig::OSS {
+                root,
+                bucket,
+                access_key_id: key_id,
+                access_key_secret: secret_key,
+                endpoint,
+            };
+
+            let store = ObjectStore::new(accessor);
+
+            (config, Some(TempDirGuard::OSS(TempFolder::new(&store, "/"))))
+        }
         StorageType::S3 => {
             let root = uuid::Uuid::new_v4().to_string();
             let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
@@ -126,6 +163,7 @@ fn get_test_store_config(
 enum TempDirGuard {
     File(TempDir),
     S3(TempFolder),
+    OSS(TempFolder),
 }
 
 /// Create a tmp dir(will be deleted once it goes out of scope.) and a default `DatanodeOptions`,
@@ -138,6 +176,9 @@ pub struct TestGuard {
 impl TestGuard {
     pub async fn remove_all(&mut self) {
         if let Some(TempDirGuard::S3(mut guard)) = self.data_tmp_dir.take() {
+            guard.remove_all().await.unwrap();
+        }
+        if let Some(TempDirGuard::OSS(mut guard)) = self.data_tmp_dir.take() {
             guard.remove_all().await.unwrap();
         }
     }
