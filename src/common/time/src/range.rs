@@ -194,7 +194,22 @@ impl<T: PartialOrd> GenericRange<T> {
 pub type TimestampRange = GenericRange<Timestamp>;
 
 impl TimestampRange {
+    /// Create a TimestampRange with optional inclusive end timestamp.
+    /// If end timestamp is present and is less than start timestamp, this method will return
+    /// an empty range.
+    /// ### Caveat
+    /// If the given end timestamp's value is `i64::MAX`, which will result into overflow when added
+    /// by 1(the end is inclusive), this method does not try to convert the time unit of end
+    /// timestamp, instead it just return `[start, INF)`. This exaggerates the range but does not
+    /// affect correctness.  
     pub fn new_inclusive(start: Option<Timestamp>, end: Option<Timestamp>) -> Self {
+        // check for emptiness
+        if let (Some(start_ts), Some(end_ts)) = (start, end) {
+            if start_ts >= end_ts {
+                return Self::empty();
+            }
+        }
+
         let end = if let Some(end) = end {
             end.value()
                 .checked_add(1)
@@ -278,6 +293,27 @@ mod tests {
         let range = RangeMillis::empty();
         assert_eq!(range.start(), range.end());
         assert_eq!(Some(TimestampMillis::new(0)), *range.start());
+    }
+
+    #[test]
+    fn test_timestamp_range_new_inclusive() {
+        let range = TimestampRange::new_inclusive(
+            Some(Timestamp::new(i64::MAX - 1, TimeUnit::Second)),
+            Some(Timestamp::new(i64::MAX, TimeUnit::Millisecond)),
+        );
+        assert!(range.is_empty());
+
+        let range = TimestampRange::new_inclusive(
+            Some(Timestamp::new(1, TimeUnit::Second)),
+            Some(Timestamp::new(1, TimeUnit::Millisecond)),
+        );
+        assert!(range.is_empty());
+
+        let range = TimestampRange::new_inclusive(
+            Some(Timestamp::new(1, TimeUnit::Second)),
+            Some(Timestamp::new(i64::MAX, TimeUnit::Millisecond)),
+        );
+        assert!(range.end.is_none());
     }
 
     #[test]

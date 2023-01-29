@@ -5,5 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-strum = "0.24.1"
+strum = { version = "0.24", features = ["std", "derive"] }
 snafu = { version = "0.7", features = ["backtraces"] }
