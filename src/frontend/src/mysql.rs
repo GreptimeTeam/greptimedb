@@ -21,7 +21,7 @@ pub struct MysqlOptions {
     pub runtime_size: usize,
     #[serde(default = "Default::default")]
     pub tls: TlsOption,
-    pub reject_no_database: bool,
+    pub reject_no_database: Option<bool>,
 }
 
 impl Default for MysqlOptions {
@@ -30,7 +30,7 @@ impl Default for MysqlOptions {
             addr: "127.0.0.1:4002".to_string(),
             runtime_size: 2,
             tls: TlsOption::default(),
-            reject_no_database: false,
+            reject_no_database: None,
         }
     }
 }

@@ -187,6 +187,7 @@ pub mod test {
     use std::fs::File;
     use std::io::{LineWriter, Write};
 
+    use session::context::UserInfo;
     use tempdir::TempDir;
 
     use crate::auth::user_provider::{double_sha1, sha1_one, sha1_two, StaticUserProvider};
@@ -216,7 +217,7 @@ pub mod test {
         assert_eq!(sha1_2, sha1_2_answer);
     }
 
-    async fn test_auth(provider: &dyn UserProvider, username: &str, password: &str) {
+    async fn test_authenticate(provider: &dyn UserProvider, username: &str, password: &str) {
         let re = provider
             .authenticate(
                 Identity::UserId(username, None),
@@ -227,10 +228,19 @@ pub mod test {
     }
 
     #[tokio::test]
+    async fn test_authorize() {
+        let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
+        let re = provider
+            .authorize("catalog", "schema", &UserInfo::new("root"))
+            .await;
+        assert!(re.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_inline_provider() {
         let provider = StaticUserProvider::try_from("cmd:root=123456,admin=654321").unwrap();
-        test_auth(&provider, "root", "123456").await;
-        test_auth(&provider, "admin", "654321").await;
+        test_authenticate(&provider, "root", "123456").await;
+        test_authenticate(&provider, "admin", "654321").await;
     }
 
     #[tokio::test]
@@ -254,7 +264,7 @@ admin=654321",
 
         let param = format!("file:{file_path}");
         let provider = StaticUserProvider::try_from(param.as_str()).unwrap();
-        test_auth(&provider, "root", "123456").await;
-        test_auth(&provider, "admin", "654321").await;
+        test_authenticate(&provider, "root", "123456").await;
+        test_authenticate(&provider, "admin", "654321").await;
     }
 }
