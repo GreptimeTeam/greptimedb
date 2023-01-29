@@ -25,7 +25,7 @@ If the node dies or restarts in the middle of creating a table, it could leave t
 ## Overview
 The procedure framework consists of the following primary components:
 - A `Procedure` represents an operation or a set of operations to be performed step-by-step
-- `ProcedureManager`, the system to run `Procedures`
+- `ProcedureManager`, the runtime to run `Procedures`. It executes the submitted procedures, stores procedures' states to the `ProcedureStore` and restores procedures from `ProcedureStore` while the database restarts.
 - `ProcedureStore` is a storage layer for persisting the procedure state
 
 
@@ -73,12 +73,12 @@ struct Context {
 }
 ```
 
-The framework calls `Procedure::dump()` to serialize the internal state of the procedure and writes to the `ProcedureStore`. The `Status` has a field `persist` to tell the framework whether it needs persistence.
+The `ProcedureManager` calls `Procedure::dump()` to serialize the internal state of the procedure and writes to the `ProcedureStore`. The `Status` has a field `persist` to tell the `ProcedureManager` whether it needs persistence.
 
 ## Sub-procedures
-A procedure may need to create some sub-procedures to process its subtasks. For example, creating a distributed table with multiple regions (partitions) needs to set up the regions in each node, thus the parent procedure should instantiate a sub-procedure for each region. The framework makes sure that the parent procedure does not proceed till all sub-procedures are successfully finished.
+A procedure may need to create some sub-procedures to process its subtasks. For example, creating a distributed table with multiple regions (partitions) needs to set up the regions in each node, thus the parent procedure should instantiate a sub-procedure for each region. The `ProcedureManager` makes sure that the parent procedure does not proceed till all sub-procedures are successfully finished.
 
-The procedure can submit sub-procedures to the framework by returning `Status::Suspended`. It needs to assign a procedure id to each procedure manually so it can track the status of the sub-procedures.
+The procedure can submit sub-procedures to the `ProcedureManager` by returning `Status::Suspended`. It needs to assign a procedure id to each procedure manually so it can track the status of the sub-procedures.
 ```rust
 struct ProcedureWithId {
     id: ProcedureId,
@@ -96,14 +96,14 @@ These implementations should share the same storage structure. They store each p
 ```
 Sample paths:
 
-/procedures/{PROCEDURE_ID}_000001.step
-/procedures/{PROCEDURE_ID}_000002.step
-/procedures/{PROCEDURE_ID}_000003.commit
+/procedures/{PROCEDURE_ID}/000001.step
+/procedures/{PROCEDURE_ID}/000002.step
+/procedures/{PROCEDURE_ID}/000003.commit
 ```
 
-`ProcedureStore` behaves like a WAL. Before performing each step, the framework can write the procedure's current state to the ProcedureStore, which stores the state in the `.step` file. The `000001` in the path is a monotonic increasing sequence of the step. After the procedure is done, the framework puts a `.commit` file to indicate the procedure is finished (committed).
+`ProcedureStore` behaves like a WAL. Before performing each step, the `ProcedureManager` can write the procedure's current state to the ProcedureStore, which stores the state in the `.step` file. The `000001` in the path is a monotonic increasing sequence of the step. After the procedure is done, the `ProcedureManager` puts a `.commit` file to indicate the procedure is finished (committed).
 
-The framework can remove the procedure's files once the procedure is done, but it needs to leave the `.commit` as the last file to remove in case of failure during removal.
+The `ProcedureManager` can remove the procedure's files once the procedure is done, but it needs to leave the `.commit` as the last file to remove in case of failure during removal.
 
 ## ProcedureManager
 `ProcedureManager` executes procedures submitted to it.
@@ -127,20 +127,20 @@ type BoxedProcedureLoader = Box<dyn Fn(&str) -> Result<BoxedProcedure> + Send>;
 ```
 
 ## Rollback
-The rollback step is supposed to clean up the resources created during the execute() step. When a procedure has failed, the framework puts a `rollback` file and calls the `Procedure::rollback()` method.
+The rollback step is supposed to clean up the resources created during the execute() step. When a procedure has failed, the `ProcedureManager` puts a `rollback` file and calls the `Procedure::rollback()` method.
 
 
 ```text
-/procedures/{PROCEDURE_ID}_000001.step
-/procedures/{PROCEDURE_ID}_000002.rollback
+/procedures/{PROCEDURE_ID}/000001.step
+/procedures/{PROCEDURE_ID}/000002.rollback
 ```
 
 Rollback is complicated to implement so some procedures might not support rollback or only provide a best-efforts approach.
 
 ## Locking
-The procedure framework can provide a locking mechanism that gives a procedure read/write access to a database object such as a table so other procedures are unable to modify the same table while the current one is executing.
+The `ProcedureManager` can provide a locking mechanism that gives a procedure read/write access to a database object such as a table so other procedures are unable to modify the same table while the current one is executing.
 
-Sub-procedures always inherit their parents' locks. The framework only acquires locks for a procedure if its parent doesn't hold the lock.
+Sub-procedures always inherit their parents' locks. The `ProcedureManager` only acquires locks for a procedure if its parent doesn't hold the lock.
 
 # Drawbacks
 The `Procedure` framework introduces additional complexity and overhead to our database.
