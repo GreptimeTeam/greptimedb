@@ -89,13 +89,13 @@ async fn test_shutdown_pg_server_range() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_schema_validating() -> Result<()> {
     async fn generate_server(auth_info: DatabaseAuthInfo<'_>) -> Result<(Box<dyn Server>, u16)> {
         let table = MemTable::default_numbers_table();
         let postgres_server =
             create_postgres_server(table, true, Default::default(), Some(auth_info))?;
-        let listening = "127.0.0.1:5432".parse::<SocketAddr>().unwrap();
+        let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
         let server_addr = postgres_server.start(listening).await.unwrap();
         let server_port = server_addr.port();
         Ok((postgres_server, server_port))
