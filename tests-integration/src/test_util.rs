@@ -60,7 +60,7 @@ fn get_port() -> usize {
 pub enum StorageType {
     S3,
     File,
-    OSS,
+    Oss,
 }
 
 impl StorageType {
@@ -76,7 +76,7 @@ impl StorageType {
                     false
                 }
             }
-            StorageType::OSS => {
+            StorageType::Oss => {
                 if let Ok(b) = env::var("GT_OSS_BUCKET") {
                     !b.is_empty()
                 } else {
@@ -94,7 +94,7 @@ fn get_test_store_config(
     let _ = dotenv::dotenv();
 
     match store_type {
-        StorageType::OSS => {
+        StorageType::Oss => {
             let oss_config = OssConfig {
                 root: uuid::Uuid::new_v4().to_string(),
                 access_key_id: env::var("GT_OSS_ACCESS_KEY_ID").unwrap(),
