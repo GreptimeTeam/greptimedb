@@ -165,4 +165,24 @@ mod test {
         let range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
         increase_runner(range_array, vec![0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 1.0]);
     }
+
+    #[test]
+    fn counter_reset() {
+        // this series should be treated [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        let values_array = Arc::new(Float64Array::from_iter([
+            1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0, 5.0,
+        ]));
+        let ranges = [
+            (0, 2),
+            (1, 2),
+            (2, 2),
+            (3, 2),
+            (4, 2),
+            (5, 2),
+            (6, 2),
+            (7, 2),
+        ];
+        let range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
+        increase_runner(range_array, vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    }
 }
