@@ -181,10 +181,17 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to find table routes for table {}", table_name))]
-    FindTableRoutes {
+    #[snafu(display("Failed to create table routes for table {}", table_name))]
+    CreateTableRoutes {
         table_name: String,
         backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to find table routes for table {}", table_name))]
+    FindTableRoute {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: partition::error::Error,
     },
 
     #[snafu(display("Failed to create AlterExpr from Alter statement, source: {}", source))]
@@ -401,7 +408,7 @@ impl ErrorExt for Error {
             }
 
             Error::FindDatanode { .. }
-            | Error::FindTableRoutes { .. }
+            | Error::CreateTableRoutes { .. }
             | Error::FindRegionRoutes { .. }
             | Error::FindLeaderPeer { .. }
             | Error::FindRegionPartition { .. }
@@ -440,9 +447,9 @@ impl ErrorExt for Error {
             Error::InvokeDatanode { source } => source.status_code(),
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
             Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
-            Error::DeserializePartition { source, .. } | Error::FindPartition { source, .. } => {
-                source.status_code()
-            }
+            Error::FindPartition { source, .. } => source.status_code(),
+            Error::DeserializePartition { source, .. } => source.status_code(),
+            Error::FindTableRoute { source, .. } => source.status_code(),
         }
     }
 

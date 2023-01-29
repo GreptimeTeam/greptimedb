@@ -27,7 +27,7 @@ use table::requests::InsertRequest;
 
 use super::DistTable;
 use crate::error;
-use crate::error::{FindPartitionSnafu, Result};
+use crate::error::{FindTableRouteSnafu, Result};
 use crate::table::scan::DatanodeInstance;
 
 impl DistTable {
@@ -36,13 +36,12 @@ impl DistTable {
         inserts: HashMap<RegionNumber, InsertRequest>,
     ) -> Result<Output> {
         let route = self
-            .table_routes
-            .get_route(&self.table_name)
+            .partition_manager
+            .find_table_route(&self.table_name)
             .await
-            .with_context(|_| FindPartitionSnafu {
-                table: self.table_name.to_string(),
+            .with_context(|_| FindTableRouteSnafu {
+                table_name: self.table_name.to_string(),
             })?;
-
         let mut joins = Vec::with_capacity(inserts.len());
         for (region_id, insert) in inserts {
             let datanode = route

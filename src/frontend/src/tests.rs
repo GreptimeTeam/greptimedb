@@ -28,6 +28,7 @@ use meta_srv::metasrv::MetaSrvOptions;
 use meta_srv::mocks::MockInfo;
 use meta_srv::service::store::kv::KvStoreRef;
 use meta_srv::service::store::memory::MemStore;
+use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
 use servers::grpc::GrpcServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
@@ -241,10 +242,12 @@ pub(crate) async fn create_distributed_instance(test_name: &str) -> MockDistribu
     let meta_backend = Arc::new(MetaKvBackend {
         client: meta_client.clone(),
     });
-    let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
+    let partition_manager = Arc::new(PartitionRuleManager::new(Arc::new(TableRoutes::new(
+        meta_client.clone(),
+    ))));
     let catalog_manager = Arc::new(FrontendCatalogManager::new(
         meta_backend,
-        table_routes.clone(),
+        partition_manager,
         datanode_clients.clone(),
     ));
 

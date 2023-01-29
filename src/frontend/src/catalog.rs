@@ -29,7 +29,7 @@ use catalog::{
 };
 use futures::StreamExt;
 use meta_client::rpc::TableName;
-use partition::route::TableRoutes;
+use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
 use table::TableRef;
 
@@ -39,19 +39,19 @@ use crate::table::DistTable;
 #[derive(Clone)]
 pub struct FrontendCatalogManager {
     backend: KvBackendRef,
-    table_routes: Arc<TableRoutes>,
+    partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
 }
 
 impl FrontendCatalogManager {
     pub(crate) fn new(
         backend: KvBackendRef,
-        table_routes: Arc<TableRoutes>,
+        partition_manager: PartitionRuleManagerRef,
         datanode_clients: Arc<DatanodeClients>,
     ) -> Self {
         Self {
             backend,
-            table_routes,
+            partition_manager,
             datanode_clients,
         }
     }
@@ -61,8 +61,8 @@ impl FrontendCatalogManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn table_routes(&self) -> Arc<TableRoutes> {
-        self.table_routes.clone()
+    pub(crate) fn partition_manager(&self) -> PartitionRuleManagerRef {
+        self.partition_manager.clone()
     }
 
     #[cfg(test)]
@@ -173,7 +173,7 @@ impl CatalogList for FrontendCatalogManager {
             Ok(Some(Arc::new(FrontendCatalogProvider {
                 catalog_name: name.to_string(),
                 backend: self.backend.clone(),
-                table_routes: self.table_routes.clone(),
+                partition_manager: self.partition_manager.clone(),
                 datanode_clients: self.datanode_clients.clone(),
             })))
         } else {
@@ -185,7 +185,7 @@ impl CatalogList for FrontendCatalogManager {
 pub struct FrontendCatalogProvider {
     catalog_name: String,
     backend: KvBackendRef,
-    table_routes: Arc<TableRoutes>,
+    partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
 }
 
@@ -232,7 +232,7 @@ impl CatalogProvider for FrontendCatalogProvider {
                 catalog_name: self.catalog_name.clone(),
                 schema_name: name.to_string(),
                 backend: self.backend.clone(),
-                table_routes: self.table_routes.clone(),
+                partition_manager: self.partition_manager.clone(),
                 datanode_clients: self.datanode_clients.clone(),
             })))
         } else {
@@ -245,7 +245,7 @@ pub struct FrontendSchemaProvider {
     catalog_name: String,
     schema_name: String,
     backend: KvBackendRef,
-    table_routes: Arc<TableRoutes>,
+    partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
 }
 
@@ -286,7 +286,7 @@ impl SchemaProvider for FrontendSchemaProvider {
         };
 
         let backend = self.backend.clone();
-        let table_routes = self.table_routes.clone();
+        let partition_manager = self.partition_manager.clone();
         let datanode_clients = self.datanode_clients.clone();
         let table_name = TableName::new(&self.catalog_name, &self.schema_name, name);
         let result: Result<Option<TableRef>, catalog::error::Error> = std::thread::spawn(|| {
@@ -306,7 +306,7 @@ impl SchemaProvider for FrontendSchemaProvider {
                             .try_into()
                             .context(catalog_err::InvalidTableInfoInCatalogSnafu)?,
                     ),
-                    table_routes,
+                    partition_manager,
                     datanode_clients,
                     backend,
                 ));

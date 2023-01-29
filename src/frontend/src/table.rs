@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::AlterExpr;
@@ -35,19 +34,10 @@ use datafusion::physical_plan::{
     Partitioning, SendableRecordBatchStream as DfSendableRecordBatchStream,
 };
 use datafusion_common::DataFusionError;
-use datafusion_expr::expr::Expr as DfExpr;
-use datafusion_expr::{BinaryExpr, Operator};
-use datatypes::prelude::Value;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use meta_client::rpc::{Peer, TableName};
-use partition::columns::RangeColumnsPartitionRule;
-use partition::partition::{PartitionBound, PartitionDef, PartitionExpr};
-use partition::range::RangePartitionRule;
-use partition::route::TableRoutes;
-use partition::splitter::WriteSplitter;
-use partition::PartitionRuleRef;
+use meta_client::rpc::TableName;
+use partition::manager::PartitionRuleManagerRef;
 use snafu::prelude::*;
-use store_api::storage::RegionNumber;
 use table::error::TableOperationSnafu;
 use table::metadata::{FilterPushDownType, TableInfo, TableInfoRef};
 use table::requests::{AlterTableRequest, InsertRequest};
@@ -56,11 +46,7 @@ use table::Table;
 use tokio::sync::RwLock;
 
 use crate::datanode::DatanodeClients;
-use crate::error::{
-    self, BuildTableMetaSnafu, CatalogEntrySerdeSnafu, CatalogSnafu, ContextValueNotFoundSnafu,
-    DeserializePartitionSnafu, FindPartitionSnafu, LeaderNotFoundSnafu, RequestDatanodeSnafu,
-    Result, TableNotFoundSnafu, TableSnafu,
-};
+use crate::error::{self, Result};
 use crate::table::scan::{DatanodeInstance, TableScanPlan};
 
 pub mod insert;
@@ -70,7 +56,7 @@ pub(crate) mod scan;
 pub struct DistTable {
     table_name: TableName,
     table_info: TableInfoRef,
-    table_routes: Arc<TableRoutes>,
+    partition_manager: PartitionRuleManagerRef,
     datanode_clients: Arc<DatanodeClients>,
     backend: KvBackendRef,
 }
@@ -90,20 +76,15 @@ impl Table for DistTable {
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
-        let partition_rule = self
-            .find_partition_rule()
+        let split = self
+            .partition_manager
+            .split_insert_request(&self.table_name, request)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
 
-        let spliter = WriteSplitter::with_partition_rule(partition_rule);
-        let inserts = spliter
-            .split_insert(request)
-            .map_err(BoxedError::new)
-            .context(TableOperationSnafu)?;
-
         let output = self
-            .dist_insert(inserts)
+            .dist_insert(split)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
@@ -118,17 +99,20 @@ impl Table for DistTable {
         limit: Option<usize>,
     ) -> table::Result<PhysicalPlanRef> {
         let partition_rule = self
-            .find_partition_rule()
+            .partition_manager
+            .find_table_partition_rule(&self.table_name)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
 
         let regions = self
-            .find_regions(partition_rule, filters)
+            .partition_manager
+            .find_regions_by_filters(partition_rule, filters)
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
         let datanodes = self
-            .find_datanodes(regions)
+            .partition_manager
+            .find_region_datanodes(&self.table_name, regions)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
@@ -173,239 +157,17 @@ impl DistTable {
     pub(crate) fn new(
         table_name: TableName,
         table_info: TableInfoRef,
-        table_routes: Arc<TableRoutes>,
+        partition_manager: PartitionRuleManagerRef,
         datanode_clients: Arc<DatanodeClients>,
         backend: KvBackendRef,
     ) -> Self {
         Self {
             table_name,
             table_info,
-            table_routes,
+            partition_manager,
             datanode_clients,
             backend,
         }
-    }
-
-    // TODO(LFC): Finding regions now seems less efficient, should be further looked into.
-    fn find_regions(
-        &self,
-        partition_rule: PartitionRuleRef,
-        filters: &[Expr],
-    ) -> Result<Vec<RegionNumber>> {
-        let regions = if let Some((first, rest)) = filters.split_first() {
-            let mut target = self.find_regions0(partition_rule.clone(), first)?;
-            for filter in rest {
-                let regions = self.find_regions0(partition_rule.clone(), filter)?;
-
-                // When all filters are provided as a collection, it often implicitly states that
-                // "all filters must be satisfied". So we join all the results here.
-                target.retain(|x| regions.contains(x));
-
-                // Failed fast, empty collection join any is empty.
-                if target.is_empty() {
-                    break;
-                }
-            }
-            target.into_iter().collect::<Vec<_>>()
-        } else {
-            partition_rule
-                .find_regions(&[])
-                .with_context(|_| FindPartitionSnafu {
-                    table: self.table_name.to_string(),
-                })?
-        };
-        ensure!(
-            !regions.is_empty(),
-            error::FindRegionsSnafu {
-                filters: filters.to_vec()
-            }
-        );
-        Ok(regions)
-    }
-
-    // TODO(LFC): Support other types of filter expr:
-    //   - BETWEEN and IN (maybe more)
-    //   - expr with arithmetic like "a + 1 < 10" (should have been optimized in logic plan?)
-    //   - not comparison or neither "AND" nor "OR" operations, for example, "a LIKE x"
-    fn find_regions0(
-        &self,
-        partition_rule: PartitionRuleRef,
-        filter: &Expr,
-    ) -> Result<HashSet<RegionNumber>> {
-        let expr = filter.df_expr();
-        match expr {
-            DfExpr::BinaryExpr(BinaryExpr { left, op, right }) if is_compare_op(op) => {
-                let column_op_value = match (left.as_ref(), right.as_ref()) {
-                    (DfExpr::Column(c), DfExpr::Literal(v)) => Some((&c.name, *op, v)),
-                    (DfExpr::Literal(v), DfExpr::Column(c)) => {
-                        Some((&c.name, reverse_operator(op), v))
-                    }
-                    _ => None,
-                };
-                if let Some((column, op, sv)) = column_op_value {
-                    let value = sv
-                        .clone()
-                        .try_into()
-                        .with_context(|_| error::ConvertScalarValueSnafu { value: sv.clone() })?;
-                    return Ok(partition_rule
-                        .find_regions(&[PartitionExpr::new(column, op, value)])
-                        .with_context(|_| FindPartitionSnafu {
-                            table: self.table_name.to_string(),
-                        })?
-                        .into_iter()
-                        .collect::<HashSet<RegionNumber>>());
-                }
-            }
-            DfExpr::BinaryExpr(BinaryExpr { left, op, right })
-                if matches!(op, Operator::And | Operator::Or) =>
-            {
-                let left_regions =
-                    self.find_regions0(partition_rule.clone(), &(*left.clone()).into())?;
-                let right_regions =
-                    self.find_regions0(partition_rule.clone(), &(*right.clone()).into())?;
-                let regions = match op {
-                    Operator::And => left_regions
-                        .intersection(&right_regions)
-                        .cloned()
-                        .collect::<HashSet<RegionNumber>>(),
-                    Operator::Or => left_regions
-                        .union(&right_regions)
-                        .cloned()
-                        .collect::<HashSet<RegionNumber>>(),
-                    _ => unreachable!(),
-                };
-                return Ok(regions);
-            }
-            _ => (),
-        }
-
-        // Returns all regions for not supported partition expr as a safety hatch.
-        Ok(partition_rule
-            .find_regions(&[])
-            .with_context(|_| FindPartitionSnafu {
-                table: self.table_name.to_string(),
-            })?
-            .into_iter()
-            .collect::<HashSet<RegionNumber>>())
-    }
-
-    async fn find_datanodes(
-        &self,
-        regions: Vec<RegionNumber>,
-    ) -> Result<HashMap<Peer, Vec<RegionNumber>>> {
-        let route = self
-            .table_routes
-            .get_route(&self.table_name)
-            .await
-            .with_context(|_| FindPartitionSnafu {
-                table: self.table_name.to_string(),
-            })?;
-
-        let mut datanodes = HashMap::new();
-        for region in regions.iter() {
-            let datanode = route
-                .region_routes
-                .iter()
-                .find_map(|x| {
-                    if x.region.id == *region as u64 {
-                        x.leader_peer.clone()
-                    } else {
-                        None
-                    }
-                })
-                .context(error::FindDatanodeSnafu { region: *region })?;
-            datanodes
-                .entry(datanode)
-                .or_insert_with(Vec::new)
-                .push(*region);
-        }
-        Ok(datanodes)
-    }
-
-    async fn find_partition_rule(&self) -> Result<PartitionRuleRef> {
-        let route = self
-            .table_routes
-            .get_route(&self.table_name)
-            .await
-            .with_context(|_| FindPartitionSnafu {
-                table: self.table_name.to_string(),
-            })?;
-        ensure!(
-            !route.region_routes.is_empty(),
-            error::FindRegionRoutesSnafu {
-                table_name: self.table_name.to_string()
-            }
-        );
-
-        let mut partitions = Vec::with_capacity(route.region_routes.len());
-        for r in route.region_routes.iter() {
-            let partition =
-                r.region
-                    .partition
-                    .clone()
-                    .context(error::FindRegionPartitionSnafu {
-                        region: r.region.id,
-                        table_name: self.table_name.to_string(),
-                    })?;
-            let partition_def =
-                PartitionDef::try_from(partition).context(DeserializePartitionSnafu)?;
-            partitions.push((r.region.id, partition_def));
-        }
-        partitions.sort_by(|a, b| a.1.partition_bounds().cmp(b.1.partition_bounds()));
-
-        ensure!(
-            partitions
-                .windows(2)
-                .all(|w| w[0].1.partition_columns() == w[1].1.partition_columns()),
-            error::IllegalTableRoutesDataSnafu {
-                table_name: self.table_name.to_string(),
-                err_msg: "partition columns of all regions are not the same"
-            }
-        );
-        let partition_columns = partitions[0].1.partition_columns();
-        ensure!(
-            !partition_columns.is_empty(),
-            error::IllegalTableRoutesDataSnafu {
-                table_name: self.table_name.to_string(),
-                err_msg: "no partition columns found"
-            }
-        );
-
-        let regions = partitions
-            .iter()
-            .map(|x| x.0 as u32)
-            .collect::<Vec<RegionNumber>>();
-
-        // TODO(LFC): Serializing and deserializing partition rule is ugly, must find a much more elegant way.
-        let partition_rule: PartitionRuleRef = match partition_columns.len() {
-            1 => {
-                // Omit the last "MAXVALUE".
-                let bounds = partitions
-                    .iter()
-                    .filter_map(|(_, p)| match &p.partition_bounds()[0] {
-                        PartitionBound::Value(v) => Some(v.clone()),
-                        PartitionBound::MaxValue => None,
-                    })
-                    .collect::<Vec<Value>>();
-                Arc::new(RangePartitionRule::new(
-                    partition_columns[0].clone(),
-                    bounds,
-                    regions,
-                )) as _
-            }
-            _ => {
-                let bounds = partitions
-                    .iter()
-                    .map(|x| x.1.partition_bounds().clone())
-                    .collect::<Vec<Vec<PartitionBound>>>();
-                Arc::new(RangeColumnsPartitionRule::new(
-                    partition_columns.clone(),
-                    bounds,
-                    regions,
-                )) as _
-            }
-        };
-        Ok(partition_rule)
     }
 
     pub(crate) async fn table_global_value(
@@ -416,9 +178,9 @@ impl DistTable {
             .backend
             .get(key.to_string().as_bytes())
             .await
-            .context(CatalogSnafu)?;
+            .context(error::CatalogSnafu)?;
         Ok(if let Some(raw) = raw {
-            Some(TableGlobalValue::from_bytes(raw.1).context(CatalogEntrySerdeSnafu)?)
+            Some(TableGlobalValue::from_bytes(raw.1).context(error::CatalogEntrySerdeSnafu)?)
         } else {
             None
         })
@@ -429,17 +191,17 @@ impl DistTable {
         key: TableGlobalKey,
         value: TableGlobalValue,
     ) -> Result<()> {
-        let value = value.as_bytes().context(CatalogEntrySerdeSnafu)?;
+        let value = value.as_bytes().context(error::CatalogEntrySerdeSnafu)?;
         self.backend
             .set(key.to_string().as_bytes(), &value)
             .await
-            .context(CatalogSnafu)
+            .context(error::CatalogSnafu)
     }
 
     async fn handle_alter(&self, context: AlterContext, request: &AlterTableRequest) -> Result<()> {
         let alter_expr = context
             .get::<AlterExpr>()
-            .context(ContextValueNotFoundSnafu { key: "AlterExpr" })?;
+            .context(error::ContextValueNotFoundSnafu { key: "AlterExpr" })?;
 
         self.alter_by_expr(alter_expr).await?;
 
@@ -448,9 +210,9 @@ impl DistTable {
         let new_meta = table_info
             .meta
             .builder_with_alter_kind(table_name, &request.alter_kind)
-            .context(TableSnafu)?
+            .context(error::TableSnafu)?
             .build()
-            .context(BuildTableMetaSnafu {
+            .context(error::BuildTableMetaSnafu {
                 table_name: table_name.clone(),
             })?;
 
@@ -463,12 +225,12 @@ impl DistTable {
             schema_name: alter_expr.schema_name.clone(),
             table_name: alter_expr.table_name.clone(),
         };
-        let mut value = self
-            .table_global_value(&key)
-            .await?
-            .context(TableNotFoundSnafu {
-                table_name: alter_expr.table_name.clone(),
-            })?;
+        let mut value =
+            self.table_global_value(&key)
+                .await?
+                .context(error::TableNotFoundSnafu {
+                    table_name: alter_expr.table_name.clone(),
+                })?;
 
         value.table_info = new_info.into();
 
@@ -479,16 +241,16 @@ impl DistTable {
     /// [`table::requests::AlterTableRequest`] and [`AlterExpr`].
     async fn alter_by_expr(&self, expr: &AlterExpr) -> Result<()> {
         let table_routes = self
-            .table_routes
-            .get_route(&self.table_name)
+            .partition_manager
+            .find_table_route(&self.table_name)
             .await
-            .with_context(|_| FindPartitionSnafu {
-                table: self.table_name.to_string(),
+            .with_context(|_| error::FindTableRouteSnafu {
+                table_name: self.table_name.to_string(),
             })?;
         let leaders = table_routes.find_leaders();
         ensure!(
             !leaders.is_empty(),
-            LeaderNotFoundSnafu {
+            error::LeaderNotFoundSnafu {
                 table: format!(
                     "{:?}.{:?}.{}",
                     expr.catalog_name, expr.schema_name, expr.table_name
@@ -501,7 +263,10 @@ impl DistTable {
                 self.datanode_clients.get_client(&datanode).await,
             );
             debug!("Sending {:?} to {:?}", expr, db);
-            let result = db.alter(expr.clone()).await.context(RequestDatanodeSnafu)?;
+            let result = db
+                .alter(expr.clone())
+                .await
+                .context(error::RequestDatanodeSnafu)?;
             debug!("Alter table result: {:?}", result);
             // TODO(hl): We should further check and track alter result in some global DDL task tracker
         }
@@ -519,28 +284,6 @@ fn project_schema(table_schema: SchemaRef, projection: Option<&Vec<usize>>) -> S
         Arc::new(Schema::new(projected))
     } else {
         table_schema
-    }
-}
-
-fn is_compare_op(op: &Operator) -> bool {
-    matches!(
-        *op,
-        Operator::Eq
-            | Operator::NotEq
-            | Operator::Lt
-            | Operator::LtEq
-            | Operator::Gt
-            | Operator::GtEq
-    )
-}
-
-fn reverse_operator(op: &Operator) -> Operator {
-    match *op {
-        Operator::Lt => Operator::Gt,
-        Operator::Gt => Operator::Lt,
-        Operator::LtEq => Operator::GtEq,
-        Operator::GtEq => Operator::LtEq,
-        _ => *op,
     }
 }
 
@@ -632,6 +375,8 @@ impl PartitionExec {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashMap;
+
     use api::v1::column::SemanticType;
     use api::v1::{column, Column, ColumnDataType, InsertRequest};
     use catalog::error::Result;
@@ -655,9 +400,14 @@ mod test {
     use meta_client::rpc::router::RegionRoute;
     use meta_client::rpc::{Region, Table, TableRoute};
     use partition::columns::RangeColumnsPartitionRule;
-    use partition::partition::PartitionDef;
+    use partition::manager::PartitionRuleManager;
+    use partition::partition::{PartitionBound, PartitionDef};
+    use partition::range::RangePartitionRule;
+    use partition::route::TableRoutes;
+    use partition::PartitionRuleRef;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
+    use store_api::storage::RegionNumber;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::TableRef;
 
@@ -696,33 +446,8 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_find_partition_rule() {
         let table_name = TableName::new("greptime", "public", "foo");
-
-        let column_schemas = vec![
-            ColumnSchema::new("ts", ConcreteDataType::uint64_datatype(), false),
-            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
-        ];
-        let schema = Arc::new(Schema::new(column_schemas.clone()));
-        let meta = TableMetaBuilder::default()
-            .schema(schema)
-            .primary_key_indices(vec![])
-            .next_column_id(1)
-            .build()
-            .unwrap();
-        let table_info = TableInfoBuilder::default()
-            .name(&table_name.table_name)
-            .meta(meta)
-            .build()
-            .unwrap();
-
         let table_routes = Arc::new(TableRoutes::new(Arc::new(MetaClient::default())));
-        let table = DistTable {
-            table_name: table_name.clone(),
-            table_info: Arc::new(table_info),
-            table_routes: table_routes.clone(),
-            datanode_clients: Arc::new(DatanodeClients::new()),
-            backend: Arc::new(DummyKvBackend),
-        };
+        let partition_manager = Arc::new(PartitionRuleManager::new(table_routes.clone()));
 
         let table_route = TableRoute {
             table: Table {
@@ -788,7 +513,10 @@ mod test {
             .insert_table_route(table_name.clone(), Arc::new(table_route))
             .await;
 
-        let partition_rule = table.find_partition_rule().await.unwrap();
+        let partition_rule = partition_manager
+            .find_table_partition_rule(&table_name)
+            .await
+            .unwrap();
         let range_rule = partition_rule
             .as_any()
             .downcast_ref::<RangePartitionRule>()
@@ -867,7 +595,10 @@ mod test {
             .insert_table_route(table_name.clone(), Arc::new(table_route))
             .await;
 
-        let partition_rule = table.find_partition_rule().await.unwrap();
+        let partition_rule = partition_manager
+            .find_table_partition_rule(&table_name)
+            .await
+            .unwrap();
         let range_columns_rule = partition_rule
             .as_any()
             .downcast_ref::<RangeColumnsPartitionRule>()
@@ -1064,7 +795,7 @@ mod test {
         let datanode_instances = instance.datanodes;
 
         let catalog_manager = dist_instance.catalog_manager();
-        let table_routes = catalog_manager.table_routes();
+        let partition_manager = catalog_manager.partition_manager();
         let datanode_clients = catalog_manager.datanode_clients();
 
         let table_name = TableName::new("greptime", "public", "dist_numbers");
@@ -1103,7 +834,10 @@ mod test {
             .await
             .unwrap();
 
-        let table_route = table_routes.get_route(&table_name).await.unwrap();
+        let table_route = partition_manager
+            .find_table_route(&table_name)
+            .await
+            .unwrap();
 
         let mut region_to_datanode_mapping = HashMap::new();
         for region_route in table_route.region_routes.iter() {
@@ -1143,7 +877,7 @@ mod test {
         DistTable {
             table_name,
             table_info: Arc::new(table_info),
-            table_routes,
+            partition_manager,
             datanode_clients,
             backend: catalog_manager.backend(),
         }
@@ -1198,30 +932,9 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_find_regions() {
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "a",
-            ConcreteDataType::int32_datatype(),
-            true,
-        )]));
-        let table_name = TableName::new("greptime", "public", "foo");
-        let meta = TableMetaBuilder::default()
-            .schema(schema)
-            .primary_key_indices(vec![])
-            .next_column_id(1)
-            .build()
-            .unwrap();
-        let table_info = TableInfoBuilder::default()
-            .name(&table_name.table_name)
-            .meta(meta)
-            .build()
-            .unwrap();
-        let table = DistTable {
-            table_name,
-            table_info: Arc::new(table_info),
-            table_routes: Arc::new(TableRoutes::new(Arc::new(MetaClient::default()))),
-            datanode_clients: Arc::new(DatanodeClients::new()),
-            backend: Arc::new(DummyKvBackend),
-        };
+        let partition_manager = Arc::new(PartitionRuleManager::new(Arc::new(TableRoutes::new(
+            Arc::new(MetaClient::default()),
+        ))));
 
         // PARTITION BY RANGE (a) (
         //   PARTITION r1 VALUES LESS THAN (10),
@@ -1235,12 +948,12 @@ mod test {
             vec![0_u32, 1, 2, 3],
         )) as _;
 
+        let partition_rule_clone = partition_rule.clone();
         let test = |filters: Vec<Expr>, expect_regions: Vec<RegionNumber>| {
-            let mut regions = table
-                .find_regions(partition_rule.clone(), filters.as_slice())
+            let mut regions = partition_manager
+                .find_regions_by_filters(partition_rule_clone.clone(), filters.as_slice())
                 .unwrap();
             regions.sort();
-
             assert_eq!(regions, expect_regions);
         };
 
@@ -1327,7 +1040,7 @@ mod test {
         );
 
         // test failed to find regions by contradictory filters
-        let regions = table.find_regions(
+        let regions = partition_manager.find_regions_by_filters(
             partition_rule,
             vec![and(
                 binary_expr(col("a"), Operator::Lt, lit(20)),
@@ -1338,7 +1051,7 @@ mod test {
         ); // a < 20 AND a >= 20
         assert!(matches!(
             regions.unwrap_err(),
-            error::Error::FindRegions { .. }
+            partition::error::Error::FindRegions { .. }
         ));
     }
 }

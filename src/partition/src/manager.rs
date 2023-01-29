@@ -21,36 +21,40 @@ use datatypes::prelude::Value;
 use meta_client::rpc::{Peer, TableName, TableRoute};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
+use table::requests::InsertRequest;
 
 use crate::columns::RangeColumnsPartitionRule;
 use crate::error::Result;
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
 use crate::route::TableRoutes;
+use crate::splitter::{InsertRequestSplit, WriteSplitter};
 use crate::{error, PartitionRuleRef};
 
-// TODO(hl): maybe rename to partition rule manager?
-pub struct PartitionManager {
-    table_routes: TableRoutes,
+pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
+
+pub struct PartitionRuleManager {
+    table_routes: Arc<TableRoutes>,
 }
 
 /// Provides methods to find regions by:
 /// - values (in case of insertion)
-/// - filters (in case of deletion and update)
-impl PartitionManager {
-    // TODO(hl): refactor DistTable::alter_by_expr
-    pub async fn find_table_routes(&self, table: TableName) -> Result<Arc<TableRoute>> {
-        self.table_routes.get_route(&table).await
+/// - filters (in case of select, deletion and update)
+impl PartitionRuleManager {
+    pub fn new(table_routes: Arc<TableRoutes>) -> Self {
+        Self { table_routes }
     }
 
-    // TODO(hl): remove DistTable::find_datanodes
+    pub async fn find_table_route(&self, table: &TableName) -> Result<Arc<TableRoute>> {
+        self.table_routes.get_route(table).await
+    }
+
     pub async fn find_region_datanodes(
         &self,
-        table: TableName,
+        table: &TableName,
         regions: Vec<RegionNumber>,
     ) -> Result<HashMap<Peer, Vec<RegionNumber>>> {
-        let route = self.table_routes.get_route(&table).await?;
-
+        let route = self.table_routes.get_route(table).await?;
         let mut datanodes = HashMap::new();
         for region in regions.iter() {
             let datanode = route
@@ -76,11 +80,7 @@ impl PartitionManager {
     }
 
     /// Get partition rule of given table.
-    // TODO(hl): Replace DistTable::find_partition_rule
-    pub async fn find_table_partition_rule(
-        &self,
-        table: TableName,
-    ) -> Result<Option<PartitionRuleRef>> {
+    pub async fn find_table_partition_rule(&self, table: &TableName) -> Result<PartitionRuleRef> {
         let route = self.table_routes.get_route(&table).await?;
         ensure!(
             !route.region_routes.is_empty(),
@@ -156,14 +156,11 @@ impl PartitionManager {
                 )) as _
             }
         };
-        Ok(Some(partition_rule))
+        Ok(partition_rule)
     }
 
-    // TODO(hl): replace DistTable::find_regions
-    // TODO(hl): table argument is not used. Maybe we can get partition_rule by table name from meta
-    pub async fn find_regions_by_filters(
+    pub fn find_regions_by_filters(
         &self,
-        table: TableName,
         partition_rule: PartitionRuleRef,
         filters: &[Expr],
     ) -> Result<Vec<RegionNumber>> {
@@ -194,7 +191,7 @@ impl PartitionManager {
         Ok(regions)
     }
 
-    pub fn find_regions0(
+    fn find_regions0(
         &self,
         partition_rule: PartitionRuleRef,
         filter: &Expr,
@@ -250,9 +247,20 @@ impl PartitionManager {
             .into_iter()
             .collect::<HashSet<RegionNumber>>())
     }
+
+    /// Split [InsertRequest] into [InsertRequestSplit] according to the partition rule
+    /// of given table.
+    pub async fn split_insert_request(
+        &self,
+        table: &TableName,
+        req: InsertRequest,
+    ) -> Result<InsertRequestSplit> {
+        let partition_rule = self.find_table_partition_rule(table).await.unwrap();
+        let splitter = WriteSplitter::with_partition_rule(partition_rule);
+        splitter.split_insert(req)
+    }
 }
 
-// TODO(hl): remove src/frontend/src/table.rs:525
 #[inline]
 fn is_compare_op(op: &Operator) -> bool {
     matches!(
@@ -266,7 +274,6 @@ fn is_compare_op(op: &Operator) -> bool {
     )
 }
 
-// TODO(hl): remove src/frontend/src/table.rs:537
 #[inline]
 fn reverse_operator(op: &Operator) -> Operator {
     match *op {

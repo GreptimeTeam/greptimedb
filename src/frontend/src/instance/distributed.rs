@@ -92,7 +92,7 @@ impl DistInstance {
         let table_routes = response.table_routes;
         ensure!(
             table_routes.len() == 1,
-            error::FindTableRoutesSnafu {
+            error::CreateTableRoutesSnafu {
                 table_name: create_table.table_name.to_string()
             }
         );
