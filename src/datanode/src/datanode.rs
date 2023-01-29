@@ -39,7 +39,7 @@ pub enum ObjectStoreConfig {
         endpoint: Option<String>,
         region: Option<String>,
     },
-    OSS {
+    Oss {
         bucket: String,
         root: String,
         access_key_id: String,

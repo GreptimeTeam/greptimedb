@@ -204,7 +204,7 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
     let object_store = match store_config {
         ObjectStoreConfig::File { data_dir } => new_fs_object_store(data_dir).await,
         ObjectStoreConfig::S3 { .. } => new_s3_object_store(store_config).await,
-        ObjectStoreConfig::OSS { .. } => new_oss_object_store(store_config).await,
+        ObjectStoreConfig::Oss { .. } => new_oss_object_store(store_config).await,
     };
 
     object_store.map(|object_store| {
@@ -218,7 +218,7 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
 
 pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
     let (root, secret_key, key_id, bucket, endpoint) = match store_config {
-        ObjectStoreConfig::OSS {
+        ObjectStoreConfig::Oss {
             bucket,
             root,
             access_key_id,

@@ -108,7 +108,7 @@ fn get_test_store_config(
                 .build()
                 .unwrap();
 
-            let config = ObjectStoreConfig::OSS {
+            let config = ObjectStoreConfig::Oss {
                 root,
                 bucket,
                 access_key_id: key_id,

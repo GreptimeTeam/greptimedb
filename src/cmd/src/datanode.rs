@@ -179,7 +179,7 @@ mod tests {
                 assert_eq!("/tmp/greptimedb/data/".to_string(), data_dir)
             }
             ObjectStoreConfig::S3 { .. } => unreachable!(),
-            ObjectStoreConfig::OSS { .. } => unreachable!(),
+            ObjectStoreConfig::Oss { .. } => unreachable!(),
         };
     }
 
