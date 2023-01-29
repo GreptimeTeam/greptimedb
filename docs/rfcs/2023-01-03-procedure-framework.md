@@ -38,6 +38,8 @@ trait Procedure {
 
     fn dump(&self) -> Result<String>;
 
+    fn rollback(&self) -> Result<()>;
+
     // other methods...
 }
 ```
@@ -59,10 +61,10 @@ enum Status {
 A call to `execute()` can result in the following possibilities:
 - `Ok(Status::Done)`: we are done
 - `Ok(Status::Executing { .. })`: there are remaining steps to do
-- `Ok(Status::Suspend { .. })`: execution is suspended and can be resumed later
+- `Ok(Status::Suspend { sub_procedure, .. })`: execution is suspended and can be resumed later after the sub-procedure is done.
 - `Err(e)`: error occurs during execution and the procedure is unable to proceed anymore.
 
-The framework assigns a unique id for each procedure and the procedure can get this id via the `Context`.
+Users need to assign a unique `ProcedureId` to the procedure and the procedure can get this id via the `Context`. The `ProcedureId` is typically a UUID.
 
 ```rust
 struct Context {
@@ -110,7 +112,7 @@ The framework can remove the procedure's files once the procedure is done, but i
 trait ProcedureManager {
     fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()>;
 
-    async fn submit(&self, procedure: BoxedProcedure) -> Result<ProcedureId>;
+    async fn submit(&self, procedure: ProcedureWithId) -> Result<()>;
 }
 ```
 
