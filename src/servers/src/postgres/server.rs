@@ -87,7 +87,7 @@ impl PostgresServer {
                             tls_acceptor.clone(),
                             handler.clone(),
                             handler.clone(),
-                            handler.clone(),
+                            handler,
                         ));
                     }
                 };

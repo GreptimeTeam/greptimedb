@@ -175,7 +175,12 @@ impl StartupHandler for PostgresServerHandler {
                     auth::finish_authentication(client, self.param_provider.as_ref()).await;
                 }
             }
-            PgWireFrontendMessage::Password(ref pwd) => {
+            PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
+                // the newer version of pgwire has a few variant password
+                // message like cleartext/md5 password, saslresponse, etc. Here
+                // we must manually coerce it into password
+                let pwd = pwd.into_password()?;
+
                 let login_info = LoginInfo::from_client_info(client);
                 // do authenticate
                 let authenticate_result = self
