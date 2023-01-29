@@ -81,7 +81,7 @@ impl PartitionRuleManager {
 
     /// Get partition rule of given table.
     pub async fn find_table_partition_rule(&self, table: &TableName) -> Result<PartitionRuleRef> {
-        let route = self.table_routes.get_route(&table).await?;
+        let route = self.table_routes.get_route(table).await?;
         ensure!(
             !route.region_routes.is_empty(),
             error::FindTableRoutesSnafu {
@@ -165,9 +165,9 @@ impl PartitionRuleManager {
         filters: &[Expr],
     ) -> Result<Vec<RegionNumber>> {
         let regions = if let Some((first, rest)) = filters.split_first() {
-            let mut target = self.find_regions0(partition_rule.clone(), first)?;
+            let mut target = find_regions0(partition_rule.clone(), first)?;
             for filter in rest {
-                let regions = self.find_regions0(partition_rule.clone(), filter)?;
+                let regions = find_regions0(partition_rule.clone(), filter)?;
 
                 // When all filters are provided as a collection, it often implicitly states that
                 // "all filters must be satisfied". So we join all the results here.
@@ -191,63 +191,6 @@ impl PartitionRuleManager {
         Ok(regions)
     }
 
-    fn find_regions0(
-        &self,
-        partition_rule: PartitionRuleRef,
-        filter: &Expr,
-    ) -> Result<HashSet<RegionNumber>> {
-        let expr = filter.df_expr();
-        match expr {
-            DfExpr::BinaryExpr(BinaryExpr { left, op, right }) if is_compare_op(op) => {
-                let column_op_value = match (left.as_ref(), right.as_ref()) {
-                    (DfExpr::Column(c), DfExpr::Literal(v)) => Some((&c.name, *op, v)),
-                    (DfExpr::Literal(v), DfExpr::Column(c)) => {
-                        Some((&c.name, reverse_operator(op), v))
-                    }
-                    _ => None,
-                };
-                if let Some((column, op, scalar)) = column_op_value {
-                    let value = Value::try_from(scalar.clone()).with_context(|_| {
-                        error::ConvertScalarValueSnafu {
-                            value: scalar.clone(),
-                        }
-                    })?;
-                    return Ok(partition_rule
-                        .find_regions(&[PartitionExpr::new(column, op, value)])?
-                        .into_iter()
-                        .collect::<HashSet<RegionNumber>>());
-                }
-            }
-            DfExpr::BinaryExpr(BinaryExpr { left, op, right })
-                if matches!(op, Operator::And | Operator::Or) =>
-            {
-                let left_regions =
-                    self.find_regions0(partition_rule.clone(), &(*left.clone()).into())?;
-                let right_regions =
-                    self.find_regions0(partition_rule.clone(), &(*right.clone()).into())?;
-                let regions = match op {
-                    Operator::And => left_regions
-                        .intersection(&right_regions)
-                        .cloned()
-                        .collect::<HashSet<RegionNumber>>(),
-                    Operator::Or => left_regions
-                        .union(&right_regions)
-                        .cloned()
-                        .collect::<HashSet<RegionNumber>>(),
-                    _ => unreachable!(),
-                };
-                return Ok(regions);
-            }
-            _ => (),
-        }
-
-        // Returns all regions for not supported partition expr as a safety hatch.
-        Ok(partition_rule
-            .find_regions(&[])?
-            .into_iter()
-            .collect::<HashSet<RegionNumber>>())
-    }
-
     /// Split [InsertRequest] into [InsertRequestSplit] according to the partition rule
     /// of given table.
     pub async fn split_insert_request(
@@ -259,6 +202,55 @@ impl PartitionRuleManager {
         let splitter = WriteSplitter::with_partition_rule(partition_rule);
         splitter.split_insert(req)
     }
+}
+
+fn find_regions0(partition_rule: PartitionRuleRef, filter: &Expr) -> Result<HashSet<RegionNumber>> {
+    let expr = filter.df_expr();
+    match expr {
+        DfExpr::BinaryExpr(BinaryExpr { left, op, right }) if is_compare_op(op) => {
+            let column_op_value = match (left.as_ref(), right.as_ref()) {
+                (DfExpr::Column(c), DfExpr::Literal(v)) => Some((&c.name, *op, v)),
+                (DfExpr::Literal(v), DfExpr::Column(c)) => Some((&c.name, reverse_operator(op), v)),
+                _ => None,
+            };
+            if let Some((column, op, scalar)) = column_op_value {
+                let value = Value::try_from(scalar.clone()).with_context(|_| {
+                    error::ConvertScalarValueSnafu {
+                        value: scalar.clone(),
+                    }
+                })?;
+                return Ok(partition_rule
+                    .find_regions(&[PartitionExpr::new(column, op, value)])?
+                    .into_iter()
+                    .collect::<HashSet<RegionNumber>>());
+            }
+        }
+        DfExpr::BinaryExpr(BinaryExpr { left, op, right })
+            if matches!(op, Operator::And | Operator::Or) =>
+        {
+            let left_regions = find_regions0(partition_rule.clone(), &(*left.clone()).into())?;
+            let right_regions = find_regions0(partition_rule.clone(), &(*right.clone()).into())?;
+            let regions = match op {
+                Operator::And => left_regions
+                    .intersection(&right_regions)
+                    .cloned()
+                    .collect::<HashSet<RegionNumber>>(),
+                Operator::Or => left_regions
+                    .union(&right_regions)
+                    .cloned()
+                    .collect::<HashSet<RegionNumber>>(),
+                _ => unreachable!(),
+            };
+            return Ok(regions);
+        }
+        _ => (),
+    }
+
+    // Returns all regions for not supported partition expr as a safety hatch.
+    Ok(partition_rule
+        .find_regions(&[])?
+        .into_iter()
+        .collect::<HashSet<RegionNumber>>())
 }
 
 #[inline]

@@ -105,7 +105,7 @@ impl Instance {
             client: meta_client.clone(),
         });
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
-        let partition_manager = Arc::new(PartitionRuleManager::new(table_routes.clone()));
+        let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
         let datanode_clients = Arc::new(DatanodeClients::new());
 
         let catalog_manager = Arc::new(FrontendCatalogManager::new(
