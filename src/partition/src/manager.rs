@@ -29,6 +29,7 @@ use crate::range::RangePartitionRule;
 use crate::route::TableRoutes;
 use crate::{error, PartitionRuleRef};
 
+// TODO(hl): maybe rename to partition rule manager?
 pub struct PartitionManager {
     table_routes: TableRoutes,
 }
