@@ -146,9 +146,11 @@ impl<S: ContextProvider> PromPlanner<S> {
                     Self::try_build_literal_expr(lhs),
                     Self::try_build_literal_expr(rhs),
                 ) {
-                    (Some(_lhs), Some(_rhs)) => {
-                        todo!("is this a legal case?")
+                    // TODO(ruihang): handle literal-only expressions
+                    (Some(_lhs), Some(_rhs)) => UnsupportedExprSnafu {
+                        name: "Literal-only expression",
                     }
+                    .fail()?,
                     // lhs is a literal, rhs is a column
                     (Some(expr), None) => {
                         let input = self.prom_expr_to_plan(*rhs.clone())?;
@@ -1261,5 +1263,30 @@ mod test {
         );
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn binary_op_literal_literal() {
+        let prom_expr = PromExpr::Binary(PromBinaryExpr {
+            lhs: Box::new(PromExpr::NumberLiteral(NumberLiteral { val: 1.0 })),
+            op: token::T_ADD,
+            rhs: Box::new(PromExpr::NumberLiteral(NumberLiteral { val: 1.0 })),
+            matching: None,
+            return_bool: false,
+        });
+
+        let eval_stmt = EvalStmt {
+            expr: prom_expr,
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(100_000))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        };
+
+        let context_provider = build_test_context_provider("some_metric".to_string(), 1, 1).await;
+        let plan_result = PromPlanner::stmt_to_plan(eval_stmt, context_provider);
+        assert!(plan_result.is_err());
     }
 }
