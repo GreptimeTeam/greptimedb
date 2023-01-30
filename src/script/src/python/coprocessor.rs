@@ -361,16 +361,22 @@ impl PyQueryEngine {
     // TODO(discord9): find a better way to call sql query api, now we don't if we are in async contex or not
     #[pymethod]
     fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
-        let query = self.inner.0.upgrade();
-        let handle = std::thread::spawn(move || -> std::result::Result<RecordBatches, String> {
+        let handle = || -> std::result::Result<RecordBatches, String> {
+            let query = self.inner.0.upgrade();
             if let Some(engine) = query {
                 let stmt = QueryLanguageParser::parse_sql(s.as_str()).map_err(|e| e.to_string())?;
                 let plan = engine
                     .statement_to_plan(stmt, Default::default())
                     .map_err(|e| e.to_string())?;
-                // To prevent the error of nested creating Runtime, because we don't know if we are being called from a async context
-                let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-                let res = rt.block_on(async {
+                // To prevent the error of nested creating Runtime, if is nested, use the parent runtime instead
+                let rt = tokio::runtime::Runtime::new();
+                let handle = match rt {
+                    Ok(rt) => rt.handle().to_owned(),
+                    Err(_) => {
+                        tokio::runtime::Handle::try_current().map_err(|err| err.to_string())?
+                    }
+                };
+                let res = handle.block_on(async {
                     let res = engine
                         .clone()
                         .execute(&plan)
@@ -389,25 +395,21 @@ impl PyQueryEngine {
             } else {
                 Err("Query Engine is already dropped".to_string())
             }
-        });
-        handle
-            .join()
-            .unwrap()
-            .map_err(|e| vm.new_system_error(e))
-            .map(|rbs| {
-                let mut top_vec = Vec::with_capacity(rbs.iter().count());
-                for rb in rbs.iter() {
-                    let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
-                    for v in rb.columns() {
-                        let v = PyVector::from(v.to_owned());
-                        vec_of_vec.push(v.to_pyobject(vm));
-                    }
-                    let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);
-                    top_vec.push(vec_of_vec);
+        };
+        handle().map_err(|e| vm.new_system_error(e)).map(|rbs| {
+            let mut top_vec = Vec::with_capacity(rbs.iter().count());
+            for rb in rbs.iter() {
+                let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
+                for v in rb.columns() {
+                    let v = PyVector::from(v.to_owned());
+                    vec_of_vec.push(v.to_pyobject(vm));
                 }
-                let top_vec = PyList::new_ref(top_vec, vm.as_ref());
-                top_vec
-            })
+                let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);
+                top_vec.push(vec_of_vec);
+            }
+            let top_vec = PyList::new_ref(top_vec, vm.as_ref());
+            top_vec
+        })
     }
 }
 
