@@ -56,12 +56,10 @@ impl EnvController for Env {
     async fn stop(&self, _mode: &str, mut database: Self::DB) {
         let mut server = database.server_process;
         Env::stop_server(&mut server).await;
-        if database.metasrv_process.is_some() {
-            let mut metasrv = database.metasrv_process.take().unwrap();
+        if let Some(mut metasrv) = database.metasrv_process.take() {
             Env::stop_server(&mut metasrv).await;
         }
-        if database.datanode_process.is_some() {
-            let mut datanode = database.datanode_process.take().unwrap();
+        if let Some(mut datanode) = database.datanode_process.take() {
             Env::stop_server(&mut datanode).await;
         }
         println!("Stopped DB.");
@@ -188,6 +186,8 @@ impl Env {
             args.push("--rpc-addr=0.0.0.0:4100");
             args.push("--metasrv-addr=0.0.0.0:3002");
             args.push("--node-id=1");
+            args.push("--data-dir=/tmp/greptimedb_node_1/data");
+            args.push("--wal-dir=/tmp/greptimedb_node_1/wal");
         }
 
         let process = Command::new("./greptime")
