@@ -428,9 +428,11 @@ impl CatalogManager for LocalCatalogManager {
         {
             let _ = self.register_lock.lock().await;
 
-            let catalog = &request.catalog;
-            let schema = &request.schema;
-            let table_name = &request.table_name;
+let DeregisterTableRequest {
+                catalog,
+                schema,
+                table_name,
+            } = &request;
             let table_id = self
                 .catalogs
                 .table(catalog, schema, table_name)?
