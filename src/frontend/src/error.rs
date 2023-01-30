@@ -330,9 +330,6 @@ pub enum Error {
         #[snafu(backtrace)]
         source: partition::error::Error,
     },
-
-    #[snafu(display("Failed to deserialize partition in meta to partition def",))]
-    DeserializePartition { source: partition::error::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -349,9 +346,8 @@ impl ErrorExt for Error {
 
             Error::RuntimeResource { source, .. } => source.status_code(),
 
-            Error::SqlExecIntercepted { source, .. } | Error::StartServer { source, .. } => {
-                source.status_code()
-            }
+            Error::SqlExecIntercepted { source, .. } => source.status_code(),
+            Error::StartServer { source, .. } => source.status_code(),
 
             Error::ParseSql { source } | Error::AlterExprFromStmt { source } => {
                 source.status_code()
