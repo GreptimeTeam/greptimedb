@@ -200,7 +200,11 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        unimplemented!("Extended Query is not implemented on this server.")
+        Ok(Response::Error(Box::new(ErrorInfo::new(
+            "ERROR".to_owned(),
+            "XX000".to_owned(),
+            "Extended query is not implemented on this server yet".to_owned(),
+        ))))
     }
 
     async fn do_describe<C>(
@@ -211,7 +215,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        unimplemented!("Extended Query is not implemented on this server.")
+        Ok(vec![])
     }
 }
 
