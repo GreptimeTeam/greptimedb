@@ -25,7 +25,7 @@ use common_query::physical_plan::{PhysicalPlanRef, SessionContext};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::util;
-use datatypes::prelude::{ConcreteDataType, ScalarVector};
+use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::{BinaryVector, TimestampMillisecondVector, UInt8Vector};
 use serde::{Deserialize, Serialize};
@@ -210,22 +210,27 @@ pub(crate) fn build_table_deletion_request(
     table_id: TableId,
 ) -> DeleteRequest {
     let table_key = format_table_entry_key(&request.catalog, &request.schema, table_id);
+    DeleteRequest {
+        key_column_values: build_primary_key_columns(EntryType::Table, table_key.as_bytes()),
+    }
+}
 
-    let mut key_column_values = HashMap::with_capacity(3);
-    key_column_values.insert(
+fn build_primary_key_columns(entry_type: EntryType, key: &[u8]) -> HashMap<String, VectorRef> {
+    let mut m = HashMap::with_capacity(3);
+    m.insert(
         "entry_type".to_string(),
-        Arc::new(UInt8Vector::from_slice(&[EntryType::Table as u8])) as _,
+        Arc::new(UInt8Vector::from_slice(&[entry_type as u8])) as _,
     );
-    key_column_values.insert(
+    m.insert(
         "key".to_string(),
-        Arc::new(BinaryVector::from_slice(&[table_key.as_bytes()])) as _,
+        Arc::new(BinaryVector::from_slice(&[key])) as _,
     );
     // Timestamp in key part is intentionally left to 0
-    key_column_values.insert(
+    m.insert(
         "timestamp".to_string(),
         Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
     );
-    DeleteRequest { key_column_values }
+    m
 }
 
 pub fn build_schema_insert_request(catalog_name: String, schema_name: String) -> InsertRequest {
@@ -240,22 +245,10 @@ pub fn build_schema_insert_request(catalog_name: String, schema_name: String) ->
 }
 
 pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> InsertRequest {
+    let primary_key_columns = build_primary_key_columns(entry_type, key);
+
     let mut columns_values = HashMap::with_capacity(6);
-    columns_values.insert(
-        "entry_type".to_string(),
-        Arc::new(UInt8Vector::from_slice(&[entry_type as u8])) as _,
-    );
-
-    columns_values.insert(
-        "key".to_string(),
-        Arc::new(BinaryVector::from_slice(&[key])) as _,
-    );
-
-    // Timestamp in key part is intentionally left to 0
-    columns_values.insert(
-        "timestamp".to_string(),
-        Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
-    );
+    columns_values.extend(primary_key_columns.into_iter());
 
     columns_values.insert(
         "value".to_string(),

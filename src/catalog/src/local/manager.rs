@@ -428,7 +428,7 @@ impl CatalogManager for LocalCatalogManager {
         {
             let _ = self.register_lock.lock().await;
 
-let DeregisterTableRequest {
+            let DeregisterTableRequest {
                 catalog,
                 schema,
                 table_name,
@@ -436,7 +436,7 @@ let DeregisterTableRequest {
             let table_id = self
                 .catalogs
                 .table(catalog, schema, table_name)?
-                .with_context(|_| error::TableNotExistSnafu {
+                .with_context(|| error::TableNotExistSnafu {
                     table: format!("{catalog}.{schema}.{table_name}"),
                 })?
                 .table_info()

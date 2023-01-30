@@ -108,12 +108,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to register table"))]
-    RegisterTable {
-        #[snafu(backtrace)]
-        source: BoxedError,
-    },
-
     #[snafu(display("Operation {} not implemented yet", operation))]
     Unimplemented {
         operation: String,
@@ -182,7 +176,10 @@ pub enum Error {
     },
 
     #[snafu(display("Failure during SchemaProvider operation, source: {}", source))]
-    SchemaProviderOperation { source: BoxedError },
+    SchemaProviderOperation {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("Failed to execute system catalog table scan, source: {}", source))]
     SystemCatalogTableScanExec {
@@ -195,15 +192,6 @@ pub enum Error {
         source: common_catalog::error::Error,
     },
 
-    #[snafu(display("IO error occurred while fetching catalog info, source: {}", source))]
-    Io {
-        backtrace: Backtrace,
-        source: std::io::Error,
-    },
-
-    #[snafu(display("Local and remote catalog data are inconsistent, msg: {}", msg))]
-    CatalogStateInconsistent { msg: String, backtrace: Backtrace },
-
     #[snafu(display("Failed to perform metasrv operation, source: {}", source))]
     MetaSrv {
         #[snafu(backtrace)]
@@ -214,12 +202,6 @@ pub enum Error {
     InvalidTableInfoInCatalog {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Catalog internal error: {}", source))]
-    Internal {
-        #[snafu(backtrace)]
-        source: BoxedError,
     },
 }
 
@@ -233,17 +215,13 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. }
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
-            | Error::InvalidEntryType { .. }
-            | Error::CatalogStateInconsistent { .. } => StatusCode::Unexpected,
+            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue { .. }
-            | Error::ValueDeserialize { .. }
-            | Error::Io { .. } => StatusCode::StorageUnavailable,
+            | Error::ValueDeserialize { .. } => StatusCode::StorageUnavailable,
 
-            Error::RegisterTable { .. } | Error::SystemCatalogTypeMismatch { .. } => {
-                StatusCode::Internal
-            }
+            Error::SystemCatalogTypeMismatch { .. } => StatusCode::Internal,
 
             Error::ReadSystemCatalog { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
@@ -264,9 +242,7 @@ impl ErrorExt for Error {
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableSchema { source, .. } => source.status_code(),
             Error::InvalidTableInfoInCatalog { .. } => StatusCode::Unexpected,
-            Error::Internal { source, .. } | Error::SchemaProviderOperation { source } => {
-                source.status_code()
-            }
+            Error::SchemaProviderOperation { source } => source.status_code(),
 
             Error::Unimplemented { .. } => StatusCode::Unsupported,
         }
