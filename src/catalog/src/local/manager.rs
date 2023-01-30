@@ -436,7 +436,7 @@ let DeregisterTableRequest {
             let table_id = self
                 .catalogs
                 .table(catalog, schema, table_name)?
-                .context(error::TableNotExistSnafu {
+                .with_context(|_| error::TableNotExistSnafu {
                     table: format!("{catalog}.{schema}.{table_name}"),
                 })?
                 .table_info()
