@@ -398,6 +398,12 @@ pub enum Error {
         column: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("SQL execution intercepted, source: {}", source))]
+    SqlExecIntercepted {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -419,6 +425,7 @@ impl ErrorExt for Error {
             Error::RuntimeResource { source, .. } => source.status_code(),
 
             Error::StartServer { source, .. } => source.status_code(),
+            Error::SqlExecIntercepted { source, .. } => source.status_code(),
 
             Error::ParseSql { source } | Error::AlterExprFromStmt { source } => {
                 source.status_code()
