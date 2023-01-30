@@ -399,7 +399,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("SQL execution intercepted: {}", source))]
+    #[snafu(display("SQL execution intercepted, source: {}", source))]
     SqlExecIntercepted {
         #[snafu(backtrace)]
         source: BoxedError,
