@@ -91,7 +91,6 @@ impl RangePartitionRule {
         &self.regions
     }
 
-    // #[cfg(test)]
     pub fn bounds(&self) -> &Vec<Value> {
         &self.bounds
     }

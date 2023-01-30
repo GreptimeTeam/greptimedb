@@ -405,8 +405,9 @@ impl ErrorExt for Error {
             Error::InvokeDatanode { source } => source.status_code(),
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
             Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
-            Error::DeserializePartition { source, .. } => source.status_code(),
-            Error::FindTableRoute { source, .. } => source.status_code(),
+            Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

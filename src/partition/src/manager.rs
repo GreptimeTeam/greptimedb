@@ -57,7 +57,7 @@ impl PartitionRuleManager {
         regions: Vec<RegionNumber>,
     ) -> Result<HashMap<Peer, Vec<RegionNumber>>> {
         let route = self.table_routes.get_route(table).await?;
-        let mut datanodes = HashMap::new();
+        let mut datanodes = HashMap::with_capacity(regions.len());
         for region in regions.iter() {
             let datanode = route
                 .region_routes

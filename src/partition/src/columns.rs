@@ -123,17 +123,14 @@ impl RangeColumnsPartitionRule {
         }
     }
 
-    // #[cfg(test)]
     pub fn column_list(&self) -> &Vec<String> {
         &self.column_list
     }
 
-    // #[cfg(test)]
     pub fn value_lists(&self) -> &Vec<Vec<PartitionBound>> {
         &self.value_lists
     }
 
-    // #[cfg(test)]
     pub fn regions(&self) -> &Vec<RegionNumber> {
         &self.regions
     }
