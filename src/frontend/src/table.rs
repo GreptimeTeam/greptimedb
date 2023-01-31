@@ -118,8 +118,8 @@ impl Table for DistTable {
             .context(TableOperationSnafu)?;
 
         let mut partition_execs = Vec::with_capacity(datanodes.len());
-        for (datanode, _regions) in datanodes.iter() {
-            let client = self.datanode_clients.get_client(datanode).await;
+        for (datanode, _regions) in datanodes.into_iter() {
+            let client = self.datanode_clients.get_client(&datanode).await;
             let db = Database::new(&self.table_name.schema_name, client);
             let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use api::v1::meta::{
     CreateRequest as PbCreateRequest, DeleteRequest as PbDeleteRequest, Partition as PbPartition,
@@ -170,12 +170,12 @@ pub struct TableRoute {
 }
 
 impl TableRoute {
-    pub fn find_leaders(&self) -> Vec<Peer> {
+    pub fn find_leaders(&self) -> HashSet<Peer> {
         self.region_routes
             .iter()
             .flat_map(|x| &x.leader_peer)
             .cloned()
-            .collect::<Vec<Peer>>()
+            .collect::<_>()
     }
 
     pub fn find_leader_regions(&self, datanode: &Peer) -> Vec<u32> {

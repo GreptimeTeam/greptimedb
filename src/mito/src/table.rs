@@ -107,8 +107,9 @@ impl<R: Region> Table for MitoTable<R> {
         let rows_num = columns_values.values().next().unwrap().len();
 
         logging::trace!(
-            "Insert into table {} with data: {:?}",
+            "Insert into table {} region {} with data: {:?}",
             self.table_info().name,
+            region.id(),
             columns_values
         );
 
@@ -291,7 +292,7 @@ impl<R: Region> Table for MitoTable<R> {
         let mut rows_deleted = 0;
         // TODO(hl): Should be tracked by procedure.
         // TODO(hl): Parse delete request into region->keys instead of delete in each region
-        for (_, region) in &self.regions {
+        for region in self.regions.values() {
             let mut write_request = region.write_request();
             let key_column_values = request.key_column_values.clone();
             // Safety: key_column_values isn't empty.
