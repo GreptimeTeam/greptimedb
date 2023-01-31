@@ -13,8 +13,13 @@
 // limitations under the License.
 
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
+use datatypes::schema::SchemaRef;
+use snafu::ResultExt;
+
+use crate::error::Result;
 
 /// A LogicalPlan represents the different types of relational
 /// operators (such as Projection, Filter, etc) and can be created by
@@ -27,4 +32,20 @@ use datafusion_expr::LogicalPlan as DfLogicalPlan;
 #[derive(Clone, Debug)]
 pub enum LogicalPlan {
     DfPlan(DfLogicalPlan),
+}
+
+impl LogicalPlan {
+    /// Get the schema for this logical plan
+    pub fn schema(&self) -> Result<SchemaRef> {
+        match self {
+            Self::DfPlan(plan) => {
+                let df_schema = plan.schema();
+                df_schema
+                    .clone()
+                    .try_into()
+                    .map(|s| Arc::new(s))
+                    .context(crate::error::DatatypeSnafu)
+            }
+        }
+    }
 }
