@@ -12,6 +12,7 @@ members = [
     "src/common/function-macro",
     "src/common/grpc",
     "src/common/grpc-expr",
+    "src/common/procedure",
     "src/common/query",
     "src/common/recordbatch",
     "src/common/runtime",
@@ -67,6 +68,7 @@ snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.28"
 tokio = { version = "1.24.2", features = ["full"] }
 tonic = "0.8"
+uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 
 [profile.release]
 debug = true

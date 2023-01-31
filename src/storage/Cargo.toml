@@ -35,7 +35,7 @@ store-api = { path = "../store-api" }
 table = { path = "../table" }
 tokio.workspace = true
 tonic.workspace = true
-uuid = { version = "1.1", features = ["v4"] }
+uuid.workspace = true
 
 [dev-dependencies]
 atomic_float = "0.1"

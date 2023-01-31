@@ -16,4 +16,4 @@ tokio.workspace = true
 anyhow = "1.0"
 common-telemetry = { path = "../common/telemetry" }
 tempdir = "0.3"
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid.workspace = true
