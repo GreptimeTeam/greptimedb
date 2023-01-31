@@ -18,7 +18,7 @@ pub mod parse;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::result::Result as StdResult;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::info;
@@ -354,6 +354,7 @@ pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
 #[derive(Debug, PyPayload)]
 pub struct PyQueryEngine {
     inner: QueryEngineWeakRef,
+    runtime: Mutex<Option<tokio::runtime::Runtime>>,
 }
 
 #[pyclass]
@@ -369,12 +370,17 @@ impl PyQueryEngine {
                     .statement_to_plan(stmt, Default::default())
                     .map_err(|e| e.to_string())?;
                 // To prevent the error of nested creating Runtime, if is nested, use the parent runtime instead
-                let rt = tokio::runtime::Runtime::new();
-                let handle = match rt {
-                    Ok(rt) => rt.handle().to_owned(),
-                    Err(_) => {
-                        tokio::runtime::Handle::try_current().map_err(|err| err.to_string())?
-                    }
+                let handle = match tokio::runtime::Handle::try_current() {
+                    Ok(rt) => rt,
+                    Err(_) => match self.runtime.lock().unwrap().as_ref() {
+                        Some(rt) => rt.handle().clone(),
+                        _ => {
+                            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+                            let handle = rt.handle().clone();
+                            *self.runtime.lock().unwrap() = Some(rt);
+                            handle
+                        }
+                    },
                 };
                 let res = handle.block_on(async {
                     let res = engine
@@ -439,6 +445,7 @@ pub(crate) fn exec_with_cached_vm(
         if let Some(engine) = &copr.query_engine {
             let query_engine = PyQueryEngine {
                 inner: engine.clone(),
+                runtime: Mutex::new(None),
             };
 
             // put a object named with query of class PyQueryEngine in scope
