@@ -30,7 +30,7 @@ use common_query::Output;
 use common_telemetry::{debug, error, info};
 use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::RawSchema;
+use datatypes::schema::{RawSchema, SchemaRef};
 use meta_client::client::MetaClient;
 use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
@@ -409,6 +409,21 @@ impl SqlQueryHandler for DistInstance {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         self.handle_statement(stmt, query_ctx).await
+    }
+
+    fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<SchemaRef>> {
+        if let Statement::Query(_) = stmt {
+            self.query_engine
+                .describe(QueryStatement::Sql(stmt), query_ctx.clone())
+                .map(Some)
+                .context(error::DescribeStatementSnafu)
+        } else {
+            Ok(None)
+        }
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {

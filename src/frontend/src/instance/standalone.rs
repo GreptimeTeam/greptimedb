@@ -18,6 +18,7 @@ use api::v1::greptime_request::Request as GreptimeRequest;
 use async_trait::async_trait;
 use common_query::Output;
 use datanode::error::Error as DatanodeError;
+use datatypes::schema::SchemaRef;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
 use session::context::QueryContextRef;
@@ -63,6 +64,16 @@ impl SqlQueryHandler for StandaloneSqlQueryHandler {
         self.0
             .do_statement_query(stmt, query_ctx)
             .await
+            .context(error::InvokeDatanodeSnafu)
+    }
+
+    fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<SchemaRef>> {
+        self.0
+            .do_describe(stmt, query_ctx.clone())
             .context(error::InvokeDatanodeSnafu)
     }
 
