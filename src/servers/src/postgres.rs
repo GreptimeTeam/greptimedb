@@ -28,13 +28,14 @@ use std::sync::Arc;
 
 use derive_builder::Builder;
 use pgwire::api::auth::ServerParameterProvider;
-use pgwire::api::stmt::NoopQueryParser;
 use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, MakeHandler};
 pub use server::PostgresServer;
 use session::context::{QueryContext, QueryContextRef};
+use sql::statements::statement::Statement;
 
 use self::auth_handler::PgLoginVerifier;
+use self::handler::POCQueryParser;
 use crate::auth::UserProviderRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -72,8 +73,8 @@ pub struct PostgresServerHandler {
     param_provider: Arc<GreptimeDBStartupParameters>,
 
     query_ctx: QueryContextRef,
-    portal_store: Arc<MemPortalStore<String>>,
-    query_parser: Arc<NoopQueryParser>,
+    portal_store: Arc<MemPortalStore<(Statement, String)>>,
+    query_parser: Arc<POCQueryParser>,
 }
 
 #[derive(Builder)]
@@ -82,8 +83,8 @@ pub(crate) struct MakePostgresServerHandler {
     user_provider: Option<UserProviderRef>,
     #[builder(default = "Arc::new(GreptimeDBStartupParameters::new())")]
     param_provider: Arc<GreptimeDBStartupParameters>,
-    #[builder(default = "Arc::new(NoopQueryParser::new())")]
-    query_parser: Arc<NoopQueryParser>,
+    #[builder(default = "Arc::new(POCQueryParser::default())")]
+    query_parser: Arc<POCQueryParser>,
     force_tls: bool,
 }
 
