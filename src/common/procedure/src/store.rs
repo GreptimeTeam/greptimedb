@@ -12,14 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Common traits and structures for the procedure framework.
+use serde::{Deserialize, Serialize};
 
-pub mod error;
-mod procedure;
-mod store;
+use crate::ProcedureId;
 
-pub use crate::error::{Error, Result};
-pub use crate::procedure::{
-    BoxedProcedure, Context, LockKey, Procedure, ProcedureId, ProcedureManager,
-    ProcedureManagerRef, ProcedureState, ProcedureWithId, Status,
-};
+mod state_store;
+
+/// Serialized data of a procedure.
+#[derive(Debug, Serialize, Deserialize)]
+struct ProcedureMessage {
+    /// Type name of the procedure. The procedure framework also use the type name to
+    /// find a loader to load the procedure.
+    type_name: String,
+    /// The data of the procedure.
+    data: String,
+    /// Parent procedure id.
+    parent_id: Option<ProcedureId>,
+}

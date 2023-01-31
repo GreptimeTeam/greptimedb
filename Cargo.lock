@@ -1518,9 +1518,12 @@ dependencies = [
  "common-error",
  "common-runtime",
  "common-telemetry",
+ "futures",
+ "object-store",
  "serde",
  "serde_json",
  "snafu",
+ "tempdir",
  "tokio",
  "uuid",
 ]
