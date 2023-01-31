@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use api::v1::meta::cluster_server::ClusterServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
@@ -22,10 +23,15 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::server::Router;
 
+use crate::cluster::MetaPeerClient;
 use crate::election::etcd::EtcdElection;
-use crate::metasrv::{MetaSrv, MetaSrvOptions};
+use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
+use crate::selector::lease_based::LeaseBasedSelector;
+use crate::selector::load_based::LoadBasedSelector;
+use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::service::store::etcd::EtcdStore;
+use crate::service::store::kv::ResetableKvStoreRef;
 use crate::service::store::memory::MemStore;
 use crate::{error, Result};
 
@@ -57,6 +63,7 @@ pub fn router(meta_srv: MetaSrv) -> Router {
         .add_service(HeartbeatServer::new(meta_srv.clone()))
         .add_service(RouterServer::new(meta_srv.clone()))
         .add_service(StoreServer::new(meta_srv.clone()))
+        .add_service(ClusterServer::new(meta_srv.clone()))
         .add_service(admin::make_admin_service(meta_srv))
 }
 
@@ -69,8 +76,29 @@ pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
             Some(EtcdElection::with_endpoints(&opts.server_addr, [&opts.store_addr]).await?),
         )
     };
-    let selector = opts.selector.clone().into();
-    let meta_srv = MetaSrv::new(opts, kv_store, Some(selector), election, None).await;
+
+    let mem_kv = Arc::new(MemStore::default()) as ResetableKvStoreRef;
+    let meta_peer_client = MetaPeerClient::new(mem_kv.clone(), election.clone());
+
+    let selector = match opts.selector {
+        SelectorType::LoadBased => Arc::new(LoadBasedSelector {
+            meta_peer_client: meta_peer_client.clone(),
+        }) as SelectorRef,
+        SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
+    };
+
+    let meta_srv = MetaSrv::new(
+        opts,
+        kv_store,
+        Some(mem_kv),
+        Some(selector),
+        election,
+        None,
+        Some(meta_peer_client),
+    )
+    .await;
+
     meta_srv.start().await;
+
     Ok(meta_srv)
 }

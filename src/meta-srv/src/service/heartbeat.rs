@@ -156,7 +156,16 @@ mod tests {
     #[tokio::test]
     async fn test_ask_leader() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None, None).await;
+        let meta_srv = MetaSrv::new(
+            MetaSrvOptions::default(),
+            kv_store,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
 
         let req = AskLeaderRequest {
             header: Some(RequestHeader::new((1, 1))),

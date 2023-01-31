@@ -19,6 +19,7 @@ use api::v1::meta::Peer;
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 
+use crate::cluster::MetaPeerClient;
 use crate::election::Election;
 use crate::handler::{
     CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
@@ -100,20 +101,23 @@ pub struct MetaSrv {
     selector: SelectorRef,
     handler_group: HeartbeatHandlerGroup,
     election: Option<ElectionRef>,
+    meta_peer_client: Option<MetaPeerClient>,
 }
 
 impl MetaSrv {
     pub async fn new(
         options: MetaSrvOptions,
         kv_store: KvStoreRef,
+        in_memory: Option<ResetableKvStoreRef>,
         selector: Option<SelectorRef>,
         election: Option<ElectionRef>,
         handler_group: Option<HeartbeatHandlerGroup>,
+        meta_peer_client: Option<MetaPeerClient>,
     ) -> Self {
         let started = Arc::new(AtomicBool::new(false));
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector {}));
-        let in_memory = Arc::new(MemStore::default());
+
         let handler_group = match handler_group {
             Some(hg) => hg,
             None => {
@@ -131,6 +135,8 @@ impl MetaSrv {
                 group
             }
         };
+        let in_memory =
+            in_memory.unwrap_or_else(|| Arc::new(MemStore::new()) as ResetableKvStoreRef);
 
         Self {
             started,
@@ -141,6 +147,7 @@ impl MetaSrv {
             selector,
             handler_group,
             election,
+            meta_peer_client,
         }
     }
 
@@ -209,6 +216,11 @@ impl MetaSrv {
     #[inline]
     pub fn election(&self) -> Option<ElectionRef> {
         self.election.clone()
+    }
+
+    #[inline]
+    pub fn meta_peer_client(&self) -> Option<MetaPeerClient> {
+        self.meta_peer_client.clone()
     }
 
     #[inline]

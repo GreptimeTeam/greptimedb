@@ -14,14 +14,15 @@
 
 use api::v1::meta::{
     router_server, CreateRequest, DeleteRequest, Error, MoveValueRequest, Peer, PeerDict,
-    PutRequest, RangeRequest, Region, RegionRoute, ResponseHeader, RouteRequest, RouteResponse,
-    Table, TableName, TableRoute, TableRouteValue,
+    PutRequest, Region, RegionRoute, ResponseHeader, RouteRequest, RouteResponse, Table, TableName,
+    TableRoute, TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
 
+use super::store::ext::KvStoreExt;
 use crate::error;
 use crate::error::Result;
 use crate::keys::TableRouteKey;
@@ -260,10 +261,12 @@ async fn get_table_route_value(
     kv_store: &KvStoreRef,
     key: &TableRouteKey<'_>,
 ) -> Result<TableRouteValue> {
-    let trv = get_from_store(kv_store, key.key().into_bytes())
+    let trkv = kv_store
+        .get(key.key().into_bytes())
         .await?
         .context(error::TableRouteNotFoundSnafu { key: key.key() })?;
-    let trv: TableRouteValue = trv
+    let trv: TableRouteValue = trkv
+        .value
         .as_slice()
         .try_into()
         .context(error::DecodeTableRouteSnafu)?;
@@ -293,10 +296,11 @@ async fn get_table_global_value(
     key: &TableGlobalKey,
 ) -> Result<Option<TableGlobalValue>> {
     let tg_key = format!("{key}").into_bytes();
-    let tv = get_from_store(kv_store, tg_key).await?;
-    match tv {
-        Some(tv) => {
-            let tv = TableGlobalValue::from_bytes(tv).context(error::InvalidCatalogValueSnafu)?;
+    let tkv = kv_store.get(tg_key).await?;
+    match tkv {
+        Some(tkv) => {
+            let tv =
+                TableGlobalValue::from_bytes(tkv.value).context(error::InvalidCatalogValueSnafu)?;
             Ok(Some(tv))
         }
         None => Ok(None),
@@ -335,18 +339,4 @@ async fn put_into_store(
     let _ = kv_store.put(put_req).await?;
 
     Ok(())
-}
-
-async fn get_from_store(kv_store: &KvStoreRef, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
-    let req = RangeRequest {
-        key,
-        ..Default::default()
-    };
-    let res = kv_store.range(req).await?;
-    let mut kvs = res.kvs;
-    if kvs.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(kvs.pop().unwrap().value))
-    }
 }

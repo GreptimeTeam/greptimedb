@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod etcd;
+pub mod ext;
 pub mod kv;
 pub mod memory;
 
@@ -92,7 +93,16 @@ mod tests {
     #[tokio::test]
     async fn test_range() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None, None).await;
+        let meta_srv = MetaSrv::new(
+            MetaSrvOptions::default(),
+            kv_store,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         let req = RangeRequest::default();
         let res = meta_srv.range(req.into_request()).await;
 
@@ -102,7 +112,16 @@ mod tests {
     #[tokio::test]
     async fn test_put() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None, None).await;
+        let meta_srv = MetaSrv::new(
+            MetaSrvOptions::default(),
+            kv_store,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         let req = PutRequest::default();
         let res = meta_srv.put(req.into_request()).await;
 
@@ -112,7 +131,16 @@ mod tests {
     #[tokio::test]
     async fn test_batch_put() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None, None).await;
+        let meta_srv = MetaSrv::new(
+            MetaSrvOptions::default(),
+            kv_store,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         let req = BatchPutRequest::default();
         let res = meta_srv.batch_put(req.into_request()).await;
 
@@ -122,7 +150,16 @@ mod tests {
     #[tokio::test]
     async fn test_compare_and_put() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None, None).await;
+        let meta_srv = MetaSrv::new(
+            MetaSrvOptions::default(),
+            kv_store,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         let req = CompareAndPutRequest::default();
         let res = meta_srv.compare_and_put(req.into_request()).await;
 
@@ -132,7 +169,16 @@ mod tests {
     #[tokio::test]
     async fn test_delete_range() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None, None).await;
+        let meta_srv = MetaSrv::new(
+            MetaSrvOptions::default(),
+            kv_store,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         let req = DeleteRangeRequest::default();
         let res = meta_srv.delete_range(req.into_request()).await;
 
@@ -142,7 +188,16 @@ mod tests {
     #[tokio::test]
     async fn test_move_value() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(MetaSrvOptions::default(), kv_store, None, None, None).await;
+        let meta_srv = MetaSrv::new(
+            MetaSrvOptions::default(),
+            kv_store,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
         let req = MoveValueRequest::default();
         let res = meta_srv.move_value(req.into_request()).await;
 

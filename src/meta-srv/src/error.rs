@@ -165,6 +165,33 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Invalid KVs length, expect: {}", expect))]
+    InvalidKvsLength { expect: usize, backtrace: Backtrace },
+
+    #[snafu(display("Failed to create gRPC channel, source: {}", source))]
+    CreateChannel {
+        #[snafu(backtrace)]
+        source: common_grpc::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to batch get KVs from leader's in_memory kv store, source: {}",
+        source
+    ))]
+    BatchGet {
+        source: tonic::Status,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Response header not found"))]
+    ResponseHeaderNotFound { backtrace: Backtrace },
+
+    #[snafu(display("The requested meta node is not leader"))]
+    IsNotLeader { backtrace: Backtrace },
+
+    #[snafu(display("MetaSrv has no meta peer client"))]
+    NoMetaPeerClient { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -194,6 +221,11 @@ impl ErrorExt for Error {
             | Error::DeserializeFromJson { .. }
             | Error::DecodeTableRoute { .. }
             | Error::NoLeader { .. }
+            | Error::CreateChannel { .. }
+            | Error::BatchGet { .. }
+            | Error::ResponseHeaderNotFound { .. }
+            | Error::IsNotLeader { .. }
+            | Error::NoMetaPeerClient { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }
@@ -210,6 +242,7 @@ impl ErrorExt for Error {
             | Error::TableRouteNotFound { .. }
             | Error::NextSequence { .. }
             | Error::MoveValue { .. }
+            | Error::InvalidKvsLength { .. }
             | Error::InvalidTxnResult { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
