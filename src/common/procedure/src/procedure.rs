@@ -13,14 +13,15 @@
 // limitations under the License.
 
 use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
 
-use crate::error::{InvalidIdSnafu, Result};
+use crate::error::Result;
 
 /// Procedure execution status.
 pub enum Status {
@@ -120,6 +121,11 @@ impl ProcedureWithId {
     }
 }
 
+#[derive(Debug, Snafu)]
+pub struct ParseIdError {
+    source: uuid::Error,
+}
+
 /// Unique id for [Procedure].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProcedureId(Uuid);
@@ -131,16 +137,24 @@ impl ProcedureId {
     }
 
     /// Parses id from string.
-    pub fn parse_str(input: &str) -> Result<ProcedureId> {
+    pub fn parse_str(input: &str) -> std::result::Result<ProcedureId, ParseIdError> {
         Uuid::parse_str(input)
             .map(ProcedureId)
-            .context(InvalidIdSnafu)
+            .context(ParseIdSnafu)
     }
 }
 
 impl fmt::Display for ProcedureId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for ProcedureId {
+    type Err = ParseIdError;
+
+    fn from_str(s: &str) -> std::result::Result<ProcedureId, ParseIdError> {
+        ProcedureId::parse_str(s)
     }
 }
 
@@ -155,7 +169,7 @@ pub enum ProcedureState {
     Running,
     /// The procedure is finished.
     Done,
-    /// The procedure is failed.
+    /// The procedure is failed and cannot proceed anymore.
     Failed,
 }
 

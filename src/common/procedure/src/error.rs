@@ -45,12 +45,6 @@ pub enum Error {
         procedure_id: ProcedureId,
         backtrace: Backtrace,
     },
-
-    // Currently we don't provide backtrace for an invalid ProcedureId as
-    // this error is mainly for the procedure manager to check whether a
-    // key in the procedure store is valid.
-    #[snafu(display("Invalid procedure id, source: {}", source))]
-    InvalidId { source: uuid::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -60,9 +54,9 @@ impl ErrorExt for Error {
         match self {
             Error::External { source } => source.status_code(),
             Error::ToJson { .. } => StatusCode::Internal,
-            Error::LoaderConflict { .. }
-            | Error::DuplicateProcedure { .. }
-            | Error::InvalidId { .. } => StatusCode::InvalidArguments,
+            Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 
