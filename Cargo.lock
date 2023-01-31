@@ -680,22 +680,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4a4ddaa51a5bc52a6948f74c06d20aaaddb71924eab79b8c97a8c556e942d6a"
 
 [[package]]
-name = "base64ct"
-version = "1.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b645a089122eccb6111b4f81cbc1a49f5900ac4666bb93ac027feaecf15607bf"
-
-[[package]]
-name = "bcder"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69dfb7dc0d4aee3f8c723c43553b55662badf692b541ff8e4426df75dae8da9a"
-dependencies = [
- "bytes",
- "smallvec",
-]
-
-[[package]]
 name = "benchmarks"
 version = "0.1.0"
 dependencies = [
@@ -1511,21 +1495,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "common-procedure"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "common-error",
- "common-runtime",
- "common-telemetry",
- "serde",
- "serde_json",
- "snafu",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "common-query"
 version = "0.1.0"
 dependencies = [
@@ -1664,12 +1633,6 @@ dependencies = [
  "tracing-core",
  "tracing-subscriber",
 ]
-
-[[package]]
-name = "const-oid"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cec318a675afcb6a1ea1d4340e2d377e56e47c266f28043ceccbf4412ddfdd3b"
 
 [[package]]
 name = "const-random"
@@ -2232,15 +2195,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "der"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1a467a65c5e759bce6e65eaf91cc29f466cdc57cb65777bd646872a8a1fd4de"
-dependencies = [
- "const-oid",
-]
-
-[[package]]
 name = "derive-new"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2257,16 +2211,7 @@ version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d07adf7be193b71cc36b193d0f5fe60b918a3a9db4dad0449f57bcfd519704a3"
 dependencies = [
- "derive_builder_macro 0.11.2",
-]
-
-[[package]]
-name = "derive_builder"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d67778784b508018359cbc8696edb3db78160bab2c2a28ba7f56ef6932997f8"
-dependencies = [
- "derive_builder_macro 0.12.0",
+ "derive_builder_macro",
 ]
 
 [[package]]
@@ -2282,34 +2227,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_builder_core"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c11bdc11a0c47bc7d37d582b5285da6849c96681023680b906673c5707af7b0f"
-dependencies = [
- "darling",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "derive_builder_macro"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f0314b72bed045f3a68671b3c86328386762c93f82d98c65c3cb5e5f573dd68"
 dependencies = [
- "derive_builder_core 0.11.2",
- "syn",
-]
-
-[[package]]
-name = "derive_builder_macro"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebcda35c7a396850a55ffeac740804b40ffec779b98fffbb1738f4033f0ee79e"
-dependencies = [
- "derive_builder_core 0.12.0",
+ "derive_builder_core",
  "syn",
 ]
 
@@ -4818,28 +4741,25 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.8.0"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6594056c6fc1c40b203ce6647d55bda25f249bc2b06bffaad3a4032a6d110e88"
+checksum = "ab6d8c74bed581ab4a5ae0393ae05dc50e6b097d6298bcf97c5c58246b74aee6"
 dependencies = [
  "async-trait",
- "base64 0.21.0",
  "bytes",
  "derive-new",
  "futures",
  "getset",
+ "hex",
  "log",
  "md5",
  "postgres-types",
  "rand 0.8.5",
- "ring",
- "stringprep",
  "thiserror",
  "time 0.3.17",
  "tokio",
  "tokio-rustls",
  "tokio-util",
- "x509-certificate",
 ]
 
 [[package]]
@@ -6643,7 +6563,6 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "datatypes",
- "derive_builder 0.12.0",
  "digest",
  "futures",
  "hex",
@@ -6763,12 +6682,6 @@ checksum = "e51e73328dc4ac0c7ccbda3a494dfa03df1de2f46018127f60c693f2648455b0"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "signature"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fe458c98333f9c8152221191a77e2a44e8325d0193484af2e9421a53019e57d"
 
 [[package]]
 name = "simba"
@@ -6905,16 +6818,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
 
 [[package]]
-name = "spki"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67cf02bbac7a337dc36e4f5a693db6c21e7863f45070f7064577eb4367a3212b"
-dependencies = [
- "base64ct",
- "der",
-]
-
-[[package]]
 name = "sql"
 version = "0.1.0"
 dependencies = [
@@ -6940,7 +6843,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ffa69a2ae10018ec72a3cb7574e3a33a3fc322ed03740f6e435fd7f0c1db4a7"
 dependencies = [
  "async-trait",
- "derive_builder 0.11.2",
+ "derive_builder",
  "prettydiff",
  "serde",
  "thiserror",
@@ -7067,7 +6970,7 @@ dependencies = [
  "common-query",
  "common-time",
  "datatypes",
- "derive_builder 0.11.2",
+ "derive_builder",
  "futures",
  "serde",
  "serde_json",
@@ -7283,7 +7186,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
- "derive_builder 0.11.2",
+ "derive_builder",
  "futures",
  "parquet",
  "parquet-format-async-temp",
@@ -8633,24 +8536,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
-]
-
-[[package]]
-name = "x509-certificate"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6ae06cd45e681e1ae216e2e668e30ce1c4f02db026374bde8c0644684af1721"
-dependencies = [
- "bcder",
- "bytes",
- "chrono",
- "der",
- "hex",
- "pem",
- "ring",
- "signature",
- "spki",
- "thiserror",
 ]
 
 [[package]]
