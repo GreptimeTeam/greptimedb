@@ -25,7 +25,6 @@ use common_error::snafu::ErrorCompat;
 use common_query::Output;
 use sqlness::{Database, EnvController};
 use tokio::process::{Child, Command};
-use tokio_stream::StreamExt;
 
 use crate::util;
 
@@ -137,8 +136,7 @@ impl Env {
         let mut frontend = Env::start_server("frontend");
         let mut datanode = Env::start_server("datanode");
 
-        let mut stream = tokio_stream::iter(&[DATANODE_ADDR, METASRV_ADDR, SERVER_ADDR]);
-        while let Some(addr) = stream.next().await {
+        for addr in [DATANODE_ADDR, METASRV_ADDR, SERVER_ADDR].iter() {
             let is_up = util::check_port(addr.parse().unwrap(), Duration::from_secs(10)).await;
             if !is_up {
                 Env::stop_server(&mut meta_server).await;

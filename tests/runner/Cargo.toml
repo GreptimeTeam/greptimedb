@@ -13,4 +13,3 @@ common-grpc = { path = "../../src/common/grpc" }
 common-query = { path = "../../src/common/query" }
 sqlness = "0.1"
 tokio.workspace = true
-tokio-stream = "0.1"
