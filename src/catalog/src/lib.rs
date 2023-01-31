@@ -154,7 +154,7 @@ pub struct RenameTableRequest {
     pub table_id: TableId,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DeregisterTableRequest {
     pub catalog: String,
     pub schema: String,

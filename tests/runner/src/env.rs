@@ -82,7 +82,7 @@ impl Env {
         // Start the DB
         let server_process = Command::new("./greptime")
             .current_dir(util::get_binary_dir("debug"))
-            .args(["standalone", "start", "-m"])
+            .args(["standalone", "start"])
             .stdout(log_file)
             .spawn()
             .expect("Failed to start the DB");

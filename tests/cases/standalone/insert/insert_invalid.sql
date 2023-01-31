@@ -1,10 +1,10 @@
-CREATE TABLE strings(i STRING, t BIGINT, time index(t));
+CREATE TABLE insert_invalid_strings(i STRING, t BIGINT, time index(t));
 
-INSERT INTO strings VALUES ('â‚(', 1);
+INSERT INTO insert_invalid_strings VALUES ('â‚(', 1);
 
-INSERT INTO strings VALUES (3, 4);
+INSERT INTO insert_invalid_strings VALUES (3, 4);
 
-SELECT * FROM strings WHERE i = 'â‚(';
+SELECT * FROM insert_invalid_strings WHERE i = 'â‚(';
 
 CREATE TABLE a(i integer, j BIGINT, time index(j));
 

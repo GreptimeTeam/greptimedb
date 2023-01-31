@@ -34,9 +34,9 @@ use table::table::TableIdProvider;
 use table::TableRef;
 
 use crate::error::{
-    CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu, Result,
-    SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu, SystemCatalogTypeMismatchSnafu,
-    TableExistsSnafu, TableNotFoundSnafu, UnimplementedSnafu,
+    self, CatalogNotFoundSnafu, IllegalManagerStateSnafu, OpenTableSnafu, ReadSystemCatalogSnafu,
+    Result, SchemaExistsSnafu, SchemaNotFoundSnafu, SystemCatalogSnafu,
+    SystemCatalogTypeMismatchSnafu, TableExistsSnafu, TableNotFoundSnafu,
 };
 use crate::local::memory::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use crate::system::{
@@ -419,11 +419,36 @@ impl CatalogManager for LocalCatalogManager {
             .is_ok())
     }
 
-    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {
-        UnimplementedSnafu {
-            operation: "deregister table",
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
+        {
+            let started = *self.init_lock.lock().await;
+            ensure!(started, IllegalManagerStateSnafu { msg: "not started" });
         }
-        .fail()
+
+        {
+            let _ = self.register_lock.lock().await;
+
+            let DeregisterTableRequest {
+                catalog,
+                schema,
+                table_name,
+            } = &request;
+            let table_id = self
+                .catalogs
+                .table(catalog, schema, table_name)?
+                .with_context(|| error::TableNotExistSnafu {
+                    table: format!("{catalog}.{schema}.{table_name}"),
+                })?
+                .table_info()
+                .ident
+                .table_id;
+
+            if !self.system.deregister_table(&request, table_id).await? {
+                return Ok(false);
+            }
+
+            self.catalogs.deregister_table(request).await
+        }
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {

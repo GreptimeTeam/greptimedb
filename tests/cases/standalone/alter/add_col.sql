@@ -1,9 +1,9 @@
-CREATE TABLE test(i INTEGER, j BIGINT TIME INDEX);
+CREATE TABLE test_add_col(i INTEGER, j BIGINT TIME INDEX);
 
-INSERT INTO test VALUES (1, 1), (2, 2);
+INSERT INTO test_add_col VALUES (1, 1), (2, 2);
 
-ALTER TABLE test ADD COLUMN k INTEGER;
+ALTER TABLE test_add_col ADD COLUMN k INTEGER;
 
-SELECT * FROM test;
+SELECT * FROM test_add_col;
 
-DROP TABLE test;
+DROP TABLE test_add_col;
