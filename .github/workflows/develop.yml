@@ -132,10 +132,10 @@ jobs:
           DOWNLOAD_URL=https://github.com/etcd-io/etcd/releases/download
           curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
           mkdir -p /tmp/etcd-download 
-          tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download --strip-components=1 && cd /tmp/etcd-download
+          tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download --strip-components=1
           rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
           
-          sudo cp -a etcd etcdctl /usr/local/bin/
+          sudo cp -a /tmp/etcd-download/etcd* /usr/local/bin/
           nohup etcd >/tmp/etcd.log 2>&1 &
           
           cargo run --bin sqlness-runner
