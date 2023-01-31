@@ -138,8 +138,7 @@ jobs:
           sudo cp -a /tmp/etcd-download/etcd* /usr/local/bin/
           nohup etcd >/tmp/etcd.log 2>&1 &
       - name: Run sqlness
-        run: |
-          cargo run --bin sqlness-runner
+        run: cargo run --bin sqlness-runner && ls /tmp
       - name: Upload sqlness logs
         uses: actions/upload-artifact@v3
         with:
