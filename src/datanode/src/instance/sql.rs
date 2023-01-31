@@ -236,7 +236,7 @@ impl SqlQueryHandler for Instance {
     fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
         if let Statement::Query(_) = stmt {
             self.query_engine
-                .describe(QueryStatement::Sql(stmt), query_ctx.clone())
+                .describe(QueryStatement::Sql(stmt), query_ctx)
                 .map(Some)
                 .context(error::DescribeStatementSnafu)
         } else {

@@ -69,7 +69,7 @@ impl SqlQueryHandler for StandaloneSqlQueryHandler {
 
     fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
         self.0
-            .do_describe(stmt, query_ctx.clone())
+            .do_describe(stmt, query_ctx)
             .context(error::InvokeDatanodeSnafu)
     }
 

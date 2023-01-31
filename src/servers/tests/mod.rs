@@ -20,6 +20,7 @@ use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaPr
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
+use datatypes::schema::Schema;
 use query::parser::QueryLanguageParser;
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
@@ -81,6 +82,14 @@ impl SqlQueryHandler for DummyInstance {
         _stmt: sql::statements::statement::Statement,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        unimplemented!()
+    }
+
+    fn do_describe(
+        &self,
+        _stmt: sql::statements::statement::Statement,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Option<Schema>> {
         unimplemented!()
     }
 

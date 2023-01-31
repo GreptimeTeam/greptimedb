@@ -488,7 +488,7 @@ impl SqlQueryHandler for Instance {
     }
 
     fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
-        self.sql_handler.do_describe(stmt, query_ctx.clone())
+        self.sql_handler.do_describe(stmt, query_ctx)
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
