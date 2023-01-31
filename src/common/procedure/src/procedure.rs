@@ -252,5 +252,17 @@ mod tests {
 
         let parsed = ProcedureId::parse_str(&uuid_str).unwrap();
         assert_eq!(id, parsed);
+        let parsed = uuid_str.parse().unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_procedure_id_serialization() {
+        let id = ProcedureId::random();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(format!("\"{}\"", id.to_string()), json);
+
+        let parsed = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, parsed);
     }
 }
