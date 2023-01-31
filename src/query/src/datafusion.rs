@@ -34,7 +34,7 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::Schema;
 use promql::planner::PromPlanner;
 use promql_parser::parser::EvalStmt;
 use session::context::QueryContextRef;
@@ -103,9 +103,8 @@ impl QueryEngine for DatafusionQueryEngine {
         }
     }
 
-    fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<SchemaRef> {
-        let plan = self.statement_to_plan(stmt, query_ctx)?;
-        plan.schema()
+    fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema> {
+        self.statement_to_plan(stmt, query_ctx)?.schema()
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {

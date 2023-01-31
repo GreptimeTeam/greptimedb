@@ -36,7 +36,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{debug, info};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::Schema;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
@@ -487,11 +487,7 @@ impl SqlQueryHandler for Instance {
             .and_then(|output| query_interceptor.post_execute(output, query_ctx.clone()))
     }
 
-    fn do_describe(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Option<SchemaRef>> {
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
         self.sql_handler.do_describe(stmt, query_ctx.clone())
     }
 

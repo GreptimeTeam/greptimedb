@@ -18,7 +18,7 @@ use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::Schema;
 use query::parser::{QueryLanguageParser, QueryStatement};
 use servers::error as server_error;
 use servers::promql::PromqlHandler;
@@ -233,11 +233,7 @@ impl SqlQueryHandler for Instance {
             .await
     }
 
-    fn do_describe(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Option<SchemaRef>> {
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
         if let Statement::Query(_) = stmt {
             self.query_engine
                 .describe(QueryStatement::Sql(stmt), query_ctx.clone())

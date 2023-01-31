@@ -17,7 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_error::prelude::*;
 use common_query::Output;
-use datatypes::schema::SchemaRef;
+use datatypes::schema::Schema;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
 
@@ -52,7 +52,7 @@ pub trait SqlQueryHandler {
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
-    ) -> std::result::Result<Option<SchemaRef>, Self::Error>;
+    ) -> std::result::Result<Option<Schema>, Self::Error>;
 
     fn is_valid_schema(
         &self,
@@ -116,11 +116,7 @@ where
             .context(error::ExecuteStatementSnafu)
     }
 
-    fn do_describe(
-        &self,
-        stmt: Statement,
-        query_ctx: QueryContextRef,
-    ) -> Result<Option<SchemaRef>> {
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
         self.0
             .do_describe(stmt, query_ctx)
             .map_err(BoxedError::new)
