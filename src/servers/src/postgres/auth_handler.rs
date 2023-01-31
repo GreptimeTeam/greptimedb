@@ -12,27 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::fmt::Debug;
 
 use async_trait::async_trait;
 use futures::{Sink, SinkExt};
-use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
+use pgwire::api::auth::StartupHandler;
 use pgwire::api::{auth, ClientInfo, PgWireConnectionState};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::response::ErrorResponse;
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
-use session::context::UserInfo;
+use session::context::{QueryContextRef, UserInfo};
 use snafu::ResultExt;
 
+use super::PostgresServerHandler;
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error;
 use crate::error::Result;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
-struct PgLoginVerifier {
+pub(crate) struct PgLoginVerifier {
     user_provider: Option<UserProviderRef>,
+}
+
+impl PgLoginVerifier {
+    pub(crate) fn new(user_provider: Option<UserProviderRef>) -> Self {
+        Self { user_provider }
+    }
 }
 
 #[allow(dead_code)]
@@ -107,61 +113,24 @@ impl PgLoginVerifier {
     }
 }
 
-struct GreptimeDBStartupParameters {
-    version: &'static str,
-}
-
-impl GreptimeDBStartupParameters {
-    fn new() -> GreptimeDBStartupParameters {
-        GreptimeDBStartupParameters {
-            version: env!("CARGO_PKG_VERSION"),
-        }
+fn set_query_context_from_client_info<C>(client: &C, query_context: QueryContextRef)
+where
+    C: ClientInfo,
+{
+    if let Some(current_catalog) = client.metadata().get(super::METADATA_CATALOG) {
+        query_context.set_current_catalog(current_catalog);
     }
-}
-
-impl ServerParameterProvider for GreptimeDBStartupParameters {
-    fn server_parameters<C>(&self, _client: &C) -> Option<HashMap<String, String>>
-    where
-        C: ClientInfo,
-    {
-        let mut params = HashMap::with_capacity(4);
-        params.insert("server_version".to_owned(), self.version.to_owned());
-        params.insert("server_encoding".to_owned(), "UTF8".to_owned());
-        params.insert("client_encoding".to_owned(), "UTF8".to_owned());
-        params.insert("DateStyle".to_owned(), "ISO YMD".to_owned());
-
-        Some(params)
-    }
-}
-
-pub struct PgAuthStartupHandler {
-    verifier: PgLoginVerifier,
-    param_provider: GreptimeDBStartupParameters,
-    force_tls: bool,
-    query_handler: ServerSqlQueryHandlerRef,
-}
-
-impl PgAuthStartupHandler {
-    pub fn new(
-        user_provider: Option<UserProviderRef>,
-        force_tls: bool,
-        query_handler: ServerSqlQueryHandlerRef,
-    ) -> Self {
-        PgAuthStartupHandler {
-            verifier: PgLoginVerifier { user_provider },
-            param_provider: GreptimeDBStartupParameters::new(),
-            force_tls,
-            query_handler,
-        }
+    if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
+        query_context.set_current_schema(current_schema);
     }
 }
 
 #[async_trait]
-impl StartupHandler for PgAuthStartupHandler {
+impl StartupHandler for PostgresServerHandler {
     async fn on_startup<C>(
         &self,
         client: &mut C,
-        message: &PgWireFrontendMessage,
+        message: PgWireFrontendMessage,
     ) -> PgWireResult<()>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
@@ -194,7 +163,7 @@ impl StartupHandler for PgAuthStartupHandler {
                     }
                 }
 
-                if self.verifier.user_provider.is_some() {
+                if self.login_verifier.user_provider.is_some() {
                     client.set_state(PgWireConnectionState::AuthenticationInProgress);
                     client
                         .send(PgWireBackendMessage::Authentication(
@@ -202,14 +171,22 @@ impl StartupHandler for PgAuthStartupHandler {
                         ))
                         .await?;
                 } else {
-                    auth::finish_authentication(client, &self.param_provider).await;
+                    set_query_context_from_client_info(client, self.query_ctx.clone());
+                    auth::finish_authentication(client, self.param_provider.as_ref()).await;
                 }
             }
-            PgWireFrontendMessage::Password(ref pwd) => {
+            PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
+                // the newer version of pgwire has a few variant password
+                // message like cleartext/md5 password, saslresponse, etc. Here
+                // we must manually coerce it into password
+                let pwd = pwd.into_password()?;
+
                 let login_info = LoginInfo::from_client_info(client);
                 // do authenticate
-                let authenticate_result =
-                    self.verifier.verify_pwd(pwd.password(), &login_info).await;
+                let authenticate_result = self
+                    .login_verifier
+                    .verify_pwd(pwd.password(), &login_info)
+                    .await;
                 if !matches!(authenticate_result, Ok(true)) {
                     return send_error(
                         client,
@@ -220,7 +197,7 @@ impl StartupHandler for PgAuthStartupHandler {
                     .await;
                 }
                 // do authorize
-                let authorize_result = self.verifier.authorize(&login_info).await;
+                let authorize_result = self.login_verifier.authorize(&login_info).await;
                 if !matches!(authorize_result, Ok(true)) {
                     return send_error(
                         client,
@@ -230,7 +207,8 @@ impl StartupHandler for PgAuthStartupHandler {
                     )
                     .await;
                 }
-                auth::finish_authentication(client, &self.param_provider).await;
+                set_query_context_from_client_info(client, self.query_ctx.clone());
+                auth::finish_authentication(client, self.param_provider.as_ref()).await;
             }
             _ => {}
         }
