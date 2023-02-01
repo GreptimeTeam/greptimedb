@@ -145,7 +145,7 @@ impl ProcedureStore {
 }
 
 /// Key to refer the procedure in the [ProcedureStore].
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct ParsedKey {
     procedure_id: ProcedureId,
     step: u32,
@@ -188,5 +188,56 @@ impl ParsedKey {
             step,
             is_committed,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parsed_key() {
+        let procedure_id = ProcedureId::random();
+        let key = ParsedKey {
+            procedure_id,
+            step: 2,
+            is_committed: false,
+        };
+        assert_eq!(format!("{}/2.step", procedure_id), key.to_string());
+        assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
+
+        let key = ParsedKey {
+            procedure_id,
+            step: 2,
+            is_committed: true,
+        };
+        assert_eq!(format!("{}/2.commit", procedure_id), key.to_string());
+        assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
+    }
+
+    #[test]
+    fn test_parse_invalid_key() {
+        assert!(ParsedKey::parse_str("").is_none());
+
+        let procedure_id = ProcedureId::random();
+        let input = format!("{}", procedure_id);
+        assert!(ParsedKey::parse_str(&input).is_none());
+
+        let input = format!("{}/", procedure_id);
+        assert!(ParsedKey::parse_str(&input).is_none());
+
+        let input = format!("{}/3", procedure_id);
+        assert!(ParsedKey::parse_str(&input).is_none());
+
+        let input = format!("{}/3.", procedure_id);
+        assert!(ParsedKey::parse_str(&input).is_none());
+
+        let input = format!("{}/3.other", procedure_id);
+        assert!(ParsedKey::parse_str(&input).is_none());
+
+        assert!(ParsedKey::parse_str("12345/3.step").is_none());
+
+        let input = format!("{}-3.commit", procedure_id);
+        assert!(ParsedKey::parse_str(&input).is_none());
     }
 }
