@@ -2687,6 +2687,7 @@ dependencies = [
  "meta-srv",
  "moka",
  "openmetrics-parser",
+ "partition",
  "prost 0.11.6",
  "query",
  "rustls",
@@ -4713,6 +4714,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c705f256449c60da65e11ff6626e0c16a0a0b96aaa348de61376b249bc340f41"
 dependencies = [
  "regex",
+]
+
+[[package]]
+name = "partition"
+version = "0.1.0"
+dependencies = [
+ "common-error",
+ "common-query",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
+ "datatypes",
+ "meta-client",
+ "moka",
+ "serde",
+ "serde_json",
+ "snafu",
+ "store-api",
+ "table",
 ]
 
 [[package]]

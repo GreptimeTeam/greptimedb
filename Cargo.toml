@@ -27,6 +27,7 @@ members = [
     "src/meta-srv",
     "src/mito",
     "src/object-store",
+    "src/partition",
     "src/promql",
     "src/query",
     "src/script",

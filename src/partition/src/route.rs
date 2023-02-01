@@ -22,13 +22,14 @@ use snafu::{ensure, ResultExt};
 
 use crate::error::{self, Result};
 
-pub(crate) struct TableRoutes {
+pub struct TableRoutes {
     meta_client: Arc<MetaClient>,
     cache: Cache<TableName, Arc<TableRoute>>,
 }
 
+// TODO(hl): maybe periodically refresh table route cache?
 impl TableRoutes {
-    pub(crate) fn new(meta_client: Arc<MetaClient>) -> Self {
+    pub fn new(meta_client: Arc<MetaClient>) -> Self {
         Self {
             meta_client,
             cache: CacheBuilder::new(1024)
@@ -38,7 +39,7 @@ impl TableRoutes {
         }
     }
 
-    pub(crate) async fn get_route(&self, table_name: &TableName) -> Result<Arc<TableRoute>> {
+    pub async fn get_route(&self, table_name: &TableName) -> Result<Arc<TableRoute>> {
         self.cache
             .try_get_with_by_ref(table_name, self.get_from_meta(table_name))
             .await
@@ -68,12 +69,7 @@ impl TableRoutes {
         Ok(Arc::new(route))
     }
 
-    #[cfg(test)]
-    pub(crate) async fn insert_table_route(
-        &self,
-        table_name: TableName,
-        table_route: Arc<TableRoute>,
-    ) {
+    pub async fn insert_table_route(&self, table_name: TableName, table_route: Arc<TableRoute>) {
         self.cache.insert(table_name, table_route).await
     }
 }
