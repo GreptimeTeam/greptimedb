@@ -16,9 +16,12 @@ use std::env;
 
 use anyhow::Result;
 use common_telemetry::logging;
+use futures::TryStreamExt;
 use object_store::backend::{fs, s3};
+use object_store::cache::ObjectStoreCachePolicy;
 use object_store::test_util::TempFolder;
 use object_store::{util, Object, ObjectLister, ObjectMode, ObjectStore};
+use opendal::layers::CacheLayer;
 use opendal::services::oss;
 use tempdir::TempDir;
 
@@ -155,6 +158,51 @@ async fn test_oss_backend() -> Result<()> {
             test_object_crud(&store).await?;
             test_object_list(&store).await?;
             guard.remove_all().await?;
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_object_store_cache_policy() -> Result<()> {
+    let root_dir = TempDir::new("test_fs_backend")?;
+    let store = ObjectStore::new(
+        fs::Builder::default()
+            .root(&root_dir.path().to_string_lossy())
+            .build()?,
+    );
+
+    let cache_dir = TempDir::new("test_fs_cache")?;
+    let cache_op = ObjectStore::new(
+        fs::Builder::default()
+            .root(&cache_dir.path().to_string_lossy())
+            .build()?,
+    );
+    let test_cache_op = ObjectStore::from(cache_op.inner());
+    let store =
+        store.layer(CacheLayer::new(cache_op).with_policy(ObjectStoreCachePolicy::default()));
+
+    // Create object handler.
+    let object = store.object("test_file");
+
+    // Write data info object;
+    assert!(object.write("Hello, World!").await.is_ok());
+
+    // Read data from object;
+    let bs = object.read().await?;
+    assert_eq!("Hello, World!", String::from_utf8(bs)?);
+
+    // Read data from object cache;
+    let mut lister = test_cache_op.batch().walk_top_down("/")?;
+    while let Some(obj) = lister.try_next().await? {
+        match obj.mode().await? {
+            ObjectMode::FILE => {
+                assert!(obj.name().starts_with("test_file"));
+                let bs = obj.read().await?;
+                assert_eq!("Hello, World!", String::from_utf8(bs)?);
+            }
+            _ => continue,
         }
     }
 

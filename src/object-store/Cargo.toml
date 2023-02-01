@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+async-trait = "0.1"
 futures = { version = "0.3" }
 opendal = { version = "0.25.1", features = [
     "layers-tracing",

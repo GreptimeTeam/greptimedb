@@ -28,8 +28,10 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
-use object_store::layers::{LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
+use object_store::cache::ObjectStoreCachePolicy;
+use object_store::layers::{CacheLayer, LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::fs::Builder as FsBuilder;
+use object_store::services::memory::Builder as MemoryBuilder;
 use object_store::services::oss::Builder as OSSBuilder;
 use object_store::services::s3::Builder as S3Builder;
 use object_store::{util, ObjectStore};
@@ -207,12 +209,17 @@ pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result
         ObjectStoreConfig::Oss { .. } => new_oss_object_store(store_config).await,
     };
 
+    let mem_accessor = MemoryBuilder::default().build().unwrap();
     object_store.map(|object_store| {
         object_store
             .layer(RetryLayer::new(ExponentialBackoff::default().with_jitter()))
             .layer(MetricsLayer)
             .layer(LoggingLayer::default())
             .layer(TracingLayer)
+            .layer(
+                CacheLayer::new(ObjectStore::new(mem_accessor))
+                    .with_policy(ObjectStoreCachePolicy::default()),
+            )
     })
 }
 
