@@ -68,7 +68,7 @@ impl PromqlServer {
         self.user_provider = Some(user_provider);
     }
 
-    fn make_app(&self) -> Router {
+    pub fn make_app(&self) -> Router {
         // TODO(ruihang): implement format_query, series, labels, values, query_examplars and targets methods
         let router = Router::new()
             .route(

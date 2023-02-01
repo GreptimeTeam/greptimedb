@@ -40,6 +40,7 @@ use once_cell::sync::OnceCell;
 use rand::Rng;
 use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServer};
+use servers::promql::PromqlServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
@@ -265,7 +266,7 @@ async fn build_frontend_instance(datanode_instance: InstanceRef) -> FeInstance {
     frontend_instance
 }
 
-pub async fn setup_test_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
+pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
     let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
     let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
     instance.start().await.unwrap();
@@ -283,7 +284,7 @@ pub async fn setup_test_app(store_type: StorageType, name: &str) -> (Router, Tes
     (http_server.make_app(), guard)
 }
 
-pub async fn setup_test_app_with_frontend(
+pub async fn setup_test_http_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
@@ -304,6 +305,26 @@ pub async fn setup_test_app_with_frontend(
     );
     http_server.set_script_handler(instance.clone());
     let app = http_server.make_app();
+    (app, guard)
+}
+
+pub async fn setup_test_promql_app_with_frontend(
+    store_type: StorageType,
+    name: &str,
+) -> (Router, TestGuard) {
+    let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, name);
+    let instance = Arc::new(Instance::with_mock_meta_client(&opts).await.unwrap());
+    let frontend = build_frontend_instance(instance.clone()).await;
+    instance.start().await.unwrap();
+    create_test_table(
+        frontend.catalog_manager(),
+        instance.sql_handler(),
+        ConcreteDataType::timestamp_millisecond_datatype(),
+    )
+    .await
+    .unwrap();
+    let promql_server = PromqlServer::create_server(Arc::new(frontend) as _);
+    let app = promql_server.make_app();
     (app, guard)
 }
 
