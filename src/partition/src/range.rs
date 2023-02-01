@@ -97,8 +97,6 @@ impl RangePartitionRule {
 }
 
 impl PartitionRule for RangePartitionRule {
-    type Error = Error;
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -107,7 +105,7 @@ impl PartitionRule for RangePartitionRule {
         vec![self.column_name().to_string()]
     }
 
-    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Self::Error> {
+    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Error> {
         debug_assert_eq!(
             values.len(),
             1,
@@ -122,7 +120,7 @@ impl PartitionRule for RangePartitionRule {
         })
     }
 
-    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Self::Error> {
+    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
         if exprs.is_empty() {
             return Ok(self.regions.clone());
         }

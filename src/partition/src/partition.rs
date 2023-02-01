@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use datafusion_expr::Operator;
 use datatypes::prelude::Value;
@@ -24,18 +25,18 @@ use store_api::storage::RegionNumber;
 
 use crate::error::{self, Error};
 
-pub trait PartitionRule: Sync + Send {
-    type Error: Debug;
+pub type PartitionRuleRef = Arc<dyn PartitionRule>;
 
+pub trait PartitionRule: Sync + Send {
     fn as_any(&self) -> &dyn Any;
 
     fn partition_columns(&self) -> Vec<String>;
 
     // TODO(LFC): Unify `find_region` and `find_regions` methods when distributed read and write features are both merged into develop.
     // Or find better names since one is mainly for writes and the other is for reads.
-    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Self::Error>;
+    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Error>;
 
-    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Self::Error>;
+    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error>;
 }
 
 /// The right bound(exclusive) of partition range.

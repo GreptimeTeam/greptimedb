@@ -33,13 +33,14 @@ use crate::{error, PartitionRuleRef};
 
 pub type PartitionRuleManagerRef = Arc<PartitionRuleManager>;
 
+/// PartitionRuleManager manages the table routes and partition rules.
+/// It provides methods to find regions by:
+/// - values (in case of insertion)
+/// - filters (in case of select, deletion and update)
 pub struct PartitionRuleManager {
     table_routes: Arc<TableRoutes>,
 }
 
-/// Provides methods to find regions by:
-/// - values (in case of insertion)
-/// - filters (in case of select, deletion and update)
 impl PartitionRuleManager {
     pub fn new(table_routes: Arc<TableRoutes>) -> Self {
         Self { table_routes }

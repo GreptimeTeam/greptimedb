@@ -137,8 +137,6 @@ impl RangeColumnsPartitionRule {
 }
 
 impl PartitionRule for RangeColumnsPartitionRule {
-    type Error = Error;
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -147,7 +145,7 @@ impl PartitionRule for RangeColumnsPartitionRule {
         self.column_list.clone()
     }
 
-    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Self::Error> {
+    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Error> {
         ensure!(
             values.len() == self.column_list.len(),
             error::RegionKeysSizeSnafu {
@@ -168,7 +166,7 @@ impl PartitionRule for RangeColumnsPartitionRule {
         })
     }
 
-    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Self::Error> {
+    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
         let regions = if exprs.iter().all(|x| self.column_list.contains(&x.column)) {
             let PartitionExpr {
                 column: _,

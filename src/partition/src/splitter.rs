@@ -438,8 +438,6 @@ mod tests {
     //     PARTITION r1 VALUES IN(2, 3),
     // );
     impl PartitionRule for MockPartitionRule {
-        type Error = Error;
-
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -448,7 +446,7 @@ mod tests {
             vec!["id".to_string()]
         }
 
-        fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Self::Error> {
+        fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Error> {
             let val = values.get(0).unwrap().to_owned();
             let id_1: Value = 1_i16.into();
             let id_2: Value = 2_i16.into();
@@ -462,7 +460,7 @@ mod tests {
             unreachable!()
         }
 
-        fn find_regions(&self, _: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Self::Error> {
+        fn find_regions(&self, _: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
             unimplemented!()
         }
     }
