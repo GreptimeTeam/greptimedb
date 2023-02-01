@@ -2727,7 +2727,7 @@ dependencies = [
  "moka",
  "openmetrics-parser",
  "partition",
- "prost 0.11.6",
+ "prost 0.11.5",
  "query",
  "rustls",
  "serde",
