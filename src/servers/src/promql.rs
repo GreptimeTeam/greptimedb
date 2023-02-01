@@ -16,12 +16,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
 use axum::body::BoxBody;
-use axum::error_handling::HandleErrorLayer;
 use axum::extract::{Query, State};
-use axum::{routing, BoxError, Json, Router};
+use axum::{routing, Json, Router};
 use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -29,16 +27,15 @@ use common_telemetry::info;
 use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Mutex};
-use tower::timeout::TimeoutLayer;
 use tower::ServiceBuilder;
 use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
-use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartHttpSnafu};
+use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::authorize::HttpAuth;
 use crate::server::Server;
 
@@ -72,20 +69,6 @@ impl PromqlServer {
     }
 
     fn make_app(&self) -> Router {
-        let api = OpenApi {
-            info: Info {
-                title: "GreptimeDB PromQL API".to_string(),
-                description: Some("PromQL HTTP Api in GreptimeDB".to_string()),
-                version: PROMQL_API_VERSION.to_string(),
-                ..Info::default()
-            },
-            servers: vec![OpenAPIServer {
-                url: format!("/{PROMQL_API_VERSION}"),
-                ..OpenAPIServer::default()
-            }],
-            ..OpenApi::default()
-        };
-
         // TODO(ruihang): implement format_query, series, labels, values, query_examplars and targets methods
         let router = Router::new()
             .route(
@@ -102,9 +85,7 @@ impl PromqlServer {
             // middlewares
             .layer(
                 ServiceBuilder::new()
-                    // .layer(HandleErrorLayer::new(handle_error))
                     .layer(TraceLayer::new_for_http())
-                    // .layer(TimeoutLayer::new(self.options.timeout))
                     // custom layer
                     .layer(AsyncRequireAuthorizationLayer::new(
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),
@@ -161,8 +142,9 @@ pub struct PromqlSeries {
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PromqlData {
+    #[serde(rename = "resultType")]
     result_type: String,
-    data: Vec<PromqlSeries>,
+    result: Vec<PromqlSeries>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -227,7 +209,7 @@ impl PromqlJsonResponse {
 
         let data = PromqlData {
             result_type: "matrix".to_string(),
-            data: vec![PromqlSeries {
+            result: vec![PromqlSeries {
                 metric: vec![("__name__".to_string(), "foo".to_string())]
                     .into_iter()
                     .collect(),
@@ -273,15 +255,4 @@ pub async fn range_query(
 ) -> Json<PromqlJsonResponse> {
     let result = handler.do_query(&params.query).await;
     PromqlJsonResponse::from_query_result(result).await
-}
-
-/// handle error middleware
-async fn handle_error(err: BoxError) -> Json<PromqlJsonResponse> {
-    Json(PromqlJsonResponse {
-        status: "error".to_string(),
-        data: PromqlData::default(),
-        error: Some(format!("Unhandled internal error: {err}")),
-        error_type: Some("internal".to_string()),
-        warnings: None,
-    })
 }
