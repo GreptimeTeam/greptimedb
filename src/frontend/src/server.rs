@@ -24,6 +24,7 @@ use servers::http::HttpServer;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
+use servers::promql::PromqlServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
@@ -154,7 +155,7 @@ impl Services {
                 ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
                 http_options.clone(),
             );
-            if let Some(user_provider) = user_provider {
+            if let Some(user_provider) = user_provider.clone() {
                 http_server.set_user_provider(user_provider);
             }
 
@@ -181,12 +182,26 @@ impl Services {
             None
         };
 
+        let promql_server_and_addr = if let Some(promql_options) = &opts.promql_options {
+            let promql_addr = parse_addr(&promql_options.addr)?;
+
+            let mut promql_server = PromqlServer::create_server(instance.clone());
+            if let Some(user_provider) = user_provider {
+                promql_server.set_user_provider(user_provider);
+            }
+
+            Some((promql_server as _, promql_addr))
+        } else {
+            None
+        };
+
         try_join!(
             start_server(http_server_and_addr),
             start_server(grpc_server_and_addr),
             start_server(mysql_server_and_addr),
             start_server(postgres_server_and_addr),
-            start_server(opentsdb_server_and_addr)
+            start_server(opentsdb_server_and_addr),
+            start_server(promql_server_and_addr),
         )
         .context(error::StartServerSnafu)?;
         Ok(())

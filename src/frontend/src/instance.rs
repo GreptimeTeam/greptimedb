@@ -42,6 +42,7 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
+use servers::promql::{PromqlHandler, PromqlHandlerRef};
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
 use servers::query_handler::{
@@ -71,6 +72,7 @@ pub trait FrontendInstance:
     + InfluxdbLineProtocolHandler
     + PrometheusProtocolHandler
     + ScriptHandler
+    + PromqlHandler
     + Send
     + Sync
     + 'static
@@ -88,6 +90,7 @@ pub struct Instance {
     script_handler: Option<ScriptHandlerRef>,
     sql_handler: SqlQueryHandlerRef<Error>,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
+    promql_handler: Option<PromqlHandlerRef>,
 
     create_expr_factory: CreateExprFactoryRef,
 
@@ -121,6 +124,7 @@ impl Instance {
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             sql_handler: dist_instance.clone(),
             grpc_query_handler: dist_instance,
+            promql_handler: None,
             plugins: Default::default(),
         })
     }
@@ -162,6 +166,7 @@ impl Instance {
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             sql_handler: StandaloneSqlQueryHandler::arc(dn_instance.clone()),
             grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
+            promql_handler: Some(dn_instance.clone()),
             plugins: Default::default(),
         }
     }
@@ -174,6 +179,7 @@ impl Instance {
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
             sql_handler: dist_instance.clone(),
             grpc_query_handler: dist_instance,
+            promql_handler: None,
             plugins: Default::default(),
         }
     }
@@ -500,6 +506,20 @@ impl ScriptHandler for Instance {
         } else {
             server_error::NotSupportedSnafu {
                 feat: "Script execution in Frontend",
+            }
+            .fail()
+        }
+    }
+}
+
+#[async_trait]
+impl PromqlHandler for Instance {
+    async fn do_query(&self, query: &str) -> server_error::Result<Output> {
+        if let Some(promql_handler) = &self.promql_handler {
+            promql_handler.do_query(query).await
+        } else {
+            server_error::NotSupportedSnafu {
+                feat: "PromQL query in Frontend",
             }
             .fail()
         }

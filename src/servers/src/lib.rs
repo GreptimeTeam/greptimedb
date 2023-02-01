@@ -28,11 +28,11 @@ pub mod mysql;
 pub mod opentsdb;
 pub mod postgres;
 pub mod prometheus;
+pub mod promql;
 pub mod query_handler;
 pub mod server;
-pub mod tls;
-
 mod shutdown;
+pub mod tls;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]

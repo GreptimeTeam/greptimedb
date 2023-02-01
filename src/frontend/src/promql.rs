@@ -12,9 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! datanode metrics
+use serde::{Deserialize, Serialize};
 
-pub const METRIC_HANDLE_SQL_ELAPSED: &str = "datanode.handle_sql_elapsed";
-pub const METRIC_HANDLE_SCRIPTS_ELAPSED: &str = "datanode.handle_scripts_elapsed";
-pub const METRIC_RUN_SCRIPT_ELAPSED: &str = "datanode.run_script_elapsed";
-pub const METRIC_HANDLE_PROMQL_ELAPSED: &str = "datanode.handle_promql_elapsed";
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PromqlOptions {
+    pub enable: bool,
+    pub addr: String,
+}
+
+impl Default for PromqlOptions {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            addr: "127.0.0.1:4004".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PromqlOptions;
+
+    #[test]
+    fn test_prometheus_options() {
+        let default = PromqlOptions::default();
+        assert!(default.enable);
+        assert_eq!(default.addr, "127.0.0.1:4004".to_string());
+    }
+}
