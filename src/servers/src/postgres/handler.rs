@@ -200,8 +200,9 @@ fn encode_binary_value(value: &Value, builder: &mut BinaryDataRowEncoder) -> PgW
         Value::Float64(v) => builder.append_field(&v.0),
         Value::String(v) => builder.append_field(&v.as_utf8()),
         Value::Binary(v) => builder.append_field(&v.deref()),
-        Value::Date(v) => builder.append_field(&v.to_string()), // TOOD
-        Value::DateTime(v) => builder.append_field(&v.to_string()), //TODO
+        // TODO(sunng87): correct date/time types encoding
+        Value::Date(v) => builder.append_field(&v.to_string()),
+        Value::DateTime(v) => builder.append_field(&v.to_string()),
         Value::Timestamp(v) => {
             // convert timestamp to SystemTime
             if let Some(ts) = v.convert_to(TimeUnit::Microsecond) {
