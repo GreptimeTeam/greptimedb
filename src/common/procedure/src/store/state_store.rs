@@ -32,7 +32,7 @@ type KeyValueStream = Pin<Box<dyn Stream<Item = Result<KeyValue>> + Send>>;
 
 /// Storage layer for persisting key-value pairs.
 #[async_trait]
-trait StateStore: Send + Sync {
+pub(crate) trait StateStore: Send + Sync {
     /// Puts `key` and `value` into the store.
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
 
@@ -46,7 +46,7 @@ trait StateStore: Send + Sync {
 }
 
 /// Reference counted pointer to [StateStore].
-type StateStoreRef = Arc<dyn StateStore>;
+pub(crate) type StateStoreRef = Arc<dyn StateStore>;
 
 /// [StateStore] based on [ObjectStore].
 #[derive(Debug)]
