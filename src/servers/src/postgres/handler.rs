@@ -14,11 +14,13 @@
 
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_query::Output;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
+use common_time::timestamp::TimeUnit;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{Schema, SchemaRef};
 use futures::{future, stream, Stream, StreamExt};
@@ -28,7 +30,7 @@ use pgwire::api::results::{
     binary_query_response, text_query_response, BinaryDataRowEncoder, FieldInfo, Response, Tag,
     TextDataRowEncoder,
 };
-use pgwire::api::stmt::QueryParser;
+use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
@@ -148,7 +150,7 @@ fn schema_to_pg(origin: &Schema) -> Result<Vec<FieldInfo>> {
                 col.name.clone(),
                 None,
                 None,
-                type_translate(&col.data_type)?,
+                type_gt_to_pg(&col.data_type)?,
             ))
         })
         .collect::<Result<Vec<FieldInfo>>>()
@@ -198,9 +200,19 @@ fn encode_binary_value(value: &Value, builder: &mut BinaryDataRowEncoder) -> PgW
         Value::Float64(v) => builder.append_field(&v.0),
         Value::String(v) => builder.append_field(&v.as_utf8()),
         Value::Binary(v) => builder.append_field(&v.deref()),
-        Value::Date(v) => builder.append_field(&v.to_string()),
-        Value::DateTime(v) => builder.append_field(&v.to_string()),
-        Value::Timestamp(v) => builder.append_field(&v.to_iso8601_string()),
+        Value::Date(v) => builder.append_field(&v.to_string()), // TOOD
+        Value::DateTime(v) => builder.append_field(&v.to_string()), //TODO
+        Value::Timestamp(v) => {
+            // convert timestamp to SystemTime
+            if let Some(ts) = v.convert_to(TimeUnit::Microsecond) {
+                let sys_time = std::time::UNIX_EPOCH + Duration::from_micros(ts.value() as u64);
+                builder.append_field(&sys_time)
+            } else {
+                Err(PgWireError::ApiError(Box::new(Error::Internal {
+                    err_msg: format!("Failed to conver timestamp to postgres type {v:?}",),
+                })))
+            }
+        }
         Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
             err_msg: format!(
                 "cannot write value {:?} in postgres protocol: unimplemented",
@@ -210,7 +222,7 @@ fn encode_binary_value(value: &Value, builder: &mut BinaryDataRowEncoder) -> PgW
     }
 }
 
-fn type_translate(origin: &ConcreteDataType) -> Result<Type> {
+fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
     match origin {
         &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
         &ConcreteDataType::Boolean(_) => Ok(Type::BOOL),
@@ -232,13 +244,34 @@ fn type_translate(origin: &ConcreteDataType) -> Result<Type> {
     }
 }
 
+fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
+    // Note that we only support a small amount of pg data types
+    match origin {
+        &Type::BOOL => Ok(ConcreteDataType::boolean_datatype()),
+        &Type::CHAR => Ok(ConcreteDataType::int8_datatype()),
+        &Type::INT2 => Ok(ConcreteDataType::int16_datatype()),
+        &Type::INT4 => Ok(ConcreteDataType::int32_datatype()),
+        &Type::INT8 => Ok(ConcreteDataType::int64_datatype()),
+        &Type::VARCHAR | &Type::TEXT => Ok(ConcreteDataType::string_datatype()),
+        &Type::TIMESTAMP => Ok(ConcreteDataType::timestamp_datatype(
+            common_time::timestamp::TimeUnit::Millisecond,
+        )),
+        &Type::DATE => Ok(ConcreteDataType::date_datatype()),
+        &Type::TIME => Ok(ConcreteDataType::datetime_datatype()),
+        _ => error::InternalSnafu {
+            err_msg: format!("unimplemented datatype {origin:?}"),
+        }
+        .fail(),
+    }
+}
+
 #[derive(Default)]
 pub struct POCQueryParser;
 
 impl QueryParser for POCQueryParser {
     type Statement = (Statement, String);
 
-    fn parse_sql(&self, sql: &str) -> PgWireResult<Self::Statement> {
+    fn parse_sql(&self, sql: &str, types: &[Type]) -> PgWireResult<Self::Statement> {
         let mut stmts = ParserContext::create_with_dialect(sql, &GenericDialect {})
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         if stmts.len() != 1 {
@@ -248,13 +281,22 @@ impl QueryParser for POCQueryParser {
                 "invalid_prepared_statement_definition".to_owned(),
             ))))
         } else {
-            Ok((stmts.remove(0), sql.to_owned()))
+            let mut stmt = stmts.remove(0);
+            if let Statement::Query(qs) = &mut stmt {
+                for t in types {
+                    let gt_type =
+                        type_pg_to_gt(t).map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+                    qs.param_types_mut().push(gt_type);
+                }
+            }
+
+            Ok((stmt, sql.to_owned()))
         }
     }
 }
 
 fn parameter_to_string(portal: &Portal<(Statement, String)>, idx: usize) -> PgWireResult<String> {
-    let param_type = portal.parameter_types().get(idx).unwrap();
+    let param_type = portal.statement().parameter_types().get(idx).unwrap();
     match param_type {
         &Type::VARCHAR | &Type::TEXT => Ok(format!(
             "\"{}\"",
@@ -294,6 +336,9 @@ fn parameter_to_string(portal: &Portal<(Statement, String)>, idx: usize) -> PgWi
 //
 // - getting schema from
 // - setting parameters in
+//
+// Datafusion's LogicalPlan is a good candidate for SELECT. But we need to
+// confirm it's support for other SQL command like INSERT, UPDATE.
 #[async_trait]
 impl ExtendedQueryHandler for PostgresServerHandler {
     type Statement = (Statement, String);
@@ -317,7 +362,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let (_, sql) = portal.statement();
+        let (_, sql) = portal.statement().statement();
 
         // manually replace variables in prepared statement
         let mut sql = sql.to_owned();
@@ -325,7 +370,6 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             sql = sql.replace(&format!("${}", i + 1), &parameter_to_string(portal, i)?);
         }
 
-        dbg!(&sql);
         let output = self
             .query_handler
             .do_query(&sql, self.query_ctx.clone())
@@ -338,12 +382,12 @@ impl ExtendedQueryHandler for PostgresServerHandler {
     async fn do_describe<C>(
         &self,
         _client: &mut C,
-        statement: &Self::Statement,
+        statement: &StoredStatement<Self::Statement>,
     ) -> PgWireResult<Vec<FieldInfo>>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let (stmt, _) = statement;
+        let (stmt, _) = statement.statement();
         if let Some(schema) = self
             .query_handler
             .do_describe(stmt.clone(), self.query_ctx.clone())
