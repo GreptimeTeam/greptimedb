@@ -92,7 +92,7 @@ impl ProcedureStore {
         let mut procedure_key_value = None;
 
         // Scan all procedures.
-        let mut key_values = self.0.list("/").await?;
+        let mut key_values = self.0.walk_top_down("/").await?;
         while let Some((key, value)) = key_values.try_next().await? {
             let Some(curr_key) = ParsedKey::parse_str(&key) else {
                 logging::info!("Unknown key while loading procedures, key: {}", key);

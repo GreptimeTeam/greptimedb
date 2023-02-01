@@ -30,16 +30,16 @@ type KeyValue = (String, Vec<u8>);
 /// Stream that yields [KeyValue].
 type KeyValueStream = Pin<Box<dyn Stream<Item = Result<KeyValue>> + Send>>;
 
-/// Storage layer for persisting key-value pairs.
+/// Storage layer for persisting procedure's state.
 #[async_trait]
 pub(crate) trait StateStore: Send + Sync {
     /// Puts `key` and `value` into the store.
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
 
-    /// Returns the key-value pairs that have the same key `path`.
+    /// Returns the key-value pairs under `path` in top down way.
     ///
     /// The `path` must ends with `/`.
-    async fn list(&self, path: &str) -> Result<KeyValueStream>;
+    async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream>;
 
     /// Deletes key-value pairs by `keys`.
     async fn delete(&self, keys: &[String]) -> Result<()>;
@@ -68,7 +68,7 @@ impl StateStore for ObjectStateStore {
         object.write(value).await.context(PutStateSnafu { key })
     }
 
-    async fn list(&self, path: &str) -> Result<KeyValueStream> {
+    async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
         let path_string = path.to_string();
         let op = self.store.batch();
         let stream = op
@@ -121,7 +121,7 @@ mod tests {
         let state_store = ObjectStateStore::new(object_store);
 
         let data: Vec<_> = state_store
-            .list("/")
+            .walk_top_down("/")
             .await
             .unwrap()
             .try_collect()
@@ -134,7 +134,7 @@ mod tests {
         state_store.put("b/1", b"v3".to_vec()).await.unwrap();
 
         let data: Vec<_> = state_store
-            .list("/")
+            .walk_top_down("/")
             .await
             .unwrap()
             .try_collect()
@@ -150,7 +150,7 @@ mod tests {
         );
 
         let data: Vec<_> = state_store
-            .list("a/")
+            .walk_top_down("a/")
             .await
             .unwrap()
             .try_collect()
@@ -169,7 +169,7 @@ mod tests {
             .await
             .unwrap();
         let data: Vec<_> = state_store
-            .list("a/")
+            .walk_top_down("a/")
             .await
             .unwrap()
             .try_collect()
