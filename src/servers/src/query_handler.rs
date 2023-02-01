@@ -12,6 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! All query handler traits for various request protocols, like SQL or GRPC.
+//! Instance that wishes to support certain request protocol, just implement the corresponding
+//! trait, the Server will handle codec for you.
+//!
+//! Note:
+//! Query handlers are not confined to only handle read requests, they are expecting to handle
+//! write requests too. So the "query" here not might seem ambiguity. However, "query" has been
+//! used as some kind of "convention", it's the "Q" in "SQL". So we might better stick to the
+//! word "query".
+
 pub mod grpc;
 pub mod sql;
 
@@ -25,16 +35,6 @@ use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
 use crate::prometheus::Metrics;
-
-/// All query handler traits for various request protocols, like SQL or GRPC.
-/// Instance that wishes to support certain request protocol, just implement the corresponding
-/// trait, the Server will handle codec for you.
-///
-/// Note:
-/// Query handlers are not confined to only handle read requests, they are expecting to handle
-/// write requests too. So the "query" here not might seem ambiguity. However, "query" has been
-/// used as some kind of "convention", it's the "Q" in "SQL". So we might better stick to the
-/// word "query".
 
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;

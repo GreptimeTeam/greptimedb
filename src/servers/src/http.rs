@@ -406,8 +406,8 @@ impl HttpServer {
     pub fn make_app(&self) -> Router {
         let mut api = OpenApi {
             info: Info {
-                title: "Greptime DB HTTP API".to_string(),
-                description: Some("HTTP APIs to interact with Greptime DB".to_string()),
+                title: "GreptimeDB HTTP API".to_string(),
+                description: Some("HTTP APIs to interact with GreptimeDB".to_string()),
                 version: HTTP_API_VERSION.to_string(),
                 ..Info::default()
             },
