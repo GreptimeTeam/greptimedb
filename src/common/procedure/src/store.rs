@@ -27,7 +27,7 @@ use crate::{BoxedProcedure, ProcedureId};
 mod state_store;
 
 /// Serialized data of a procedure.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ProcedureMessage {
     /// Type name of the procedure. The procedure framework also use the type name to
     /// find a loader to load the procedure.
@@ -88,8 +88,8 @@ impl ProcedureStore {
     /// Load uncommitted procedures from the storage.
     async fn load_messages(&self) -> Result<HashMap<ProcedureId, ProcedureMessage>> {
         let mut messages = HashMap::new();
-        // Tracks the last key-value pair of an uncommitted procedure.
-        let mut procedure_key_value = None;
+        // Track the key-value pair by procedure id.
+        let mut procedure_key_values: HashMap<_, (ParsedKey, Vec<u8>)> = HashMap::new();
 
         // Scan all procedures.
         let mut key_values = self.0.walk_top_down("/").await?;
@@ -98,35 +98,25 @@ impl ProcedureStore {
                 logging::info!("Unknown key while loading procedures, key: {}", key);
                 continue;
             };
-            let Some((prev_key, prev_value)) = &procedure_key_value else {
-                // This is new procedure. We stores the key-value pair and check next
-                // key-value pair.
-                procedure_key_value = Some((curr_key, value));
-                continue;
-            };
-            if prev_key.procedure_id == curr_key.procedure_id && !curr_key.is_committed {
-                // The same procedure, update its value.
-                procedure_key_value = Some((curr_key, value));
-            } else if prev_key.procedure_id == curr_key.procedure_id {
-                // Skips the procedure if it is committed.
-                procedure_key_value = None;
+
+            if let Some(entry) = procedure_key_values.get_mut(&curr_key.procedure_id) {
+                if entry.0.step < curr_key.step {
+                    entry.0 = curr_key;
+                    entry.1 = value;
+                }
             } else {
-                // A new procedure, now we can load previous procedure.
-                let Some(message) = self.load_one_message(prev_key, prev_value) else {
+                procedure_key_values.insert(curr_key.procedure_id, (curr_key, value));
+            }
+        }
+
+        for (procedure_id, (parsed_key, value)) in procedure_key_values {
+            if !parsed_key.is_committed {
+                let Some(message) = self.load_one_message(&parsed_key, &value) else {
                     // We don't abort the loading process and just ignore errors to ensure all remaining
                     // procedures are loaded.
                     continue;
                 };
-                messages.insert(prev_key.procedure_id, message);
-
-                procedure_key_value = Some((curr_key, value));
-            }
-        }
-
-        // Load last procedure.
-        if let Some((last_key, last_value)) = &procedure_key_value {
-            if let Some(message) = self.load_one_message(last_key, last_value) {
-                messages.insert(last_key.procedure_id, message);
+                messages.insert(procedure_id, message);
             }
         }
 
@@ -156,7 +146,7 @@ impl fmt::Display for ParsedKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/{}.{}",
+            "{}/{:010}.{}",
             self.procedure_id,
             self.step,
             if self.is_committed { "commit" } else { "step" }
@@ -193,7 +183,16 @@ impl ParsedKey {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use object_store::services::fs::Builder;
+    use object_store::ObjectStore;
+    use tempdir::TempDir;
+
     use super::*;
+    use crate::store::state_store::ObjectStateStore;
+    use crate::{Context, LockKey, Procedure, Status};
 
     #[test]
     fn test_parsed_key() {
@@ -203,7 +202,7 @@ mod tests {
             step: 2,
             is_committed: false,
         };
-        assert_eq!(format!("{}/2.step", procedure_id), key.to_string());
+        assert_eq!(format!("{}/0000000002.step", procedure_id), key.to_string());
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
 
         let key = ParsedKey {
@@ -211,7 +210,10 @@ mod tests {
             step: 2,
             is_committed: true,
         };
-        assert_eq!(format!("{}/2.commit", procedure_id), key.to_string());
+        assert_eq!(
+            format!("{}/0000000002.commit", procedure_id),
+            key.to_string()
+        );
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
     }
 
@@ -226,18 +228,175 @@ mod tests {
         let input = format!("{}/", procedure_id);
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{}/3", procedure_id);
+        let input = format!("{}/0000000003", procedure_id);
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{}/3.", procedure_id);
+        let input = format!("{}/0000000003.", procedure_id);
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{}/3.other", procedure_id);
+        let input = format!("{}/0000000003.other", procedure_id);
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        assert!(ParsedKey::parse_str("12345/3.step").is_none());
+        assert!(ParsedKey::parse_str("12345/0000000003.step").is_none());
 
-        let input = format!("{}-3.commit", procedure_id);
+        let input = format!("{}-0000000003.commit", procedure_id);
         assert!(ParsedKey::parse_str(&input).is_none());
+    }
+
+    #[test]
+    fn test_procedure_message() {
+        let mut message = ProcedureMessage {
+            type_name: "TestMessage".to_string(),
+            data: "no parent id".to_string(),
+            parent_id: None,
+        };
+
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":null}"#
+        );
+
+        let procedure_id = ProcedureId::parse_str("9f805a1f-05f7-490c-9f91-bd56e3cc54c1").unwrap();
+        message.parent_id = Some(procedure_id);
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":"9f805a1f-05f7-490c-9f91-bd56e3cc54c1"}"#
+        );
+    }
+
+    struct MockProcedure {
+        data: String,
+    }
+
+    impl MockProcedure {
+        fn new(data: impl Into<String>) -> MockProcedure {
+            MockProcedure { data: data.into() }
+        }
+    }
+
+    #[async_trait]
+    impl Procedure for MockProcedure {
+        fn type_name(&self) -> &str {
+            "MockProcedure"
+        }
+
+        async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+            unimplemented!()
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(self.data.clone())
+        }
+
+        fn lock_key(&self) -> Option<LockKey> {
+            None
+        }
+    }
+
+    fn new_procedure_store(dir: &TempDir) -> ProcedureStore {
+        let store_dir = dir.path().to_str().unwrap();
+        let accessor = Builder::default().root(store_dir).build().unwrap();
+        let object_store = ObjectStore::new(accessor);
+        let state_store = ObjectStateStore::new(object_store);
+
+        ProcedureStore(Arc::new(state_store))
+    }
+
+    #[tokio::test]
+    async fn test_store_procedure() {
+        let dir = TempDir::new("store_procedure").unwrap();
+        let store = new_procedure_store(&dir);
+
+        let procedure_id = ProcedureId::random();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
+
+        store
+            .store_procedure(procedure_id, 0, &procedure, None)
+            .await
+            .unwrap();
+
+        let messages = store.load_messages().await.unwrap();
+        assert_eq!(1, messages.len());
+        let msg = messages.get(&procedure_id).unwrap();
+        let expect = ProcedureMessage {
+            type_name: "MockProcedure".to_string(),
+            data: "test store procedure".to_string(),
+            parent_id: None,
+        };
+        assert_eq!(expect, *msg);
+    }
+
+    #[tokio::test]
+    async fn test_commit_procedure() {
+        let dir = TempDir::new("store_procedure").unwrap();
+        let store = new_procedure_store(&dir);
+
+        let procedure_id = ProcedureId::random();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
+
+        store
+            .store_procedure(procedure_id, 0, &procedure, None)
+            .await
+            .unwrap();
+        store.commit_procedure(procedure_id, 1).await.unwrap();
+
+        let messages = store.load_messages().await.unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_messages() {
+        let dir = TempDir::new("store_procedure").unwrap();
+        let store = new_procedure_store(&dir);
+
+        // store 3 steps
+        let id0 = ProcedureId::random();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("id0-0"));
+        store
+            .store_procedure(id0, 0, &procedure, None)
+            .await
+            .unwrap();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("id0-1"));
+        store
+            .store_procedure(id0, 1, &procedure, None)
+            .await
+            .unwrap();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("id0-2"));
+        store
+            .store_procedure(id0, 2, &procedure, None)
+            .await
+            .unwrap();
+
+        // store 2 steps and then commit
+        let id1 = ProcedureId::random();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("id1-0"));
+        store
+            .store_procedure(id1, 0, &procedure, None)
+            .await
+            .unwrap();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("id1-1"));
+        store
+            .store_procedure(id1, 1, &procedure, None)
+            .await
+            .unwrap();
+        store.commit_procedure(id1, 2).await.unwrap();
+
+        // store 1 step
+        let id2 = ProcedureId::random();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("id2-0"));
+        store
+            .store_procedure(id2, 0, &procedure, None)
+            .await
+            .unwrap();
+
+        let messages = store.load_messages().await.unwrap();
+        assert_eq!(2, messages.len());
+
+        let msg = messages.get(&id0).unwrap();
+        assert_eq!("id0-2", msg.data);
+        let msg = messages.get(&id2).unwrap();
+        assert_eq!("id2-0", msg.data);
     }
 }

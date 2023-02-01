@@ -38,7 +38,9 @@ pub(crate) trait StateStore: Send + Sync {
 
     /// Returns the key-value pairs under `path` in top down way.
     ///
-    /// The `path` must ends with `/`.
+    /// # Note
+    /// - There is no guarantee about the order of the keys in the stream.
+    /// - The `path` must ends with `/`.
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream>;
 
     /// Deletes key-value pairs by `keys`.
@@ -50,13 +52,13 @@ pub(crate) type StateStoreRef = Arc<dyn StateStore>;
 
 /// [StateStore] based on [ObjectStore].
 #[derive(Debug)]
-struct ObjectStateStore {
+pub(crate) struct ObjectStateStore {
     store: ObjectStore,
 }
 
 impl ObjectStateStore {
     /// Returns a new [ObjectStateStore] with specific `store`.
-    fn new(store: ObjectStore) -> ObjectStateStore {
+    pub(crate) fn new(store: ObjectStore) -> ObjectStateStore {
         ObjectStateStore { store }
     }
 }
@@ -133,13 +135,14 @@ mod tests {
         state_store.put("a/2", b"v2".to_vec()).await.unwrap();
         state_store.put("b/1", b"v3".to_vec()).await.unwrap();
 
-        let data: Vec<_> = state_store
+        let mut data: Vec<_> = state_store
             .walk_top_down("/")
             .await
             .unwrap()
             .try_collect()
             .await
             .unwrap();
+        data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             vec![
                 ("a/1".to_string(), b"v1".to_vec()),
@@ -149,13 +152,14 @@ mod tests {
             data
         );
 
-        let data: Vec<_> = state_store
+        let mut data: Vec<_> = state_store
             .walk_top_down("a/")
             .await
             .unwrap()
             .try_collect()
             .await
             .unwrap();
+        data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             vec![
                 ("a/1".to_string(), b"v1".to_vec()),
@@ -168,13 +172,14 @@ mod tests {
             .delete(&["a/2".to_string(), "b/1".to_string()])
             .await
             .unwrap();
-        let data: Vec<_> = state_store
+        let mut data: Vec<_> = state_store
             .walk_top_down("a/")
             .await
             .unwrap()
             .try_collect()
             .await
             .unwrap();
+        data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(vec![("a/1".to_string(), b"v1".to_vec()),], data);
     }
 }
