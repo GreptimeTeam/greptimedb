@@ -29,16 +29,8 @@ use crate::error::{
 
 /// Convert an [`AlterExpr`] to an [`AlterTableRequest`]
 pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
-    let catalog_name = if expr.catalog_name.is_empty() {
-        None
-    } else {
-        Some(expr.catalog_name)
-    };
-    let schema_name = if expr.schema_name.is_empty() {
-        None
-    } else {
-        Some(expr.schema_name)
-    };
+    let catalog_name = expr.catalog_name;
+    let schema_name = expr.schema_name;
     let kind = expr.kind.context(MissingFieldSnafu { field: "kind" })?;
     match kind {
         Kind::AddColumns(add_columns) => {
@@ -219,8 +211,8 @@ mod tests {
         };
 
         let alter_request = alter_expr_to_request(expr).unwrap();
-        assert_eq!(None, alter_request.catalog_name);
-        assert_eq!(None, alter_request.schema_name);
+        assert_eq!(alter_request.catalog_name, "");
+        assert_eq!(alter_request.schema_name, "");
         assert_eq!("monitor".to_string(), alter_request.table_name);
         let add_column = match alter_request.alter_kind {
             AlterKind::AddColumns { mut columns } => columns.pop().unwrap(),
@@ -250,8 +242,8 @@ mod tests {
         };
 
         let alter_request = alter_expr_to_request(expr).unwrap();
-        assert_eq!(Some("test_catalog".to_string()), alter_request.catalog_name);
-        assert_eq!(Some("test_schema".to_string()), alter_request.schema_name);
+        assert_eq!(alter_request.catalog_name, "test_catalog");
+        assert_eq!(alter_request.schema_name, "test_schema");
         assert_eq!("monitor".to_string(), alter_request.table_name);
 
         let mut drop_names = match alter_request.alter_kind {

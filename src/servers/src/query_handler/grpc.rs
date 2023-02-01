@@ -14,10 +14,11 @@
 
 use std::sync::Arc;
 
-use api::v1::GreptimeRequest;
+use api::v1::greptime_request::Request as GreptimeRequest;
 use async_trait::async_trait;
 use common_error::prelude::*;
 use common_query::Output;
+use session::context::QueryContextRef;
 
 use crate::error::{self, Result};
 
@@ -28,7 +29,11 @@ pub type ServerGrpcQueryHandlerRef = GrpcQueryHandlerRef<error::Error>;
 pub trait GrpcQueryHandler {
     type Error: ErrorExt;
 
-    async fn do_query(&self, query: GreptimeRequest) -> std::result::Result<Output, Self::Error>;
+    async fn do_query(
+        &self,
+        query: GreptimeRequest,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, Self::Error>;
 }
 
 pub struct ServerGrpcQueryHandlerAdaptor<E>(GrpcQueryHandlerRef<E>);
@@ -46,9 +51,9 @@ where
 {
     type Error = error::Error;
 
-    async fn do_query(&self, query: GreptimeRequest) -> Result<Output> {
+    async fn do_query(&self, query: GreptimeRequest, ctx: QueryContextRef) -> Result<Output> {
         self.0
-            .do_query(query)
+            .do_query(query, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)

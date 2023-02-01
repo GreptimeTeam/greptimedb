@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use sqlparser::ast::ObjectName;
+
 /// DROP TABLE statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropTable {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
+    table_name: ObjectName,
 }
 
 impl DropTable {
     /// Creates a statement for `DROP TABLE`
-    pub fn new(catalog_name: String, schema_name: String, table_name: String) -> Self {
-        DropTable {
-            catalog_name,
-            schema_name,
-            table_name,
-        }
+    pub fn new(table_name: ObjectName) -> Self {
+        Self { table_name }
+    }
+
+    pub fn table_name(&self) -> &ObjectName {
+        &self.table_name
     }
 }

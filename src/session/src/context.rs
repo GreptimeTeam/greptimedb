@@ -12,23 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use arc_swap::ArcSwapOption;
-use common_telemetry::info;
+use arc_swap::ArcSwap;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_telemetry::debug;
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
 pub struct QueryContext {
-    current_catalog: ArcSwapOption<String>,
-    current_schema: ArcSwapOption<String>,
+    current_catalog: ArcSwap<String>,
+    current_schema: ArcSwap<String>,
 }
 
 impl Default for QueryContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Display for QueryContext {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "QueryContext{{catalog: {}, schema: {}}}",
+            self.current_catalog(),
+            self.current_schema()
+        )
     }
 }
 
@@ -39,39 +52,37 @@ impl QueryContext {
 
     pub fn new() -> Self {
         Self {
-            current_catalog: ArcSwapOption::new(None),
-            current_schema: ArcSwapOption::new(None),
+            current_catalog: ArcSwap::new(Arc::new(DEFAULT_CATALOG_NAME.to_string())),
+            current_schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.to_string())),
         }
     }
 
-    pub fn with(catalog: String, schema: String) -> Self {
+    pub fn with(catalog: &str, schema: &str) -> Self {
         Self {
-            current_catalog: ArcSwapOption::new(Some(Arc::new(catalog))),
-            current_schema: ArcSwapOption::new(Some(Arc::new(schema))),
+            current_catalog: ArcSwap::new(Arc::new(catalog.to_string())),
+            current_schema: ArcSwap::new(Arc::new(schema.to_string())),
         }
     }
 
-    pub fn current_schema(&self) -> Option<String> {
-        self.current_schema.load().as_deref().cloned()
+    pub fn current_schema(&self) -> String {
+        self.current_schema.load().as_ref().clone()
     }
 
-    pub fn current_catalog(&self) -> Option<String> {
-        self.current_catalog.load().as_deref().cloned()
+    pub fn current_catalog(&self) -> String {
+        self.current_catalog.load().as_ref().clone()
     }
 
     pub fn set_current_schema(&self, schema: &str) {
-        let last = self.current_schema.swap(Some(Arc::new(schema.to_string())));
-        info!(
+        let last = self.current_schema.swap(Arc::new(schema.to_string()));
+        debug!(
             "set new session default schema: {:?}, swap old: {:?}",
             schema, last
         )
     }
 
     pub fn set_current_catalog(&self, catalog: &str) {
-        let last = self
-            .current_catalog
-            .swap(Some(Arc::new(catalog.to_string())));
-        info!(
+        let last = self.current_catalog.swap(Arc::new(catalog.to_string()));
+        debug!(
             "set new session default catalog: {:?}, swap old: {:?}",
             catalog, last
         )

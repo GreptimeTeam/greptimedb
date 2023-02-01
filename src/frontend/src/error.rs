@@ -20,6 +20,12 @@ use store_api::storage::RegionId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("{source}"))]
+    External {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to request Datanode, source: {}", source))]
     RequestDatanode {
         #[snafu(backtrace)]
@@ -401,6 +407,7 @@ impl ErrorExt for Error {
             Error::InvokeDatanode { source } => source.status_code(),
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
             Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+            Error::External { source } => source.status_code(),
             Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
                 source.status_code()
             }

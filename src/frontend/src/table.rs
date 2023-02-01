@@ -20,7 +20,6 @@ use async_trait::async_trait;
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use catalog::remote::KvBackendRef;
 use client::Database;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::prelude::BoxedError;
 use common_query::error::Result as QueryResult;
 use common_query::logical_plan::Expr;
@@ -117,15 +116,16 @@ impl Table for DistTable {
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
 
+        let table_name = &self.table_name;
         let mut partition_execs = Vec::with_capacity(datanodes.len());
         for (datanode, _regions) in datanodes.iter() {
             let client = self.datanode_clients.get_client(datanode).await;
-            let db = Database::new(&self.table_name.schema_name, client);
+            let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
             let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 
             // TODO(LFC): Pass in "regions" when Datanode supports multi regions for a table.
             partition_execs.push(Arc::new(PartitionExec {
-                table_name: self.table_name.clone(),
+                table_name: table_name.clone(),
                 datanode_instance,
                 projection: projection.cloned(),
                 filters: filters.to_vec(),
@@ -258,10 +258,8 @@ impl DistTable {
             }
         );
         for datanode in leaders {
-            let db = Database::new(
-                DEFAULT_CATALOG_NAME,
-                self.datanode_clients.get_client(&datanode).await,
-            );
+            let client = self.datanode_clients.get_client(&datanode).await;
+            let db = Database::with_client(client);
             debug!("Sending {:?} to {:?}", expr, db);
             let result = db
                 .alter(expr.clone())
@@ -405,6 +403,7 @@ mod test {
     use partition::range::RangePartitionRule;
     use partition::route::TableRoutes;
     use partition::PartitionRuleRef;
+    use session::context::QueryContext;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
     use store_api::storage::RegionNumber;
@@ -921,13 +920,15 @@ mod test {
             },
         ];
         let request = InsertRequest {
-            schema_name: table_name.schema_name.clone(),
             table_name: table_name.table_name.clone(),
             columns,
             row_count,
             region_number: 0,
         };
-        dn_instance.handle_insert(request).await.unwrap();
+        dn_instance
+            .handle_insert(request, QueryContext::arc())
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

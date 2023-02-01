@@ -1,31 +1,31 @@
-CREATE SCHEMA test_schema;
+CREATE SCHEMA test_public_schema;
 
-SHOW DATABASES;
+CREATE SCHEMA test_public_schema;
 
-CREATE TABLE test_schema.hello(i BIGINT TIME INDEX);
+SHOW DATABASES LIKE '%public%';
 
-DROP TABLE test_schema.hello;
+USE test_public_schema;
 
-DROP SCHEMA test_schema;
+CREATE TABLE hello(i BIGINT TIME INDEX);
 
-CREATE SCHEMA test_schema;
+DROP TABLE hello;
 
-CREATE TABLE test_schema.hello(i BIGINT TIME INDEX);
+CREATE TABLE hello(i BIGINT TIME INDEX);
 
-INSERT INTO test_schema.hello VALUES (2), (3), (4);
+INSERT INTO hello VALUES (2), (3), (4);
 
-SELECT * FROM test_schema.hello;
+SELECT * FROM hello;
 
 SHOW TABLES;
 
-SHOW TABLES FROM test_schema;
+DROP TABLE hello;
 
-DROP TABLE test_schema.hello;
+DROP TABLE hello;
 
-DROP TABLE test_schema.hello;
+SHOW TABLES FROM test_public_schema;
 
-SHOW TABLES FROM test_schema;
+SHOW TABLES FROM public;
 
-DROP SCHEMA test_schema;
+DROP SCHEMA test_public_schema;
 
-SELECT * FROM test_schema.hello;
+SELECT * FROM test_public_schema.hello;
