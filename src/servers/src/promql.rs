@@ -22,13 +22,14 @@ use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{Query, State};
 use axum::{routing, BoxError, Json, Router};
+use common_error::prelude::ErrorExt;
 use common_query::Output;
-use common_runtime::Runtime;
+use common_recordbatch::RecordBatches;
 use common_telemetry::info;
 use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Mutex};
 use tower::timeout::TimeoutLayer;
@@ -37,10 +38,9 @@ use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
-use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
+use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartHttpSnafu};
 use crate::http::authorize::HttpAuth;
-use crate::http::JsonResponse;
-use crate::server::{BaseTcpServer, Server};
+use crate::server::Server;
 
 pub const PROMQL_API_VERSION: &str = "v1";
 
@@ -154,12 +154,89 @@ impl Server for PromqlServer {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct PromqlSeries {
+    metric: HashMap<String, String>,
+    values: Vec<(i64, String)>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct PromqlData {
+    result_type: String,
+    data: Vec<PromqlSeries>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PromqlJsonResponse {
     status: String,
-    data: HashMap<(), ()>,
+    data: PromqlData,
     error: Option<String>,
     error_type: Option<String>,
     warnings: Option<Vec<String>>,
+}
+
+impl PromqlJsonResponse {
+    pub fn error<S1, S2>(error_type: S1, reason: S2) -> Json<Self>
+    where
+        S1: Into<String>,
+        S2: Into<String>,
+    {
+        Json(PromqlJsonResponse {
+            status: "error".to_string(),
+            data: PromqlData::default(),
+            error: Some(reason.into()),
+            error_type: Some(error_type.into()),
+            warnings: None,
+        })
+    }
+
+    pub fn success(data: PromqlData) -> Json<Self> {
+        Json(PromqlJsonResponse {
+            status: "success".to_string(),
+            data,
+            error: None,
+            error_type: None,
+            warnings: None,
+        })
+    }
+
+    /// Convert from `Result<Output>`
+    pub async fn from_query_result(result: Result<Output>) -> Json<Self> {
+        match result {
+            Ok(Output::RecordBatches(batches)) => {
+                Self::success(Self::record_batches_to_data(batches).unwrap())
+            }
+            Ok(Output::Stream(stream)) => {
+                let record_batches = RecordBatches::try_collect(stream).await.unwrap();
+                Self::success(Self::record_batches_to_data(record_batches).unwrap())
+            }
+            Ok(Output::AffectedRows(_)) => Self::error(
+                "unexpected result",
+                "expected data result, but got affected rows",
+            ),
+            Err(err) => Self::error(err.status_code().to_string(), err.to_string()),
+        }
+    }
+
+    fn record_batches_to_data(batches: RecordBatches) -> Result<PromqlData> {
+        info!("schema: {:?}", batches.schema());
+        for batch in batches.iter() {
+            for row in batch.rows() {
+                info!("row: {row:?}",);
+            }
+        }
+
+        let data = PromqlData {
+            result_type: "matrix".to_string(),
+            data: vec![PromqlSeries {
+                metric: vec![("__name__".to_string(), "foo".to_string())]
+                    .into_iter()
+                    .collect(),
+                values: vec![(1, "123.45".to_string())],
+            }],
+        };
+
+        Ok(data)
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -171,16 +248,13 @@ pub struct InstantQuery {
 
 #[axum_macros::debug_handler]
 pub async fn instant_query(
-    State(handler): State<PromqlHandlerRef>,
-    Query(params): Query<InstantQuery>,
+    State(_handler): State<PromqlHandlerRef>,
+    Query(_params): Query<InstantQuery>,
 ) -> Json<PromqlJsonResponse> {
-    Json(PromqlJsonResponse {
-        status: "error".to_string(),
-        data: HashMap::new(),
-        error: Some("not implemented".to_string()),
-        error_type: Some("not implemented".to_string()),
-        warnings: None,
-    })
+    PromqlJsonResponse::error(
+        "not implemented",
+        "instant query api `/query` is not implemented. Use `/range_query` instead.",
+    )
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -196,23 +270,16 @@ pub struct RangeQuery {
 pub async fn range_query(
     State(handler): State<PromqlHandlerRef>,
     Query(params): Query<RangeQuery>,
-) -> Json<JsonResponse> {
+) -> Json<PromqlJsonResponse> {
     let result = handler.do_query(&params.query).await;
-
-    // let request = decode_remote_read_request(body).await?;
-
-    // handler
-    //     .read(params.db.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME), request)
-    //     .await
-
-    todo!()
+    PromqlJsonResponse::from_query_result(result).await
 }
 
 /// handle error middleware
 async fn handle_error(err: BoxError) -> Json<PromqlJsonResponse> {
     Json(PromqlJsonResponse {
         status: "error".to_string(),
-        data: HashMap::new(),
+        data: PromqlData::default(),
         error: Some(format!("Unhandled internal error: {err}")),
         error_type: Some("internal".to_string()),
         warnings: None,
