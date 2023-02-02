@@ -355,6 +355,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     .into_iter()
                     .map(|f| f.name())
                     .collect::<HashSet<_>>();
+                // remove "without"-ed fields
                 for label in labels {
                     ensure!(
                         // ensure this field was existed
@@ -369,6 +370,14 @@ impl<S: ContextProvider> PromPlanner<S> {
                         }
                     );
                 }
+                // remove time index and value fields
+                if let Some(time_index) = &self.ctx.time_index_column {
+                    all_fields.remove(time_index);
+                }
+                for value in &self.ctx.value_columns {
+                    all_fields.remove(value);
+                }
+                // collect remaining fields and convert to col expr
                 let exprs = all_fields
                     .into_iter()
                     .map(|c| DfExpr::Column(Column::from(c)))
