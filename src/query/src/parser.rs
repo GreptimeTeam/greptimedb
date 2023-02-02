@@ -18,8 +18,8 @@ use common_error::ext::PlainError;
 use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
 use common_telemetry::timer;
-use promql_parser::parser::{EvalStmt, };
-use snafu::{ ResultExt};
+use promql_parser::parser::EvalStmt;
+use snafu::ResultExt;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
@@ -58,12 +58,7 @@ impl QueryLanguageParser {
         let _timer = timer!(METRIC_PARSE_PROMQL_ELAPSED);
 
         let prom_expr = promql_parser::parser::parse(promql)
-            .map_err(|msg| {
-                BoxedError::new(PlainError::new(
-                    msg,
-                    StatusCode::InvalidArguments,
-                ))
-            })
+            .map_err(|msg| BoxedError::new(PlainError::new(msg, StatusCode::InvalidArguments)))
             .context(QueryParseSnafu { query: promql })?;
 
         let eval_stmt = EvalStmt {

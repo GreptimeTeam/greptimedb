@@ -352,7 +352,7 @@ impl<S: ContextProvider> PromPlanner<S> {
             AggModifier::Without(labels) => {
                 let mut all_fields = input_schema
                     .fields()
-                    .into_iter()
+                    .iter()
                     .map(|f| f.name())
                     .collect::<HashSet<_>>();
                 // remove "without"-ed fields
