@@ -73,6 +73,9 @@ impl StateStore for ObjectStateStore {
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
         let path_string = path.to_string();
         let op = self.store.batch();
+        // Note that there is no guarantee about the order between files and dirs
+        // at the same level.
+        // See https://docs.rs/opendal/0.25.2/opendal/raw/struct.TopDownWalker.html#note
         let stream = op
             .walk_top_down(path)
             .context(ListStateSnafu { path })?
