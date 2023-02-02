@@ -490,7 +490,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     async fn alter_table(&self, _ctx: &EngineContext, req: AlterTableRequest) -> Result<TableRef> {
         let catalog_name = &req.catalog_name;
         let schema_name = &req.schema_name;
-        let table_name = &req.table_name.clone();
+        let table_name = &req.table_name;
 
         if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
             let table_ref = TableReference {
