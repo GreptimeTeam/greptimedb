@@ -16,6 +16,8 @@
 
 pub mod error;
 mod procedure;
+// TODO(yingwen): Remove this attribute once ProcedureManager is implemented.
+#[allow(dead_code)]
 mod store;
 
 pub use crate::error::{Error, Result};

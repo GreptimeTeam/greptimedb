@@ -202,7 +202,7 @@ mod tests {
             step: 2,
             is_committed: false,
         };
-        assert_eq!(format!("{}/0000000002.step", procedure_id), key.to_string());
+        assert_eq!(format!("{procedure_id}/0000000002.step"), key.to_string());
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
 
         let key = ParsedKey {
@@ -210,10 +210,7 @@ mod tests {
             step: 2,
             is_committed: true,
         };
-        assert_eq!(
-            format!("{}/0000000002.commit", procedure_id),
-            key.to_string()
-        );
+        assert_eq!(format!("{procedure_id}/0000000002.commit"), key.to_string());
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
     }
 
@@ -222,24 +219,24 @@ mod tests {
         assert!(ParsedKey::parse_str("").is_none());
 
         let procedure_id = ProcedureId::random();
-        let input = format!("{}", procedure_id);
+        let input = format!("{procedure_id}");
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{}/", procedure_id);
+        let input = format!("{procedure_id}/");
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{}/0000000003", procedure_id);
+        let input = format!("{procedure_id}/0000000003");
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{}/0000000003.", procedure_id);
+        let input = format!("{procedure_id}/0000000003.");
         assert!(ParsedKey::parse_str(&input).is_none());
 
-        let input = format!("{}/0000000003.other", procedure_id);
+        let input = format!("{procedure_id}/0000000003.other");
         assert!(ParsedKey::parse_str(&input).is_none());
 
         assert!(ParsedKey::parse_str("12345/0000000003.step").is_none());
 
-        let input = format!("{}-0000000003.commit", procedure_id);
+        let input = format!("{procedure_id}-0000000003.commit");
         assert!(ParsedKey::parse_str(&input).is_none());
     }
 

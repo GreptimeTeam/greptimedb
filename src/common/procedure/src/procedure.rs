@@ -248,7 +248,7 @@ mod tests {
     fn test_procedure_id_serialization() {
         let id = ProcedureId::random();
         let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(format!("\"{}\"", id.to_string()), json);
+        assert_eq!(format!("\"{id}\""), json);
 
         let parsed = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
