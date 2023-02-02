@@ -688,7 +688,7 @@ struct FunctionArgs {
 
 #[cfg(test)]
 mod test {
-    use std::time::UNIX_EPOCH;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use catalog::local::MemoryCatalogManager;
     use catalog::{CatalogManager, RegisterTableRequest};
@@ -696,7 +696,10 @@ mod test {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::label::Matcher;
-    use promql_parser::parser::ValueType;
+    use promql_parser::parser::{
+        BinModifier, FunctionArgs as PromFunctionArgs, ValueType, VectorMatchCardinality,
+        VectorMatchModifier,
+    };
     use query::query_engine::QueryEngineState;
     use query::DfContextProviderAdapter;
     use session::context::QueryContext;
@@ -787,25 +790,29 @@ mod test {
                 variadic: false,
                 return_type: ValueType::Vector,
             },
-            args: vec![Box::new(PromExpr::VectorSelector(VectorSelector {
-                name: Some("some_metric".to_owned()),
-                offset: None,
-                at: None,
-                label_matchers: Matchers {
-                    matchers: vec![
-                        Matcher {
-                            op: MatchOp::NotEqual,
-                            name: "tag_0".to_string(),
-                            value: "bar".to_string(),
-                        },
-                        Matcher {
-                            op: MatchOp::Equal,
-                            name: METRIC_NAME.to_string(),
-                            value: "some_metric".to_string(),
-                        },
-                    ],
-                },
-            }))],
+            args: PromFunctionArgs {
+                args: vec![Box::new(PromExpr::VectorSelector(VectorSelector {
+                    name: Some("some_metric".to_owned()),
+                    offset: None,
+                    at: None,
+                    label_matchers: Matchers {
+                        matchers: vec![
+                            Matcher {
+                                op: MatchOp::NotEqual,
+                                name: "tag_0".to_string(),
+                                value: "bar".to_string(),
+                            },
+                            Matcher {
+                                op: MatchOp::Equal,
+                                name: METRIC_NAME.to_string(),
+                                value: "some_metric".to_string(),
+                            },
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
+                }))],
+            },
         });
         let eval_stmt = EvalStmt {
             expr: prom_expr,
@@ -1021,11 +1028,13 @@ mod test {
                             name: METRIC_NAME.to_string(),
                             value: "some_metric".to_string(),
                         },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             })),
             param: None,
-            grouping: vec![String::from("tag_1")],
+            grouping: AggModifier::By(vec![String::from("tag_1")].into_iter().collect()),
         });
         let mut eval_stmt = EvalStmt {
             expr: prom_expr,
@@ -1053,8 +1062,8 @@ mod test {
         );
 
         // test group without
-        if let PromExpr::Aggregate(AggregateExpr { without, .. }) = &mut eval_stmt.expr {
-            *without = true;
+        if let PromExpr::Aggregate(AggregateExpr { grouping, .. }) = &mut eval_stmt.expr {
+            *grouping = AggModifier::Without(vec![String::from("tag_1")].into_iter().collect());
         }
         let context_provider = build_test_context_provider("some_metric".to_string(), 2, 2).await;
         let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
@@ -1177,7 +1186,9 @@ mod test {
                             name: METRIC_NAME.to_string(),
                             value: "some_metric".to_string(),
                         },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             })),
             op: token::T_ADD,
@@ -1197,10 +1208,16 @@ mod test {
                             name: METRIC_NAME.to_string(),
                             value: "some_metric".to_string(),
                         },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             })),
-            matching: None,
+            matching: BinModifier {
+                card: VectorMatchCardinality::OneToOne,
+                matching: VectorMatchModifier::Ignoring(HashSet::new()),
+                return_bool: false,
+            },
         });
 
         let eval_stmt = EvalStmt {
@@ -1254,10 +1271,16 @@ mod test {
                             name: METRIC_NAME.to_string(),
                             value: "some_metric".to_string(),
                         },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             })),
-            matching: None,
+            matching: BinModifier {
+                card: VectorMatchCardinality::OneToOne,
+                matching: VectorMatchModifier::Ignoring(HashSet::new()),
+                return_bool: false,
+            },
         });
 
         let eval_stmt = EvalStmt {
@@ -1290,7 +1313,11 @@ mod test {
             lhs: Box::new(PromExpr::NumberLiteral(NumberLiteral { val: 1.0 })),
             op: token::T_ADD,
             rhs: Box::new(PromExpr::NumberLiteral(NumberLiteral { val: 1.0 })),
-            matching: None,
+            matching: BinModifier {
+                card: VectorMatchCardinality::OneToOne,
+                matching: VectorMatchModifier::Ignoring(HashSet::new()),
+                return_bool: false,
+            },
         });
 
         let eval_stmt = EvalStmt {
