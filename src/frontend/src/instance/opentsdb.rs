@@ -17,6 +17,7 @@ use common_error::prelude::BoxedError;
 use servers::error as server_error;
 use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;
+use session::context::QueryContext;
 use snafu::prelude::*;
 
 use crate::instance::Instance;
@@ -25,7 +26,7 @@ use crate::instance::Instance;
 impl OpentsdbProtocolHandler for Instance {
     async fn exec(&self, data_point: &DataPoint) -> server_error::Result<()> {
         let request = data_point.as_grpc_insert();
-        self.handle_insert(request)
+        self.handle_insert(request, QueryContext::arc())
             .await
             .map_err(BoxedError::new)
             .with_context(|_| server_error::ExecuteQuerySnafu {

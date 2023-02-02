@@ -6,4 +6,5 @@ license.workspace = true
 
 [dependencies]
 arc-swap = "1.5"
+common-catalog = { path = "../common/catalog" }
 common-telemetry = { path = "../common/telemetry" }

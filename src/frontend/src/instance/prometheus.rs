@@ -15,7 +15,7 @@
 use api::prometheus::remote::read_request::ResponseType;
 use api::prometheus::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
 use api::v1::greptime_request::Request;
-use api::v1::{query_request, GreptimeRequest, QueryRequest};
+use api::v1::{query_request, QueryRequest};
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_query::Output;
@@ -26,6 +26,7 @@ use servers::error::{self, Result as ServerResult};
 use servers::prometheus::{self, Metrics};
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::{PrometheusProtocolHandler, PrometheusResponse};
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
 use crate::instance::Instance;
@@ -74,26 +75,24 @@ async fn to_query_result(table_name: &str, output: Output) -> ServerResult<Query
 impl Instance {
     async fn handle_remote_queries(
         &self,
-        db: &str,
+        ctx: QueryContextRef,
         queries: &[Query],
     ) -> ServerResult<Vec<(String, Output)>> {
         let mut results = Vec::with_capacity(queries.len());
 
         for query in queries {
-            let (table_name, sql) = prometheus::query_to_sql(db, query)?;
+            let (table_name, sql) = prometheus::query_to_sql(query)?;
             logging::debug!(
                 "prometheus remote read, table: {}, sql: {}",
                 table_name,
                 sql
             );
 
-            let query = GreptimeRequest {
-                request: Some(Request::Query(QueryRequest {
-                    query: Some(query_request::Query::Sql(sql.to_string())),
-                })),
-            };
+            let query = Request::Query(QueryRequest {
+                query: Some(query_request::Query::Sql(sql.to_string())),
+            });
             let output = self
-                .do_query(query)
+                .do_query(query, ctx.clone())
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)?;
@@ -106,22 +105,24 @@ impl Instance {
 
 #[async_trait]
 impl PrometheusProtocolHandler for Instance {
-    async fn write(&self, database: &str, request: WriteRequest) -> ServerResult<()> {
-        let requests = prometheus::to_grpc_insert_requests(database, request.clone())?;
-        self.handle_inserts(requests)
+    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> ServerResult<()> {
+        let requests = prometheus::to_grpc_insert_requests(request.clone())?;
+        self.handle_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
         Ok(())
     }
 
-    async fn read(&self, database: &str, request: ReadRequest) -> ServerResult<PrometheusResponse> {
+    async fn read(
+        &self,
+        request: ReadRequest,
+        ctx: QueryContextRef,
+    ) -> ServerResult<PrometheusResponse> {
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
-        let results = self
-            .handle_remote_queries(database, &request.queries)
-            .await?;
+        let results = self.handle_remote_queries(ctx, &request.queries).await?;
 
         match response_type {
             ResponseType::Samples => {
@@ -159,6 +160,7 @@ mod tests {
 
     use api::prometheus::remote::label_matcher::Type as MatcherType;
     use api::prometheus::remote::{Label, LabelMatcher, Sample};
+    use common_catalog::consts::DEFAULT_CATALOG_NAME;
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
@@ -190,18 +192,19 @@ mod tests {
         };
 
         let db = "prometheus";
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
 
         assert!(SqlQueryHandler::do_query(
             instance.as_ref(),
             "CREATE DATABASE IF NOT EXISTS prometheus",
-            QueryContext::arc()
+            ctx.clone(),
         )
         .await
         .get(0)
         .unwrap()
         .is_ok());
 
-        instance.write(db, write_request).await.unwrap();
+        instance.write(write_request, ctx.clone()).await.unwrap();
 
         let read_request = ReadRequest {
             queries: vec![
@@ -236,7 +239,7 @@ mod tests {
             ..Default::default()
         };
 
-        let resp = instance.read(db, read_request).await.unwrap();
+        let resp = instance.read(read_request, ctx).await.unwrap();
         assert_eq!(resp.content_type, "application/x-protobuf");
         assert_eq!(resp.content_encoding, "snappy");
         let body = prometheus::snappy_decompress(&resp.body).unwrap();

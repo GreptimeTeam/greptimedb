@@ -14,7 +14,6 @@
 
 use api::v1::column::SemanticType;
 use api::v1::{column, Column, ColumnDataType, InsertRequest as GrpcInsertRequest};
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 
 use crate::error::{self, Result};
 
@@ -126,7 +125,6 @@ impl DataPoint {
     }
 
     pub fn as_grpc_insert(&self) -> GrpcInsertRequest {
-        let schema_name = DEFAULT_SCHEMA_NAME.to_string();
         let mut columns = Vec::with_capacity(2 + self.tags.len());
 
         let ts_column = Column {
@@ -167,7 +165,6 @@ impl DataPoint {
         }
 
         GrpcInsertRequest {
-            schema_name,
             table_name: self.metric.clone(),
             region_number: 0,
             columns,

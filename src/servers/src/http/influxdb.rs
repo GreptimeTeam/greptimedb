@@ -13,11 +13,13 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::writer::Precision;
+use session::context::QueryContext;
 
 use crate::error::{Result, TimePrecisionSnafu};
 use crate::influxdb::InfluxdbRequest;
@@ -32,17 +34,15 @@ pub async fn influxdb_write(
     let db = params
         .remove("db")
         .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
+    let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, &db));
 
     let precision = params
         .get("precision")
         .map(|val| parse_time_precision(val))
         .transpose()?;
-    let request = InfluxdbRequest {
-        precision,
-        lines,
-        db,
-    };
-    handler.exec(&request).await?;
+    let request = InfluxdbRequest { precision, lines };
+
+    handler.exec(&request, ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 

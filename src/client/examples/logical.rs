@@ -65,13 +65,12 @@ async fn run() {
         region_ids: vec![0],
     };
 
-    let db = Database::new("create table", client.clone());
+    let db = Database::with_client(client);
     let result = db.create(create_table_expr).await.unwrap();
     event!(Level::INFO, "create table result: {:#?}", result);
 
     let logical = mock_logical_plan();
     event!(Level::INFO, "plan size: {:#?}", logical.len());
-    let db = Database::new("greptime", client);
     let result = db.logical_plan(logical).await.unwrap();
 
     event!(Level::INFO, "result: {:#?}", result);

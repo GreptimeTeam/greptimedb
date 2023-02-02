@@ -17,7 +17,6 @@ use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::info;
 use snafu::ResultExt;
-use sql::statements::drop::DropTable;
 use table::engine::{EngineContext, TableReference};
 use table::requests::DropTableRequest;
 
@@ -59,13 +58,5 @@ impl SqlHandler {
         info!("Successfully dropped table: {}", table_full_name);
 
         Ok(Output::AffectedRows(1))
-    }
-
-    pub fn drop_table_to_request(&self, drop_table: DropTable) -> DropTableRequest {
-        DropTableRequest {
-            catalog_name: drop_table.catalog_name,
-            schema_name: drop_table.schema_name,
-            table_name: drop_table.table_name,
-        }
     }
 }

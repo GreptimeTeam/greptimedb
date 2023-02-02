@@ -12,15 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::prometheus::remote::{ReadRequest, WriteRequest};
 use axum::extract::{Query, RawBody, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use hyper::Body;
 use prost::Message;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use session::context::QueryContext;
 use snafu::prelude::*;
 
 use crate::error::{self, Result};
@@ -48,10 +51,13 @@ pub async fn remote_write(
 ) -> Result<(StatusCode, ())> {
     let request = decode_remote_write_request(body).await?;
 
-    handler
-        .write(params.db.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME), request)
-        .await?;
+    let ctx = if let Some(db) = params.db {
+        Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, &db))
+    } else {
+        QueryContext::arc()
+    };
 
+    handler.write(request, ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
 }
 
@@ -76,9 +82,13 @@ pub async fn remote_read(
 ) -> Result<PrometheusResponse> {
     let request = decode_remote_read_request(body).await?;
 
-    handler
-        .read(params.db.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME), request)
-        .await
+    let ctx = if let Some(db) = params.db {
+        Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, &db))
+    } else {
+        QueryContext::arc()
+    };
+
+    handler.read(request, ctx).await
 }
 
 async fn decode_remote_write_request(body: Body) -> Result<WriteRequest> {

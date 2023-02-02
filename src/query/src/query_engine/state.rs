@@ -35,6 +35,7 @@ use datafusion_optimizer::optimizer::Optimizer;
 use datafusion_sql::planner::ContextProvider;
 use datatypes::arrow::datatypes::DataType;
 use promql::extension_plan::PromExtensionPlanner;
+use session::context::QueryContextRef;
 
 use crate::datafusion::DfCatalogListAdapter;
 use crate::optimizer::TypeConversionRule;
@@ -115,15 +116,19 @@ impl QueryEngineState {
 
     pub(crate) fn get_table_provider(
         &self,
-        schema: Option<&str>,
+        query_ctx: QueryContextRef,
         name: TableReference,
     ) -> DfResult<Arc<dyn TableSource>> {
-        let name = if let (Some(schema), TableReference::Bare { table }) = (schema, name) {
-            TableReference::Partial { schema, table }
+        let state = self.df_context.state();
+        if let TableReference::Bare { table } = name {
+            let name = TableReference::Partial {
+                schema: &query_ctx.current_schema(),
+                table,
+            };
+            state.get_table_provider(name)
         } else {
-            name
-        };
-        self.df_context.state().get_table_provider(name)
+            state.get_table_provider(name)
+        }
     }
 
     pub(crate) fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {

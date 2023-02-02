@@ -1,9 +1,13 @@
-CREATE TABLE test_add_col(i INTEGER, j BIGINT TIME INDEX);
+CREATE SCHEMA test_add_col;
 
-INSERT INTO test_add_col VALUES (1, 1), (2, 2);
+USE test_add_col;
 
-ALTER TABLE test_add_col ADD COLUMN k INTEGER;
+CREATE TABLE test(i INTEGER, j BIGINT TIME INDEX);
 
-SELECT * FROM test_add_col;
+INSERT INTO test VALUES (1, 1), (2, 2);
 
-DROP TABLE test_add_col;
+ALTER TABLE test ADD COLUMN k INTEGER;
+
+SELECT * FROM test;
+
+DROP TABLE test;

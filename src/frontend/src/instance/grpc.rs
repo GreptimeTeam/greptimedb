@@ -14,12 +14,11 @@
 
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use api::v1::GreptimeRequest;
 use async_trait::async_trait;
 use common_query::Output;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt};
 
 use crate::error::{self, Result};
@@ -29,12 +28,9 @@ use crate::instance::Instance;
 impl GrpcQueryHandler for Instance {
     type Error = error::Error;
 
-    async fn do_query(&self, query: GreptimeRequest) -> Result<Output> {
-        let request = query.request.context(error::IncompleteGrpcResultSnafu {
-            err_msg: "Missing field 'GreptimeRequest.request'",
-        })?;
+    async fn do_query(&self, request: Request, ctx: QueryContextRef) -> Result<Output> {
         let output = match request {
-            Request::Insert(request) => self.handle_insert(request).await?,
+            Request::Insert(request) => self.handle_insert(request, ctx).await?,
             Request::Query(query_request) => {
                 let query = query_request
                     .query
@@ -43,8 +39,7 @@ impl GrpcQueryHandler for Instance {
                     })?;
                 match query {
                     Query::Sql(sql) => {
-                        let mut result =
-                            SqlQueryHandler::do_query(self, &sql, QueryContext::arc()).await;
+                        let mut result = SqlQueryHandler::do_query(self, &sql, ctx).await;
                         ensure!(
                             result.len() == 1,
                             error::NotSupportedSnafu {
@@ -62,10 +57,8 @@ impl GrpcQueryHandler for Instance {
                 }
             }
             Request::Ddl(request) => {
-                let query = GreptimeRequest {
-                    request: Some(Request::Ddl(request)),
-                };
-                GrpcQueryHandler::do_query(&*self.grpc_query_handler, query).await?
+                let query = Request::Ddl(request);
+                GrpcQueryHandler::do_query(&*self.grpc_query_handler, query, ctx).await?
             }
         };
         Ok(output)
@@ -86,6 +79,7 @@ mod test {
     use catalog::helper::{TableGlobalKey, TableGlobalValue};
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use session::context::QueryContext;
 
     use super::*;
     use crate::table::DistTable;
@@ -111,93 +105,83 @@ mod test {
     }
 
     async fn test_handle_ddl_request(instance: &Arc<Instance>) {
-        let query = GreptimeRequest {
-            request: Some(Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
-                    database_name: "database_created_through_grpc".to_string(),
-                    create_if_not_exists: true,
-                })),
+        let query = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
+                database_name: "database_created_through_grpc".to_string(),
+                create_if_not_exists: true,
             })),
-        };
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query)
+        });
+        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(1)));
 
-        let query = GreptimeRequest {
-            request: Some(Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::CreateTable(CreateTableExpr {
-                    catalog_name: "greptime".to_string(),
-                    schema_name: "database_created_through_grpc".to_string(),
-                    table_name: "table_created_through_grpc".to_string(),
-                    column_defs: vec![
-                        ColumnDef {
-                            name: "a".to_string(),
-                            datatype: ColumnDataType::String as _,
+        let query = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(CreateTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+                column_defs: vec![
+                    ColumnDef {
+                        name: "a".to_string(),
+                        datatype: ColumnDataType::String as _,
+                        is_nullable: true,
+                        default_constraint: vec![],
+                    },
+                    ColumnDef {
+                        name: "ts".to_string(),
+                        datatype: ColumnDataType::TimestampMillisecond as _,
+                        is_nullable: false,
+                        default_constraint: vec![],
+                    },
+                ],
+                time_index: "ts".to_string(),
+                ..Default::default()
+            })),
+        });
+        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
+            .await
+            .unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+
+        let query = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::Alter(AlterExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+                kind: Some(alter_expr::Kind::AddColumns(AddColumns {
+                    add_columns: vec![AddColumn {
+                        column_def: Some(ColumnDef {
+                            name: "b".to_string(),
+                            datatype: ColumnDataType::Int32 as _,
                             is_nullable: true,
                             default_constraint: vec![],
-                        },
-                        ColumnDef {
-                            name: "ts".to_string(),
-                            datatype: ColumnDataType::TimestampMillisecond as _,
-                            is_nullable: false,
-                            default_constraint: vec![],
-                        },
-                    ],
-                    time_index: "ts".to_string(),
-                    ..Default::default()
+                        }),
+                        is_key: false,
+                    }],
                 })),
             })),
-        };
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query)
+        });
+        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
 
-        let query = GreptimeRequest {
-            request: Some(Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::Alter(AlterExpr {
-                    catalog_name: "greptime".to_string(),
-                    schema_name: "database_created_through_grpc".to_string(),
-                    table_name: "table_created_through_grpc".to_string(),
-                    kind: Some(alter_expr::Kind::AddColumns(AddColumns {
-                        add_columns: vec![AddColumn {
-                            column_def: Some(ColumnDef {
-                                name: "b".to_string(),
-                                datatype: ColumnDataType::Int32 as _,
-                                is_nullable: true,
-                                default_constraint: vec![],
-                            }),
-                            is_key: false,
-                        }],
-                    })),
-                })),
-            })),
-        };
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query)
-            .await
-            .unwrap();
-        assert!(matches!(output, Output::AffectedRows(0)));
-
-        let query = GreptimeRequest {
-            request: Some(Request::Query(QueryRequest {
-                query: Some(Query::Sql("INSERT INTO database_created_through_grpc.table_created_through_grpc (a, b, ts) VALUES ('s', 1, 1672816466000)".to_string()))
-            }))
-        };
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query)
+        let query = Request::Query(QueryRequest {
+            query: Some(Query::Sql("INSERT INTO database_created_through_grpc.table_created_through_grpc (a, b, ts) VALUES ('s', 1, 1672816466000)".to_string()))
+        });
+        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(1)));
 
-        let query = GreptimeRequest {
-            request: Some(Request::Query(QueryRequest {
-                query: Some(Query::Sql(
-                    "SELECT ts, a, b FROM database_created_through_grpc.table_created_through_grpc"
-                        .to_string(),
-                )),
-            })),
-        };
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query)
+        let query = Request::Query(QueryRequest {
+            query: Some(Query::Sql(
+                "SELECT ts, a, b FROM database_created_through_grpc.table_created_through_grpc"
+                    .to_string(),
+            )),
+        });
+        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
             .await
             .unwrap();
         let Output::Stream(stream) = output else { unreachable!() };
@@ -327,12 +311,10 @@ CREATE TABLE {table_name} (
     }
 
     async fn create_table(frontend: &Arc<Instance>, sql: String) {
-        let query = GreptimeRequest {
-            request: Some(Request::Query(QueryRequest {
-                query: Some(Query::Sql(sql)),
-            })),
-        };
-        let output = GrpcQueryHandler::do_query(frontend.as_ref(), query)
+        let query = Request::Query(QueryRequest {
+            query: Some(Query::Sql(sql)),
+        });
+        let output = GrpcQueryHandler::do_query(frontend.as_ref(), query, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
@@ -340,7 +322,6 @@ CREATE TABLE {table_name} (
 
     async fn test_insert_and_query_on_existing_table(instance: &Arc<Instance>, table_name: &str) {
         let insert = InsertRequest {
-            schema_name: "public".to_string(),
             table_name: table_name.to_string(),
             columns: vec![
                 Column {
@@ -377,22 +358,18 @@ CREATE TABLE {table_name} (
             ..Default::default()
         };
 
-        let query = GreptimeRequest {
-            request: Some(Request::Insert(insert)),
-        };
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query)
+        let query = Request::Insert(insert);
+        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(8)));
 
-        let query = GreptimeRequest {
-            request: Some(Request::Query(QueryRequest {
-                query: Some(Query::Sql(format!(
-                    "SELECT ts, a FROM {table_name} ORDER BY ts"
-                ))),
-            })),
-        };
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query)
+        let query = Request::Query(QueryRequest {
+            query: Some(Query::Sql(format!(
+                "SELECT ts, a FROM {table_name} ORDER BY ts"
+            ))),
+        });
+        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
             .await
             .unwrap();
         let Output::Stream(stream) = output else { unreachable!() };
@@ -461,7 +438,6 @@ CREATE TABLE {table_name} (
 
     async fn test_insert_and_query_on_auto_created_table(instance: &Arc<Instance>) {
         let insert = InsertRequest {
-            schema_name: "public".to_string(),
             table_name: "auto_created_table".to_string(),
             columns: vec![
                 Column {
@@ -490,16 +466,13 @@ CREATE TABLE {table_name} (
         };
 
         // Test auto create not existed table upon insertion.
-        let query = GreptimeRequest {
-            request: Some(Request::Insert(insert)),
-        };
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query)
+        let query = Request::Insert(insert);
+        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(3)));
 
         let insert = InsertRequest {
-            schema_name: "public".to_string(),
             table_name: "auto_created_table".to_string(),
             columns: vec![
                 Column {
@@ -528,22 +501,18 @@ CREATE TABLE {table_name} (
         };
 
         // Test auto add not existed column upon insertion.
-        let query = GreptimeRequest {
-            request: Some(Request::Insert(insert)),
-        };
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query)
+        let query = Request::Insert(insert);
+        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
             .await
             .unwrap();
         assert!(matches!(output, Output::AffectedRows(3)));
 
-        let query = GreptimeRequest {
-            request: Some(Request::Query(QueryRequest {
-                query: Some(Query::Sql(
-                    "SELECT ts, a, b FROM auto_created_table".to_string(),
-                )),
-            })),
-        };
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query)
+        let query = Request::Query(QueryRequest {
+            query: Some(Query::Sql(
+                "SELECT ts, a, b FROM auto_created_table".to_string(),
+            )),
+        });
+        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
             .await
             .unwrap();
         let Output::Stream(stream) = output else { unreachable!() };

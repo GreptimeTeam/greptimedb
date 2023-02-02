@@ -1,16 +1,25 @@
-CREATE TABLE test_add_col(i INTEGER, j BIGINT TIME INDEX);
+CREATE SCHEMA test_add_col;
+
+Affected Rows: 1
+
+USE test_add_col;
+
+++
+++
+
+CREATE TABLE test(i INTEGER, j BIGINT TIME INDEX);
 
 Affected Rows: 0
 
-INSERT INTO test_add_col VALUES (1, 1), (2, 2);
+INSERT INTO test VALUES (1, 1), (2, 2);
 
 Affected Rows: 2
 
-ALTER TABLE test_add_col ADD COLUMN k INTEGER;
+ALTER TABLE test ADD COLUMN k INTEGER;
 
 Affected Rows: 0
 
-SELECT * FROM test_add_col;
+SELECT * FROM test;
 
 +---+---+---+
 | i | j | k |
@@ -19,7 +28,7 @@ SELECT * FROM test_add_col;
 | 2 | 2 |   |
 +---+---+---+
 
-DROP TABLE test_add_col;
+DROP TABLE test;
 
 Affected Rows: 1
 

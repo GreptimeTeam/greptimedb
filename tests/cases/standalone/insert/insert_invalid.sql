@@ -1,10 +1,14 @@
-CREATE TABLE insert_invalid_strings(i STRING, t BIGINT, time index(t));
+CREATE SCHEMA insert_invalid;
 
-INSERT INTO insert_invalid_strings VALUES ('â‚(', 1);
+USE insert_invalid;
 
-INSERT INTO insert_invalid_strings VALUES (3, 4);
+CREATE TABLE strings(i STRING, t BIGINT, time index(t));
 
-SELECT * FROM insert_invalid_strings WHERE i = 'â‚(';
+INSERT INTO strings VALUES ('â‚(', 1);
+
+INSERT INTO strings VALUES (3, 4);
+
+SELECT * FROM strings WHERE i = 'â‚(';
 
 CREATE TABLE a(i integer, j BIGINT, time index(j));
 

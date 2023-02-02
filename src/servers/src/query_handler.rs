@@ -20,6 +20,7 @@ use std::sync::Arc;
 use api::prometheus::remote::{ReadRequest, WriteRequest};
 use async_trait::async_trait;
 use common_query::Output;
+use session::context::QueryContextRef;
 
 use crate::error::Result;
 use crate::influxdb::InfluxdbRequest;
@@ -51,7 +52,7 @@ pub trait ScriptHandler {
 pub trait InfluxdbLineProtocolHandler {
     /// A successful request will not return a response.
     /// Only on error will the socket return a line of data.
-    async fn exec(&self, request: &InfluxdbRequest) -> Result<()>;
+    async fn exec(&self, request: &InfluxdbRequest, ctx: QueryContextRef) -> Result<()>;
 }
 
 #[async_trait]
@@ -70,9 +71,9 @@ pub struct PrometheusResponse {
 #[async_trait]
 pub trait PrometheusProtocolHandler {
     /// Handling prometheus remote write requests
-    async fn write(&self, database: &str, request: WriteRequest) -> Result<()>;
+    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> Result<()>;
     /// Handling prometheus remote read requests
-    async fn read(&self, database: &str, request: ReadRequest) -> Result<PrometheusResponse>;
+    async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PrometheusResponse>;
     /// Handling push gateway requests
     async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }

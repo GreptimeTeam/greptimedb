@@ -1,3 +1,7 @@
+CREATE SCHEMA order_variable_size_payload;
+
+USE order_variable_size_payload;
+
 create table t0 (c0 varchar, t BIGINT TIME INDEX);
 
 insert into t0 values ('a', 1), (NULL,2), (NULL, 3), (NULL, 4), (NULL, 5), (NULL,6), (NULL,7);
@@ -35,7 +39,7 @@ INSERT INTO tpch_q1_agg VALUES ('N', 'O', 7459297, 10512270008.90, 9986238338.38
 
 SELECT * FROM tpch_q1_agg ORDER BY l_returnflag, l_linestatus;
 
-create table order_variable_size_payload_test5 (i int, s varchar, t BIGINT TIME INDEX);
+create table test5 (i int, s varchar, t BIGINT TIME INDEX);
 
 CREATE TABLE test6 (i1 INT, s1 VARCHAR, i2 int, s2 VARCHAR, t BIGINT TIME INDEX);
 
