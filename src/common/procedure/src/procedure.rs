@@ -197,18 +197,6 @@ pub trait ProcedureManager: Send + Sync + 'static {
 /// Ref-counted pointer to the [ProcedureManager].
 pub type ProcedureManagerRef = Arc<dyn ProcedureManager>;
 
-/// Serialized data of a procedure.
-#[derive(Debug, Serialize, Deserialize)]
-struct ProcedureMessage {
-    /// Type name of the procedure. The procedure framework also use the type name to
-    /// find a loader to load the procedure.
-    type_name: String,
-    /// The data of the procedure.
-    data: String,
-    /// Parent procedure id.
-    parent_id: Option<ProcedureId>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +239,18 @@ mod tests {
         assert_eq!(id.0.to_string(), uuid_str);
 
         let parsed = ProcedureId::parse_str(&uuid_str).unwrap();
+        assert_eq!(id, parsed);
+        let parsed = uuid_str.parse().unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_procedure_id_serialization() {
+        let id = ProcedureId::random();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(format!("\"{id}\""), json);
+
+        let parsed = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
     }
 }
