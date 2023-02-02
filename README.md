@@ -153,6 +153,9 @@ You can always cleanup test database by removing `/tmp/greptimedb`.
 - GreptimeDB [Developer
   Guide](https://docs.greptime.com/developer-guide/overview.html)
 
+### Dashboard
+- [The dashboard UI for GreptimeDB](https://github.com/GreptimeTeam/dashboard)
+
 ### SDK
 
 - [GreptimeDB Java
