@@ -48,6 +48,7 @@ pub struct S3Config {
     pub secret_access_key: String,
     pub endpoint: Option<String>,
     pub region: Option<String>,
+    pub cache_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
@@ -58,6 +59,7 @@ pub struct OssConfig {
     pub access_key_id: String,
     pub access_key_secret: String,
     pub endpoint: String,
+    pub cache_path: Option<String>,
 }
 
 impl Default for ObjectStoreConfig {
