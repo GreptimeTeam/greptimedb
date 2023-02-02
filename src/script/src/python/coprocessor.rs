@@ -18,7 +18,7 @@ pub mod parse;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::result::Result as StdResult;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::info;
@@ -354,34 +354,29 @@ pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
 #[derive(Debug, PyPayload)]
 pub struct PyQueryEngine {
     inner: QueryEngineWeakRef,
-    runtime: Mutex<Option<tokio::runtime::Runtime>>,
 }
 
 #[pyclass]
 impl PyQueryEngine {
     // TODO(discord9): find a better way to call sql query api, now we don't if we are in async contex or not
+    /// return sql query results in List[List[PyVector]], or List[usize] for AffectedRows number if no recordbatches is returned
     #[pymethod]
     fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
-        let handle = || -> std::result::Result<RecordBatches, String> {
-            let query = self.inner.0.upgrade();
+        enum Either {
+            Rb(RecordBatches),
+            AffectedRows(usize),
+        }
+        let query = self.inner.0.upgrade();
+        let thread_handle = std::thread::spawn(move || -> std::result::Result<_, String> {
             if let Some(engine) = query {
                 let stmt = QueryLanguageParser::parse_sql(s.as_str()).map_err(|e| e.to_string())?;
                 let plan = engine
                     .statement_to_plan(stmt, Default::default())
                     .map_err(|e| e.to_string())?;
                 // To prevent the error of nested creating Runtime, if is nested, use the parent runtime instead
-                let handle = match tokio::runtime::Handle::try_current() {
-                    Ok(rt) => rt,
-                    Err(_) => match self.runtime.lock().unwrap().as_ref() {
-                        Some(rt) => rt.handle().clone(),
-                        _ => {
-                            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-                            let handle = rt.handle().clone();
-                            *self.runtime.lock().unwrap() = Some(rt);
-                            handle
-                        }
-                    },
-                };
+
+                let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+                let handle = rt.handle().clone();
                 let res = handle.block_on(async {
                     let res = engine
                         .clone()
@@ -389,11 +384,13 @@ impl PyQueryEngine {
                         .await
                         .map_err(|e| e.to_string());
                     match res {
-                        Ok(common_query::Output::AffectedRows(_)) => todo!(),
-                        Ok(common_query::Output::RecordBatches(rbs)) => Ok(rbs),
-                        Ok(common_query::Output::Stream(s)) => {
-                            Ok(common_recordbatch::util::collect_batches(s).await.unwrap())
+                        Ok(common_query::Output::AffectedRows(cnt)) => {
+                            Ok(Either::AffectedRows(cnt))
                         }
+                        Ok(common_query::Output::RecordBatches(rbs)) => Ok(Either::Rb(rbs)),
+                        Ok(common_query::Output::Stream(s)) => Ok(Either::Rb(
+                            common_recordbatch::util::collect_batches(s).await.unwrap(),
+                        )),
                         Err(e) => Err(e),
                     }
                 })?;
@@ -401,21 +398,32 @@ impl PyQueryEngine {
             } else {
                 Err("Query Engine is already dropped".to_string())
             }
-        };
-        handle().map_err(|e| vm.new_system_error(e)).map(|rbs| {
-            let mut top_vec = Vec::with_capacity(rbs.iter().count());
-            for rb in rbs.iter() {
-                let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
-                for v in rb.columns() {
-                    let v = PyVector::from(v.to_owned());
-                    vec_of_vec.push(v.to_pyobject(vm));
+        });
+        thread_handle
+            .join()
+            .map_err(|e| {
+                vm.new_system_error(format!("Dedicated thread for sql query panic: {e:?}"))
+            })?
+            .map_err(|e| vm.new_system_error(e))
+            .map(|rbs| match rbs {
+                Either::Rb(rbs) => {
+                    let mut top_vec = Vec::with_capacity(rbs.iter().count());
+                    for rb in rbs.iter() {
+                        let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
+                        for v in rb.columns() {
+                            let v = PyVector::from(v.to_owned());
+                            vec_of_vec.push(v.to_pyobject(vm));
+                        }
+                        let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);
+                        top_vec.push(vec_of_vec);
+                    }
+                    let top_vec = PyList::new_ref(top_vec, vm.as_ref());
+                    top_vec
                 }
-                let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);
-                top_vec.push(vec_of_vec);
-            }
-            let top_vec = PyList::new_ref(top_vec, vm.as_ref());
-            top_vec
-        })
+                Either::AffectedRows(cnt) => {
+                    PyList::new_ref(vec![vm.ctx.new_int(cnt).into()], vm.as_ref())
+                }
+            })
     }
 }
 
@@ -445,7 +453,6 @@ pub(crate) fn exec_with_cached_vm(
         if let Some(engine) = &copr.query_engine {
             let query_engine = PyQueryEngine {
                 inner: engine.clone(),
-                runtime: Mutex::new(None),
             };
 
             // put a object named with query of class PyQueryEngine in scope

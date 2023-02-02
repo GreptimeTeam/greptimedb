@@ -318,8 +318,8 @@ mod tests {
         let script = r#"
 import greptime as gt
 
-@copr(args=["a"], returns = ["r"], sql = "select * from numbers")
-def test(a):
+@copr(args=["number"], returns = ["number"], sql = "select * from numbers")
+def test(number)->vector[u32]:
     return query.sql("select * from numbers")[0][0][1]
 "#;
         let script = script_engine
@@ -327,6 +327,14 @@ def test(a):
             .await
             .unwrap();
         let _output = script.execute(EvalContext::default()).await.unwrap();
+        let res = common_recordbatch::util::collect_batches(match _output {
+            Output::Stream(s) => s,
+            _ => todo!(),
+        })
+        .await
+        .unwrap();
+        let rb = res.iter().next().expect("One and only one recordbatch");
+        assert_eq!(rb.column(0).len(), 100);
     }
 
     #[tokio::test]
