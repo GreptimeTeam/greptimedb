@@ -421,7 +421,7 @@ mod tests {
     }
 
     fn throw_catalog_error() -> catalog::error::Result<()> {
-        Err(catalog::error::Error::RegisterTable {
+        Err(catalog::error::Error::SchemaProviderOperation {
             source: BoxedError::new(MockError::with_backtrace(StatusCode::Internal)),
         })
     }

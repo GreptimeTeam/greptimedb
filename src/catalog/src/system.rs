@@ -25,29 +25,27 @@ use common_query::physical_plan::{PhysicalPlanRef, SessionContext};
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::util;
-use datatypes::prelude::{ConcreteDataType, ScalarVector};
+use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::{BinaryVector, TimestampMillisecondVector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableInfoRef};
-use table::requests::{CreateTableRequest, InsertRequest, OpenTableRequest};
+use table::requests::{CreateTableRequest, DeleteRequest, InsertRequest, OpenTableRequest};
 use table::{Table, TableRef};
 
 use crate::error::{
     self, CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InvalidEntryTypeSnafu, InvalidKeySnafu,
     OpenSystemCatalogSnafu, Result, ValueDeserializeSnafu,
 };
+use crate::DeregisterTableRequest;
 
 pub const ENTRY_TYPE_INDEX: usize = 0;
 pub const KEY_INDEX: usize = 1;
 pub const VALUE_INDEX: usize = 3;
 
-pub struct SystemCatalogTable {
-    table_info: TableInfoRef,
-    pub table: TableRef,
-}
+pub struct SystemCatalogTable(TableRef);
 
 #[async_trait::async_trait]
 impl Table for SystemCatalogTable {
@@ -56,25 +54,29 @@ impl Table for SystemCatalogTable {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.table_info.meta.schema.clone()
+        self.0.schema()
     }
 
     async fn scan(
         &self,
-        _projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        _limit: Option<usize>,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
     ) -> table::Result<PhysicalPlanRef> {
-        panic!("System catalog table does not support scan!")
+        self.0.scan(projection, filters, limit).await
     }
 
     /// Insert values into table.
     async fn insert(&self, request: InsertRequest) -> table::error::Result<usize> {
-        self.table.insert(request).await
+        self.0.insert(request).await
     }
 
     fn table_info(&self) -> TableInfoRef {
-        self.table_info.clone()
+        self.0.table_info()
+    }
+
+    async fn delete(&self, request: DeleteRequest) -> table::Result<usize> {
+        self.0.delete(request).await
     }
 }
 
@@ -95,10 +97,7 @@ impl SystemCatalogTable {
             .await
             .context(OpenSystemCatalogSnafu)?
         {
-            Ok(Self {
-                table_info: table.table_info(),
-                table,
-            })
+            Ok(Self(table))
         } else {
             // system catalog table is not yet created, try to create
             let request = CreateTableRequest {
@@ -118,8 +117,7 @@ impl SystemCatalogTable {
                 .create_table(&ctx, request)
                 .await
                 .context(CreateSystemCatalogSnafu)?;
-            let table_info = table.table_info();
-            Ok(Self { table, table_info })
+            Ok(Self(table))
         }
     }
 
@@ -128,7 +126,6 @@ impl SystemCatalogTable {
         let full_projection = None;
         let ctx = SessionContext::new();
         let scan = self
-            .table
             .scan(full_projection, &[], None)
             .await
             .context(error::SystemCatalogTableScanSnafu)?;
@@ -208,6 +205,34 @@ pub fn build_table_insert_request(
     )
 }
 
+pub(crate) fn build_table_deletion_request(
+    request: &DeregisterTableRequest,
+    table_id: TableId,
+) -> DeleteRequest {
+    let table_key = format_table_entry_key(&request.catalog, &request.schema, table_id);
+    DeleteRequest {
+        key_column_values: build_primary_key_columns(EntryType::Table, table_key.as_bytes()),
+    }
+}
+
+fn build_primary_key_columns(entry_type: EntryType, key: &[u8]) -> HashMap<String, VectorRef> {
+    let mut m = HashMap::with_capacity(3);
+    m.insert(
+        "entry_type".to_string(),
+        Arc::new(UInt8Vector::from_slice(&[entry_type as u8])) as _,
+    );
+    m.insert(
+        "key".to_string(),
+        Arc::new(BinaryVector::from_slice(&[key])) as _,
+    );
+    // Timestamp in key part is intentionally left to 0
+    m.insert(
+        "timestamp".to_string(),
+        Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
+    );
+    m
+}
+
 pub fn build_schema_insert_request(catalog_name: String, schema_name: String) -> InsertRequest {
     let full_schema_name = format!("{catalog_name}.{schema_name}");
     build_insert_request(
@@ -220,22 +245,10 @@ pub fn build_schema_insert_request(catalog_name: String, schema_name: String) ->
 }
 
 pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> InsertRequest {
+    let primary_key_columns = build_primary_key_columns(entry_type, key);
+
     let mut columns_values = HashMap::with_capacity(6);
-    columns_values.insert(
-        "entry_type".to_string(),
-        Arc::new(UInt8Vector::from_slice(&[entry_type as u8])) as _,
-    );
-
-    columns_values.insert(
-        "key".to_string(),
-        Arc::new(BinaryVector::from_slice(&[key])) as _,
-    );
-
-    // Timestamp in key part is intentionally left to 0
-    columns_values.insert(
-        "timestamp".to_string(),
-        Arc::new(TimestampMillisecondVector::from_slice(&[0])) as _,
-    );
+    columns_values.extend(primary_key_columns.into_iter());
 
     columns_values.insert(
         "value".to_string(),
@@ -380,6 +393,8 @@ pub struct TableEntryValue {
 
 #[cfg(test)]
 mod tests {
+    use common_recordbatch::RecordBatches;
+    use datatypes::value::Value;
     use log_store::NoopLogStore;
     use mito::config::EngineConfig;
     use mito::engine::MitoEngine;
@@ -499,5 +514,54 @@ mod tests {
         assert_eq!(SYSTEM_CATALOG_TABLE_ID, info.ident.table_id);
         assert_eq!(SYSTEM_CATALOG_NAME, info.catalog_name);
         assert_eq!(INFORMATION_SCHEMA_NAME, info.schema_name);
+    }
+
+    #[tokio::test]
+    async fn test_system_catalog_table_records() {
+        let (_, table_engine) = prepare_table_engine().await;
+        let catalog_table = SystemCatalogTable::new(table_engine).await.unwrap();
+
+        let table_insertion = build_table_insert_request(
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "my_table".to_string(),
+            1,
+        );
+        let result = catalog_table.insert(table_insertion).await.unwrap();
+        assert_eq!(result, 1);
+
+        let records = catalog_table.records().await.unwrap();
+        let mut batches = RecordBatches::try_collect(records).await.unwrap().take();
+        assert_eq!(batches.len(), 1);
+        let batch = batches.remove(0);
+        assert_eq!(batch.num_rows(), 1);
+
+        let row = batch.rows().next().unwrap();
+        let Value::UInt8(entry_type) = row[0] else { unreachable!() };
+        let Value::Binary(key) = row[1].clone() else { unreachable!() };
+        let Value::Binary(value) = row[3].clone() else { unreachable!() };
+        let entry = decode_system_catalog(Some(entry_type), Some(&*key), Some(&*value)).unwrap();
+        let expected = Entry::Table(TableEntry {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "my_table".to_string(),
+            table_id: 1,
+        });
+        assert_eq!(entry, expected);
+
+        let table_deletion = build_table_deletion_request(
+            &DeregisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "my_table".to_string(),
+            },
+            1,
+        );
+        let result = catalog_table.delete(table_deletion).await.unwrap();
+        assert_eq!(result, 1);
+
+        let records = catalog_table.records().await.unwrap();
+        let batches = RecordBatches::try_collect(records).await.unwrap().take();
+        assert_eq!(batches.len(), 0);
     }
 }

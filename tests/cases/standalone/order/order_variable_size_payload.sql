@@ -35,7 +35,7 @@ INSERT INTO tpch_q1_agg VALUES ('N', 'O', 7459297, 10512270008.90, 9986238338.38
 
 SELECT * FROM tpch_q1_agg ORDER BY l_returnflag, l_linestatus;
 
-create table test5 (i int, s varchar, t BIGINT TIME INDEX);
+create table order_variable_size_payload_test5 (i int, s varchar, t BIGINT TIME INDEX);
 
 CREATE TABLE test6 (i1 INT, s1 VARCHAR, i2 int, s2 VARCHAR, t BIGINT TIME INDEX);
 

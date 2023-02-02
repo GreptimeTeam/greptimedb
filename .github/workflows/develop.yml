@@ -126,8 +126,25 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+      - name: Run etcd
+        run: |
+          ETCD_VER=v3.5.7
+          DOWNLOAD_URL=https://github.com/etcd-io/etcd/releases/download
+          curl -L ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+          mkdir -p /tmp/etcd-download 
+          tar xzvf /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C /tmp/etcd-download --strip-components=1
+          rm -f /tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+
+          sudo cp -a /tmp/etcd-download/etcd* /usr/local/bin/
+          nohup etcd >/tmp/etcd.log 2>&1 &
       - name: Run sqlness
-        run: cargo run --bin sqlness-runner
+        run: cargo run --bin sqlness-runner && ls /tmp
+      - name: Upload sqlness logs
+        uses: actions/upload-artifact@v3
+        with:
+          name: sqlness-logs
+          path: /tmp/greptime-*.log
+          retention-days: 3
 
   fmt:
     name: Rustfmt

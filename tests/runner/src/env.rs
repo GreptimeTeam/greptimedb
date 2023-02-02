@@ -28,8 +28,13 @@ use tokio::process::{Child, Command};
 
 use crate::util;
 
+const DATANODE_ADDR: &str = "127.0.0.1:4100";
+const METASRV_ADDR: &str = "127.0.0.1:3002";
 const SERVER_ADDR: &str = "127.0.0.1:4001";
 const SERVER_LOG_FILE: &str = "/tmp/greptime-sqlness.log";
+const METASRV_LOG_FILE: &str = "/tmp/greptime-sqlness-metasrv.log";
+const FRONTEND_LOG_FILE: &str = "/tmp/greptime-sqlness-frontend.log";
+const DATANODE_LOG_FILE: &str = "/tmp/greptime-sqlness-datanode.log";
 
 pub struct Env {}
 
@@ -48,8 +53,14 @@ impl EnvController for Env {
     /// Stop one [`Database`].
     #[allow(clippy::print_stdout)]
     async fn stop(&self, _mode: &str, mut database: Self::DB) {
-        database.server_process.kill().await.unwrap();
-        let _ = database.server_process.wait().await;
+        let mut server = database.server_process;
+        Env::stop_server(&mut server).await;
+        if let Some(mut metasrv) = database.metasrv_process.take() {
+            Env::stop_server(&mut metasrv).await;
+        }
+        if let Some(mut datanode) = database.datanode_process.take() {
+            Env::stop_server(&mut datanode).await;
+        }
         println!("Stopped DB.");
     }
 }
@@ -82,7 +93,7 @@ impl Env {
         // Start the DB
         let server_process = Command::new("./greptime")
             .current_dir(util::get_binary_dir("debug"))
-            .args(["standalone", "start", "-m"])
+            .args(["standalone", "start"])
             .stdout(log_file)
             .spawn()
             .expect("Failed to start the DB");
@@ -98,18 +109,99 @@ impl Env {
 
         GreptimeDB {
             server_process,
+            metasrv_process: None,
+            datanode_process: None,
             client,
             db,
         }
     }
 
     pub async fn start_distributed() -> GreptimeDB {
-        todo!()
+        let cargo_build_result = Command::new("cargo")
+            .current_dir(util::get_workspace_root())
+            .args(["build", "--bin", "greptime"])
+            .stdout(Stdio::null())
+            .output()
+            .await
+            .expect("Failed to start GreptimeDB")
+            .status;
+        if !cargo_build_result.success() {
+            panic!("Failed to build GreptimeDB (`cargo build` fails)");
+        }
+
+        // start a distributed GreptimeDB
+        let mut meta_server = Env::start_server("metasrv");
+        // wait for election
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let mut frontend = Env::start_server("frontend");
+        let mut datanode = Env::start_server("datanode");
+
+        for addr in [DATANODE_ADDR, METASRV_ADDR, SERVER_ADDR].iter() {
+            let is_up = util::check_port(addr.parse().unwrap(), Duration::from_secs(10)).await;
+            if !is_up {
+                Env::stop_server(&mut meta_server).await;
+                Env::stop_server(&mut frontend).await;
+                Env::stop_server(&mut datanode).await;
+                panic!("Server {addr} doesn't up in 10 seconds, quit.")
+            }
+        }
+
+        let client = Client::with_urls(vec![SERVER_ADDR]);
+        let db = DB::new("greptime", client.clone());
+
+        GreptimeDB {
+            server_process: frontend,
+            metasrv_process: Some(meta_server),
+            datanode_process: Some(datanode),
+            client,
+            db,
+        }
+    }
+
+    async fn stop_server(process: &mut Child) {
+        process.kill().await.unwrap();
+        let _ = process.wait().await;
+    }
+
+    fn start_server(subcommand: &str) -> Child {
+        let log_file_name = match subcommand {
+            "datanode" => DATANODE_LOG_FILE,
+            "frontend" => FRONTEND_LOG_FILE,
+            "metasrv" => METASRV_LOG_FILE,
+            _ => panic!("Unexpected subcommand: {subcommand}"),
+        };
+        let log_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(log_file_name)
+            .unwrap_or_else(|_| panic!("Cannot open log file at {log_file_name}"));
+
+        let mut args = vec![subcommand, "start"];
+        if subcommand == "frontend" {
+            args.push("--metasrv-addr=0.0.0.0:3002");
+        } else if subcommand == "datanode" {
+            args.push("--rpc-addr=0.0.0.0:4100");
+            args.push("--metasrv-addr=0.0.0.0:3002");
+            args.push("--node-id=1");
+            args.push("--data-dir=/tmp/greptimedb_node_1/data");
+            args.push("--wal-dir=/tmp/greptimedb_node_1/wal");
+        }
+
+        let process = Command::new("./greptime")
+            .current_dir(util::get_binary_dir("debug"))
+            .args(args)
+            .stdout(log_file)
+            .spawn()
+            .expect("Failed to start the DB");
+        process
     }
 }
 
 pub struct GreptimeDB {
     server_process: Child,
+    metasrv_process: Option<Child>,
+    datanode_process: Option<Child>,
     #[allow(dead_code)]
     client: Client,
     db: DB,

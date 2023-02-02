@@ -40,6 +40,8 @@ use datanode::instance::InstanceRef as DnInstanceRef;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
+use partition::manager::PartitionRuleManager;
+use partition::route::TableRoutes;
 use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
 use servers::promql::{PromqlHandler, PromqlHandlerRef};
@@ -61,7 +63,6 @@ use crate::error::{self, Error, MissingMetasrvOptsSnafu, Result};
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::instance::standalone::{StandaloneGrpcQueryHandler, StandaloneSqlQueryHandler};
-use crate::table::route::TableRoutes;
 use crate::Plugins;
 
 #[async_trait]
@@ -107,10 +108,12 @@ impl Instance {
             client: meta_client.clone(),
         });
         let table_routes = Arc::new(TableRoutes::new(meta_client.clone()));
+        let partition_manager = Arc::new(PartitionRuleManager::new(table_routes));
         let datanode_clients = Arc::new(DatanodeClients::new());
+
         let catalog_manager = Arc::new(FrontendCatalogManager::new(
             meta_backend,
-            table_routes,
+            partition_manager,
             datanode_clients.clone(),
         ));
 

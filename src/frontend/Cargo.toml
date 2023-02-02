@@ -32,6 +32,7 @@ itertools = "0.10"
 meta-client = { path = "../meta-client" }
 moka = { version = "0.9", features = ["future"] }
 openmetrics-parser = "0.4"
+partition = { path = "../partition" }
 prost.workspace = true
 query = { path = "../query" }
 rustls = "0.20"

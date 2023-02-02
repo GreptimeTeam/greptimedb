@@ -32,7 +32,7 @@ sql = { path = "../src/sql" }
 table = { path = "../src/table" }
 tempdir = "0.3"
 tokio.workspace = true
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid.workspace = true
 
 [dev-dependencies]
 paste.workspace = true

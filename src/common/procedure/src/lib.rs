@@ -12,25 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+//! Common traits and structures for the procedure framework.
 
-pub type Plugins = anymap::Map<dyn core::any::Any + Send + Sync>;
-
-mod catalog;
-mod datanode;
 pub mod error;
-mod expr_factory;
-pub mod frontend;
-pub mod grpc;
-pub mod influxdb;
-pub mod instance;
-pub mod mysql;
-pub mod opentsdb;
-pub mod postgres;
-pub mod prometheus;
-pub mod promql;
-mod server;
-mod sql;
-mod table;
-#[cfg(test)]
-mod tests;
+mod procedure;
+
+pub use crate::error::{Error, Result};
+pub use crate::procedure::{
+    BoxedProcedure, Context, LockKey, Procedure, ProcedureId, ProcedureManager,
+    ProcedureManagerRef, ProcedureState, ProcedureWithId, Status,
+};

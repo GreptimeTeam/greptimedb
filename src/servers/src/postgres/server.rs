@@ -25,18 +25,16 @@ use pgwire::tokio::process_socket;
 use tokio;
 use tokio_rustls::TlsAcceptor;
 
+use super::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
 use crate::auth::UserProviderRef;
 use crate::error::Result;
-use crate::postgres::auth_handler::PgAuthStartupHandler;
-use crate::postgres::handler::PostgresServerHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::TlsOption;
 
 pub struct PostgresServer {
     base_server: BaseTcpServer,
-    auth_handler: Arc<PgAuthStartupHandler>,
-    query_handler: Arc<PostgresServerHandler>,
+    make_handler: Arc<MakePostgresServerHandler>,
     tls: TlsOption,
 }
 
@@ -48,16 +46,17 @@ impl PostgresServer {
         io_runtime: Arc<Runtime>,
         user_provider: Option<UserProviderRef>,
     ) -> PostgresServer {
-        let postgres_handler = Arc::new(PostgresServerHandler::new(query_handler.clone()));
-        let startup_handler = Arc::new(PgAuthStartupHandler::new(
-            user_provider,
-            tls.should_force_tls(),
-            query_handler,
-        ));
+        let make_handler = Arc::new(
+            MakePostgresServerHandlerBuilder::default()
+                .query_handler(query_handler.clone())
+                .user_provider(user_provider.clone())
+                .force_tls(tls.should_force_tls())
+                .build()
+                .unwrap(),
+        );
         PostgresServer {
             base_server: BaseTcpServer::create_server("Postgres", io_runtime),
-            auth_handler: startup_handler,
-            query_handler: postgres_handler,
+            make_handler,
             tls,
         }
     }
@@ -68,14 +67,11 @@ impl PostgresServer {
         accepting_stream: AbortableStream,
         tls_acceptor: Option<Arc<TlsAcceptor>>,
     ) -> impl Future<Output = ()> {
-        let auth_handler = self.auth_handler.clone();
-        let query_handler = self.query_handler.clone();
-
+        let handler = self.make_handler.clone();
         accepting_stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
-            let auth_handler = auth_handler.clone();
-            let query_handler = query_handler.clone();
             let tls_acceptor = tls_acceptor.clone();
+            let handler = handler.clone();
 
             async move {
                 match tcp_stream {
@@ -89,9 +85,9 @@ impl PostgresServer {
                         io_runtime.spawn(process_socket(
                             io_stream,
                             tls_acceptor.clone(),
-                            auth_handler.clone(),
-                            query_handler.clone(),
-                            query_handler.clone(),
+                            handler.clone(),
+                            handler.clone(),
+                            handler,
                         ));
                     }
                 };

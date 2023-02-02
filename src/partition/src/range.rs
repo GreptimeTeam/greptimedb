@@ -14,13 +14,14 @@
 
 use std::any::Any;
 
+use datafusion_expr::Operator;
 use datatypes::prelude::*;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use store_api::storage::RegionNumber;
 
 use crate::error::{self, Error};
-use crate::partitioning::{Operator, PartitionExpr, PartitionRule};
+use crate::partition::{PartitionExpr, PartitionRule};
 
 /// [RangePartitionRule] manages the distribution of partitions partitioning by some column's value
 /// range. It's generated from create table request, using MySQL's syntax:
@@ -70,7 +71,7 @@ pub struct RangePartitionRule {
 }
 
 impl RangePartitionRule {
-    pub(crate) fn new(
+    pub fn new(
         column_name: impl Into<String>,
         bounds: Vec<Value>,
         regions: Vec<RegionNumber>,
@@ -82,23 +83,20 @@ impl RangePartitionRule {
         }
     }
 
-    pub(crate) fn column_name(&self) -> &String {
+    pub fn column_name(&self) -> &String {
         &self.column_name
     }
 
-    pub(crate) fn all_regions(&self) -> &Vec<RegionNumber> {
+    pub fn all_regions(&self) -> &Vec<RegionNumber> {
         &self.regions
     }
 
-    #[cfg(test)]
-    pub(crate) fn bounds(&self) -> &Vec<Value> {
+    pub fn bounds(&self) -> &Vec<Value> {
         &self.bounds
     }
 }
 
 impl PartitionRule for RangePartitionRule {
-    type Error = Error;
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -107,7 +105,7 @@ impl PartitionRule for RangePartitionRule {
         vec![self.column_name().to_string()]
     }
 
-    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Self::Error> {
+    fn find_region(&self, values: &[Value]) -> Result<RegionNumber, Error> {
         debug_assert_eq!(
             values.len(),
             1,
@@ -122,7 +120,7 @@ impl PartitionRule for RangePartitionRule {
         })
     }
 
-    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Self::Error> {
+    fn find_regions(&self, exprs: &[PartitionExpr]) -> Result<Vec<RegionNumber>, Error> {
         if exprs.is_empty() {
             return Ok(self.regions.clone());
         }
@@ -173,7 +171,10 @@ impl PartitionRule for RangePartitionRule {
 
 #[cfg(test)]
 mod test {
+    use datafusion_expr::Operator;
+
     use super::*;
+    use crate::partition::PartitionExpr;
 
     #[test]
     fn test_find_regions() {

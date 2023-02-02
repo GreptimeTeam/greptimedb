@@ -137,7 +137,7 @@ SELECT * FROM tpch_q1_agg ORDER BY l_returnflag, l_linestatus;
 | R            | F            | 3785523 | 5337950526.47  | 5071818532.942  | 5274405503.049367  | 25.5259438574251   | 35994.029214030925 | 0.04998927856184382 | 148301      | 2 |
 +--------------+--------------+---------+----------------+-----------------+--------------------+--------------------+--------------------+---------------------+-------------+---+
 
-create table test5 (i int, s varchar, t BIGINT TIME INDEX);
+create table order_variable_size_payload_test5 (i int, s varchar, t BIGINT TIME INDEX);
 
 Affected Rows: 0
 

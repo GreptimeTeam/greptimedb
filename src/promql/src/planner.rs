@@ -15,8 +15,9 @@
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
+use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::{
@@ -30,17 +31,17 @@ use datafusion::sql::planner::ContextProvider;
 use datafusion::sql::TableReference;
 use promql_parser::label::{MatchOp, Matchers, METRIC_NAME};
 use promql_parser::parser::{
-    token, AggregateExpr, BinaryExpr as PromBinaryExpr, Call, EvalStmt, Expr as PromExpr, Function,
-    MatrixSelector, NumberLiteral, ParenExpr, StringLiteral, SubqueryExpr, TokenType, UnaryExpr,
-    VectorSelector,
+    token, AggModifier, AggregateExpr, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
+    Expr as PromExpr, Function, MatrixSelector, NumberLiteral, Offset, ParenExpr, StringLiteral,
+    SubqueryExpr, TokenType, UnaryExpr, VectorSelector,
 };
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
     DataFusionPlanningSnafu, ExpectExprSnafu, LabelNotFoundSnafu, MultipleVectorSnafu, Result,
-    TableNameNotFoundSnafu, TableNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu,
-    UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu, ValueNotFoundSnafu,
+    TableNameNotFoundSnafu, TableNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, ValueNotFoundSnafu,
 };
 use crate::extension_plan::{InstantManipulate, Millisecond, RangeManipulate, SeriesNormalize};
 
@@ -94,39 +95,11 @@ impl<S: ContextProvider> PromPlanner<S> {
                 // TODO(ruihang): support param
                 param: _param,
                 grouping,
-                without,
             }) => {
                 let input = self.prom_expr_to_plan(*expr.clone())?;
 
                 // calculate columns to group by
-                let schema = input.schema();
-                let group_columns_indices = grouping
-                    .iter()
-                    .map(|label| {
-                        schema
-                            .index_of_column_by_name(None, label)
-                            .with_context(|_| LabelNotFoundSnafu {
-                                table: self.ctx.table_name.clone().unwrap(),
-                            })
-                    })
-                    .collect::<Result<HashSet<_>>>()?;
-                let value_names = self.ctx.value_columns.iter().collect::<HashSet<_>>();
-                let group_exprs = schema
-                    .fields()
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, field)| {
-                        if *without != group_columns_indices.contains(&i)
-                            && Some(field.name()) != self.ctx.time_index_column.as_ref()
-                            && !value_names.contains(&field.name())
-                        {
-                            Some(DfExpr::Column(Column::from(field.name())))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
+                let group_exprs = self.agg_modifier_to_col(input.schema(), grouping)?;
                 // convert op and value columns to aggregate exprs
                 let aggr_exprs = self.create_aggregate_exprs(*op)?;
 
@@ -213,12 +186,12 @@ impl<S: ContextProvider> PromPlanner<S> {
             PromExpr::VectorSelector(VectorSelector {
                 name: _,
                 offset,
-                start_or_end: _,
                 label_matchers,
+                at: _,
             }) => {
                 let matchers = self.preprocess_label_matchers(label_matchers)?;
                 self.setup_context()?;
-                let normalize = self.selector_to_series_normalize_plan(*offset, matchers)?;
+                let normalize = self.selector_to_series_normalize_plan(offset, matchers)?;
                 let manipulate = InstantManipulate::new(
                     self.ctx.start,
                     self.ctx.end,
@@ -238,24 +211,14 @@ impl<S: ContextProvider> PromPlanner<S> {
                 vector_selector,
                 range,
             }) => {
-                let normalize = match &**vector_selector {
-                    PromExpr::VectorSelector(VectorSelector {
-                        name: _,
-                        offset,
-                        start_or_end: _,
-                        label_matchers,
-                    })=> {
-                        let matchers = self.preprocess_label_matchers(label_matchers)?;
-                        self.setup_context()?;
-                        self.selector_to_series_normalize_plan(*offset, matchers)?
-                    }
-                    _ => UnexpectedPlanExprSnafu {
-                        desc: format!(
-                            "MatrixSelector must contains a VectorSelector, but found {vector_selector:?}",
-                        ),
-                    }
-                    .fail()?,
-                };
+                let VectorSelector {
+                    offset,
+                    label_matchers,
+                    ..
+                } = vector_selector;
+                let matchers = self.preprocess_label_matchers(label_matchers)?;
+                self.setup_context()?;
+                let normalize = self.selector_to_series_normalize_plan(offset, matchers)?;
                 let manipulate = RangeManipulate::new(
                     self.ctx.start,
                     self.ctx.end,
@@ -276,7 +239,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                 })
             }
             PromExpr::Call(Call { func, args }) => {
-                let args = self.create_function_args(args)?;
+                let args = self.create_function_args(&args.args)?;
                 let input =
                     self.prom_expr_to_plan(args.input.with_context(|| ExpectExprSnafu {
                         expr: prom_expr.clone(),
@@ -298,22 +261,21 @@ impl<S: ContextProvider> PromPlanner<S> {
     /// Extract metric name from `__name__` matcher and set it into [PromPlannerContext].
     /// Returns a new [Matchers] that doesn't contains metric name matcher.
     fn preprocess_label_matchers(&mut self, label_matchers: &Matchers) -> Result<Matchers> {
-        let mut matchers = Vec::with_capacity(label_matchers.matchers.len());
+        let mut matchers = HashSet::new();
         for matcher in &label_matchers.matchers {
             // TODO(ruihang): support other metric match ops
             if matcher.name == METRIC_NAME && matches!(matcher.op, MatchOp::Equal) {
                 self.ctx.table_name = Some(matcher.value.clone());
             } else {
-                matchers.push(matcher.clone());
+                matchers.insert(matcher.clone());
             }
         }
-
         Ok(Matchers { matchers })
     }
 
     fn selector_to_series_normalize_plan(
         &self,
-        offset: Option<Duration>,
+        offset: &Option<Offset>,
         label_matchers: Matchers,
     ) -> Result<LogicalPlan> {
         let table_name = self.ctx.table_name.clone().unwrap();
@@ -341,9 +303,13 @@ impl<S: ContextProvider> PromPlanner<S> {
         );
 
         // make series_normalize plan
-        let offset = offset.unwrap_or_default();
+        let offset_duration = match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        };
         let series_normalize = SeriesNormalize::new(
-            offset,
+            offset_duration,
             self.ctx
                 .time_index_column
                 .clone()
@@ -354,6 +320,71 @@ impl<S: ContextProvider> PromPlanner<S> {
             node: Arc::new(series_normalize),
         });
         Ok(logical_plan)
+    }
+
+    /// Convert [AggModifier] to [Column] exprs for aggregation.
+    fn agg_modifier_to_col(
+        &self,
+        input_schema: &DFSchemaRef,
+        modifier: &AggModifier,
+    ) -> Result<Vec<DfExpr>> {
+        match modifier {
+            AggModifier::By(labels) => {
+                let mut exprs = Vec::with_capacity(labels.len());
+                for label in labels {
+                    let field = input_schema
+                        .field_with_unqualified_name(label)
+                        .map_err(|_| {
+                            LabelNotFoundSnafu {
+                                table: self
+                                    .ctx
+                                    .table_name
+                                    .clone()
+                                    .unwrap_or("no_table_name".to_string()),
+                                label: label.clone(),
+                            }
+                            .build()
+                        })?;
+                    exprs.push(DfExpr::Column(Column::from(field.name())));
+                }
+                Ok(exprs)
+            }
+            AggModifier::Without(labels) => {
+                let mut all_fields = input_schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .collect::<HashSet<_>>();
+                // remove "without"-ed fields
+                for label in labels {
+                    ensure!(
+                        // ensure this field was existed
+                        all_fields.remove(label),
+                        LabelNotFoundSnafu {
+                            table: self
+                                .ctx
+                                .table_name
+                                .clone()
+                                .unwrap_or("no_table_name".to_string()),
+                            label: label.clone(),
+                        }
+                    );
+                }
+                // remove time index and value fields
+                if let Some(time_index) = &self.ctx.time_index_column {
+                    all_fields.remove(time_index);
+                }
+                for value in &self.ctx.value_columns {
+                    all_fields.remove(value);
+                }
+                // collect remaining fields and convert to col expr
+                let exprs = all_fields
+                    .into_iter()
+                    .map(|c| DfExpr::Column(Column::from(c)))
+                    .collect();
+                Ok(exprs)
+            }
+        }
     }
 
     // TODO(ruihang): ignore `MetricNameLabel` (`__name__`) matcher
@@ -666,7 +697,7 @@ struct FunctionArgs {
 
 #[cfg(test)]
 mod test {
-    use std::time::UNIX_EPOCH;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use catalog::local::MemoryCatalogManager;
     use catalog::{CatalogManager, RegisterTableRequest};
@@ -674,7 +705,10 @@ mod test {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::label::Matcher;
-    use promql_parser::parser::ValueType;
+    use promql_parser::parser::{
+        BinModifier, FunctionArgs as PromFunctionArgs, ValueType, VectorMatchCardinality,
+        VectorMatchModifier,
+    };
     use query::query_engine::QueryEngineState;
     use query::DfContextProviderAdapter;
     use session::context::QueryContext;
@@ -765,25 +799,29 @@ mod test {
                 variadic: false,
                 return_type: ValueType::Vector,
             },
-            args: vec![Box::new(PromExpr::VectorSelector(VectorSelector {
-                name: Some("some_metric".to_owned()),
-                offset: None,
-                start_or_end: None,
-                label_matchers: Matchers {
-                    matchers: vec![
-                        Matcher {
-                            op: MatchOp::NotEqual,
-                            name: "tag_0".to_string(),
-                            value: "bar".to_string(),
-                        },
-                        Matcher {
-                            op: MatchOp::Equal,
-                            name: METRIC_NAME.to_string(),
-                            value: "some_metric".to_string(),
-                        },
-                    ],
-                },
-            }))],
+            args: PromFunctionArgs {
+                args: vec![Box::new(PromExpr::VectorSelector(VectorSelector {
+                    name: Some("some_metric".to_owned()),
+                    offset: None,
+                    at: None,
+                    label_matchers: Matchers {
+                        matchers: vec![
+                            Matcher {
+                                op: MatchOp::NotEqual,
+                                name: "tag_0".to_string(),
+                                value: "bar".to_string(),
+                            },
+                            Matcher {
+                                op: MatchOp::Equal,
+                                name: METRIC_NAME.to_string(),
+                                value: "some_metric".to_string(),
+                            },
+                        ]
+                        .into_iter()
+                        .collect(),
+                    },
+                }))],
+            },
         });
         let eval_stmt = EvalStmt {
             expr: prom_expr,
@@ -986,7 +1024,7 @@ mod test {
             expr: Box::new(PromExpr::VectorSelector(VectorSelector {
                 name: Some("some_metric".to_owned()),
                 offset: None,
-                start_or_end: None,
+                at: None,
                 label_matchers: Matchers {
                     matchers: vec![
                         Matcher {
@@ -999,12 +1037,13 @@ mod test {
                             name: METRIC_NAME.to_string(),
                             value: "some_metric".to_string(),
                         },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             })),
-            param: Box::new(PromExpr::empty_vector_selector()),
-            grouping: vec![String::from("tag_1")],
-            without: false,
+            param: None,
+            grouping: AggModifier::By(vec![String::from("tag_1")].into_iter().collect()),
         });
         let mut eval_stmt = EvalStmt {
             expr: prom_expr,
@@ -1032,8 +1071,8 @@ mod test {
         );
 
         // test group without
-        if let PromExpr::Aggregate(AggregateExpr { without, .. }) = &mut eval_stmt.expr {
-            *without = true;
+        if let PromExpr::Aggregate(AggregateExpr { grouping, .. }) = &mut eval_stmt.expr {
+            *grouping = AggModifier::Without(vec![String::from("tag_1")].into_iter().collect());
         }
         let context_provider = build_test_context_provider("some_metric".to_string(), 2, 2).await;
         let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
@@ -1143,7 +1182,7 @@ mod test {
             lhs: Box::new(PromExpr::VectorSelector(VectorSelector {
                 name: Some("some_metric".to_owned()),
                 offset: None,
-                start_or_end: None,
+                at: None,
                 label_matchers: Matchers {
                     matchers: vec![
                         Matcher {
@@ -1156,14 +1195,16 @@ mod test {
                             name: METRIC_NAME.to_string(),
                             value: "some_metric".to_string(),
                         },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             })),
             op: token::T_ADD,
             rhs: Box::new(PromExpr::VectorSelector(VectorSelector {
                 name: Some("some_metric".to_owned()),
                 offset: None,
-                start_or_end: None,
+                at: None,
                 label_matchers: Matchers {
                     matchers: vec![
                         Matcher {
@@ -1176,11 +1217,16 @@ mod test {
                             name: METRIC_NAME.to_string(),
                             value: "some_metric".to_string(),
                         },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             })),
-            matching: None,
-            return_bool: false,
+            matching: BinModifier {
+                card: VectorMatchCardinality::OneToOne,
+                matching: VectorMatchModifier::Ignoring(HashSet::new()),
+                return_bool: false,
+            },
         });
 
         let eval_stmt = EvalStmt {
@@ -1221,7 +1267,7 @@ mod test {
             rhs: Box::new(PromExpr::VectorSelector(VectorSelector {
                 name: Some("some_metric".to_owned()),
                 offset: None,
-                start_or_end: None,
+                at: None,
                 label_matchers: Matchers {
                     matchers: vec![
                         Matcher {
@@ -1234,11 +1280,16 @@ mod test {
                             name: METRIC_NAME.to_string(),
                             value: "some_metric".to_string(),
                         },
-                    ],
+                    ]
+                    .into_iter()
+                    .collect(),
                 },
             })),
-            matching: None,
-            return_bool: false,
+            matching: BinModifier {
+                card: VectorMatchCardinality::OneToOne,
+                matching: VectorMatchModifier::Ignoring(HashSet::new()),
+                return_bool: false,
+            },
         });
 
         let eval_stmt = EvalStmt {
@@ -1271,8 +1322,11 @@ mod test {
             lhs: Box::new(PromExpr::NumberLiteral(NumberLiteral { val: 1.0 })),
             op: token::T_ADD,
             rhs: Box::new(PromExpr::NumberLiteral(NumberLiteral { val: 1.0 })),
-            matching: None,
-            return_bool: false,
+            matching: BinModifier {
+                card: VectorMatchCardinality::OneToOne,
+                matching: VectorMatchModifier::Ignoring(HashSet::new()),
+                return_bool: false,
+            },
         });
 
         let eval_stmt = EvalStmt {

@@ -89,13 +89,13 @@ async fn test_shutdown_pg_server_range() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_schema_validating() -> Result<()> {
     async fn generate_server(auth_info: DatabaseAuthInfo<'_>) -> Result<(Box<dyn Server>, u16)> {
         let table = MemTable::default_numbers_table();
         let postgres_server =
             create_postgres_server(table, true, Default::default(), Some(auth_info))?;
-        let listening = "127.0.0.1:5432".parse::<SocketAddr>().unwrap();
+        let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
         let server_addr = postgres_server.start(listening).await.unwrap();
         let server_port = server_addr.port();
         Ok((postgres_server, server_port))
@@ -103,8 +103,8 @@ async fn test_schema_validating() -> Result<()> {
 
     common_telemetry::init_default_ut_logging();
     let (pg_server, server_port) = generate_server(DatabaseAuthInfo {
-        catalog: "greptime",
-        schema: "public",
+        catalog: DEFAULT_CATALOG_NAME,
+        schema: DEFAULT_SCHEMA_NAME,
         username: "greptime",
     })
     .await?;
@@ -115,8 +115,8 @@ async fn test_schema_validating() -> Result<()> {
     assert!(result.is_ok());
 
     let (pg_server, server_port) = generate_server(DatabaseAuthInfo {
-        catalog: "greptime",
-        schema: "public",
+        catalog: DEFAULT_CATALOG_NAME,
+        schema: DEFAULT_SCHEMA_NAME,
         username: "no_right_user",
     })
     .await?;
@@ -141,7 +141,7 @@ async fn test_shutdown_pg_server(with_pwd: bool) -> Result<()> {
         .to_string()
         .contains("Postgres server is not started."));
 
-    let listening = "127.0.0.1:5432".parse::<SocketAddr>().unwrap();
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = postgres_server.start(listening).await.unwrap();
     let server_port = server_addr.port();
 

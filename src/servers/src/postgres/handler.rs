@@ -25,46 +25,24 @@ use futures::{future, stream, Stream, StreamExt};
 use pgwire::api::portal::Portal;
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{text_query_response, FieldInfo, Response, Tag, TextDataRowEncoder};
+use pgwire::api::stmt::NoopQueryParser;
+use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use session::context::QueryContext;
 
+use super::PostgresServerHandler;
 use crate::error::{self, Error, Result};
-use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-
-pub struct PostgresServerHandler {
-    query_handler: ServerSqlQueryHandlerRef,
-}
-
-impl PostgresServerHandler {
-    pub fn new(query_handler: ServerSqlQueryHandlerRef) -> Self {
-        PostgresServerHandler { query_handler }
-    }
-}
-
-fn query_context_from_client_info<C>(client: &C) -> Arc<QueryContext>
-where
-    C: ClientInfo,
-{
-    let query_context = QueryContext::new();
-    if let Some(current_catalog) = client.metadata().get(super::METADATA_CATALOG) {
-        query_context.set_current_catalog(current_catalog);
-    }
-    if let Some(current_schema) = client.metadata().get(super::METADATA_SCHEMA) {
-        query_context.set_current_schema(current_schema);
-    }
-
-    Arc::new(query_context)
-}
 
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandler {
-    async fn do_query<C>(&self, client: &C, query: &str) -> PgWireResult<Vec<Response>>
+    async fn do_query<C>(&self, _client: &C, query: &str) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        let query_ctx = query_context_from_client_info(client);
-        let outputs = self.query_handler.do_query(query, query_ctx).await;
+        let outputs = self
+            .query_handler
+            .do_query(query, self.query_ctx.clone())
+            .await;
 
         let mut results = Vec::with_capacity(outputs.len());
 
@@ -201,16 +179,43 @@ fn type_translate(origin: &ConcreteDataType) -> Result<Type> {
 
 #[async_trait]
 impl ExtendedQueryHandler for PostgresServerHandler {
+    type Statement = String;
+    type QueryParser = NoopQueryParser;
+    type PortalStore = MemPortalStore<Self::Statement>;
+
+    fn portal_store(&self) -> Arc<Self::PortalStore> {
+        self.portal_store.clone()
+    }
+
+    fn query_parser(&self) -> Arc<Self::QueryParser> {
+        self.query_parser.clone()
+    }
+
     async fn do_query<C>(
         &self,
         _client: &mut C,
-        _portal: &Portal,
+        _portal: &Portal<Self::Statement>,
         _max_rows: usize,
     ) -> PgWireResult<Response>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        unimplemented!()
+        Ok(Response::Error(Box::new(ErrorInfo::new(
+            "ERROR".to_owned(),
+            "XX000".to_owned(),
+            "Extended query is not implemented on this server yet".to_owned(),
+        ))))
+    }
+
+    async fn do_describe<C>(
+        &self,
+        _client: &mut C,
+        _statement: &Self::Statement,
+    ) -> PgWireResult<Vec<FieldInfo>>
+    where
+        C: ClientInfo + Unpin + Send + Sync,
+    {
+        Ok(vec![])
     }
 }
 

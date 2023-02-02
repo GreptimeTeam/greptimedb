@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::fmt::Debug;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::prelude::{Snafu, StatusCode};
@@ -20,6 +21,8 @@ use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use snafu::{Backtrace, ErrorCompat};
+
+use crate::DeregisterTableRequest;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -96,16 +99,13 @@ pub enum Error {
     #[snafu(display("Table `{}` already exists", table))]
     TableExists { table: String, backtrace: Backtrace },
 
+    #[snafu(display("Table `{}` not exist", table))]
+    TableNotExist { table: String, backtrace: Backtrace },
+
     #[snafu(display("Schema {} already exists", schema))]
     SchemaExists {
         schema: String,
         backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to register table"))]
-    RegisterTable {
-        #[snafu(backtrace)]
-        source: BoxedError,
     },
 
     #[snafu(display("Operation {} not implemented yet", operation))]
@@ -142,6 +142,17 @@ pub enum Error {
         source: table::error::Error,
     },
 
+    #[snafu(display(
+        "Failed to deregister table, request: {:?}, source: {}",
+        request,
+        source
+    ))]
+    DeregisterTable {
+        request: DeregisterTableRequest,
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
+
     #[snafu(display("Illegal catalog manager state: {}", msg))]
     IllegalManagerState { backtrace: Backtrace, msg: String },
 
@@ -165,7 +176,10 @@ pub enum Error {
     },
 
     #[snafu(display("Failure during SchemaProvider operation, source: {}", source))]
-    SchemaProviderOperation { source: BoxedError },
+    SchemaProviderOperation {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
 
     #[snafu(display("Failed to execute system catalog table scan, source: {}", source))]
     SystemCatalogTableScanExec {
@@ -178,15 +192,6 @@ pub enum Error {
         source: common_catalog::error::Error,
     },
 
-    #[snafu(display("IO error occurred while fetching catalog info, source: {}", source))]
-    Io {
-        backtrace: Backtrace,
-        source: std::io::Error,
-    },
-
-    #[snafu(display("Local and remote catalog data are inconsistent, msg: {}", msg))]
-    CatalogStateInconsistent { msg: String, backtrace: Backtrace },
-
     #[snafu(display("Failed to perform metasrv operation, source: {}", source))]
     MetaSrv {
         #[snafu(backtrace)]
@@ -197,12 +202,6 @@ pub enum Error {
     InvalidTableInfoInCatalog {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Catalog internal error: {}", source))]
-    Internal {
-        #[snafu(backtrace)]
-        source: BoxedError,
     },
 }
 
@@ -216,37 +215,34 @@ impl ErrorExt for Error {
             | Error::TableNotFound { .. }
             | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
-            | Error::InvalidEntryType { .. }
-            | Error::CatalogStateInconsistent { .. } => StatusCode::Unexpected,
+            | Error::InvalidEntryType { .. } => StatusCode::Unexpected,
 
             Error::SystemCatalog { .. }
             | Error::EmptyValue { .. }
-            | Error::ValueDeserialize { .. }
-            | Error::Io { .. } => StatusCode::StorageUnavailable,
+            | Error::ValueDeserialize { .. } => StatusCode::StorageUnavailable,
 
-            Error::RegisterTable { .. } | Error::SystemCatalogTypeMismatch { .. } => {
-                StatusCode::Internal
-            }
+            Error::SystemCatalogTypeMismatch { .. } => StatusCode::Internal,
 
             Error::ReadSystemCatalog { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
 
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
+            Error::TableNotExist { .. } => StatusCode::TableNotFound,
             Error::SchemaExists { .. } => StatusCode::InvalidArguments,
 
             Error::OpenSystemCatalog { source, .. }
             | Error::CreateSystemCatalog { source, .. }
             | Error::InsertCatalogRecord { source, .. }
             | Error::OpenTable { source, .. }
-            | Error::CreateTable { source, .. } => source.status_code(),
+            | Error::CreateTable { source, .. }
+            | Error::DeregisterTable { source, .. } => source.status_code(),
+
             Error::MetaSrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
             Error::InvalidTableSchema { source, .. } => source.status_code(),
             Error::InvalidTableInfoInCatalog { .. } => StatusCode::Unexpected,
-            Error::Internal { source, .. } | Error::SchemaProviderOperation { source } => {
-                source.status_code()
-            }
+            Error::SchemaProviderOperation { source } => source.status_code(),
 
             Error::Unimplemented { .. } => StatusCode::Unsupported,
         }

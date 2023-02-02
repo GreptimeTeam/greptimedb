@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
-use common_base::bytes::StringBytes;
+use common_base::bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::data_type::{DataType, DataTypeRef};
@@ -43,7 +43,7 @@ impl DataType for BinaryType {
     }
 
     fn default_value(&self) -> Value {
-        StringBytes::default().into()
+        Bytes::default().into()
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
