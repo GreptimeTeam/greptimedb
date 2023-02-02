@@ -23,7 +23,7 @@ use axum::{routing, Json, Router};
 use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,7 @@ use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
-use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
+use crate::error::{AlreadyStartedSnafu, CollectRecordbatchSnafu, Result, StartHttpSnafu};
 use crate::http::authorize::HttpAuth;
 use crate::server::Server;
 
@@ -183,27 +183,35 @@ impl PromqlJsonResponse {
 
     /// Convert from `Result<Output>`
     pub async fn from_query_result(result: Result<Output>) -> Json<Self> {
-        match result {
-            Ok(Output::RecordBatches(batches)) => {
-                Self::success(Self::record_batches_to_data(batches).unwrap())
-            }
-            Ok(Output::Stream(stream)) => {
-                let record_batches = RecordBatches::try_collect(stream).await.unwrap();
-                Self::success(Self::record_batches_to_data(record_batches).unwrap())
-            }
-            Ok(Output::AffectedRows(_)) => Self::error(
-                "unexpected result",
-                "expected data result, but got affected rows",
-            ),
-            Err(err) => Self::error(err.status_code().to_string(), err.to_string()),
-        }
+        let response: Result<Json<Self>> = try {
+            let json = match result? {
+                Output::RecordBatches(batches) => {
+                    Self::success(Self::record_batches_to_data(batches)?)
+                }
+                Output::Stream(stream) => {
+                    let record_batches = RecordBatches::try_collect(stream)
+                        .await
+                        .context(CollectRecordbatchSnafu)?;
+                    Self::success(Self::record_batches_to_data(record_batches)?)
+                }
+                Output::AffectedRows(_) => Self::error(
+                    "unexpected result",
+                    "expected data result, but got affected rows",
+                ),
+            };
+
+            json
+        };
+
+        response.unwrap_or_else(|err| Self::error(err.status_code().to_string(), err.to_string()))
     }
 
+    /// TODO(ruihang): implement this conversion method
     fn record_batches_to_data(batches: RecordBatches) -> Result<PromqlData> {
-        info!("schema: {:?}", batches.schema());
+        debug!("schema: {:?}", batches.schema());
         for batch in batches.iter() {
             for row in batch.rows() {
-                info!("row: {row:?}",);
+                debug!("row: {row:?}",);
             }
         }
 

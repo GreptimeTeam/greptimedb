@@ -182,7 +182,7 @@ impl Services {
             None
         };
 
-        let promql_server_and_addr = if let Some(promql_options) = &opts.promql_options {
+        let promql_server_and_addr = if let Some(promql_options) = &opts.promql_options && promql_options.enable {
             let promql_addr = parse_addr(&promql_options.addr)?;
 
             let mut promql_server = PromqlServer::create_server(instance.clone());

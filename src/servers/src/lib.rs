@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
+#![feature(try_blocks)]
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use serde::{Deserialize, Serialize};
