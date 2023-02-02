@@ -300,7 +300,7 @@ fn parameter_to_string(portal: &Portal<(Statement, String)>, idx: usize) -> PgWi
     let param_type = portal.statement().parameter_types().get(idx).unwrap();
     match param_type {
         &Type::VARCHAR | &Type::TEXT => Ok(format!(
-            "\"{}\"",
+            "'{}'",
             portal.parameter::<String>(idx)?.as_deref().unwrap_or("")
         )),
         &Type::BOOL => Ok(portal
