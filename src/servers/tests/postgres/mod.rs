@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
+use pgwire::api::Type;
 use rand::rngs::StdRng;
 use rand::Rng;
 use rustls::client::{ServerCertVerified, ServerCertVerifier};
@@ -326,11 +327,33 @@ async fn test_using_db() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_extended_query() -> Result<()> {
+    let server_port = start_test_server(TlsOption::default()).await?;
+    let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)
+        .await
+        .unwrap();
+    let stmt = client
+        .prepare_typed(
+            "SELECT uint32s FROM numbers WHERE uint32s = $1",
+            &[Type::INT4],
+        )
+        .await
+        .unwrap();
+    let rows = client.query(&stmt, &[&1i32]).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 1);
+    assert_eq!(rows[0].get::<usize, i32>(0usize), 1);
+    assert_eq!(rows[0].get::<&str, i32>("uint32s"), 1);
+
+    Ok(())
+}
+
 async fn start_test_server(server_tls: TlsOption) -> Result<u16> {
     common_telemetry::init_default_ut_logging();
     let table = MemTable::default_numbers_table();
     let pg_server = create_postgres_server(table, false, server_tls, None)?;
-    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    let listening = "127.0.0.1:5432".parse::<SocketAddr>().unwrap();
     let server_addr = pg_server.start(listening).await.unwrap();
     Ok(server_addr.port())
 }

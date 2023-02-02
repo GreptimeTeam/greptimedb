@@ -21,7 +21,7 @@ use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use datatypes::schema::Schema;
-use query::parser::QueryLanguageParser;
+use query::parser::{QueryLanguageParser, QueryStatement};
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
@@ -29,6 +29,7 @@ use servers::error::{Error, Result};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 use table::test_util::MemTable;
 
 mod auth;
@@ -85,12 +86,16 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    fn do_describe(
-        &self,
-        _stmt: sql::statements::statement::Statement,
-        _query_ctx: QueryContextRef,
-    ) -> Result<Option<Schema>> {
-        unimplemented!()
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+        if let Statement::Query(_) = stmt {
+            let schema = self
+                .query_engine
+                .describe(QueryStatement::Sql(stmt), query_ctx)
+                .unwrap();
+            Ok(Some(schema))
+        } else {
+            Ok(None)
+        }
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
