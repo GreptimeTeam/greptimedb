@@ -384,7 +384,6 @@ import greptime as gt
 
 @copr(args=["number"], returns = ["r"], sql="select number from numbers limit 100")
 def test(a):
-    print(query.sql("select * from numbers")[0][0][1])
     return gt.vector([x for x in a if x % 2 == 0])
 "#;
         let script = script_engine
