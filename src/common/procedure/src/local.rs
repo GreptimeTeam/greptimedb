@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-use crate::{ProcedureId, ProcedureState, LockKey};
+mod lock;
+
+use std::sync::{Arc, Mutex};
+
 use tokio::sync::Notify;
-use std::sync::Mutex;
+
+use crate::{LockKey, ProcedureId, ProcedureState};
 
 /// Mutable metadata of a procedure during execution.
 #[derive(Debug)]
@@ -25,6 +28,13 @@ struct ExecMeta {
 }
 
 /// Shared metadata of a procedure.
+///
+/// # Note
+/// [Notify] is not a condition variable, we can't guarantee the waiters are notified
+/// if they didn't call `notified()` before we signal the notify. So we
+/// 1. use dedicated notify for each condition, such as waiting for a lock, waiting
+/// for children;
+/// 2. always use `notify_one` and ensure there are only one waiter.
 #[derive(Debug)]
 struct ProcedureMeta {
     /// Id of this procedure.
@@ -37,10 +47,10 @@ struct ProcedureMeta {
     child_notify: Notify,
     /// Locks inherted from the parent procedure.
     parent_locks: Vec<LockKey>,
-    /// Lock this procedure needs additionally.
+    /// Lock not in `parent_locks` but required by this procedure.
     ///
-    /// If the parent procedure already owns the lock this procedure
-    /// needs, then we also set this field to `None`.
+    /// If the parent procedure already owns the lock that this procedure
+    /// needs, we set this field to `None`.
     lock_key: Option<LockKey>,
     /// Mutable status during execution.
     exec_meta: Mutex<ExecMeta>,
@@ -60,4 +70,45 @@ impl ProcedureMeta {
     }
 }
 
+/// Reference counted pointer to [ProcedureMeta].
 type ProcedureMetaRef = Arc<ProcedureMeta>;
+
+/// Create a new [ProcedureMeta] for test purpose.
+#[cfg(test)]
+fn procedure_meta_for_test() -> ProcedureMeta {
+    ProcedureMeta {
+        id: ProcedureId::random(),
+        lock_notify: Notify::new(),
+        parent_id: None,
+        child_notify: Notify::new(),
+        parent_locks: Vec::new(),
+        lock_key: None,
+        exec_meta: Mutex::new(ExecMeta {
+            state: ProcedureState::Running,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_locks_needed() {
+        let mut meta = procedure_meta_for_test();
+        let locks = meta.locks_needed();
+        assert!(locks.is_empty());
+
+        let parent_locks = vec![LockKey::new("a"), LockKey::new("b")];
+        meta.parent_locks = parent_locks.clone();
+        let locks = meta.locks_needed();
+        assert_eq!(parent_locks, locks);
+
+        meta.lock_key = Some(LockKey::new("c"));
+        let locks = meta.locks_needed();
+        assert_eq!(
+            vec![LockKey::new("a"), LockKey::new("b"), LockKey::new("c")],
+            locks
+        );
+    }
+}
