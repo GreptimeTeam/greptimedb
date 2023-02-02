@@ -210,6 +210,16 @@ impl SqlQueryHandler for Instance {
         vec![result]
     }
 
+    async fn do_promql_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<Result<Output>> {
+        let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
+        let result = self.execute_promql(query, query_ctx).await;
+        vec![result]
+    }
+
     async fn do_statement_query(
         &self,
         stmt: Statement,

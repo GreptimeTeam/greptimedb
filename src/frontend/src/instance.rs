@@ -59,7 +59,7 @@ use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Error, MissingMetasrvOptsSnafu, Result};
+use crate::error::{self, Error, ExecutePromqlSnafu, MissingMetasrvOptsSnafu, Result};
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::instance::standalone::{StandaloneGrpcQueryHandler, StandaloneSqlQueryHandler};
@@ -463,6 +463,18 @@ impl SqlQueryHandler for Instance {
             Err(e) => {
                 vec![Err(e)]
             }
+        }
+    }
+
+    async fn do_promql_query(&self, query: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+        if let Some(handler) = &self.promql_handler {
+            let result = handler
+                .do_query(query)
+                .await
+                .context(ExecutePromqlSnafu { query });
+            vec![result]
+        } else {
+            vec![]
         }
     }
 

@@ -477,6 +477,11 @@ impl HttpServer {
                 apirouting::get_with(handler::sql, handler::sql_docs)
                     .post_with(handler::sql, handler::sql_docs),
             )
+            .api_route(
+                "/promql",
+                apirouting::get_with(handler::promql, handler::sql_docs)
+                    .post_with(handler::promql, handler::sql_docs),
+            )
             .api_route("/scripts", apirouting::post(script::scripts))
             .api_route("/run-script", apirouting::post(script::run_script))
             .route("/private/api.json", apirouting::get(serve_api))
@@ -581,6 +586,14 @@ mod test {
         type Error = Error;
 
         async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_promql_query(
+            &self,
+            _: &str,
+            _: QueryContextRef,
+        ) -> Vec<std::result::Result<Output, Self::Error>> {
             unimplemented!()
         }
 

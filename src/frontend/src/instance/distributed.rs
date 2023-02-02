@@ -376,6 +376,14 @@ impl SqlQueryHandler for DistInstance {
         self.handle_sql(query, query_ctx).await
     }
 
+    async fn do_promql_query(
+        &self,
+        _: &str,
+        _: QueryContextRef,
+    ) -> Vec<std::result::Result<Output, Self::Error>> {
+        unimplemented!()
+    }
+
     async fn do_statement_query(
         &self,
         stmt: Statement,
