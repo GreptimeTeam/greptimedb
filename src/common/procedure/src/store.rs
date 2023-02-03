@@ -332,7 +332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_commit_procedure() {
-        let dir = TempDir::new("store_procedure").unwrap();
+        let dir = TempDir::new("commit_procedure").unwrap();
         let store = new_procedure_store(&dir);
 
         let procedure_id = ProcedureId::random();
@@ -350,7 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_messages() {
-        let dir = TempDir::new("store_procedure").unwrap();
+        let dir = TempDir::new("load_messages").unwrap();
         let store = new_procedure_store(&dir);
 
         // store 3 steps

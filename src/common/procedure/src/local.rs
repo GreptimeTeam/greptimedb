@@ -279,7 +279,13 @@ fn procedure_meta_for_test() -> ProcedureMeta {
 
 #[cfg(test)]
 mod tests {
+    use object_store::services::fs::Builder;
+    use serde::{Deserialize, Serialize};
+    use tempdir::TempDir;
+
     use super::*;
+    use crate::error::Error;
+    use crate::{Context, Procedure, Status};
 
     #[test]
     fn test_locks_needed() {
@@ -298,5 +304,64 @@ mod tests {
             vec![LockKey::new("a"), LockKey::new("b"), LockKey::new("c")],
             locks
         );
+    }
+
+    fn new_object_store(dir: &TempDir) -> ObjectStore {
+        let store_dir = dir.path().to_str().unwrap();
+        let accessor = Builder::default().root(store_dir).build().unwrap();
+        ObjectStore::new(accessor)
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct MockData {
+        id: u32,
+        content: String,
+    }
+
+    #[derive(Debug)]
+    struct ProcedureToLoad {
+        data: MockData,
+    }
+
+    #[async_trait]
+    impl Procedure for ProcedureToLoad {
+        fn type_name(&self) -> &str {
+            "ProcedureToLoad"
+        }
+
+        async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+            unimplemented!()
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(serde_json::to_string(&self.data).unwrap())
+        }
+
+        fn lock_key(&self) -> Option<LockKey> {
+            None
+        }
+    }
+
+    #[test]
+    fn test_register_loader() {
+        let dir = TempDir::new("register_loader").unwrap();
+        let config = ManagerConfig {
+            object_store: new_object_store(&dir),
+        };
+        let manager = LocalManager::new(config);
+
+        let loader = |json: &str| {
+            let data = serde_json::from_str(json).unwrap();
+            let procedure = ProcedureToLoad { data };
+            Ok(Box::new(procedure) as _)
+        };
+        manager
+            .register_loader("ProcedureToLoad", Box::new(loader))
+            .unwrap();
+        // Register duplicate loader.
+        let err = manager
+            .register_loader("ProcedureToLoad", Box::new(loader))
+            .unwrap_err();
+        assert!(matches!(err, Error::DuplicateProcedure { .. }), "{err}");
     }
 }
