@@ -73,7 +73,7 @@ impl PromqlServer {
 
         let router = Router::new()
             .route("/query", routing::post(instant_query).get(instant_query))
-            .route("/query_range", routing::post(range_query).get(range_query))
+            .route("/range_query", routing::post(range_query).get(range_query))
             .with_state(self.query_handler.clone());
 
         Router::new()
