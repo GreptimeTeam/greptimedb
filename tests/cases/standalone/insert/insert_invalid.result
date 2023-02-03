@@ -1,12 +1,3 @@
-CREATE SCHEMA insert_invalid;
-
-Affected Rows: 1
-
-USE insert_invalid;
-
-++
-++
-
 CREATE TABLE strings(i STRING, t BIGINT, time index(t));
 
 Affected Rows: 0

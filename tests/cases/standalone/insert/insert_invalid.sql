@@ -1,7 +1,3 @@
-CREATE SCHEMA insert_invalid;
-
-USE insert_invalid;
-
 CREATE TABLE strings(i STRING, t BIGINT, time index(t));
 
 INSERT INTO strings VALUES ('â‚(', 1);

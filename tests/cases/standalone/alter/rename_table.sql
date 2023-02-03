@@ -1,7 +1,3 @@
-CREATE SCHEMA test_rename_table;
-
-USE test_rename_table;
-
 CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
 
 DESC TABLE t;

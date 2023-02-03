@@ -1,7 +1,3 @@
-CREATE SCHEMA test_add_col;
-
-USE test_add_col;
-
 CREATE TABLE test(i INTEGER, j BIGINT TIME INDEX);
 
 INSERT INTO test VALUES (1, 1), (2, 2);

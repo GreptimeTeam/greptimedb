@@ -1,7 +1,3 @@
-CREATE SCHEMA order_variable_size_payload;
-
-USE order_variable_size_payload;
-
 create table t0 (c0 varchar, t BIGINT TIME INDEX);
 
 insert into t0 values ('a', 1), (NULL,2), (NULL, 3), (NULL, 4), (NULL, 5), (NULL,6), (NULL,7);

@@ -1,5 +1,3 @@
-USE public;
-
 SELECT SUM(number) FROM numbers;
 
 SELECT SUM(1) FROM numbers;

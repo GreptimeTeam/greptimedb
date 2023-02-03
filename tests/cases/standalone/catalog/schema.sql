@@ -29,3 +29,5 @@ SHOW TABLES FROM public;
 DROP SCHEMA test_public_schema;
 
 SELECT * FROM test_public_schema.hello;
+
+USE public;
