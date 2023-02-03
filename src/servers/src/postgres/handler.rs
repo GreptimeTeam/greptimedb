@@ -75,11 +75,8 @@ fn output_to_query_response(output: Result<Output>, is_text: bool) -> PgWireResu
         }
         Ok(Output::RecordBatches(recordbatches)) => {
             let schema = recordbatches.schema();
-            recordbatches_to_query_response(
-                stream::iter(recordbatches.take().into_iter().map(Ok)),
-                schema,
-                is_text,
-            )
+
+            recordbatches_to_query_response(recordbatches.as_stream(), schema, is_text)
         }
         Err(e) => Ok(Response::Error(Box::new(ErrorInfo::new(
             "ERROR".to_string(),
@@ -297,6 +294,8 @@ impl QueryParser for POCQueryParser {
 }
 
 fn parameter_to_string(portal: &Portal<(Statement, String)>, idx: usize) -> PgWireResult<String> {
+    // the index is managed from portal's parameters count so it's safe to
+    // unwrap here.
     let param_type = portal.statement().parameter_types().get(idx).unwrap();
     match param_type {
         &Type::VARCHAR | &Type::TEXT => Ok(format!(

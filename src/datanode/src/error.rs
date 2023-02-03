@@ -320,7 +320,7 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to describe schema for given statement, source: {}", source))]
-    DescribeStatement { 
+    DescribeStatement {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
