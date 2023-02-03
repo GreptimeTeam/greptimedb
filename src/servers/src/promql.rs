@@ -70,14 +70,14 @@ impl PromqlServer {
 
     pub fn make_app(&self) -> Router {
         // TODO(ruihang): implement format_query, series, labels, values, query_examplars and targets methods
-        let router = Router::new()
-            .nest(&format!("/{PROMQL_API_VERSION}/query"), self.route_query())
-            .nest(
-                &format!("/{PROMQL_API_VERSION}/range_query"),
-                self.route_range_query(),
-            );
 
-        router
+        let router = Router::new()
+            .route("/query", routing::post(instant_query).get(instant_query))
+            .route("/query_range", routing::post(range_query).get(range_query))
+            .with_state(self.query_handler.clone());
+
+        Router::new()
+            .nest(&format!("/{PROMQL_API_VERSION}"), router)
             // middlewares
             .layer(
                 ServiceBuilder::new()
@@ -87,18 +87,6 @@ impl PromqlServer {
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),
                     )),
             )
-    }
-
-    fn route_query(&self) -> Router {
-        Router::new()
-            .route("/", routing::post(instant_query).get(instant_query))
-            .with_state(self.query_handler.clone())
-    }
-
-    fn route_range_query(&self) -> Router {
-        Router::new()
-            .route("/", routing::post(range_query).get(range_query))
-            .with_state(self.query_handler.clone())
     }
 }
 
