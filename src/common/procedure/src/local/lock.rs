@@ -68,8 +68,11 @@ impl LockMap {
 
     /// Acquire lock by `key` for procedure with specific `meta`.
     ///
-    /// Thought `meta` is clonable, callers must ensure that only one `meta`
+    /// Though `meta` is cloneable, callers must ensure that only one `meta`
     /// is acquiring and holding the lock at the same time.
+    ///
+    /// # Panics
+    /// Panics if the procedure acquires the lock recursively.
     async fn acquire_lock(&self, key: &str, meta: ProcedureMetaRef) {
         assert!(!self.hold_lock(key, meta.id));
 
