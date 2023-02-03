@@ -353,7 +353,7 @@ async fn start_test_server(server_tls: TlsOption) -> Result<u16> {
     common_telemetry::init_default_ut_logging();
     let table = MemTable::default_numbers_table();
     let pg_server = create_postgres_server(table, false, server_tls, None)?;
-    let listening = "127.0.0.1:5432".parse::<SocketAddr>().unwrap();
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     let server_addr = pg_server.start(listening).await.unwrap();
     Ok(server_addr.port())
 }

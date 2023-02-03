@@ -48,6 +48,7 @@ pub trait SqlQueryHandler {
         query_ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error>;
 
+    // TODO(LFC): revisit this for mysql prepared statement
     fn do_describe(
         &self,
         stmt: Statement,
