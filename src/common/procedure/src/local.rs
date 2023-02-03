@@ -86,6 +86,12 @@ impl ProcedureMeta {
         let meta = self.exec_meta.lock().unwrap();
         meta.state.clone()
     }
+
+    /// Update current [ProcedureState].
+    fn set_state(&self, state: ProcedureState) {
+        let mut meta = self.exec_meta.lock().unwrap();
+        meta.state = state;
+    }
 }
 
 /// Reference counted pointer to [ProcedureMeta].
@@ -122,13 +128,13 @@ impl ManagerContext {
         procedures.contains_key(&procedure_id)
     }
 
-    /// Insert the procedure with specific `procedure_id`.
+    /// Insert the `procedure` to the context.
     ///
     /// # Panics
     /// Panics if the procedure already exists.
-    fn insert_procedure(&self, procedure_id: ProcedureId, meta: ProcedureMetaRef) {
+    fn insert_procedure(&self, meta: ProcedureMetaRef) {
         let mut procedures = self.procedures.write().unwrap();
-        let old = procedures.insert(procedure_id, meta);
+        let old = procedures.insert(meta.id, meta);
         assert!(old.is_none());
     }
 
@@ -182,7 +188,7 @@ impl LocalManager {
             store: ProcedureStore::new(self.state_store.clone()),
         };
 
-        self.manager_ctx.insert_procedure(procedure_id, meta);
+        self.manager_ctx.insert_procedure(meta);
 
         common_runtime::spawn_bg(async move {
             // Run the root procedure.
@@ -205,7 +211,7 @@ impl ProcedureManager for LocalManager {
     async fn submit(&self, procedure: ProcedureWithId) -> Result<()> {
         let procedure_id = procedure.id;
         ensure!(
-            self.manager_ctx.contains_procedure(procedure_id),
+            !self.manager_ctx.contains_procedure(procedure_id),
             DuplicateProcedureSnafu { procedure_id }
         );
 
@@ -274,43 +280,69 @@ mod tests {
         ObjectStore::new(accessor)
     }
 
-    #[derive(Debug, Serialize, Deserialize)]
-    struct MockData {
-        id: u32,
-        content: String,
+    #[test]
+    fn test_manager_context() {
+        let ctx = ManagerContext::new();
+        let meta = Arc::new(procedure_meta_for_test());
+
+        assert!(!ctx.contains_procedure(meta.id));
+        assert!(ctx.state(meta.id).is_none());
+
+        ctx.insert_procedure(meta.clone());
+        assert!(ctx.contains_procedure(meta.id));
+
+        assert_eq!(ProcedureState::Running, ctx.state(meta.id).unwrap());
+        meta.set_state(ProcedureState::Done);
+        assert_eq!(ProcedureState::Done, ctx.state(meta.id).unwrap());
     }
 
-    #[derive(Debug)]
-    struct ProcedureToLoad {
-        data: MockData,
-    }
+    #[test]
+    #[should_panic]
+    fn test_manager_context_insert_duplicate() {
+        let ctx = ManagerContext::new();
+        let meta = Arc::new(procedure_meta_for_test());
 
-    #[async_trait]
-    impl Procedure for ProcedureToLoad {
-        fn type_name(&self) -> &str {
-            "ProcedureToLoad"
-        }
-
-        async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
-            unimplemented!()
-        }
-
-        fn dump(&self) -> Result<String> {
-            Ok(serde_json::to_string(&self.data).unwrap())
-        }
-
-        fn lock_key(&self) -> Option<LockKey> {
-            None
-        }
+        ctx.insert_procedure(meta.clone());
+        ctx.insert_procedure(meta);
     }
 
     #[test]
     fn test_register_loader() {
-        let dir = TempDir::new("register_loader").unwrap();
+        let dir = TempDir::new("register").unwrap();
         let config = ManagerConfig {
             object_store: new_object_store(&dir),
         };
         let manager = LocalManager::new(config);
+
+        #[derive(Debug, Serialize, Deserialize)]
+        struct MockData {
+            id: u32,
+            content: String,
+        }
+
+        #[derive(Debug)]
+        struct ProcedureToLoad {
+            data: MockData,
+        }
+
+        #[async_trait]
+        impl Procedure for ProcedureToLoad {
+            fn type_name(&self) -> &str {
+                "ProcedureToLoad"
+            }
+
+            async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+                unimplemented!()
+            }
+
+            fn dump(&self) -> Result<String> {
+                Ok(serde_json::to_string(&self.data).unwrap())
+            }
+
+            fn lock_key(&self) -> Option<LockKey> {
+                None
+            }
+        }
 
         let loader = |json: &str| {
             let data = serde_json::from_str(json).unwrap();
@@ -324,6 +356,67 @@ mod tests {
         let err = manager
             .register_loader("ProcedureToLoad", Box::new(loader))
             .unwrap_err();
-        assert!(matches!(err, Error::DuplicateProcedure { .. }), "{err}");
+        assert!(matches!(err, Error::LoaderConflict { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_submit_procedure() {
+        let dir = TempDir::new("submit").unwrap();
+        let config = ManagerConfig {
+            object_store: new_object_store(&dir),
+        };
+        let manager = LocalManager::new(config);
+
+        #[derive(Debug)]
+        struct MockProcedure {}
+
+        #[async_trait]
+        impl Procedure for MockProcedure {
+            fn type_name(&self) -> &str {
+                "MockProcedure"
+            }
+
+            async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+                unimplemented!()
+            }
+
+            fn dump(&self) -> Result<String> {
+                unimplemented!()
+            }
+
+            fn lock_key(&self) -> Option<LockKey> {
+                Some(LockKey::new("test.submit"))
+            }
+        }
+
+        let procedure_id = ProcedureId::random();
+        assert!(manager
+            .procedure_state(procedure_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        manager
+            .submit(ProcedureWithId {
+                id: procedure_id,
+                procedure: Box::new(MockProcedure {}),
+            })
+            .await
+            .unwrap();
+        assert!(manager
+            .procedure_state(procedure_id)
+            .await
+            .unwrap()
+            .is_some());
+
+        // Try to submit procedure with same id again.
+        let err = manager
+            .submit(ProcedureWithId {
+                id: procedure_id,
+                procedure: Box::new(MockProcedure {}),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::DuplicateProcedure { .. }), "{err:?}");
     }
 }
