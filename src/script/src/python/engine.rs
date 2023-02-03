@@ -265,7 +265,10 @@ impl ScriptEngine for PyEngine {
     }
 
     async fn compile(&self, script: &str, _ctx: CompileContext) -> Result<PyScript> {
-        let copr = Arc::new(parse::parse_and_compile_copr(script)?);
+        let copr = Arc::new(parse::parse_and_compile_copr(
+            script,
+            Some(self.query_engine.clone()),
+        )?);
 
         Ok(PyScript {
             copr,
@@ -287,8 +290,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn test_compile_execute() {
+    fn sample_script_engine() -> PyEngine {
         let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
 
         let default_schema = Arc::new(MemorySchemaProvider::new());
@@ -306,7 +308,38 @@ mod tests {
         let factory = QueryEngineFactory::new(catalog_list);
         let query_engine = factory.query_engine();
 
-        let script_engine = PyEngine::new(query_engine.clone());
+        PyEngine::new(query_engine.clone())
+    }
+
+    #[tokio::test]
+    async fn test_sql_in_py() {
+        let script_engine = sample_script_engine();
+
+        let script = r#"
+import greptime as gt
+
+@copr(args=["number"], returns = ["number"], sql = "select * from numbers")
+def test(number)->vector[u32]:
+    return query.sql("select * from numbers")[0][0][1]
+"#;
+        let script = script_engine
+            .compile(script, CompileContext::default())
+            .await
+            .unwrap();
+        let _output = script.execute(EvalContext::default()).await.unwrap();
+        let res = common_recordbatch::util::collect_batches(match _output {
+            Output::Stream(s) => s,
+            _ => todo!(),
+        })
+        .await
+        .unwrap();
+        let rb = res.iter().next().expect("One and only one recordbatch");
+        assert_eq!(rb.column(0).len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_compile_execute() {
+        let script_engine = sample_script_engine();
 
         // To avoid divide by zero, the script divides `add(a, b)` by `g.sqrt(c + 1)` instead of `g.sqrt(c)`
         let script = r#"
@@ -351,7 +384,7 @@ import greptime as gt
 
 @copr(args=["number"], returns = ["r"], sql="select number from numbers limit 100")
 def test(a):
-   return gt.vector([x for x in a if x % 2 == 0])
+    return gt.vector([x for x in a if x % 2 == 0])
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())
