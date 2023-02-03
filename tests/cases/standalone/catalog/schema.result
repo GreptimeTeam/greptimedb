@@ -86,3 +86,8 @@ SELECT * FROM test_public_schema.hello;
 
 Error: 3000(PlanQuery), Error during planning: table 'greptime.test_public_schema.hello' not found
 
+USE public;
+
+++
+++
+

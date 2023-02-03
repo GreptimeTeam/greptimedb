@@ -1,12 +1,3 @@
-CREATE SCHEMA test_rename_table;
-
-Affected Rows: 1
-
-USE test_rename_table;
-
-++
-++
-
 CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
 
 Affected Rows: 0
@@ -44,7 +35,7 @@ Error: 4001(TableNotFound), Table not found: t
 
 SELECT * FROM t;
 
-Error: 3000(PlanQuery), Error during planning: table 'greptime.test_rename_table.t' not found
+Error: 3000(PlanQuery), Error during planning: table 'greptime.public.t' not found
 
 CREATE TABLE t(i INTEGER, j BIGINT TIME INDEX);
 
@@ -71,11 +62,11 @@ SELECT * FROM new_table;
 
 ALTER TABLE new_table RENAME new_table;
 
-Error: 1004(InvalidArguments), Table already exists: greptime.test_rename_table.new_table
+Error: 1004(InvalidArguments), Table already exists: greptime.public.new_table
 
 ALTER TABLE new_table RENAME t;
 
-Error: 1004(InvalidArguments), Table already exists: greptime.test_rename_table.t
+Error: 1004(InvalidArguments), Table already exists: greptime.public.t
 
 DROP TABLE t;
 

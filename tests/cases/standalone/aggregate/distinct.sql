@@ -1,7 +1,3 @@
-CREATE SCHEMA test_distinct;
-
-USE test_distinct;
-
 CREATE TABLE test (a INTEGER, b INTEGER, t BIGINT TIME INDEX);
 
 INSERT INTO test VALUES (11, 22, 1), (13, 22, 2), (11, 21, 3), (11, 22, 4);
