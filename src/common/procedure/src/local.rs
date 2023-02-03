@@ -39,11 +39,11 @@ struct ExecMeta {
 struct ProcedureMeta {
     /// Id of this procedure.
     id: ProcedureId,
-    /// Notify to waiting for a lock.
+    /// Notify to wait for a lock.
     lock_notify: Notify,
     /// Parent procedure id.
     parent_id: Option<ProcedureId>,
-    /// Notify to waiting for subprocedures.
+    /// Notify to wait for subprocedures.
     child_notify: Notify,
     /// Locks inherted from the parent procedure.
     parent_locks: Vec<LockKey>,
