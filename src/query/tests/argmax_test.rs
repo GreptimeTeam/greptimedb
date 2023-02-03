@@ -23,7 +23,7 @@ use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::types::WrapperType;
 use query::error::Result;
-use query::parser::QueryLanguageParser;
+use query::parser::{QueryLanguage, QueryLanguageParser};
 use query::QueryEngine;
 use session::context::QueryContext;
 
@@ -84,7 +84,7 @@ async fn execute_argmax<'a>(
     engine: Arc<dyn QueryEngine>,
 ) -> RecordResult<Vec<RecordBatch>> {
     let sql = format!("select ARGMAX({column_name}) as argmax from {table_name}");
-    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
+    let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql)).unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))
         .unwrap();

@@ -34,7 +34,7 @@ use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::UInt32Vector;
 use query::error::{QueryExecutionSnafu, Result};
-use query::parser::QueryLanguageParser;
+use query::parser::{QueryLanguage, QueryLanguageParser};
 use query::plan::LogicalPlan;
 use query::query_engine::QueryEngineFactory;
 use session::context::QueryContext;
@@ -145,9 +145,10 @@ async fn test_udf() -> Result<()> {
 
     engine.register_udf(udf);
 
-    let stmt =
-        QueryLanguageParser::parse_sql("select my_pow(number, number) as p from numbers limit 10")
-            .unwrap();
+    let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(
+        "select my_pow(number, number) as p from numbers limit 10".to_string(),
+    ))
+    .unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))
         .unwrap();

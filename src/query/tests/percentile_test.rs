@@ -27,7 +27,7 @@ use datatypes::vectors::Int32Vector;
 use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
 use query::error::Result;
-use query::parser::QueryLanguageParser;
+use query::parser::{QueryLanguage, QueryLanguageParser};
 use query::{QueryEngine, QueryEngineFactory};
 use session::context::QueryContext;
 use table::test_util::MemTable;
@@ -53,7 +53,7 @@ async fn test_percentile_aggregator() -> Result<()> {
 async fn test_percentile_correctness() -> Result<()> {
     let engine = create_correctness_engine();
     let sql = String::from("select PERCENTILE(corr_number,88.0) as percentile from corr_numbers");
-    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
+    let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql)).unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))
         .unwrap();
@@ -98,7 +98,7 @@ async fn execute_percentile<'a>(
     engine: Arc<dyn QueryEngine>,
 ) -> RecordResult<Vec<RecordBatch>> {
     let sql = format!("select PERCENTILE({column_name},50.0) as percentile from {table_name}");
-    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
+    let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql)).unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))
         .unwrap();

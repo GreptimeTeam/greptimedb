@@ -26,6 +26,7 @@ use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
+use query::parser::QueryLanguage;
 use query::QueryEngineRef;
 use session::context::QueryContext;
 use table::metadata::{FilterPushDownType, TableInfoRef};
@@ -126,7 +127,8 @@ struct TimeRangeTester {
 
 impl TimeRangeTester {
     async fn check(&self, sql: &str, expect: TimestampRange) {
-        let stmt = query::parser::QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt =
+            query::parser::QueryLanguageParser::parse(QueryLanguage::Sql(sql.to_owned())).unwrap();
         let _ = self
             .engine
             .execute(

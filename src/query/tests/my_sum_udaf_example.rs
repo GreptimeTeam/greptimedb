@@ -33,7 +33,7 @@ use datatypes::vectors::Helper;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
 use query::error::Result;
-use query::parser::QueryLanguageParser;
+use query::parser::{QueryLanguage, QueryLanguageParser};
 use query::QueryEngineFactory;
 use session::context::QueryContext;
 use table::test_util::MemTable;
@@ -219,7 +219,7 @@ where
     )));
 
     let sql = format!("select MY_SUM({column_name}) as my_sum from {table_name}");
-    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
+    let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql)).unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))
         .unwrap();

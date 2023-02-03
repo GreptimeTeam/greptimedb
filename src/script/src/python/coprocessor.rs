@@ -27,7 +27,7 @@ use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
-use query::parser::QueryLanguageParser;
+use query::parser::{QueryLanguage, QueryLanguageParser};
 use query::QueryEngine;
 use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
@@ -290,7 +290,7 @@ fn set_items_in_scope(
 }
 
 /// The coprocessor function accept a python script and a Record Batch:
-/// ## What it does
+/// # What it does
 /// 1. it take a python script and a [`RecordBatch`], extract columns and annotation info according to `args` given in decorator in python script
 /// 2. execute python code and return a vector or a tuple of vector,
 /// 3. the returning vector(s) is assembled into a new [`RecordBatch`] according to `returns` in python decorator and return to caller
@@ -369,7 +369,8 @@ impl PyQueryEngine {
         let query = self.inner.0.upgrade();
         let thread_handle = std::thread::spawn(move || -> std::result::Result<_, String> {
             if let Some(engine) = query {
-                let stmt = QueryLanguageParser::parse_sql(s.as_str()).map_err(|e| e.to_string())?;
+                let stmt =
+                    QueryLanguageParser::parse(QueryLanguage::Sql(s)).map_err(|e| e.to_string())?;
                 let plan = engine
                     .statement_to_plan(stmt, Default::default())
                     .map_err(|e| e.to_string())?;

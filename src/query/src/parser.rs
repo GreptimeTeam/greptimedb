@@ -28,6 +28,12 @@ use crate::error::{MultipleStatementsSnafu, QueryParseSnafu, Result};
 use crate::metric::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
 
 #[derive(Debug, Clone)]
+pub enum QueryLanguage {
+    Sql(String),
+    Promql(String),
+}
+
+#[derive(Debug, Clone)]
 pub enum QueryStatement {
     Sql(Statement),
     Promql(EvalStmt),
@@ -36,7 +42,14 @@ pub enum QueryStatement {
 pub struct QueryLanguageParser {}
 
 impl QueryLanguageParser {
-    pub fn parse_sql(sql: &str) -> Result<QueryStatement> {
+    pub fn parse(query: QueryLanguage) -> Result<QueryStatement> {
+        match query {
+            QueryLanguage::Sql(sql) => Self::parse_sql(&sql),
+            QueryLanguage::Promql(promql) => Self::parse_promql(&promql),
+        }
+    }
+
+    fn parse_sql(sql: &str) -> Result<QueryStatement> {
         let _timer = timer!(METRIC_PARSE_SQL_ELAPSED);
         let mut statement = ParserContext::create_with_dialect(sql, &GenericDialect {})
             .map_err(BoxedError::new)
@@ -53,8 +66,7 @@ impl QueryLanguageParser {
         }
     }
 
-    // TODO(ruihang): implement this method when parser is ready.
-    pub fn parse_promql(promql: &str) -> Result<QueryStatement> {
+    fn parse_promql(promql: &str) -> Result<QueryStatement> {
         let _timer = timer!(METRIC_PARSE_PROMQL_ELAPSED);
 
         let prom_expr = promql_parser::parser::parse(promql)

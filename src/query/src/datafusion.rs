@@ -277,7 +277,7 @@ mod tests {
     use session::context::QueryContext;
     use table::table::numbers::NumbersTable;
 
-    use crate::parser::QueryLanguageParser;
+    use crate::parser::{QueryLanguage, QueryLanguageParser};
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
     fn create_test_engine() -> QueryEngineRef {
@@ -301,9 +301,9 @@ mod tests {
     #[test]
     fn test_sql_to_plan() {
         let engine = create_test_engine();
-        let sql = "select sum(number) from numbers limit 20";
+        let sql = "select sum(number) from numbers limit 20".to_string();
 
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql)).unwrap();
         let plan = engine
             .statement_to_plan(stmt, Arc::new(QueryContext::new()))
             .unwrap();
@@ -321,9 +321,9 @@ mod tests {
     #[tokio::test]
     async fn test_execute() {
         let engine = create_test_engine();
-        let sql = "select sum(number) from numbers limit 20";
+        let sql = "select sum(number) from numbers limit 20".to_string();
 
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql)).unwrap();
         let plan = engine
             .statement_to_plan(stmt, Arc::new(QueryContext::new()))
             .unwrap();

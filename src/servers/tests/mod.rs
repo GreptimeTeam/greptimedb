@@ -20,7 +20,7 @@ use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaPr
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
-use query::parser::QueryLanguageParser;
+use query::parser::{QueryLanguage, QueryLanguageParser};
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
@@ -59,7 +59,7 @@ impl SqlQueryHandler for DummyInstance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let stmt = QueryLanguageParser::parse_sql(query).unwrap();
+        let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(query.to_owned())).unwrap();
         let plan = self
             .query_engine
             .statement_to_plan(stmt, query_ctx)

@@ -18,7 +18,7 @@ use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
-use query::parser::{QueryLanguageParser, QueryStatement};
+use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
 use servers::error as server_error;
 use servers::promql::PromqlHandler;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -160,12 +160,14 @@ impl Instance {
     }
 
     pub async fn execute_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
-        let stmt = QueryLanguageParser::parse_sql(sql).context(ExecuteSqlSnafu)?;
+        let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql.to_owned()))
+            .context(ExecuteSqlSnafu)?;
         self.execute_stmt(stmt, query_ctx).await
     }
 
     pub async fn execute_promql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
-        let stmt = QueryLanguageParser::parse_promql(sql).context(ExecuteSqlSnafu)?;
+        let stmt = QueryLanguageParser::parse(QueryLanguage::Promql(sql.to_owned()))
+            .context(ExecuteSqlSnafu)?;
         self.execute_stmt(stmt, query_ctx).await
     }
 }

@@ -143,7 +143,7 @@ mod tests {
     use mito::engine::MitoEngine;
     use object_store::services::fs::Builder;
     use object_store::ObjectStore;
-    use query::parser::{QueryLanguageParser, QueryStatement};
+    use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
     use query::QueryEngineFactory;
     use sql::statements::statement::Statement;
     use storage::config::EngineConfig as StorageEngineConfig;
@@ -241,7 +241,7 @@ mod tests {
         let query_engine = factory.query_engine();
         let sql_handler = SqlHandler::new(table_engine, catalog_list.clone(), query_engine.clone());
 
-        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+        let stmt = match QueryLanguageParser::parse(QueryLanguage::Sql(sql.to_owned())).unwrap() {
             QueryStatement::Sql(Statement::Insert(i)) => i,
             _ => {
                 unreachable!()

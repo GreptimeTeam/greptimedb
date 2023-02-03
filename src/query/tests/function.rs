@@ -26,7 +26,7 @@ use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::types::WrapperType;
 use datatypes::vectors::Helper;
-use query::parser::QueryLanguageParser;
+use query::parser::{QueryLanguage, QueryLanguageParser};
 use query::query_engine::QueryEngineFactory;
 use query::QueryEngine;
 use rand::Rng;
@@ -83,7 +83,7 @@ where
     T: WrapperType,
 {
     let sql = format!("SELECT {column_name} FROM {table_name}");
-    let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
+    let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql)).unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))
         .unwrap();

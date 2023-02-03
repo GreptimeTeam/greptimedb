@@ -30,7 +30,7 @@ use datafusion_expr::Volatility;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::vectors::VectorRef;
 use futures::Stream;
-use query::parser::{QueryLanguageParser, QueryStatement};
+use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
 use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{ensure, ResultExt};
@@ -220,7 +220,7 @@ impl Script for PyScript {
 
     async fn execute(&self, _ctx: EvalContext) -> Result<Output> {
         if let Some(sql) = &self.copr.deco_args.sql {
-            let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+            let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql.clone())).unwrap();
             ensure!(
                 matches!(stmt, QueryStatement::Sql(Statement::Query { .. })),
                 error::UnsupportedSqlSnafu { sql }

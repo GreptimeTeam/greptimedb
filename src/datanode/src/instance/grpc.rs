@@ -18,7 +18,7 @@ use api::v1::query_request::Query;
 use api::v1::{CreateDatabaseExpr, DdlRequest, InsertRequest};
 use async_trait::async_trait;
 use common_query::Output;
-use query::parser::QueryLanguageParser;
+use query::parser::{QueryLanguage, QueryLanguageParser};
 use query::plan::LogicalPlan;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContextRef;
@@ -52,7 +52,8 @@ impl Instance {
     async fn handle_query(&self, query: Query, ctx: QueryContextRef) -> Result<Output> {
         Ok(match query {
             Query::Sql(sql) => {
-                let stmt = QueryLanguageParser::parse_sql(&sql).context(ExecuteSqlSnafu)?;
+                let stmt =
+                    QueryLanguageParser::parse(QueryLanguage::Sql(sql)).context(ExecuteSqlSnafu)?;
                 self.execute_stmt(stmt, ctx).await?
             }
             Query::LogicalPlan(plan) => self.execute_logical(plan).await?,
