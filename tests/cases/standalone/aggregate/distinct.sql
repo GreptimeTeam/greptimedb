@@ -1,19 +1,23 @@
-CREATE TABLE test_distinct (a INTEGER, b INTEGER, t BIGINT TIME INDEX);
+CREATE SCHEMA test_distinct;
 
-INSERT INTO test_distinct VALUES (11, 22, 1), (13, 22, 2), (11, 21, 3), (11, 22, 4);
+USE test_distinct;
 
-SELECT DISTINCT a, b FROM test_distinct ORDER BY a, b;
+CREATE TABLE test (a INTEGER, b INTEGER, t BIGINT TIME INDEX);
 
-SELECT DISTINCT test_distinct.a, b FROM test_distinct ORDER BY a, b;
+INSERT INTO test VALUES (11, 22, 1), (13, 22, 2), (11, 21, 3), (11, 22, 4);
 
-SELECT DISTINCT a FROM test_distinct ORDER BY a;
+SELECT DISTINCT a, b FROM test ORDER BY a, b;
 
-SELECT DISTINCT b FROM test_distinct ORDER BY b;
+SELECT DISTINCT test.a, b FROM test ORDER BY a, b;
 
-SELECT DISTINCT a, SUM(B) FROM test_distinct GROUP BY a ORDER BY a;
+SELECT DISTINCT a FROM test ORDER BY a;
 
-SELECT DISTINCT MAX(b) FROM test_distinct GROUP BY a;
+SELECT DISTINCT b FROM test ORDER BY b;
 
-SELECT DISTINCT CASE WHEN a > 11 THEN 11 ELSE a END FROM test_distinct;
+SELECT DISTINCT a, SUM(B) FROM test GROUP BY a ORDER BY a;
 
-DROP TABLE test_distinct;
+SELECT DISTINCT MAX(b) FROM test GROUP BY a;
+
+SELECT DISTINCT CASE WHEN a > 11 THEN 11 ELSE a END FROM test;
+
+DROP TABLE test;

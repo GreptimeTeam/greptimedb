@@ -35,11 +35,11 @@ struct DummyInstance {
 
 #[async_trait]
 impl InfluxdbLineProtocolHandler for DummyInstance {
-    async fn exec(&self, request: &InfluxdbRequest) -> Result<()> {
+    async fn exec(&self, request: &InfluxdbRequest, ctx: QueryContextRef) -> Result<()> {
         let requests: Vec<InsertRequest> = request.try_into()?;
 
         for expr in requests {
-            let _ = self.tx.send((expr.schema_name, expr.table_name)).await;
+            let _ = self.tx.send((ctx.current_schema(), expr.table_name)).await;
         }
 
         Ok(())

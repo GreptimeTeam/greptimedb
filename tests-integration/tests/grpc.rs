@@ -18,7 +18,7 @@ use api::v1::{
     InsertRequest, TableId,
 };
 use client::{Client, Database};
-use common_catalog::consts::MIN_USER_TABLE_ID;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_query::Output;
 use servers::server::Server;
 use tests_integration::test_util::{setup_grpc_server, StorageType};
@@ -65,7 +65,7 @@ pub async fn test_auto_create_table(store_type: StorageType) {
         setup_grpc_server(store_type, "auto_create_table").await;
 
     let grpc_client = Client::with_urls(vec![addr]);
-    let db = Database::new("greptime", grpc_client);
+    let db = Database::with_client(grpc_client);
     insert_and_assert(&db).await;
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
@@ -131,8 +131,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         setup_grpc_server(store_type, "insert_and_select").await;
 
     let grpc_client = Client::with_urls(vec![addr]);
-
-    let db = Database::new("greptime", grpc_client.clone());
+    let db = Database::with_client(grpc_client);
 
     // create
     let expr = testing_create_expr();
@@ -153,9 +152,9 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         }],
     });
     let expr = AlterExpr {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: "demo".to_string(),
-        catalog_name: "".to_string(),
-        schema_name: "".to_string(),
         kind: Some(kind),
     };
     let result = db.alter(expr).await.unwrap();
@@ -173,7 +172,6 @@ async fn insert_and_assert(db: &Database) {
     let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
 
     let request = InsertRequest {
-        schema_name: "public".to_string(),
         table_name: "demo".to_string(),
         region_number: 0,
         columns: vec![

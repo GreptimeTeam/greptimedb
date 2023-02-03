@@ -20,6 +20,7 @@ use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, O
 use crate::TableRef;
 
 /// Represents a resolved path to a table of the form “catalog.schema.table”
+#[derive(Debug, PartialEq)]
 pub struct TableReference<'a> {
     pub catalog: &'a str,
     pub schema: &'a str,

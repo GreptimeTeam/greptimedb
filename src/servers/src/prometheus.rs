@@ -41,7 +41,7 @@ pub struct Metrics {
 
 /// Generate a sql from a remote request query
 /// TODO(dennis): maybe use logical plan in future to prevent sql injection
-pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
+pub fn query_to_sql(q: &Query) -> Result<(String, String)> {
     let start_timestamp_ms = q.start_timestamp_ms;
     let end_timestamp_ms = q.end_timestamp_ms;
 
@@ -100,9 +100,7 @@ pub fn query_to_sql(db: &str, q: &Query) -> Result<(String, String)> {
 
     Ok((
         table_name.to_string(),
-        format!(
-            "select * from {db}.{table_name} where {conditions} order by {TIMESTAMP_COLUMN_NAME}",
-        ),
+        format!("select * from {table_name} where {conditions} order by {TIMESTAMP_COLUMN_NAME}",),
     ))
 }
 
@@ -284,21 +282,12 @@ fn recordbatch_to_timeseries(table: &str, recordbatch: RecordBatch) -> Result<Ve
     Ok(timeseries_map.into_values().collect())
 }
 
-pub fn to_grpc_insert_requests(
-    database: &str,
-    mut request: WriteRequest,
-) -> Result<Vec<GrpcInsertRequest>> {
+pub fn to_grpc_insert_requests(mut request: WriteRequest) -> Result<Vec<GrpcInsertRequest>> {
     let timeseries = std::mem::take(&mut request.timeseries);
-
-    timeseries
-        .into_iter()
-        .map(|timeseries| to_grpc_insert_request(database, timeseries))
-        .collect()
+    timeseries.into_iter().map(to_grpc_insert_request).collect()
 }
 
-fn to_grpc_insert_request(database: &str, mut timeseries: TimeSeries) -> Result<GrpcInsertRequest> {
-    let schema_name = database.to_string();
-
+fn to_grpc_insert_request(mut timeseries: TimeSeries) -> Result<GrpcInsertRequest> {
     // TODO(dennis): save exemplars into a column
     let labels = std::mem::take(&mut timeseries.labels);
     let samples = std::mem::take(&mut timeseries.samples);
@@ -355,7 +344,6 @@ fn to_grpc_insert_request(database: &str, mut timeseries: TimeSeries) -> Result<
     }
 
     Ok(GrpcInsertRequest {
-        schema_name,
         table_name: table_name.context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
         })?,
@@ -467,7 +455,7 @@ mod tests {
             matchers: vec![],
             ..Default::default()
         };
-        let err = query_to_sql("public", &q).unwrap_err();
+        let err = query_to_sql(&q).unwrap_err();
         assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
 
         let q = Query {
@@ -480,9 +468,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let (table, sql) = query_to_sql("public", &q).unwrap();
+        let (table, sql) = query_to_sql(&q).unwrap();
         assert_eq!("test", table);
-        assert_eq!("select * from public.test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 order by greptime_timestamp", sql);
+        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 order by greptime_timestamp", sql);
 
         let q = Query {
             start_timestamp_ms: 1000,
@@ -506,9 +494,9 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (table, sql) = query_to_sql("public", &q).unwrap();
+        let (table, sql) = query_to_sql(&q).unwrap();
         assert_eq!("test", table);
-        assert_eq!("select * from public.test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 AND job~'*prom*' AND instance!='localhost' order by greptime_timestamp", sql);
+        assert_eq!("select * from test where greptime_timestamp>=1000 AND greptime_timestamp<=2000 AND job~'*prom*' AND instance!='localhost' order by greptime_timestamp", sql);
     }
 
     #[test]
@@ -518,11 +506,8 @@ mod tests {
             ..Default::default()
         };
 
-        let exprs = to_grpc_insert_requests("prometheus", write_request).unwrap();
+        let exprs = to_grpc_insert_requests(write_request).unwrap();
         assert_eq!(3, exprs.len());
-        assert_eq!("prometheus", exprs[0].schema_name);
-        assert_eq!("prometheus", exprs[1].schema_name);
-        assert_eq!("prometheus", exprs[2].schema_name);
         assert_eq!("metric1", exprs[0].table_name);
         assert_eq!("metric2", exprs[1].table_name);
         assert_eq!("metric3", exprs[2].table_name);

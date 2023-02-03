@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use session::context::QueryContext;
 
@@ -23,10 +20,7 @@ use crate::tests::test_util::{check_output_stream, setup_test_instance};
 #[tokio::test(flavor = "multi_thread")]
 async fn sql_insert_promql_query_ceil() {
     let instance = setup_test_instance("test_execute_insert").await;
-    let query_ctx = Arc::new(QueryContext::with(
-        DEFAULT_CATALOG_NAME.to_owned(),
-        DEFAULT_SCHEMA_NAME.to_owned(),
-    ));
+    let query_ctx = QueryContext::arc();
     let put_output = instance
         .inner()
         .execute_sql(

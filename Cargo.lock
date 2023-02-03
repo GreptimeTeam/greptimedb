@@ -1304,6 +1304,7 @@ dependencies = [
  "arrow-flight",
  "async-stream",
  "common-base",
+ "common-catalog",
  "common-error",
  "common-grpc",
  "common-grpc-expr",
@@ -1518,9 +1519,12 @@ dependencies = [
  "common-error",
  "common-runtime",
  "common-telemetry",
+ "futures",
+ "object-store",
  "serde",
  "serde_json",
  "snafu",
+ "tempdir",
  "tokio",
  "uuid",
 ]
@@ -6694,6 +6698,7 @@ name = "session"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "common-catalog",
  "common-telemetry",
 ]
 
@@ -6935,9 +6940,9 @@ dependencies = [
 
 [[package]]
 name = "sqlness"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ffa69a2ae10018ec72a3cb7574e3a33a3fc322ed03740f6e435fd7f0c1db4a7"
+checksum = "16a494ea677f9de93e8c25ec33b1073f8f72d61466d4595ecf1462ba877fe924"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",
@@ -6959,7 +6964,10 @@ dependencies = [
  "common-error",
  "common-grpc",
  "common-query",
+ "common-time",
+ "serde",
  "sqlness",
+ "tinytemplate",
  "tokio",
 ]
 

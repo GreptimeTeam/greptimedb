@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::*;
@@ -24,10 +24,10 @@ use datatypes::vectors::{Helper, StringVector};
 use once_cell::sync::Lazy;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
 use sql::statements::statement::Statement;
+use table::TableRef;
 
 use crate::error::{self, Result};
 use crate::parser::QueryStatement;
@@ -129,15 +129,11 @@ pub fn show_tables(
     let schema = if let Some(database) = stmt.database {
         database
     } else {
-        query_ctx
-            .current_schema()
-            .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string())
+        query_ctx.current_schema()
     };
     // TODO(sunng87): move this function into query_ctx
-    let catalog = query_ctx.current_catalog();
-    let catalog = catalog.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
     let schema = catalog_manager
-        .schema(catalog, &schema)
+        .schema(&query_ctx.current_catalog(), &schema)
         .context(error::CatalogSnafu)?
         .context(error::SchemaNotFoundSnafu { schema })?;
     let mut tables = schema.table_names().context(error::CatalogSnafu)?;
@@ -170,24 +166,7 @@ pub async fn explain(
     query_engine.execute(&plan).await
 }
 
-pub fn describe_table(stmt: DescribeTable, catalog_manager: CatalogManagerRef) -> Result<Output> {
-    let catalog = stmt.catalog_name.as_str();
-    let schema = stmt.schema_name.as_str();
-    catalog_manager
-        .catalog(catalog)
-        .context(error::CatalogSnafu)?
-        .context(error::CatalogNotFoundSnafu { catalog })?;
-    let schema = catalog_manager
-        .schema(catalog, schema)
-        .context(error::CatalogSnafu)?
-        .context(error::SchemaNotFoundSnafu { schema })?;
-    let table = schema
-        .table(&stmt.table_name)
-        .context(error::CatalogSnafu)?
-        .context(error::TableNotFoundSnafu {
-            table: &stmt.table_name,
-        })?;
-
+pub fn describe_table(table: TableRef) -> Result<Output> {
     let table_info = table.table_info();
     let columns_schemas = table_info.meta.schema.column_schemas();
     let columns = vec![
@@ -263,10 +242,6 @@ fn describe_column_semantic_types(
 mod test {
     use std::sync::Arc;
 
-    use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
-    use catalog::{CatalogList, CatalogManagerRef, CatalogProvider, SchemaProvider};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_error::ext::ErrorExt;
     use common_query::Output;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use common_time::timestamp::TimeUnit;
@@ -274,8 +249,8 @@ mod test {
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt32Vector, VectorRef};
     use snafu::ResultExt;
-    use sql::statements::describe::DescribeTable;
     use table::test_util::MemTable;
+    use table::TableRef;
 
     use crate::error;
     use crate::error::Result;
@@ -285,93 +260,7 @@ mod test {
     };
 
     #[test]
-    fn test_describe_table_catalog_not_found() -> Result<()> {
-        let catalog_name = DEFAULT_CATALOG_NAME.to_string();
-        let schema_name = DEFAULT_SCHEMA_NAME.to_string();
-        let table_name = "test_table";
-        let table_schema = SchemaRef::new(Schema::new(vec![ColumnSchema::new(
-            "test_col",
-            ConcreteDataType::uint32_datatype(),
-            false,
-        )]));
-        let data = vec![Arc::new(UInt32Vector::from_vec(vec![0])) as _];
-        let catalog_manager =
-            prepare_describe_table(&catalog_name, &schema_name, table_name, table_schema, data);
-
-        let stmt = DescribeTable::new("unknown".to_string(), schema_name, table_name.to_string());
-
-        let err = describe_table(stmt, catalog_manager).err().unwrap();
-        let err = err.as_any().downcast_ref::<error::Error>().unwrap();
-
-        if let error::Error::CatalogNotFound { catalog, .. } = err {
-            assert_eq!(catalog, "unknown");
-        } else {
-            panic!("describe table returned incorrect error");
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_describe_table_schema_not_found() -> Result<()> {
-        let catalog_name = DEFAULT_CATALOG_NAME.to_string();
-        let schema_name = DEFAULT_SCHEMA_NAME.to_string();
-        let table_name = "test_table";
-        let table_schema = SchemaRef::new(Schema::new(vec![ColumnSchema::new(
-            "test_col",
-            ConcreteDataType::uint32_datatype(),
-            false,
-        )]));
-        let data = vec![Arc::new(UInt32Vector::from_vec(vec![0])) as _];
-        let catalog_manager =
-            prepare_describe_table(&catalog_name, &schema_name, table_name, table_schema, data);
-
-        let stmt = DescribeTable::new(catalog_name, "unknown".to_string(), table_name.to_string());
-
-        let err = describe_table(stmt, catalog_manager).err().unwrap();
-        let err = err.as_any().downcast_ref::<error::Error>().unwrap();
-
-        if let error::Error::SchemaNotFound { schema, .. } = err {
-            assert_eq!(schema, "unknown");
-        } else {
-            panic!("describe table returned incorrect error");
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_describe_table_table_not_found() -> Result<()> {
-        let catalog_name = DEFAULT_CATALOG_NAME.to_string();
-        let schema_name = DEFAULT_SCHEMA_NAME.to_string();
-        let table_name = "test_table";
-        let table_schema = SchemaRef::new(Schema::new(vec![ColumnSchema::new(
-            "test_col",
-            ConcreteDataType::uint32_datatype(),
-            false,
-        )]));
-        let data = vec![Arc::new(UInt32Vector::from_vec(vec![0])) as _];
-        let catalog_manager =
-            prepare_describe_table(&catalog_name, &schema_name, table_name, table_schema, data);
-
-        let stmt = DescribeTable::new(catalog_name, schema_name, "unknown".to_string());
-
-        let err = describe_table(stmt, catalog_manager).err().unwrap();
-        let err = err.as_any().downcast_ref::<error::Error>().unwrap();
-
-        if let error::Error::TableNotFound { table, .. } = err {
-            assert_eq!(table, "unknown");
-        } else {
-            panic!("describe table returned incorrect error");
-        }
-
-        Ok(())
-    }
-
-    #[test]
     fn test_describe_table_multiple_columns() -> Result<()> {
-        let catalog_name = DEFAULT_CATALOG_NAME;
-        let schema_name = DEFAULT_SCHEMA_NAME;
         let table_name = "test_table";
         let schema = vec![
             ColumnSchema::new("t1", ConcreteDataType::uint32_datatype(), true),
@@ -401,38 +290,23 @@ mod test {
             ])) as _,
         ];
 
-        describe_table_test_by_schema(
-            catalog_name,
-            schema_name,
-            table_name,
-            schema,
-            data,
-            expected_columns,
-        )
+        describe_table_test_by_schema(table_name, schema, data, expected_columns)
     }
 
     fn describe_table_test_by_schema(
-        catalog_name: &str,
-        schema_name: &str,
         table_name: &str,
         schema: Vec<ColumnSchema>,
         data: Vec<VectorRef>,
         expected_columns: Vec<VectorRef>,
     ) -> Result<()> {
         let table_schema = SchemaRef::new(Schema::new(schema));
-        let catalog_manager =
-            prepare_describe_table(catalog_name, schema_name, table_name, table_schema, data);
+        let table = prepare_describe_table(table_name, table_schema, data);
 
         let expected =
             RecordBatches::try_from_columns(DESCRIBE_TABLE_OUTPUT_SCHEMA.clone(), expected_columns)
                 .context(error::CreateRecordBatchSnafu)?;
 
-        let stmt = DescribeTable::new(
-            catalog_name.to_string(),
-            schema_name.to_string(),
-            table_name.to_string(),
-        );
-        if let Output::RecordBatches(res) = describe_table(stmt, catalog_manager)? {
+        if let Output::RecordBatches(res) = describe_table(table)? {
             assert_eq!(res.take(), expected.take());
         } else {
             panic!("describe table must return record batch");
@@ -442,28 +316,11 @@ mod test {
     }
 
     fn prepare_describe_table(
-        catalog_name: &str,
-        schema_name: &str,
         table_name: &str,
         table_schema: SchemaRef,
         data: Vec<VectorRef>,
-    ) -> CatalogManagerRef {
+    ) -> TableRef {
         let record_batch = RecordBatch::new(table_schema, data).unwrap();
-        let table = Arc::new(MemTable::new(table_name, record_batch));
-
-        let schema_provider = Arc::new(MemorySchemaProvider::new());
-        let catalog_provider = Arc::new(MemoryCatalogProvider::new());
-        let catalog_manager = Arc::new(MemoryCatalogManager::default());
-        schema_provider
-            .register_table(table_name.to_string(), table)
-            .unwrap();
-        catalog_provider
-            .register_schema(schema_name.to_string(), schema_provider)
-            .unwrap();
-        catalog_manager
-            .register_catalog(catalog_name.to_string(), catalog_provider)
-            .unwrap();
-
-        catalog_manager
+        Arc::new(MemTable::new(table_name, record_batch))
     }
 }

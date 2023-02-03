@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
@@ -24,6 +26,7 @@ use crate::election::etcd::EtcdElection;
 use crate::metasrv::{MetaSrv, MetaSrvOptions};
 use crate::service::admin;
 use crate::service::store::etcd::EtcdStore;
+use crate::service::store::memory::MemStore;
 use crate::{error, Result};
 
 // Bootstrap the rpc server to serve incoming request
@@ -58,10 +61,16 @@ pub fn router(meta_srv: MetaSrv) -> Router {
 }
 
 pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
-    let kv_store = EtcdStore::with_endpoints([&opts.store_addr]).await?;
-    let election = EtcdElection::with_endpoints(&opts.server_addr, [&opts.store_addr]).await?;
+    let (kv_store, election) = if opts.use_memory_store {
+        (Arc::new(MemStore::new()) as _, None)
+    } else {
+        (
+            EtcdStore::with_endpoints([&opts.store_addr]).await?,
+            Some(EtcdElection::with_endpoints(&opts.server_addr, [&opts.store_addr]).await?),
+        )
+    };
     let selector = opts.selector.clone().into();
-    let meta_srv = MetaSrv::new(opts, kv_store, Some(selector), Some(election), None).await;
+    let meta_srv = MetaSrv::new(opts, kv_store, Some(selector), election, None).await;
     meta_srv.start().await;
     Ok(meta_srv)
 }

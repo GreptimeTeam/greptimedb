@@ -25,17 +25,16 @@ use std::time::Duration;
 use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
-use api::v1::{
-    AddColumns, AlterExpr, Column, DdlRequest, DropTableExpr, GreptimeRequest, InsertRequest,
-};
+use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, DropTableExpr, InsertRequest};
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{debug, info};
+use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -200,10 +199,14 @@ impl Instance {
     }
 
     /// Handle batch inserts
-    pub async fn handle_inserts(&self, requests: Vec<InsertRequest>) -> Result<Output> {
+    pub async fn handle_inserts(
+        &self,
+        requests: Vec<InsertRequest>,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
         let mut success = 0;
         for request in requests {
-            match self.handle_insert(request).await? {
+            match self.handle_insert(request, ctx.clone()).await? {
                 Output::AffectedRows(rows) => success += rows,
                 _ => unreachable!("Insert should not yield output other than AffectedRows"),
             }
@@ -211,20 +214,12 @@ impl Instance {
         Ok(Output::AffectedRows(success))
     }
 
-    async fn handle_insert(&self, request: InsertRequest) -> Result<Output> {
-        let schema_name = &request.schema_name;
-        let table_name = &request.table_name;
-        let catalog_name = DEFAULT_CATALOG_NAME;
-
-        let columns = &request.columns;
-
-        self.create_or_alter_table_on_demand(catalog_name, schema_name, table_name, columns)
+    async fn handle_insert(&self, request: InsertRequest, ctx: QueryContextRef) -> Result<Output> {
+        self.create_or_alter_table_on_demand(ctx.clone(), &request.table_name, &request.columns)
             .await?;
 
-        let query = GreptimeRequest {
-            request: Some(Request::Insert(request)),
-        };
-        GrpcQueryHandler::do_query(&*self.grpc_query_handler, query).await
+        let query = Request::Insert(request);
+        GrpcQueryHandler::do_query(&*self.grpc_query_handler, query, ctx).await
     }
 
     // check if table already exist:
@@ -232,11 +227,13 @@ impl Instance {
     // - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
     async fn create_or_alter_table_on_demand(
         &self,
-        catalog_name: &str,
-        schema_name: &str,
+        ctx: QueryContextRef,
         table_name: &str,
         columns: &[Column],
     ) -> Result<()> {
+        let catalog_name = &ctx.current_catalog();
+        let schema_name = &ctx.current_schema();
+
         let table = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name)
@@ -247,7 +244,7 @@ impl Instance {
                     "Table {}.{}.{} does not exist, try create table",
                     catalog_name, schema_name, table_name,
                 );
-                self.create_table_by_columns(catalog_name, schema_name, table_name, columns)
+                self.create_table_by_columns(ctx, table_name, columns)
                     .await?;
                 info!(
                     "Successfully created table on insertion: {}.{}.{}",
@@ -264,13 +261,8 @@ impl Instance {
                         "Find new columns {:?} on insertion, try to alter table: {}.{}.{}",
                         add_columns, catalog_name, schema_name, table_name
                     );
-                    self.add_new_columns_to_table(
-                        catalog_name,
-                        schema_name,
-                        table_name,
-                        add_columns,
-                    )
-                    .await?;
+                    self.add_new_columns_to_table(ctx, table_name, add_columns)
+                        .await?;
                     info!(
                         "Successfully altered table on insertion: {}.{}.{}",
                         catalog_name, schema_name, table_name
@@ -284,11 +276,13 @@ impl Instance {
     /// Infer create table expr from inserting data
     async fn create_table_by_columns(
         &self,
-        catalog_name: &str,
-        schema_name: &str,
+        ctx: QueryContextRef,
         table_name: &str,
         columns: &[Column],
     ) -> Result<Output> {
+        let catalog_name = &ctx.current_catalog();
+        let schema_name = &ctx.current_schema();
+
         // Create table automatically, build schema from data.
         let create_expr = self
             .create_expr_factory
@@ -301,18 +295,18 @@ impl Instance {
         );
 
         self.grpc_query_handler
-            .do_query(GreptimeRequest {
-                request: Some(Request::Ddl(DdlRequest {
+            .do_query(
+                Request::Ddl(DdlRequest {
                     expr: Some(DdlExpr::CreateTable(create_expr)),
-                })),
-            })
+                }),
+                ctx,
+            )
             .await
     }
 
     async fn add_new_columns_to_table(
         &self,
-        catalog_name: &str,
-        schema_name: &str,
+        ctx: QueryContextRef,
         table_name: &str,
         add_columns: AddColumns,
     ) -> Result<Output> {
@@ -321,25 +315,24 @@ impl Instance {
             add_columns, table_name
         );
         let expr = AlterExpr {
+            catalog_name: ctx.current_catalog(),
+            schema_name: ctx.current_schema(),
             table_name: table_name.to_string(),
-            schema_name: schema_name.to_string(),
-            catalog_name: catalog_name.to_string(),
             kind: Some(Kind::AddColumns(add_columns)),
         };
 
         self.grpc_query_handler
-            .do_query(GreptimeRequest {
-                request: Some(Request::Ddl(DdlRequest {
+            .do_query(
+                Request::Ddl(DdlRequest {
                     expr: Some(DdlExpr::Alter(expr)),
-                })),
-            })
+                }),
+                ctx,
+            )
             .await
     }
 
     fn handle_use(&self, db: String, query_ctx: QueryContextRef) -> Result<Output> {
-        let catalog = query_ctx.current_catalog();
-        let catalog = catalog.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
-
+        let catalog = &query_ctx.current_catalog();
         ensure!(
             self.catalog_manager
                 .schema(catalog, &db)
@@ -386,34 +379,28 @@ impl Instance {
             | Statement::DescribeTable(_)
             | Statement::Explain(_)
             | Statement::Query(_)
-            | Statement::Insert(_) => {
+            | Statement::Insert(_)
+            | Statement::Alter(_) => {
                 return self.sql_handler.do_statement_query(stmt, query_ctx).await;
             }
-            Statement::Alter(alter_stmt) => {
-                let expr =
-                    AlterExpr::try_from(alter_stmt).context(error::AlterExprFromStmtSnafu)?;
-                return self
-                    .grpc_query_handler
-                    .do_query(GreptimeRequest {
-                        request: Some(Request::Ddl(DdlRequest {
-                            expr: Some(DdlExpr::Alter(expr)),
-                        })),
-                    })
-                    .await;
-            }
             Statement::DropTable(drop_stmt) => {
+                let (catalog_name, schema_name, table_name) =
+                    table_idents_to_full_name(drop_stmt.table_name(), query_ctx.clone())
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
                 let expr = DropTableExpr {
-                    catalog_name: drop_stmt.catalog_name,
-                    schema_name: drop_stmt.schema_name,
-                    table_name: drop_stmt.table_name,
+                    catalog_name,
+                    schema_name,
+                    table_name,
                 };
                 return self
                     .grpc_query_handler
-                    .do_query(GreptimeRequest {
-                        request: Some(Request::Ddl(DdlRequest {
+                    .do_query(
+                        Request::Ddl(DdlRequest {
                             expr: Some(DdlExpr::DropTable(expr)),
-                        })),
-                    })
+                        }),
+                        query_ctx,
+                    )
                     .await;
             }
             Statement::ShowCreateTable(_) => error::NotSupportedSnafu { feat: query }.fail(),

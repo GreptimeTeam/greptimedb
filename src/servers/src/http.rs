@@ -30,7 +30,6 @@ use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
 use axum::response::{Html, Json};
 use axum::{routing, BoxError, Extension, Router};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -71,10 +70,7 @@ pub(crate) fn query_context_from_db(
         let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
 
         match query_handler.is_valid_schema(catalog, schema) {
-            Ok(true) => Ok(Arc::new(QueryContext::with(
-                catalog.to_owned(),
-                schema.to_owned(),
-            ))),
+            Ok(true) => Ok(Arc::new(QueryContext::with(catalog, schema))),
             Ok(false) => Err(JsonResponse::with_error(
                 format!("Database not found: {db}"),
                 StatusCode::DatabaseNotFound,
@@ -85,10 +81,7 @@ pub(crate) fn query_context_from_db(
             )),
         }
     } else {
-        Ok(Arc::new(QueryContext::with(
-            DEFAULT_CATALOG_NAME.to_owned(),
-            DEFAULT_SCHEMA_NAME.to_owned(),
-        )))
+        Ok(QueryContext::arc())
     }
 }
 

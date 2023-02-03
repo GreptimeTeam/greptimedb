@@ -15,14 +15,13 @@
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request as GrpcRequest;
 use api::v1::query_request::Query;
-use api::v1::{CreateDatabaseExpr, DdlRequest, GreptimeRequest, InsertRequest};
+use api::v1::{CreateDatabaseExpr, DdlRequest, InsertRequest};
 use async_trait::async_trait;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
 use servers::query_handler::grpc::GrpcQueryHandler;
-use session::context::QueryContext;
+use session::context::QueryContextRef;
 use snafu::prelude::*;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::requests::CreateDatabaseRequest;
@@ -50,26 +49,31 @@ impl Instance {
             .context(ExecuteSqlSnafu)
     }
 
-    async fn handle_query(&self, query: Query) -> Result<Output> {
+    async fn handle_query(&self, query: Query, ctx: QueryContextRef) -> Result<Output> {
         Ok(match query {
             Query::Sql(sql) => {
                 let stmt = QueryLanguageParser::parse_sql(&sql).context(ExecuteSqlSnafu)?;
-                self.execute_stmt(stmt, QueryContext::arc()).await?
+                self.execute_stmt(stmt, ctx).await?
             }
             Query::LogicalPlan(plan) => self.execute_logical(plan).await?,
         })
     }
 
-    pub async fn handle_insert(&self, request: InsertRequest) -> Result<Output> {
+    pub async fn handle_insert(
+        &self,
+        request: InsertRequest,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let catalog = &ctx.current_catalog();
+        let schema = &ctx.current_schema();
         let table_name = &request.table_name.clone();
-        // TODO(LFC): InsertRequest should carry catalog name, too.
         let table = self
             .catalog_manager
-            .table(DEFAULT_CATALOG_NAME, &request.schema_name, table_name)
+            .table(catalog, schema, table_name)
             .context(error::CatalogSnafu)?
             .context(error::TableNotFoundSnafu { table_name })?;
 
-        let request = common_grpc_expr::insert::to_table_insert_request(request)
+        let request = common_grpc_expr::insert::to_table_insert_request(catalog, schema, request)
             .context(error::InsertDataSnafu)?;
 
         let affected_rows = table
@@ -96,19 +100,16 @@ impl Instance {
 impl GrpcQueryHandler for Instance {
     type Error = error::Error;
 
-    async fn do_query(&self, query: GreptimeRequest) -> Result<Output> {
-        let request = query.request.context(error::MissingRequiredFieldSnafu {
-            name: "GreptimeRequest.request",
-        })?;
+    async fn do_query(&self, request: GrpcRequest, ctx: QueryContextRef) -> Result<Output> {
         match request {
-            GrpcRequest::Insert(request) => self.handle_insert(request).await,
+            GrpcRequest::Insert(request) => self.handle_insert(request, ctx).await,
             GrpcRequest::Query(query_request) => {
                 let query = query_request
                     .query
                     .context(error::MissingRequiredFieldSnafu {
                         name: "QueryRequest.query",
                     })?;
-                self.handle_query(query).await
+                self.handle_query(query, ctx).await
             }
             GrpcRequest::Ddl(request) => self.handle_ddl(request).await,
         }
@@ -124,6 +125,7 @@ mod test {
     };
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::*;
+    use session::context::QueryContext;
 
     use super::*;
     use crate::tests::test_util::{self, MockInstance};
@@ -133,67 +135,61 @@ mod test {
         let instance = MockInstance::new("test_handle_ddl").await;
         let instance = instance.inner();
 
-        let query = GreptimeRequest {
-            request: Some(GrpcRequest::Ddl(DdlRequest {
-                expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
-                    database_name: "my_database".to_string(),
-                    create_if_not_exists: true,
-                })),
+        let query = GrpcRequest::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
+                database_name: "my_database".to_string(),
+                create_if_not_exists: true,
             })),
-        };
-        let output = instance.do_query(query).await.unwrap();
+        });
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(1)));
 
-        let query = GreptimeRequest {
-            request: Some(GrpcRequest::Ddl(DdlRequest {
-                expr: Some(DdlExpr::CreateTable(CreateTableExpr {
-                    catalog_name: "greptime".to_string(),
-                    schema_name: "my_database".to_string(),
-                    table_name: "my_table".to_string(),
-                    desc: "blabla".to_string(),
-                    column_defs: vec![
-                        ColumnDef {
-                            name: "a".to_string(),
-                            datatype: ColumnDataType::String as i32,
-                            is_nullable: true,
-                            default_constraint: vec![],
-                        },
-                        ColumnDef {
-                            name: "ts".to_string(),
-                            datatype: ColumnDataType::TimestampMillisecond as i32,
-                            is_nullable: false,
-                            default_constraint: vec![],
-                        },
-                    ],
-                    time_index: "ts".to_string(),
-                    ..Default::default()
-                })),
+        let query = GrpcRequest::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(CreateTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "my_database".to_string(),
+                table_name: "my_table".to_string(),
+                desc: "blabla".to_string(),
+                column_defs: vec![
+                    ColumnDef {
+                        name: "a".to_string(),
+                        datatype: ColumnDataType::String as i32,
+                        is_nullable: true,
+                        default_constraint: vec![],
+                    },
+                    ColumnDef {
+                        name: "ts".to_string(),
+                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        is_nullable: false,
+                        default_constraint: vec![],
+                    },
+                ],
+                time_index: "ts".to_string(),
+                ..Default::default()
             })),
-        };
-        let output = instance.do_query(query).await.unwrap();
+        });
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
 
-        let query = GreptimeRequest {
-            request: Some(GrpcRequest::Ddl(DdlRequest {
-                expr: Some(DdlExpr::Alter(AlterExpr {
-                    catalog_name: "greptime".to_string(),
-                    schema_name: "my_database".to_string(),
-                    table_name: "my_table".to_string(),
-                    kind: Some(alter_expr::Kind::AddColumns(AddColumns {
-                        add_columns: vec![AddColumn {
-                            column_def: Some(ColumnDef {
-                                name: "b".to_string(),
-                                datatype: ColumnDataType::Int32 as i32,
-                                is_nullable: true,
-                                default_constraint: vec![],
-                            }),
-                            is_key: true,
-                        }],
-                    })),
+        let query = GrpcRequest::Ddl(DdlRequest {
+            expr: Some(DdlExpr::Alter(AlterExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "my_database".to_string(),
+                table_name: "my_table".to_string(),
+                kind: Some(alter_expr::Kind::AddColumns(AddColumns {
+                    add_columns: vec![AddColumn {
+                        column_def: Some(ColumnDef {
+                            name: "b".to_string(),
+                            datatype: ColumnDataType::Int32 as i32,
+                            is_nullable: true,
+                            default_constraint: vec![],
+                        }),
+                        is_key: true,
+                    }],
                 })),
             })),
-        };
-        let output = instance.do_query(query).await.unwrap();
+        });
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
 
         let output = instance
@@ -232,7 +228,6 @@ mod test {
             .unwrap();
 
         let insert = InsertRequest {
-            schema_name: "public".to_string(),
             table_name: "demo".to_string(),
             columns: vec![
                 Column {
@@ -274,10 +269,8 @@ mod test {
             ..Default::default()
         };
 
-        let query = GreptimeRequest {
-            request: Some(GrpcRequest::Insert(insert)),
-        };
-        let output = instance.do_query(query).await.unwrap();
+        let query = GrpcRequest::Insert(insert);
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(3)));
 
         let output = instance
@@ -305,27 +298,23 @@ mod test {
             .await
             .unwrap();
 
-        let query = GreptimeRequest {
-            request: Some(GrpcRequest::Query(QueryRequest {
-                query: Some(Query::Sql(
-                    "INSERT INTO demo(host, cpu, memory, ts) VALUES \
+        let query = GrpcRequest::Query(QueryRequest {
+            query: Some(Query::Sql(
+                "INSERT INTO demo(host, cpu, memory, ts) VALUES \
                             ('host1', 66.6, 1024, 1672201025000),\
                             ('host2', 88.8, 333.3, 1672201026000)"
-                        .to_string(),
-                )),
-            })),
-        };
-        let output = instance.do_query(query).await.unwrap();
+                    .to_string(),
+            )),
+        });
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         assert!(matches!(output, Output::AffectedRows(2)));
 
-        let query = GreptimeRequest {
-            request: Some(GrpcRequest::Query(QueryRequest {
-                query: Some(Query::Sql(
-                    "SELECT ts, host, cpu, memory FROM demo".to_string(),
-                )),
-            })),
-        };
-        let output = instance.do_query(query).await.unwrap();
+        let query = GrpcRequest::Query(QueryRequest {
+            query: Some(Query::Sql(
+                "SELECT ts, host, cpu, memory FROM demo".to_string(),
+            )),
+        });
+        let output = instance.do_query(query, QueryContext::arc()).await.unwrap();
         let Output::Stream(stream) = output else { unreachable!() };
         let recordbatch = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
