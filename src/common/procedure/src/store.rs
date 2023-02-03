@@ -49,7 +49,7 @@ impl ProcedureStore {
     }
 
     /// Dump the `procedure` to the storage.
-    async fn store_procedure(
+    pub(crate) async fn store_procedure(
         &self,
         procedure_id: ProcedureId,
         step: u32,
@@ -78,7 +78,11 @@ impl ProcedureStore {
     }
 
     /// Write commit flag to the storage.
-    async fn commit_procedure(&self, procedure_id: ProcedureId, step: u32) -> Result<()> {
+    pub(crate) async fn commit_procedure(
+        &self,
+        procedure_id: ProcedureId,
+        step: u32,
+    ) -> Result<()> {
         let key = ParsedKey {
             procedure_id,
             step,

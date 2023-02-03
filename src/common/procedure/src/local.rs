@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
+use common_telemetry::logging;
 use object_store::ObjectStore;
 use snafu::ensure;
 use tokio::sync::Notify;
@@ -37,6 +38,14 @@ use crate::{
 struct ExecMeta {
     /// Current procedure state.
     state: ProcedureState,
+}
+
+impl Default for ExecMeta {
+    fn default() -> ExecMeta {
+        ExecMeta {
+            state: ProcedureState::Running,
+        }
+    }
 }
 
 /// Shared metadata of a procedure.
@@ -143,6 +152,43 @@ impl ManagerContext {
         let procedures = self.procedures.read().unwrap();
         procedures.get(&procedure_id).map(|meta| meta.state())
     }
+
+    /// Notify a suspended parent procedure with specific `procedure_id` by its subprocedure.
+    fn notify_by_subprocedure(&self, procedure_id: ProcedureId) {
+        let procedures = self.procedures.read().unwrap();
+        if let Some(meta) = procedures.get(&procedure_id) {
+            meta.child_notify.notify_one();
+        }
+    }
+
+    /// Load procedure with specific `procedure_id` from cached [ProcedureMessage]s.
+    fn load_one_procedure(&self, procedure_id: ProcedureId) -> Option<ProcedureAndParent> {
+        let messages = self.messages.lock().unwrap();
+        let message = messages.get(&procedure_id)?;
+
+        let loaders = self.loaders.lock().unwrap();
+        let loader = loaders.get(&message.type_name).or_else(|| {
+            logging::error!(
+                "Loader not found, procedure_id: {}, type_name: {}",
+                procedure_id,
+                message.type_name
+            );
+            None
+        })?;
+
+        let procedure = loader(&message.data)
+            .map_err(|e| {
+                logging::error!(
+                    "Failed to load procedure data, key: {}, source: {}",
+                    procedure_id,
+                    e
+                );
+                e
+            })
+            .ok()?;
+
+        Some(ProcedureAndParent(procedure, message.parent_id))
+    }
 }
 
 /// Config for [LocalManager].
@@ -176,9 +222,7 @@ impl LocalManager {
             child_notify: Notify::new(),
             parent_locks: Vec::new(),
             lock_key: procedure.lock_key(),
-            exec_meta: Mutex::new(ExecMeta {
-                state: ProcedureState::Running,
-            }),
+            exec_meta: Mutex::new(ExecMeta::default()),
         });
         let runner = Runner {
             meta: meta.clone(),
@@ -239,9 +283,7 @@ fn procedure_meta_for_test() -> ProcedureMeta {
         child_notify: Notify::new(),
         parent_locks: Vec::new(),
         lock_key: None,
-        exec_meta: Mutex::new(ExecMeta {
-            state: ProcedureState::Running,
-        }),
+        exec_meta: Mutex::new(ExecMeta::default()),
     }
 }
 
@@ -417,6 +459,6 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(matches!(err, Error::DuplicateProcedure { .. }), "{err:?}");
+        assert!(matches!(err, Error::DuplicateProcedure { .. }), "{err}");
     }
 }
