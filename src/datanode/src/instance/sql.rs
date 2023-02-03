@@ -13,13 +13,16 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
 use query::parser::{QueryLanguageParser, QueryStatement};
+use servers::error as server_error;
+use servers::promql::PromqlHandler;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::ast::ObjectName;
 use sql::statements::statement::Statement;
@@ -209,6 +212,16 @@ impl SqlQueryHandler for Instance {
         vec![result]
     }
 
+    async fn do_promql_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<Result<Output>> {
+        let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
+        let result = self.execute_promql(query, query_ctx).await;
+        vec![result]
+    }
+
     async fn do_statement_query(
         &self,
         stmt: Statement,
@@ -224,6 +237,17 @@ impl SqlQueryHandler for Instance {
             .schema(catalog, schema)
             .map(|s| s.is_some())
             .context(error::CatalogSnafu)
+    }
+}
+
+#[async_trait]
+impl PromqlHandler for Instance {
+    async fn do_query(&self, query: &str) -> server_error::Result<Output> {
+        let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
+        self.execute_promql(query, QueryContext::arc())
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| server_error::ExecuteQuerySnafu { query })
     }
 }
 

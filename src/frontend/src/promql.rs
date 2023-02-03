@@ -12,25 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+use serde::{Deserialize, Serialize};
 
-pub type Plugins = anymap::Map<dyn core::any::Any + Send + Sync>;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PromqlOptions {
+    pub addr: String,
+}
 
-mod catalog;
-mod datanode;
-pub mod error;
-mod expr_factory;
-pub mod frontend;
-pub mod grpc;
-pub mod influxdb;
-pub mod instance;
-pub mod mysql;
-pub mod opentsdb;
-pub mod postgres;
-pub mod prometheus;
-pub mod promql;
-mod server;
-mod sql;
-mod table;
+impl Default for PromqlOptions {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:4004".to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::PromqlOptions;
+
+    #[test]
+    fn test_prometheus_options() {
+        let default = PromqlOptions::default();
+        assert_eq!(default.addr, "127.0.0.1:4004".to_string());
+    }
+}

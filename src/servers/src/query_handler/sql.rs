@@ -35,6 +35,12 @@ pub trait SqlQueryHandler {
         query_ctx: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>>;
 
+    async fn do_promql_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<std::result::Result<Output, Self::Error>>;
+
     async fn do_statement_query(
         &self,
         stmt: Statement,
@@ -66,6 +72,22 @@ where
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         self.0
             .do_query(query, query_ctx)
+            .await
+            .into_iter()
+            .map(|x| {
+                x.map_err(BoxedError::new)
+                    .context(error::ExecuteQuerySnafu { query })
+            })
+            .collect()
+    }
+
+    async fn do_promql_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<Result<Output>> {
+        self.0
+            .do_promql_query(query, query_ctx)
             .await
             .into_iter()
             .map(|x| {

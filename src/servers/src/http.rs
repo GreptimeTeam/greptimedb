@@ -399,8 +399,8 @@ impl HttpServer {
     pub fn make_app(&self) -> Router {
         let mut api = OpenApi {
             info: Info {
-                title: "Greptime DB HTTP API".to_string(),
-                description: Some("HTTP APIs to interact with Greptime DB".to_string()),
+                title: "GreptimeDB HTTP API".to_string(),
+                description: Some("HTTP APIs to interact with GreptimeDB".to_string()),
                 version: HTTP_API_VERSION.to_string(),
                 ..Info::default()
             },
@@ -469,6 +469,11 @@ impl HttpServer {
                 "/sql",
                 apirouting::get_with(handler::sql, handler::sql_docs)
                     .post_with(handler::sql, handler::sql_docs),
+            )
+            .api_route(
+                "/promql",
+                apirouting::get_with(handler::promql, handler::sql_docs)
+                    .post_with(handler::promql, handler::sql_docs),
             )
             .api_route("/scripts", apirouting::post(script::scripts))
             .api_route("/run-script", apirouting::post(script::run_script))
@@ -574,6 +579,14 @@ mod test {
         type Error = Error;
 
         async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_promql_query(
+            &self,
+            _: &str,
+            _: QueryContextRef,
+        ) -> Vec<std::result::Result<Output, Self::Error>> {
             unimplemented!()
         }
 

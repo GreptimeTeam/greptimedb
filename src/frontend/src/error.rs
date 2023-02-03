@@ -336,6 +336,14 @@ pub enum Error {
         #[snafu(backtrace)]
         source: partition::error::Error,
     },
+
+    // TODO(ruihang): merge all query execution error kinds
+    #[snafu(display("failed to execute PromQL query {}, source: {}", query, source))]
+    ExecutePromql {
+        query: String,
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -351,6 +359,7 @@ impl ErrorExt for Error {
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
             Error::RuntimeResource { source, .. } => source.status_code(),
+            Error::ExecutePromql { source, .. } => source.status_code(),
 
             Error::SqlExecIntercepted { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
