@@ -58,7 +58,9 @@ use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
-use crate::error::{self, Error, ExecutePromqlSnafu, MissingMetasrvOptsSnafu, Result};
+use crate::error::{
+    self, Error, ExecutePromqlSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, Result,
+};
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
 use crate::instance::standalone::{StandaloneGrpcQueryHandler, StandaloneSqlQueryHandler};
@@ -461,7 +463,10 @@ impl SqlQueryHandler for Instance {
                 .context(ExecutePromqlSnafu { query });
             vec![result]
         } else {
-            vec![]
+            vec![Err(NotSupportedSnafu {
+                feat: "PromQL Query",
+            }
+            .build())]
         }
     }
 

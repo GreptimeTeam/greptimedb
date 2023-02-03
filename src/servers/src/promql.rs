@@ -23,7 +23,7 @@ use axum::{routing, Json, Router};
 use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
-use common_telemetry::{debug, info};
+use common_telemetry::info;
 use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -71,15 +71,11 @@ impl PromqlServer {
     pub fn make_app(&self) -> Router {
         // TODO(ruihang): implement format_query, series, labels, values, query_examplars and targets methods
         let router = Router::new()
-            .route(
-                &format!("/{PROMQL_API_VERSION}/query"),
-                routing::post(instant_query).get(instant_query),
-            )
-            .route(
+            .nest(&format!("/{PROMQL_API_VERSION}/query"), self.route_query())
+            .nest(
                 &format!("/{PROMQL_API_VERSION}/range_query"),
-                routing::post(range_query).get(range_query),
-            )
-            .with_state(self.query_handler.clone());
+                self.route_range_query(),
+            );
 
         router
             // middlewares
@@ -91,6 +87,18 @@ impl PromqlServer {
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),
                     )),
             )
+    }
+
+    fn route_query(&self) -> Router {
+        Router::new()
+            .route("/", routing::post(instant_query).get(instant_query))
+            .with_state(self.query_handler.clone())
+    }
+
+    fn route_range_query(&self) -> Router {
+        Router::new()
+            .route("/", routing::post(range_query).get(range_query))
+            .with_state(self.query_handler.clone())
     }
 }
 
@@ -207,14 +215,7 @@ impl PromqlJsonResponse {
     }
 
     /// TODO(ruihang): implement this conversion method
-    fn record_batches_to_data(batches: RecordBatches) -> Result<PromqlData> {
-        debug!("schema: {:?}", batches.schema());
-        for batch in batches.iter() {
-            for row in batch.rows() {
-                debug!("row: {row:?}",);
-            }
-        }
-
+    fn record_batches_to_data(_: RecordBatches) -> Result<PromqlData> {
         let data = PromqlData {
             result_type: "matrix".to_string(),
             result: vec![PromqlSeries {

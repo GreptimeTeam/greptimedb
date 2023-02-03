@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-#![feature(let_chains)]
 
 pub type Plugins = anymap::Map<dyn core::any::Any + Send + Sync>;
 
