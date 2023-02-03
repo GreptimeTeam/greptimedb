@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
-use common_telemetry::logging;
 use object_store::ObjectStore;
 use snafu::ensure;
 use tokio::sync::Notify;
@@ -137,43 +136,6 @@ impl ManagerContext {
     fn state(&self, procedure_id: ProcedureId) -> Option<ProcedureState> {
         let procedures = self.procedures.read().unwrap();
         procedures.get(&procedure_id).map(|meta| meta.state())
-    }
-
-    /// Notify a suspended parent procedure with specific `procedure_id` by its subprocedure.
-    fn notify_by_subprocedure(&self, procedure_id: ProcedureId) {
-        let procedures = self.procedures.read().unwrap();
-        if let Some(meta) = procedures.get(&procedure_id) {
-            meta.child_notify.notify_one();
-        }
-    }
-
-    /// Load procedure with specific `procedure_id` from cached [ProcedureMessage]s.
-    fn load_one_procedure(&self, procedure_id: ProcedureId) -> Option<ProcedureAndParent> {
-        let messages = self.messages.lock().unwrap();
-        let message = messages.get(&procedure_id)?;
-
-        let loaders = self.loaders.lock().unwrap();
-        let loader = loaders.get(&message.type_name).or_else(|| {
-            logging::error!(
-                "Loader not found, procedure_id: {}, type_name: {}",
-                procedure_id,
-                message.type_name
-            );
-            None
-        })?;
-
-        let procedure = loader(&message.data)
-            .map_err(|e| {
-                logging::error!(
-                    "Failed to load procedure data, key: {}, source: {}",
-                    procedure_id,
-                    e
-                );
-                e
-            })
-            .ok()?;
-
-        Some(ProcedureAndParent(procedure, message.parent_id))
     }
 }
 
