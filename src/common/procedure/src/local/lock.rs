@@ -54,13 +54,13 @@ impl Lock {
 }
 
 /// Manages lock entries for procedures.
-struct LockMap {
+pub(crate) struct LockMap {
     locks: RwLock<HashMap<String, Lock>>,
 }
 
 impl LockMap {
     /// Returns a new [LockMap].
-    fn new() -> LockMap {
+    pub(crate) fn new() -> LockMap {
         LockMap {
             locks: RwLock::new(HashMap::new()),
         }
@@ -73,7 +73,7 @@ impl LockMap {
     ///
     /// # Panics
     /// Panics if the procedure acquires the lock recursively.
-    async fn acquire_lock(&self, key: &str, meta: ProcedureMetaRef) {
+    pub(crate) async fn acquire_lock(&self, key: &str, meta: ProcedureMetaRef) {
         assert!(!self.hold_lock(key, meta.id));
 
         {
@@ -101,7 +101,7 @@ impl LockMap {
     }
 
     /// Release lock by `key`.
-    fn release_lock(&self, key: &str, procedure_id: ProcedureId) {
+    pub(crate) fn release_lock(&self, key: &str, procedure_id: ProcedureId) {
         let mut locks = self.locks.write().unwrap();
         if let Some(lock) = locks.get_mut(key) {
             if lock.owner.id != procedure_id {

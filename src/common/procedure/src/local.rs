@@ -13,12 +13,25 @@
 // limitations under the License.
 
 mod lock;
+mod runner;
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 
+use async_trait::async_trait;
+use common_telemetry::logging;
+use object_store::ObjectStore;
+use snafu::ensure;
 use tokio::sync::Notify;
 
-use crate::{LockKey, ProcedureId, ProcedureState};
+use crate::error::{DuplicateProcedureSnafu, LoaderConflictSnafu, Result};
+use crate::local::lock::LockMap;
+use crate::local::runner::Runner;
+use crate::procedure::BoxedProcedureLoader;
+use crate::store::{ObjectStateStore, ProcedureMessage, ProcedureStore, StateStoreRef};
+use crate::{
+    BoxedProcedure, LockKey, ProcedureId, ProcedureManager, ProcedureState, ProcedureWithId,
+};
 
 /// Mutable metadata of a procedure during execution.
 #[derive(Debug)]
@@ -36,7 +49,7 @@ struct ExecMeta {
 /// for children;
 /// 2. always use `notify_one` and ensure there are only one waiter.
 #[derive(Debug)]
-struct ProcedureMeta {
+pub(crate) struct ProcedureMeta {
     /// Id of this procedure.
     id: ProcedureId,
     /// Notify to wait for a lock.
@@ -68,10 +81,185 @@ impl ProcedureMeta {
 
         locks
     }
+
+    /// Returns current [ProcedureState].
+    fn state(&self) -> ProcedureState {
+        let meta = self.exec_meta.lock().unwrap();
+        meta.state.clone()
+    }
 }
 
 /// Reference counted pointer to [ProcedureMeta].
 type ProcedureMetaRef = Arc<ProcedureMeta>;
+/// Procedure and its parent procedure id.
+struct ProcedureAndParent(BoxedProcedure, Option<ProcedureId>);
+
+/// Shared context of the manager.
+pub(crate) struct ManagerContext {
+    /// Procedure loaders. The key is the type name of the procedure which the loader returns.
+    loaders: Mutex<HashMap<String, BoxedProcedureLoader>>,
+    lock_map: LockMap,
+    procedures: RwLock<HashMap<ProcedureId, ProcedureMetaRef>>,
+    // TODO(yingwen): Now we never clean the messages. But when the root procedure is done, we
+    // should be able to remove the its message and all its child messages.
+    /// Messages loaded from the procedure store.
+    messages: Mutex<HashMap<ProcedureId, ProcedureMessage>>,
+}
+
+impl ManagerContext {
+    /// Returns a new [ManagerContext].
+    fn new() -> ManagerContext {
+        ManagerContext {
+            loaders: Mutex::new(HashMap::new()),
+            lock_map: LockMap::new(),
+            procedures: RwLock::new(HashMap::new()),
+            messages: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Returns true if the procedure with specific `procedure_id` exists.
+    fn contains_procedure(&self, procedure_id: ProcedureId) -> bool {
+        let procedures = self.procedures.read().unwrap();
+        procedures.contains_key(&procedure_id)
+    }
+
+    /// Insert the procedure with specific `procedure_id`.
+    ///
+    /// # Panics
+    /// Panics if the procedure already exists.
+    fn insert_procedure(&self, procedure_id: ProcedureId, meta: ProcedureMetaRef) {
+        let mut procedures = self.procedures.write().unwrap();
+        let old = procedures.insert(procedure_id, meta);
+        assert!(old.is_none());
+    }
+
+    /// Returns the [ProcedureState] of specific `procedure_id`.
+    fn state(&self, procedure_id: ProcedureId) -> Option<ProcedureState> {
+        let procedures = self.procedures.read().unwrap();
+        procedures.get(&procedure_id).map(|meta| meta.state())
+    }
+
+    /// Notify a suspended parent procedure with specific `procedure_id` by its subprocedure.
+    fn notify_by_subprocedure(&self, procedure_id: ProcedureId) {
+        let procedures = self.procedures.read().unwrap();
+        if let Some(meta) = procedures.get(&procedure_id) {
+            meta.child_notify.notify_one();
+        }
+    }
+
+    /// Load procedure with specific `procedure_id` from cached [ProcedureMessage]s.
+    fn load_one_procedure(&self, procedure_id: ProcedureId) -> Option<ProcedureAndParent> {
+        let messages = self.messages.lock().unwrap();
+        let message = messages.get(&procedure_id)?;
+
+        let loaders = self.loaders.lock().unwrap();
+        let loader = loaders.get(&message.type_name).or_else(|| {
+            logging::error!(
+                "Loader not found, procedure_id: {}, type_name: {}",
+                procedure_id,
+                message.type_name
+            );
+            None
+        })?;
+
+        let procedure = loader(&message.data)
+            .map_err(|e| {
+                logging::error!(
+                    "Failed to load procedure data, key: {}, source: {}",
+                    procedure_id,
+                    e
+                );
+                e
+            })
+            .ok()?;
+
+        Some(ProcedureAndParent(procedure, message.parent_id))
+    }
+}
+
+/// Config for [LocalManager].
+#[derive(Debug)]
+pub struct ManagerConfig {
+    /// Object store
+    object_store: ObjectStore,
+}
+
+/// A [ProcedureManager] that maintains procedure states locally.
+pub struct LocalManager {
+    manager_ctx: Arc<ManagerContext>,
+    state_store: StateStoreRef,
+}
+
+impl LocalManager {
+    /// Create a new [LocalManager] with specific `config`.
+    pub fn new(config: ManagerConfig) -> LocalManager {
+        LocalManager {
+            manager_ctx: Arc::new(ManagerContext::new()),
+            state_store: Arc::new(ObjectStateStore::new(config.object_store)),
+        }
+    }
+
+    /// Submit a root procedure with given `procedure_id`.
+    fn submit_root(&self, procedure_id: ProcedureId, step: u32, procedure: BoxedProcedure) {
+        let meta = Arc::new(ProcedureMeta {
+            id: procedure_id,
+            lock_notify: Notify::new(),
+            parent_id: None,
+            child_notify: Notify::new(),
+            parent_locks: Vec::new(),
+            lock_key: procedure.lock_key(),
+            exec_meta: Mutex::new(ExecMeta {
+                state: ProcedureState::Running,
+            }),
+        });
+        let runner = Runner {
+            meta: meta.clone(),
+            procedure,
+            manager_ctx: self.manager_ctx.clone(),
+            step,
+            store: ProcedureStore::new(self.state_store.clone()),
+        };
+
+        self.manager_ctx.insert_procedure(procedure_id, meta);
+
+        common_runtime::spawn_bg(async move {
+            // Run the root procedure.
+            runner.run().await
+        });
+    }
+}
+
+#[async_trait]
+impl ProcedureManager for LocalManager {
+    fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()> {
+        let mut loaders = self.manager_ctx.loaders.lock().unwrap();
+        ensure!(!loaders.contains_key(name), LoaderConflictSnafu { name });
+
+        loaders.insert(name.to_string(), loader);
+
+        Ok(())
+    }
+
+    async fn submit(&self, procedure: ProcedureWithId) -> Result<()> {
+        let procedure_id = procedure.id;
+        ensure!(
+            self.manager_ctx.contains_procedure(procedure_id),
+            DuplicateProcedureSnafu { procedure_id }
+        );
+
+        self.submit_root(procedure.id, 0, procedure.procedure);
+
+        Ok(())
+    }
+
+    async fn recover(&self) -> Result<()> {
+        unimplemented!()
+    }
+
+    async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
+        Ok(self.manager_ctx.state(procedure_id))
+    }
+}
 
 /// Create a new [ProcedureMeta] for test purpose.
 #[cfg(test)]

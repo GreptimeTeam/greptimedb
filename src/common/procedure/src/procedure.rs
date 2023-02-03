@@ -163,7 +163,7 @@ pub type BoxedProcedureLoader = Box<dyn Fn(&str) -> Result<BoxedProcedure> + Sen
 
 // TODO(yingwen): Find a way to return the error message if the procedure is failed.
 /// State of a submitted procedure.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ProcedureState {
     /// The procedure is running.
     Running,

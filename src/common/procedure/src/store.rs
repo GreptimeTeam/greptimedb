@@ -21,28 +21,33 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
 use crate::error::{Result, ToJsonSnafu};
-use crate::store::state_store::StateStoreRef;
+pub(crate) use crate::store::state_store::{ObjectStateStore, StateStoreRef};
 use crate::{BoxedProcedure, ProcedureId};
 
 mod state_store;
 
 /// Serialized data of a procedure.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct ProcedureMessage {
+pub struct ProcedureMessage {
     /// Type name of the procedure. The procedure framework also use the type name to
     /// find a loader to load the procedure.
-    type_name: String,
+    pub type_name: String,
     /// The data of the procedure.
-    data: String,
+    pub data: String,
     /// Parent procedure id.
-    parent_id: Option<ProcedureId>,
+    pub parent_id: Option<ProcedureId>,
 }
 
 /// Procedure storage layer.
 #[derive(Clone)]
-struct ProcedureStore(StateStoreRef);
+pub(crate) struct ProcedureStore(StateStoreRef);
 
 impl ProcedureStore {
+    /// Creates a new [ProcedureStore] from specific [StateStoreRef].
+    pub(crate) fn new(state_store: StateStoreRef) -> ProcedureStore {
+        ProcedureStore(state_store)
+    }
+
     /// Dump the `procedure` to the storage.
     async fn store_procedure(
         &self,
