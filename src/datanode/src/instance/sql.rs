@@ -38,6 +38,7 @@ impl Instance {
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        println!("statement: {:?}", stmt);
         match stmt {
             QueryStatement::Sql(Statement::Query(_)) | QueryStatement::Promql(_) => {
                 let logical_plan = self
@@ -58,6 +59,16 @@ impl Instance {
                     self.catalog_manager.clone(),
                     *i,
                     table_ref,
+                )?;
+                self.sql_handler.execute(request, query_ctx).await
+            }
+            QueryStatement::Sql(Statement::Delete(d))=>{
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(d.table_name(), query_ctx.clone())?;
+                let table_ref = TableReference::full(&catalog, &schema, &table);
+                let request = self.sql_handler.delete_to_request(
+                    table_ref,
+                    *d,
                 )?;
                 self.sql_handler.execute(request, query_ctx).await
             }
@@ -115,6 +126,7 @@ impl Instance {
                     .execute(SqlRequest::DropTable(req), query_ctx)
                     .await
             }
+            //TODO delete statement
             QueryStatement::Sql(Statement::ShowDatabases(stmt)) => {
                 self.sql_handler
                     .execute(SqlRequest::ShowDatabases(stmt), query_ctx)

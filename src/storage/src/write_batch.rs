@@ -94,6 +94,8 @@ impl WriteRequest for WriteBatch {
             return Ok(());
         }
 
+        println!("data :{:?}", data);
+
         let record_batch = self.process_put_data(data)?;
 
         self.add_num_rows_to_mutate(record_batch.num_rows())?;
@@ -201,6 +203,8 @@ impl WriteBatch {
                 }
             );
         }
+        println!("len:{:?}", self.row_key_column_schemas());
+        println!("data:{:?}", data);
         // Ensure only provides row key columns.
         ensure!(
             data.0.len() == self.row_key_column_schemas().len(),
@@ -299,6 +303,7 @@ pub(crate) fn new_column_with_default_value(
 /// Vectors in [NameToVector] have same length.
 ///
 /// MUST construct it via [`NameToVector::new()`] to ensure the vector lengths are validated.
+#[derive(Debug)]
 struct NameToVector(HashMap<String, VectorRef>);
 
 impl NameToVector {
@@ -540,6 +545,7 @@ mod tests {
         batch.delete(keys).unwrap();
 
         let record_batch = &batch.payload().mutations[0].record_batch;
+        println!("batch:{:?}", batch);
         assert_eq!(3, record_batch.num_rows());
         assert_eq!(4, record_batch.num_columns());
         let v1 = record_batch.column_by_name("v1").unwrap();

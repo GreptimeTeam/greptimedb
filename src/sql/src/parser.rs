@@ -89,6 +89,10 @@ impl<'a> ParserContext<'a> {
                         self.parse_show()
                     }
 
+                    Keyword::DELETE=>{
+                        self.parse_delete()
+                    }
+
                     Keyword::DESCRIBE | Keyword::DESC => {
                         self.parser.next_token();
                         self.parse_describe()

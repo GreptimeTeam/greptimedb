@@ -21,6 +21,8 @@ pub mod insert;
 pub mod query;
 pub mod show;
 pub mod statement;
+pub mod delete;
+
 use std::str::FromStr;
 
 use api::helper::ColumnDataTypeWrapper;

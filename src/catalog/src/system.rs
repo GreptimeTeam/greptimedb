@@ -161,7 +161,7 @@ fn build_system_catalog_schema() -> Schema {
             ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         )
-        .with_time_index(true),
+            .with_time_index(true),
         ColumnSchema::new(
             "value".to_string(),
             ConcreteDataType::binary_datatype(),
@@ -212,6 +212,9 @@ pub(crate) fn build_table_deletion_request(
     let table_key = format_table_entry_key(&request.catalog, &request.schema, table_id);
     DeleteRequest {
         key_column_values: build_primary_key_columns(EntryType::Table, table_key.as_bytes()),
+        catalog_name: (&request.catalog).to_string(),
+        schema_name: (&request.schema).to_string(),
+        table_name: (&request.table_name).to_string(),
     }
 }
 
@@ -352,7 +355,7 @@ impl TryFrom<u8> for EntryType {
             b => InvalidEntryTypeSnafu {
                 entry_type: Some(b),
             }
-            .fail(),
+                .fail(),
         }
     }
 }
@@ -414,7 +417,7 @@ mod tests {
             Some("some_catalog".as_bytes()),
             None,
         )
-        .unwrap();
+            .unwrap();
         if let Entry::Catalog(e) = entry {
             assert_eq!("some_catalog", e.catalog_name);
         } else {
@@ -429,7 +432,7 @@ mod tests {
             Some("some_catalog.some_schema".as_bytes()),
             None,
         )
-        .unwrap();
+            .unwrap();
 
         if let Entry::Schema(e) = entry {
             assert_eq!("some_catalog", e.catalog_name);
@@ -446,7 +449,7 @@ mod tests {
             Some("some_catalog.some_schema.42".as_bytes()),
             Some("{\"table_name\":\"some_table\"}".as_bytes()),
         )
-        .unwrap();
+            .unwrap();
 
         if let Entry::Table(e) = entry {
             assert_eq!("some_catalog", e.catalog_name);
@@ -466,7 +469,7 @@ mod tests {
             Some("some_catalog.some_schema.42".as_bytes()),
             None,
         )
-        .unwrap();
+            .unwrap();
     }
 
     #[test]

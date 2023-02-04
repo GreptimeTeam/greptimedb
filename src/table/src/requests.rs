@@ -105,4 +105,8 @@ pub struct DeleteRequest {
     ///
     /// The key is the column name, and the value is the column value.
     pub key_column_values: HashMap<String, VectorRef>,
+
+    pub catalog_name: String,
+    pub schema_name: String,
+    pub table_name: String,
 }

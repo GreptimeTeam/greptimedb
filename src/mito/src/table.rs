@@ -214,7 +214,7 @@ impl<R: Region> Table for MitoTable<R> {
             .context(table_error::TableOperationSnafu)?;
 
         if let Some(alter_op) =
-            create_alter_operation(table_name, &req.alter_kind, &mut new_info.meta)?
+        create_alter_operation(table_name, &req.alter_kind, &mut new_info.meta)?
         {
             // TODO(yingwen): Error handling. Maybe the region need to provide a method to
             // validate the request first.
@@ -248,6 +248,7 @@ impl<R: Region> Table for MitoTable<R> {
             return Ok(0);
         }
 
+        println!("Delete from table {} with data: {:?}", self.table_info().name, request);
         let mut write_request = self.region.write_request();
 
         let key_column_values = request.key_column_values;
@@ -276,7 +277,7 @@ impl<R: Region> Table for MitoTable<R> {
 
 struct ChunkStream {
     schema: SchemaRef,
-    stream: Pin<Box<dyn Stream<Item = RecordBatchResult<RecordBatch>> + Send>>,
+    stream: Pin<Box<dyn Stream<Item=RecordBatchResult<RecordBatch>> + Send>>,
 }
 
 impl RecordBatchStream for ChunkStream {

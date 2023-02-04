@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ops::Deref;
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use common_telemetry::error;
@@ -32,6 +33,7 @@ mod alter;
 mod create;
 mod drop_table;
 mod insert;
+mod delete;
 
 #[derive(Debug)]
 pub enum SqlRequest {
@@ -44,6 +46,7 @@ pub enum SqlRequest {
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
     Explain(Box<Explain>),
+    Delete(DeleteRequest),
 }
 
 // Handler to execute SQL except query
@@ -77,6 +80,7 @@ impl SqlHandler {
             SqlRequest::CreateDatabase(req) => self.create_database(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
+            SqlRequest::Delete(req) => self.delete(req).await,
             SqlRequest::ShowDatabases(stmt) => {
                 show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
@@ -160,7 +164,7 @@ mod tests {
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     true,
                 )
-                .with_time_index(true),
+                    .with_time_index(true),
             ];
 
             Arc::new(

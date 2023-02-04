@@ -111,6 +111,13 @@ pub enum Error {
         source: TableError,
     },
 
+    #[snafu(display("Failed to delete value to table: {}, source: {}", table_name, source))]
+    Delete {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: TableError,
+    },
+
     #[snafu(display("Failed to start server, source: {}", source))]
     StartServer {
         #[snafu(backtrace)]
@@ -332,6 +339,7 @@ impl ErrorExt for Error {
             Error::DropTable { source, .. } => source.status_code(),
 
             Error::Insert { source, .. } => source.status_code(),
+            Error::Delete { source, .. } => source.status_code(),
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
