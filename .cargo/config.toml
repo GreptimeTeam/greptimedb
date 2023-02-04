@@ -1,2 +1,12 @@
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
+
+[build]
+rustflags = [
+    # lints
+    # TODO: use lint configuration in cargo https://github.com/rust-lang/cargo/issues/5034
+    "-Wclippy::print_stdout",
+    "-Wclippy::print_stderr",
+    # false positive: https://github.com/rust-lang/rust/issues/51443#issuecomment-1374847313
+    "-Awhere_clauses_object_safety",
+]

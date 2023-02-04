@@ -52,6 +52,11 @@ pub trait SqlQueryHandler {
         catalog: &str,
         schema: &str,
     ) -> std::result::Result<bool, Self::Error>;
+
+    async fn foo(&self) -> std::result::Result<(), Self::Error> {
+        println!("");
+        unimplemented!()
+    }
 }
 
 pub struct ServerSqlQueryHandlerAdaptor<E>(SqlQueryHandlerRef<E>);
