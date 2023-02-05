@@ -382,6 +382,7 @@ impl Instance {
             | Statement::Explain(_)
             | Statement::Query(_)
             | Statement::Insert(_)
+            | Statement::Delete(_)
             | Statement::Alter(_) => {
                 return self.sql_handler.do_statement_query(stmt, query_ctx).await;
             }
