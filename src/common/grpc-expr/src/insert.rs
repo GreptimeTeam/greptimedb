@@ -21,7 +21,6 @@ use api::v1::{
     InsertRequest as GrpcInsertRequest,
 };
 use common_base::BitVec;
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_time::timestamp::Timestamp;
 use common_time::{Date, DateTime};
 use datatypes::data_type::{ConcreteDataType, DataType};
@@ -31,7 +30,7 @@ use datatypes::value::Value;
 use datatypes::vectors::MutableVector;
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, InsertRequest};
+use table::requests::InsertRequest;
 
 use crate::error::{
     ColumnDataTypeSnafu, CreateVectorSnafu, DuplicatedTimestampColumnSnafu, IllegalInsertDataSnafu,
@@ -78,20 +77,6 @@ pub fn find_new_columns(schema: &SchemaRef, columns: &[Column]) -> Result<Option
         Ok(Some(AddColumns {
             add_columns: columns_to_add,
         }))
-    }
-}
-
-/// Build a alter table rqeusts that adding new columns.
-#[inline]
-pub fn build_alter_table_request(
-    table_name: &str,
-    columns: Vec<AddColumnRequest>,
-) -> AlterTableRequest {
-    AlterTableRequest {
-        catalog_name: None,
-        schema_name: None,
-        table_name: table_name.to_string(),
-        alter_kind: AlterKind::AddColumns { columns },
     }
 }
 
@@ -281,9 +266,11 @@ pub fn build_create_expr_from_insertion(
     Ok(expr)
 }
 
-pub fn to_table_insert_request(request: GrpcInsertRequest) -> Result<InsertRequest> {
-    let catalog_name = DEFAULT_CATALOG_NAME;
-    let schema_name = &request.schema_name;
+pub fn to_table_insert_request(
+    catalog_name: &str,
+    schema_name: &str,
+    request: GrpcInsertRequest,
+) -> Result<InsertRequest> {
     let table_name = &request.table_name;
     let row_count = request.row_count as usize;
 
@@ -619,13 +606,12 @@ mod tests {
     fn test_to_table_insert_request() {
         let (columns, row_count) = mock_insert_batch();
         let request = GrpcInsertRequest {
-            schema_name: "public".to_string(),
             table_name: "demo".to_string(),
             columns,
             row_count,
             region_number: 0,
         };
-        let insert_req = to_table_insert_request(request).unwrap();
+        let insert_req = to_table_insert_request("greptime", "public", request).unwrap();
 
         assert_eq!("greptime", insert_req.catalog_name);
         assert_eq!("public", insert_req.schema_name);

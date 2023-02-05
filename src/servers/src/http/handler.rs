@@ -59,6 +59,32 @@ pub async fn sql(
     Json(resp.with_execution_time(start.elapsed().as_millis()))
 }
 
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct PromqlQuery {
+    pub query: String,
+}
+
+/// Handler to execute promql
+#[axum_macros::debug_handler]
+pub async fn promql(
+    State(state): State<ApiState>,
+    Query(params): Query<PromqlQuery>,
+    // TODO(fys): pass _user_info into query context
+    _user_info: Extension<UserInfo>,
+) -> Json<JsonResponse> {
+    let sql_handler = &state.sql_handler;
+    let start = Instant::now();
+    let resp = match super::query_context_from_db(sql_handler.clone(), None) {
+        Ok(query_ctx) => {
+            JsonResponse::from_output(sql_handler.do_promql_query(&params.query, query_ctx).await)
+                .await
+        }
+        Err(resp) => resp,
+    };
+
+    Json(resp.with_execution_time(start.elapsed().as_millis()))
+}
+
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
     op.response::<200, Json<JsonResponse>>()
 }

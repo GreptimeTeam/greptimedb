@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use clap::Parser;
-use common_telemetry::{info, logging};
+use common_telemetry::{info, logging, warn};
 use meta_srv::bootstrap;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
@@ -58,6 +58,8 @@ struct StartCommand {
     config_file: Option<String>,
     #[clap(short, long)]
     selector: Option<String>,
+    #[clap(long)]
+    use_memory_store: bool,
 }
 
 impl StartCommand {
@@ -100,6 +102,11 @@ impl TryFrom<StartCommand> for MetaSrvOptions {
             info!("Using {} selector", selector_type);
         }
 
+        if cmd.use_memory_store {
+            warn!("Using memory store for Meta. Make sure you are in running tests.");
+            opts.use_memory_store = true;
+        }
+
         Ok(opts)
     }
 }
@@ -118,6 +125,7 @@ mod tests {
             store_addr: Some("127.0.0.1:2380".to_string()),
             config_file: None,
             selector: Some("LoadBased".to_string()),
+            use_memory_store: false,
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
@@ -137,6 +145,7 @@ mod tests {
                 "{}/../../config/metasrv.example.toml",
                 std::env::current_dir().unwrap().as_path().to_str().unwrap()
             )),
+            use_memory_store: false,
         };
         let options: MetaSrvOptions = cmd.try_into().unwrap();
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);

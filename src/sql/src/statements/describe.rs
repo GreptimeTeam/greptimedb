@@ -12,22 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use sqlparser::ast::ObjectName;
+
 /// SQL structure for `DESCRIBE TABLE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeTable {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
+    name: ObjectName,
 }
 
 impl DescribeTable {
     /// Creates a statement for `DESCRIBE TABLE`
-    pub fn new(catalog_name: String, schema_name: String, table_name: String) -> Self {
-        DescribeTable {
-            catalog_name,
-            schema_name,
-            table_name,
-        }
+    pub fn new(name: ObjectName) -> Self {
+        Self { name }
+    }
+
+    pub fn name(&self) -> &ObjectName {
+        &self.name
     }
 }
 
@@ -49,7 +49,7 @@ mod tests {
         assert_matches!(&stmts[0], Statement::DescribeTable { .. });
         match &stmts[0] {
             Statement::DescribeTable(show) => {
-                assert_eq!(show.table_name.as_str(), "test");
+                assert_eq!(show.name.to_string(), "test");
             }
             _ => {
                 unreachable!();
@@ -66,8 +66,7 @@ mod tests {
         assert_matches!(&stmts[0], Statement::DescribeTable { .. });
         match &stmts[0] {
             Statement::DescribeTable(show) => {
-                assert_eq!(show.schema_name.as_str(), "test_schema");
-                assert_eq!(show.table_name.as_str(), "test");
+                assert_eq!(show.name.to_string(), "test_schema.test");
             }
             _ => {
                 unreachable!();
@@ -84,9 +83,7 @@ mod tests {
         assert_matches!(&stmts[0], Statement::DescribeTable { .. });
         match &stmts[0] {
             Statement::DescribeTable(show) => {
-                assert_eq!(show.catalog_name.as_str(), "test_catalog");
-                assert_eq!(show.schema_name.as_str(), "test_schema");
-                assert_eq!(show.table_name.as_str(), "test");
+                assert_eq!(show.name.to_string(), "test_catalog.test_schema.test");
             }
             _ => {
                 unreachable!();

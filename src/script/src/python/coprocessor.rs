@@ -18,15 +18,17 @@ pub mod parse;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::result::Result as StdResult;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-use common_recordbatch::RecordBatch;
+use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::info;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
+use query::parser::QueryLanguageParser;
+use query::QueryEngine;
 use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
 use rustpython_vm::class::PyClassImpl;
@@ -34,9 +36,10 @@ use rustpython_vm::AsObject;
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
-use vm::builtins::{PyBaseExceptionRef, PyTuple};
+use vm::builtins::{PyBaseExceptionRef, PyList, PyListRef, PyTuple};
+use vm::convert::ToPyObject;
 use vm::scope::Scope;
-use vm::{Interpreter, PyObjectRef, VirtualMachine};
+use vm::{pyclass, Interpreter, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
 use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::DecoratorArgs;
@@ -77,6 +80,31 @@ pub struct Coprocessor {
     // but CodeObject doesn't.
     #[cfg_attr(test, serde(skip))]
     pub code_obj: Option<CodeObject>,
+    #[cfg_attr(test, serde(skip))]
+    pub query_engine: Option<QueryEngineWeakRef>,
+}
+
+#[derive(Clone)]
+pub struct QueryEngineWeakRef(pub Weak<dyn QueryEngine>);
+
+impl From<Weak<dyn QueryEngine>> for QueryEngineWeakRef {
+    fn from(value: Weak<dyn QueryEngine>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&Arc<dyn QueryEngine>> for QueryEngineWeakRef {
+    fn from(value: &Arc<dyn QueryEngine>) -> Self {
+        Self(Arc::downgrade(value))
+    }
+}
+
+impl std::fmt::Debug for QueryEngineWeakRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("QueryEngineWeakRef")
+            .field(&self.0.upgrade().map(|f| f.name().to_owned()))
+            .finish()
+    }
 }
 
 impl PartialEq for Coprocessor {
@@ -318,8 +346,97 @@ pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
-    let copr = parse::parse_and_compile_copr(script)?;
+    let copr = parse::parse_and_compile_copr(script, None)?;
     exec_parsed(&copr, rb)
+}
+
+#[pyclass(module = false, name = "query_engine")]
+#[derive(Debug, PyPayload)]
+pub struct PyQueryEngine {
+    inner: QueryEngineWeakRef,
+}
+
+#[pyclass]
+impl PyQueryEngine {
+    // TODO(discord9): find a better way to call sql query api, now we don't if we are in async contex or not
+    /// return sql query results in List[List[PyVector]], or List[usize] for AffectedRows number if no recordbatches is returned
+    #[pymethod]
+    fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
+        enum Either {
+            Rb(RecordBatches),
+            AffectedRows(usize),
+        }
+        let query = self.inner.0.upgrade();
+        let thread_handle = std::thread::spawn(move || -> std::result::Result<_, String> {
+            if let Some(engine) = query {
+                let stmt = QueryLanguageParser::parse_sql(s.as_str()).map_err(|e| e.to_string())?;
+                let plan = engine
+                    .statement_to_plan(stmt, Default::default())
+                    .map_err(|e| e.to_string())?;
+                // To prevent the error of nested creating Runtime, if is nested, use the parent runtime instead
+
+                let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+                let handle = rt.handle().clone();
+                let res = handle.block_on(async {
+                    let res = engine
+                        .clone()
+                        .execute(&plan)
+                        .await
+                        .map_err(|e| e.to_string());
+                    match res {
+                        Ok(common_query::Output::AffectedRows(cnt)) => {
+                            Ok(Either::AffectedRows(cnt))
+                        }
+                        Ok(common_query::Output::RecordBatches(rbs)) => Ok(Either::Rb(rbs)),
+                        Ok(common_query::Output::Stream(s)) => Ok(Either::Rb(
+                            common_recordbatch::util::collect_batches(s).await.unwrap(),
+                        )),
+                        Err(e) => Err(e),
+                    }
+                })?;
+                Ok(res)
+            } else {
+                Err("Query Engine is already dropped".to_string())
+            }
+        });
+        thread_handle
+            .join()
+            .map_err(|e| {
+                vm.new_system_error(format!("Dedicated thread for sql query panic: {e:?}"))
+            })?
+            .map_err(|e| vm.new_system_error(e))
+            .map(|rbs| match rbs {
+                Either::Rb(rbs) => {
+                    let mut top_vec = Vec::with_capacity(rbs.iter().count());
+                    for rb in rbs.iter() {
+                        let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
+                        for v in rb.columns() {
+                            let v = PyVector::from(v.to_owned());
+                            vec_of_vec.push(v.to_pyobject(vm));
+                        }
+                        let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);
+                        top_vec.push(vec_of_vec);
+                    }
+                    let top_vec = PyList::new_ref(top_vec, vm.as_ref());
+                    top_vec
+                }
+                Either::AffectedRows(cnt) => {
+                    PyList::new_ref(vec![vm.ctx.new_int(cnt).into()], vm.as_ref())
+                }
+            })
+    }
+}
+
+fn set_query_engine_in_scope(
+    scope: &Scope,
+    vm: &VirtualMachine,
+    query_engine: PyQueryEngine,
+) -> Result<()> {
+    scope
+        .locals
+        .as_object()
+        .set_item("query", query_engine.to_pyobject(vm), vm)
+        .map_err(|e| format_py_error(e, vm))
 }
 
 pub(crate) fn exec_with_cached_vm(
@@ -333,6 +450,15 @@ pub(crate) fn exec_with_cached_vm(
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
+        if let Some(engine) = &copr.query_engine {
+            let query_engine = PyQueryEngine {
+                inner: engine.clone(),
+            };
+
+            // put a object named with query of class PyQueryEngine in scope
+            PyQueryEngine::make_class(&vm.ctx);
+            set_query_engine_in_scope(&scope, vm, query_engine)?;
+        }
 
         // It's safe to unwrap code_object, it's already compiled before.
         let code_obj = vm.ctx.new_code(copr.code_obj.clone().unwrap());
@@ -444,7 +570,7 @@ def test(a, b, c):
     return add(a, b) / g.sqrt(c)
 "#;
 
-        let copr = parse_and_compile_copr(script).unwrap();
+        let copr = parse_and_compile_copr(script, None).unwrap();
         assert_eq!(copr.name, "test");
         let deco_args = copr.deco_args.clone();
         assert_eq!(

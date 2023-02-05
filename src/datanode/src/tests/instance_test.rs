@@ -647,10 +647,7 @@ async fn try_execute_sql_in_db(
     sql: &str,
     db: &str,
 ) -> Result<Output, crate::error::Error> {
-    let query_ctx = Arc::new(QueryContext::with(
-        DEFAULT_CATALOG_NAME.to_owned(),
-        db.to_string(),
-    ));
+    let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
     instance.inner().execute_sql(sql, query_ctx).await
 }
 

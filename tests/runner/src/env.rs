@@ -14,7 +14,7 @@
 
 use std::fmt::Display;
 use std::fs::OpenOptions;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -23,8 +23,11 @@ use client::{Client, Database as DB, Error as ClientError};
 use common_error::ext::ErrorExt;
 use common_error::snafu::ErrorCompat;
 use common_query::Output;
+use serde::Serialize;
 use sqlness::{Database, EnvController};
+use tinytemplate::TinyTemplate;
 use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
 
 use crate::util;
 
@@ -38,6 +41,7 @@ const DATANODE_LOG_FILE: &str = "/tmp/greptime-sqlness-datanode.log";
 
 pub struct Env {}
 
+#[allow(clippy::print_stdout)]
 #[async_trait]
 impl EnvController for Env {
     type DB = GreptimeDB;
@@ -51,7 +55,6 @@ impl EnvController for Env {
     }
 
     /// Stop one [`Database`].
-    #[allow(clippy::print_stdout)]
     async fn stop(&self, _mode: &str, mut database: Self::DB) {
         let mut server = database.server_process;
         Env::stop_server(&mut server).await;
@@ -65,8 +68,8 @@ impl EnvController for Env {
     }
 }
 
+#[allow(clippy::print_stdout)]
 impl Env {
-    #[allow(clippy::print_stdout)]
     pub async fn start_standalone() -> GreptimeDB {
         // Build the DB with `cargo build --bin greptime`
         println!("Going to build the DB...");
@@ -90,10 +93,12 @@ impl Env {
             .truncate(true)
             .open(SERVER_LOG_FILE)
             .unwrap_or_else(|_| panic!("Cannot open log file at {SERVER_LOG_FILE}"));
+
+        let conf = Self::generate_standalone_config_file();
         // Start the DB
         let server_process = Command::new("./greptime")
             .current_dir(util::get_binary_dir("debug"))
-            .args(["standalone", "start"])
+            .args(["--log-level=debug", "standalone", "start", "-c", &conf])
             .stdout(log_file)
             .spawn()
             .expect("Failed to start the DB");
@@ -105,15 +110,45 @@ impl Env {
         println!("Started, going to test. Log will be write to {SERVER_LOG_FILE}");
 
         let client = Client::with_urls(vec![SERVER_ADDR]);
-        let db = DB::new("greptime", client.clone());
+        let db = DB::with_client(client);
 
         GreptimeDB {
             server_process,
             metasrv_process: None,
             datanode_process: None,
-            client,
-            db,
+            client: Mutex::new(db),
         }
+    }
+
+    fn generate_standalone_config_file() -> String {
+        let mut tt = TinyTemplate::new();
+
+        let mut template_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        template_file.push("../conf/standalone-test.toml.template");
+        let path = template_file.as_path();
+        let template = std::fs::read_to_string(path)
+            .unwrap_or_else(|_| panic!("Failed to read template config file: {}", path.display()));
+        tt.add_template("standalone", &template).unwrap();
+
+        #[derive(Serialize)]
+        struct Context {
+            wal_dir: String,
+            data_dir: String,
+        }
+
+        let current_time = common_time::util::current_time_millis();
+        let greptimedb_dir = format!("/tmp/greptimedb-{current_time}");
+        let ctx = Context {
+            wal_dir: format!("{greptimedb_dir}/wal/"),
+            data_dir: format!("{greptimedb_dir}/data/"),
+        };
+        let rendered = tt.render("standalone", &ctx).unwrap();
+
+        let conf_file = format!("/tmp/standalone-{current_time}.toml");
+        println!("Generating standalone config file in {conf_file}, full content:\n{rendered}");
+        std::fs::write(&conf_file, rendered).unwrap();
+
+        conf_file
     }
 
     pub async fn start_distributed() -> GreptimeDB {
@@ -147,14 +182,13 @@ impl Env {
         }
 
         let client = Client::with_urls(vec![SERVER_ADDR]);
-        let db = DB::new("greptime", client.clone());
+        let db = DB::with_client(client);
 
         GreptimeDB {
             server_process: frontend,
             metasrv_process: Some(meta_server),
             datanode_process: Some(datanode),
-            client,
-            db,
+            client: Mutex::new(db),
         }
     }
 
@@ -186,6 +220,8 @@ impl Env {
             args.push("--node-id=1");
             args.push("--data-dir=/tmp/greptimedb_node_1/data");
             args.push("--wal-dir=/tmp/greptimedb_node_1/wal");
+        } else if subcommand == "metasrv" {
+            args.push("--use-memory-store");
         }
 
         let process = Command::new("./greptime")
@@ -202,15 +238,23 @@ pub struct GreptimeDB {
     server_process: Child,
     metasrv_process: Option<Child>,
     datanode_process: Option<Child>,
-    #[allow(dead_code)]
-    client: Client,
-    db: DB,
+    client: Mutex<DB>,
 }
 
 #[async_trait]
 impl Database for GreptimeDB {
     async fn query(&self, query: String) -> Box<dyn Display> {
-        let result = self.db.sql(&query).await;
+        let mut client = self.client.lock().await;
+        if query.trim().starts_with("USE ") {
+            let database = query
+                .split_ascii_whitespace()
+                .nth(1)
+                .expect("Illegal `USE` statement: expecting a database.")
+                .trim_end_matches(';');
+            client.set_schema(database);
+        }
+
+        let result = client.sql(&query).await;
         Box::new(ResultDisplayer { result }) as _
     }
 }

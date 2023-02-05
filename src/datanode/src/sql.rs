@@ -26,7 +26,8 @@ use table::engine::{EngineContext, TableEngineRef, TableReference};
 use table::requests::*;
 use table::TableRef;
 
-use crate::error::{ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu};
+use crate::error::{self, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu};
+use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
 mod create;
@@ -81,17 +82,29 @@ impl SqlHandler {
                 show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
             SqlRequest::ShowTables(stmt) => {
-                show_tables(stmt, self.catalog_manager.clone(), query_ctx).context(ExecuteSqlSnafu)
+                show_tables(stmt, self.catalog_manager.clone(), query_ctx.clone())
+                    .context(ExecuteSqlSnafu)
             }
             SqlRequest::DescribeTable(stmt) => {
-                describe_table(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.name(), query_ctx.clone())?;
+                let table = self
+                    .catalog_manager
+                    .table(&catalog, &schema, &table)
+                    .context(error::CatalogSnafu)?
+                    .with_context(|| TableNotFoundSnafu {
+                        table_name: stmt.name().to_string(),
+                    })?;
+                describe_table(table).context(ExecuteSqlSnafu)
             }
-            SqlRequest::Explain(stmt) => explain(stmt, self.query_engine.clone(), query_ctx)
-                .await
-                .context(ExecuteSqlSnafu),
+            SqlRequest::Explain(stmt) => {
+                explain(stmt, self.query_engine.clone(), query_ctx.clone())
+                    .await
+                    .context(ExecuteSqlSnafu)
+            }
         };
         if let Err(e) = &result {
-            error!("Datanode execution error: {:?}", e);
+            error!(e; "{query_ctx}");
         }
         result
     }

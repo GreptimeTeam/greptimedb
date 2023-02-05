@@ -28,6 +28,7 @@ pub mod mysql;
 pub mod opentsdb;
 pub mod postgres;
 pub mod prometheus;
+pub mod promql;
 mod server;
 mod sql;
 mod table;

@@ -35,13 +35,15 @@ impl DistTable {
         &self,
         inserts: HashMap<RegionNumber, InsertRequest>,
     ) -> Result<Output> {
+        let table_name = &self.table_name;
         let route = self
             .partition_manager
             .find_table_route(&self.table_name)
             .await
             .with_context(|_| FindTableRouteSnafu {
-                table_name: self.table_name.to_string(),
+                table_name: table_name.to_string(),
             })?;
+
         let mut joins = Vec::with_capacity(inserts.len());
         for (region_id, insert) in inserts {
             let datanode = route
@@ -57,7 +59,7 @@ impl DistTable {
                 .context(error::FindDatanodeSnafu { region: region_id })?;
 
             let client = self.datanode_clients.get_client(&datanode).await;
-            let db = Database::new(&self.table_name.schema_name, client);
+            let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
             let instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 
             let join = common_runtime::spawn_write(async move {
@@ -135,7 +137,6 @@ fn to_grpc_insert_request(
     let table_name = insert.table_name.clone();
     let (columns, row_count) = insert_request_to_insert_batch(&insert)?;
     Ok(GrpcInsertRequest {
-        schema_name: insert.schema_name,
         table_name,
         region_number,
         columns,

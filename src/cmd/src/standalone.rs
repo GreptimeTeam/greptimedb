@@ -26,6 +26,7 @@ use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
+use frontend::promql::PromqlOptions;
 use frontend::Plugins;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
@@ -72,6 +73,7 @@ pub struct StandaloneOptions {
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
+    pub promql_options: Option<PromqlOptions>,
     pub mode: Mode,
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
@@ -88,6 +90,7 @@ impl Default for StandaloneOptions {
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
+            promql_options: Some(PromqlOptions::default()),
             mode: Mode::Standalone,
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
@@ -106,6 +109,7 @@ impl StandaloneOptions {
             opentsdb_options: self.opentsdb_options,
             influxdb_options: self.influxdb_options,
             prometheus_options: self.prometheus_options,
+            promql_options: self.promql_options,
             mode: self.mode,
             meta_client_opts: None,
         }

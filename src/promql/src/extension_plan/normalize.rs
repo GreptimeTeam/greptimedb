@@ -16,7 +16,6 @@ use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 use datafusion::arrow::compute;
 use datafusion::common::{DFSchemaRef, Result as DataFusionResult, Statistics};
@@ -91,12 +90,12 @@ impl UserDefinedLogicalNode for SeriesNormalize {
 
 impl SeriesNormalize {
     pub fn new<N: AsRef<str>>(
-        offset: Duration,
+        offset: Millisecond,
         time_index_column_name: N,
         input: LogicalPlan,
     ) -> Self {
         Self {
-            offset: offset.as_millis() as i64,
+            offset,
             time_index_column_name: time_index_column_name.as_ref().to_string(),
             input,
         }

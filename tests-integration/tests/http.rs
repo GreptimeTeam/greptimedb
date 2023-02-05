@@ -18,7 +18,10 @@ use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
 use servers::http::handler::HealthResponse;
 use servers::http::{JsonOutput, JsonResponse};
-use tests_integration::test_util::{setup_test_app, setup_test_app_with_frontend, StorageType};
+use tests_integration::test_util::{
+    setup_test_http_app, setup_test_http_app_with_frontend, setup_test_promql_app_with_frontend,
+    StorageType,
+};
 
 #[macro_export]
 macro_rules! http_test {
@@ -50,6 +53,7 @@ macro_rules! http_tests {
                 $service,
 
                 test_sql_api,
+                test_promql_api,
                 test_metrics_api,
                 test_scripts_api,
                 test_health_api,
@@ -60,7 +64,7 @@ macro_rules! http_tests {
 
 pub async fn test_sql_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_app_with_frontend(store_type, "sql_api").await;
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app);
     let res = client.get("/v1/sql").send().await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -261,10 +265,35 @@ pub async fn test_sql_api(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_promql_api(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_promql_app_with_frontend(store_type, "promql_api").await;
+    let client = TestClient::new(app);
+
+    // instant query
+    let res = client.get("/v1/query?query=up").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client.post("/v1/query?query=up").send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = client
+        .get("/v1/range_query?query=up&start=1&end=100&step=5")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = client
+        .post("/v1/range_query?query=up&start=1&end=100&step=5")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    guard.remove_all().await;
+}
+
 pub async fn test_metrics_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     common_telemetry::init_default_metrics_recorder();
-    let (app, mut guard) = setup_test_app(store_type, "metrics_api").await;
+    let (app, mut guard) = setup_test_http_app(store_type, "metrics_api").await;
     let client = TestClient::new(app);
 
     // Send a sql
@@ -284,7 +313,7 @@ pub async fn test_metrics_api(store_type: StorageType) {
 
 pub async fn test_scripts_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_app_with_frontend(store_type, "script_api").await;
+    let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "script_api").await;
     let client = TestClient::new(app);
 
     let res = client
@@ -325,7 +354,7 @@ def test(n):
 
 pub async fn test_health_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, _guard) = setup_test_app_with_frontend(store_type, "health_api").await;
+    let (app, _guard) = setup_test_http_app_with_frontend(store_type, "health_api").await;
     let client = TestClient::new(app);
 
     // we can call health api with both `GET` and `POST` method.

@@ -65,8 +65,8 @@ pub struct OpenTableRequest {
 /// Alter table request
 #[derive(Debug)]
 pub struct AlterTableRequest {
-    pub catalog_name: Option<String>,
-    pub schema_name: Option<String>,
+    pub catalog_name: String,
+    pub schema_name: String,
     pub table_name: String,
     pub alter_kind: AlterKind,
 }

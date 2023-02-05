@@ -88,6 +88,45 @@ impl crate::snafu::ErrorCompat for BoxedError {
     }
 }
 
+/// Error type with plain error message
+#[derive(Debug)]
+pub struct PlainError {
+    msg: String,
+    status_code: StatusCode,
+}
+
+impl PlainError {
+    pub fn new(msg: String, status_code: StatusCode) -> Self {
+        Self { msg, status_code }
+    }
+}
+
+impl std::fmt::Display for PlainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.msg)
+    }
+}
+
+impl std::error::Error for PlainError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+    }
+}
+
+impl crate::ext::ErrorExt for PlainError {
+    fn status_code(&self) -> crate::status_code::StatusCode {
+        self.status_code
+    }
+
+    fn backtrace_opt(&self) -> Option<&crate::snafu::Backtrace> {
+        None
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self as _
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;

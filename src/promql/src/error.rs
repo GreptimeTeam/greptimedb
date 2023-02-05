@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use datafusion::error::DataFusionError;
+use promql_parser::label::Label;
 use promql_parser::parser::{Expr as PromExpr, TokenType};
 
 #[derive(Debug, Snafu)]
@@ -48,10 +49,11 @@ pub enum Error {
     #[snafu(display("Cannot find value columns in table {}", table))]
     ValueNotFound { table: String, backtrace: Backtrace },
 
-    #[snafu(display("Cannot find label in table {}, source: {}", table, source))]
+    #[snafu(display("Cannot find label {} in table {}", label, table,))]
     LabelNotFound {
         table: String,
-        source: datafusion::error::DataFusionError,
+        label: Label,
+        backtrace: Backtrace,
     },
 
     #[snafu(display("Cannot find the table {}", table))]

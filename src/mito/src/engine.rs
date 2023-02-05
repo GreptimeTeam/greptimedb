@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_telemetry::logging;
 use datatypes::schema::SchemaRef;
@@ -496,9 +495,9 @@ impl<S: StorageEngine> MitoEngineInner<S> {
     }
 
     async fn alter_table(&self, _ctx: &EngineContext, req: AlterTableRequest) -> Result<TableRef> {
-        let catalog_name = req.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
-        let schema_name = req.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
-        let table_name = &req.table_name.clone();
+        let catalog_name = &req.catalog_name;
+        let schema_name = &req.schema_name;
+        let table_name = &req.table_name;
 
         if let AlterKind::RenameTable { new_table_name } = &req.alter_kind {
             let table_ref = TableReference {
@@ -569,6 +568,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
 #[cfg(test)]
 mod tests {
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::physical_plan::SessionContext;
     use common_recordbatch::util;
     use datatypes::prelude::ConcreteDataType;
@@ -989,8 +989,8 @@ mod tests {
 
     fn new_add_columns_req(new_tag: &ColumnSchema, new_field: &ColumnSchema) -> AlterTableRequest {
         AlterTableRequest {
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: TABLE_NAME.to_string(),
             alter_kind: AlterKind::AddColumns {
                 columns: vec![
@@ -1068,8 +1068,8 @@ mod tests {
 
         // Then remove memory and my_field from the table.
         let req = AlterTableRequest {
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: TABLE_NAME.to_string(),
             alter_kind: AlterKind::DropColumns {
                 names: vec![String::from("memory"), String::from("my_field")],
@@ -1123,8 +1123,8 @@ mod tests {
             .expect("create table must succeed");
         // test renaming a table with an existing name.
         let req = AlterTableRequest {
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: TABLE_NAME.to_string(),
             alter_kind: AlterKind::RenameTable {
                 new_table_name: another_name.to_string(),
@@ -1139,8 +1139,8 @@ mod tests {
         let new_table_name = "test_table";
         // test rename table
         let req = AlterTableRequest {
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: TABLE_NAME.to_string(),
             alter_kind: AlterKind::RenameTable {
                 new_table_name: new_table_name.to_string(),
