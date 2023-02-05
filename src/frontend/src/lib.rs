@@ -26,11 +26,10 @@ pub mod influxdb;
 pub mod instance;
 pub mod mysql;
 pub mod opentsdb;
-pub mod partitioning;
 pub mod postgres;
 pub mod prometheus;
+pub mod promql;
 mod server;
-pub mod spliter;
 mod sql;
 mod table;
 #[cfg(test)]

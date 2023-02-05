@@ -80,7 +80,10 @@ pub enum Error {
     },
 
     #[snafu(display("Table not found: {}", table_name))]
-    TableNotFound { table_name: String },
+    TableNotFound {
+        table_name: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Column {} not found in table {}", column_name, table_name))]
     ColumnNotFound {

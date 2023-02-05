@@ -81,7 +81,7 @@ impl Server for GrpcServer {
                 .await
                 .context(TcpBindSnafu { addr })?;
             let addr = listener.local_addr().context(TcpBindSnafu { addr })?;
-            info!("GRPC server is bound to {}", addr);
+            info!("gRPC server is bound to {}", addr);
 
             *shutdown_tx = Some(tx);
 

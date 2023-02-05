@@ -16,15 +16,20 @@ use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::InfluxdbLineProtocolHandler;
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::instance::Instance;
 
 #[async_trait]
 impl InfluxdbLineProtocolHandler for Instance {
-    async fn exec(&self, request: &InfluxdbRequest) -> servers::error::Result<()> {
+    async fn exec(
+        &self,
+        request: &InfluxdbRequest,
+        ctx: QueryContextRef,
+    ) -> servers::error::Result<()> {
         let requests = request.try_into()?;
-        self.handle_inserts(requests)
+        self.handle_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(servers::error::ExecuteGrpcQuerySnafu)?;
@@ -68,10 +73,9 @@ monitor1,host=host1 cpu=66.6,memory=1024 1663840496100023100
 monitor1,host=host2 memory=1027 1663840496400340001";
         let request = InfluxdbRequest {
             precision: None,
-            db: "public".to_string(),
             lines: lines.to_string(),
         };
-        instance.exec(&request).await.unwrap();
+        instance.exec(&request, QueryContext::arc()).await.unwrap();
 
         let mut output = instance
             .do_query(

@@ -9,6 +9,7 @@ api = { path = "../api" }
 arrow-flight.workspace = true
 async-stream.workspace = true
 common-base = { path = "../common/base" }
+common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-grpc = { path = "../common/grpc" }
 common-grpc-expr = { path = "../common/grpc-expr" }

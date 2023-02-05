@@ -11,5 +11,8 @@ common-base = { path = "../../src/common/base" }
 common-error = { path = "../../src/common/error" }
 common-grpc = { path = "../../src/common/grpc" }
 common-query = { path = "../../src/common/query" }
-sqlness = "0.1"
+common-time = { path = "../../src/common/time" }
+serde.workspace = true
+sqlness = "0.2"
+tinytemplate = "1.2"
 tokio.workspace = true

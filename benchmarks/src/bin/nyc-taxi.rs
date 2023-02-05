@@ -32,7 +32,6 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tokio::task::JoinSet;
 
-const DATABASE_NAME: &str = "greptime";
 const CATALOG_NAME: &str = "greptime";
 const SCHEMA_NAME: &str = "public";
 const TABLE_NAME: &str = "nyc_taxi";
@@ -100,7 +99,6 @@ async fn write_data(
         let record_batch = record_batch.unwrap();
         let (columns, row_count) = convert_record_batch(record_batch);
         let request = InsertRequest {
-            schema_name: "public".to_string(),
             table_name: TABLE_NAME.to_string(),
             region_number: 0,
             columns,
@@ -424,7 +422,7 @@ fn main() {
         .unwrap()
         .block_on(async {
             let client = Client::with_urls(vec![&args.endpoint]);
-            let db = Database::new(DATABASE_NAME, client);
+            let db = Database::with_client(client);
 
             if !args.skip_write {
                 do_write(&args, &db).await;

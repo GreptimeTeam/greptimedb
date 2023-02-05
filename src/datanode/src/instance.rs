@@ -53,7 +53,7 @@ use crate::sql::SqlHandler;
 
 mod grpc;
 mod script;
-mod sql;
+pub mod sql;
 
 pub(crate) type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
 

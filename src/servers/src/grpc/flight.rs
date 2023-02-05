@@ -17,7 +17,7 @@ mod stream;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use api::v1::GreptimeRequest;
+use api::v1::{GreptimeRequest, RequestHeader};
 use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
@@ -29,7 +29,8 @@ use common_query::Output;
 use common_runtime::Runtime;
 use futures::Stream;
 use prost::Message;
-use snafu::ResultExt;
+use session::context::{QueryContext, QueryContextRef};
+use snafu::{OptionExt, ResultExt};
 use tokio::sync::oneshot;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -92,6 +93,11 @@ impl FlightService for FlightHandler {
         let request =
             GreptimeRequest::decode(ticket.as_slice()).context(error::InvalidFlightTicketSnafu)?;
 
+        let query = request.request.context(error::InvalidQuerySnafu {
+            reason: "Expecting non-empty GreptimeRequest.",
+        })?;
+        let query_ctx = create_query_context(request.header.as_ref());
+
         let (tx, rx) = oneshot::channel();
         let handler = self.handler.clone();
 
@@ -99,7 +105,7 @@ impl FlightService for FlightHandler {
         // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
         // 2. avoid the handler blocks the gRPC runtime incidentally.
         self.runtime.spawn(async move {
-            let result = handler.do_query(request).await;
+            let result = handler.do_query(query, query_ctx).await;
 
             // Ignore the sending result.
             // Usually an error indicates the rx at Tonic side is dropped (due to request timeout).
@@ -165,4 +171,18 @@ fn to_flight_data_stream(output: Output) -> TonicStream<FlightData> {
             Box::pin(stream) as _
         }
     }
+}
+
+fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
+    let ctx = QueryContext::arc();
+    if let Some(header) = header {
+        if !header.catalog.is_empty() {
+            ctx.set_current_catalog(&header.catalog);
+        }
+
+        if !header.schema.is_empty() {
+            ctx.set_current_schema(&header.schema);
+        }
+    };
+    ctx
 }

@@ -19,9 +19,10 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{
     AlterExpr, CreateTableExpr, DdlRequest, DropTableExpr, GreptimeRequest, InsertRequest,
-    QueryRequest,
+    QueryRequest, RequestHeader,
 };
 use arrow_flight::{FlightData, Ticket};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::*;
 use common_grpc::flight::{flight_messages_to_recordbatches, FlightDecoder, FlightMessage};
 use common_query::Output;
@@ -34,83 +35,89 @@ use crate::{error, Client, Result};
 
 #[derive(Clone, Debug)]
 pub struct Database {
-    name: String,
+    // The "catalog" and "schema" to be used in processing the requests at the server side.
+    // They are the "hint" or "context", just like how the "database" in "USE" statement is treated in MySQL.
+    // They will be carried in the request header.
+    catalog: String,
+    schema: String,
+
     client: Client,
 }
 
 impl Database {
-    pub fn new(name: impl Into<String>, client: Client) -> Self {
+    pub fn new(catalog: impl Into<String>, schema: impl Into<String>, client: Client) -> Self {
         Self {
-            name: name.into(),
+            catalog: catalog.into(),
+            schema: schema.into(),
             client,
         }
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
+    pub fn with_client(client: Client) -> Self {
+        Self::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client)
+    }
+
+    pub fn set_schema(&mut self, schema: impl Into<String>) {
+        self.schema = schema.into();
     }
 
     pub async fn insert(&self, request: InsertRequest) -> Result<Output> {
-        self.do_get(GreptimeRequest {
-            request: Some(Request::Insert(request)),
-        })
-        .await
+        self.do_get(Request::Insert(request)).await
     }
 
     pub async fn sql(&self, sql: &str) -> Result<Output> {
-        self.do_get(GreptimeRequest {
-            request: Some(Request::Query(QueryRequest {
-                query: Some(Query::Sql(sql.to_string())),
-            })),
-        })
+        self.do_get(Request::Query(QueryRequest {
+            query: Some(Query::Sql(sql.to_string())),
+        }))
         .await
     }
 
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
-        self.do_get(GreptimeRequest {
-            request: Some(Request::Query(QueryRequest {
-                query: Some(Query::LogicalPlan(logical_plan)),
-            })),
-        })
+        self.do_get(Request::Query(QueryRequest {
+            query: Some(Query::LogicalPlan(logical_plan)),
+        }))
         .await
     }
 
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
-        self.do_get(GreptimeRequest {
-            request: Some(Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::CreateTable(expr)),
-            })),
-        })
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(expr)),
+        }))
         .await
     }
 
     pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
-        self.do_get(GreptimeRequest {
-            request: Some(Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::Alter(expr)),
-            })),
-        })
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::Alter(expr)),
+        }))
         .await
     }
 
     pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
-        self.do_get(GreptimeRequest {
-            request: Some(Request::Ddl(DdlRequest {
-                expr: Some(DdlExpr::DropTable(expr)),
-            })),
-        })
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::DropTable(expr)),
+        }))
         .await
     }
 
-    async fn do_get(&self, request: GreptimeRequest) -> Result<Output> {
+    async fn do_get(&self, request: Request) -> Result<Output> {
+        let request = GreptimeRequest {
+            header: Some(RequestHeader {
+                catalog: self.catalog.clone(),
+                schema: self.schema.clone(),
+            }),
+            request: Some(request),
+        };
+        let request = Ticket {
+            ticket: request.encode_to_vec(),
+        };
+
         let mut client = self.client.make_client()?;
 
         // TODO(LFC): Streaming get flight data.
         let flight_data: Vec<FlightData> = client
             .mut_inner()
-            .do_get(Ticket {
-                ticket: request.encode_to_vec(),
-            })
+            .do_get(request)
             .and_then(|response| response.into_inner().try_collect())
             .await
             .map_err(|e| {

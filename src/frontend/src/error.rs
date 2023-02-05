@@ -15,14 +15,17 @@
 use std::any::Any;
 
 use common_error::prelude::*;
-use common_query::logical_plan::Expr;
-use datafusion_common::ScalarValue;
-use datatypes::prelude::Value;
 use store_api::storage::RegionId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("{source}"))]
+    External {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to request Datanode, source: {}", source))]
     RequestDatanode {
         #[snafu(backtrace)]
@@ -99,35 +102,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display(
-        "Failed to convert DataFusion's ScalarValue: {:?}, source: {}",
-        value,
-        source
-    ))]
-    ConvertScalarValue {
-        value: ScalarValue,
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Failed to find partition column: {}", column_name))]
-    FindPartitionColumn {
-        column_name: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to find region, reason: {}", reason))]
-    FindRegion {
-        reason: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to find regions by filters: {:?}", filters))]
-    FindRegions {
-        filters: Vec<Expr>,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to find Datanode by region: {:?}", region))]
     FindDatanode {
         region: RegionId,
@@ -137,13 +111,6 @@ pub enum Error {
     #[snafu(display("Invalid InsertRequest, reason: {}", reason))]
     InvalidInsertRequest {
         reason: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Expect {} region keys, actual {}", expect, actual))]
-    RegionKeysSize {
-        expect: usize,
-        actual: usize,
         backtrace: Backtrace,
     },
 
@@ -201,16 +168,17 @@ pub enum Error {
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to get cache, error: {}", err_msg))]
-    GetCache {
-        err_msg: String,
+    #[snafu(display("Failed to create table route for table {}", table_name))]
+    CreateTableRoute {
+        table_name: String,
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to find table routes for table {}", table_name))]
-    FindTableRoutes {
+    #[snafu(display("Failed to find table route for table {}", table_name))]
+    FindTableRoute {
         table_name: String,
-        backtrace: Backtrace,
+        #[snafu(backtrace)]
+        source: partition::error::Error,
     },
 
     #[snafu(display("Failed to create AlterExpr from Alter statement, source: {}", source))]
@@ -252,21 +220,9 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to find region routes for table {}", table_name))]
-    FindRegionRoutes {
+    #[snafu(display("Failed to find region route for table {}", table_name))]
+    FindRegionRoute {
         table_name: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to serialize value to json, source: {}", source))]
-    SerializeJson {
-        source: serde_json::Error,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display("Failed to deserialize value from json, source: {}", source))]
-    DeserializeJson {
-        source: serde_json::Error,
         backtrace: Backtrace,
     },
 
@@ -278,28 +234,6 @@ pub enum Error {
     FindLeaderPeer {
         region: u64,
         table_name: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display(
-        "Failed to find partition info for region {} in table {}",
-        region,
-        table_name
-    ))]
-    FindRegionPartition {
-        region: u64,
-        table_name: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display(
-        "Illegal table routes data for table {}, error message: {}",
-        table_name,
-        err_msg
-    ))]
-    IllegalTableRoutesData {
-        table_name: String,
-        err_msg: String,
         backtrace: Backtrace,
     },
 
@@ -343,17 +277,6 @@ pub enum Error {
     EncodeSubstraitLogicalPlan {
         #[snafu(backtrace)]
         source: substrait::error::Error,
-    },
-
-    #[snafu(display(
-        "Failed to build a vector from values, value: {}, source: {}",
-        value,
-        source
-    ))]
-    BuildVector {
-        value: Value,
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to found context value: {}", key))]
@@ -404,6 +327,23 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display(
+        "Failed to deserialize partition in meta to partition def, source: {}",
+        source
+    ))]
+    DeserializePartition {
+        #[snafu(backtrace)]
+        source: partition::error::Error,
+    },
+
+    // TODO(ruihang): merge all query execution error kinds
+    #[snafu(display("failed to execute PromQL query {}, source: {}", query, source))]
+    ExecutePromql {
+        query: String,
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -413,19 +353,16 @@ impl ErrorExt for Error {
         match self {
             Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
-            | Error::FindRegion { .. }
-            | Error::FindRegions { .. }
             | Error::InvalidInsertRequest { .. }
-            | Error::FindPartitionColumn { .. }
-            | Error::ColumnValuesNumberMismatch { .. }
-            | Error::RegionKeysSize { .. } => StatusCode::InvalidArguments,
+            | Error::ColumnValuesNumberMismatch { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
             Error::RuntimeResource { source, .. } => source.status_code(),
+            Error::ExecutePromql { source, .. } => source.status_code(),
 
-            Error::StartServer { source, .. } => source.status_code(),
             Error::SqlExecIntercepted { source, .. } => source.status_code(),
+            Error::StartServer { source, .. } => source.status_code(),
 
             Error::ParseSql { source } | Error::AlterExprFromStmt { source } => {
                 source.status_code()
@@ -433,8 +370,7 @@ impl ErrorExt for Error {
 
             Error::Table { source } => source.status_code(),
 
-            Error::ConvertColumnDefaultConstraint { source, .. }
-            | Error::ConvertScalarValue { source, .. } => source.status_code(),
+            Error::ConvertColumnDefaultConstraint { source, .. } => source.status_code(),
 
             Error::RequestDatanode { source } => source.status_code(),
 
@@ -443,14 +379,9 @@ impl ErrorExt for Error {
             }
 
             Error::FindDatanode { .. }
-            | Error::GetCache { .. }
-            | Error::FindTableRoutes { .. }
-            | Error::SerializeJson { .. }
-            | Error::DeserializeJson { .. }
-            | Error::FindRegionRoutes { .. }
+            | Error::CreateTableRoute { .. }
+            | Error::FindRegionRoute { .. }
             | Error::FindLeaderPeer { .. }
-            | Error::FindRegionPartition { .. }
-            | Error::IllegalTableRoutesData { .. }
             | Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. } => StatusCode::Internal,
 
@@ -482,10 +413,13 @@ impl ErrorExt for Error {
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
-            Error::BuildVector { source, .. } => source.status_code(),
             Error::InvokeDatanode { source } => source.status_code(),
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
             Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+            Error::External { source } => source.status_code(),
+            Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

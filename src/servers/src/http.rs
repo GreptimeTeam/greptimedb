@@ -30,7 +30,6 @@ use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
 use axum::response::{Html, Json};
 use axum::{routing, BoxError, Extension, Router};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -71,10 +70,7 @@ pub(crate) fn query_context_from_db(
         let (catalog, schema) = super::parse_catalog_and_schema_from_client_database_name(db);
 
         match query_handler.is_valid_schema(catalog, schema) {
-            Ok(true) => Ok(Arc::new(QueryContext::with(
-                catalog.to_owned(),
-                schema.to_owned(),
-            ))),
+            Ok(true) => Ok(Arc::new(QueryContext::with(catalog, schema))),
             Ok(false) => Err(JsonResponse::with_error(
                 format!("Database not found: {db}"),
                 StatusCode::DatabaseNotFound,
@@ -85,10 +81,7 @@ pub(crate) fn query_context_from_db(
             )),
         }
     } else {
-        Ok(Arc::new(QueryContext::with(
-            DEFAULT_CATALOG_NAME.to_owned(),
-            DEFAULT_SCHEMA_NAME.to_owned(),
-        )))
+        Ok(QueryContext::arc())
     }
 }
 
@@ -406,8 +399,8 @@ impl HttpServer {
     pub fn make_app(&self) -> Router {
         let mut api = OpenApi {
             info: Info {
-                title: "Greptime DB HTTP API".to_string(),
-                description: Some("HTTP APIs to interact with Greptime DB".to_string()),
+                title: "GreptimeDB HTTP API".to_string(),
+                description: Some("HTTP APIs to interact with GreptimeDB".to_string()),
                 version: HTTP_API_VERSION.to_string(),
                 ..Info::default()
             },
@@ -476,6 +469,11 @@ impl HttpServer {
                 "/sql",
                 apirouting::get_with(handler::sql, handler::sql_docs)
                     .post_with(handler::sql, handler::sql_docs),
+            )
+            .api_route(
+                "/promql",
+                apirouting::get_with(handler::promql, handler::sql_docs)
+                    .post_with(handler::promql, handler::sql_docs),
             )
             .api_route("/scripts", apirouting::post(script::scripts))
             .api_route("/run-script", apirouting::post(script::run_script))
@@ -581,6 +579,14 @@ mod test {
         type Error = Error;
 
         async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_promql_query(
+            &self,
+            _: &str,
+            _: QueryContextRef,
+        ) -> Vec<std::result::Result<Output, Self::Error>> {
             unimplemented!()
         }
 

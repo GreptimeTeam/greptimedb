@@ -37,18 +37,18 @@ struct DummyInstance {
 
 #[async_trait]
 impl PrometheusProtocolHandler for DummyInstance {
-    async fn write(&self, db: &str, request: WriteRequest) -> Result<()> {
+    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> Result<()> {
         let _ = self
             .tx
-            .send((db.to_string(), request.encode_to_vec()))
+            .send((ctx.current_schema(), request.encode_to_vec()))
             .await;
 
         Ok(())
     }
-    async fn read(&self, db: &str, request: ReadRequest) -> Result<PrometheusResponse> {
+    async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PrometheusResponse> {
         let _ = self
             .tx
-            .send((db.to_string(), request.encode_to_vec()))
+            .send((ctx.current_schema(), request.encode_to_vec()))
             .await;
 
         let response = ReadResponse {
@@ -74,6 +74,14 @@ impl SqlQueryHandler for DummyInstance {
     type Error = Error;
 
     async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+        unimplemented!()
+    }
+
+    async fn do_promql_query(
+        &self,
+        _: &str,
+        _: QueryContextRef,
+    ) -> Vec<std::result::Result<Output, Self::Error>> {
         unimplemented!()
     }
 

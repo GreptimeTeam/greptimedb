@@ -52,6 +52,14 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
+    async fn do_promql_query(
+        &self,
+        _: &str,
+        _: QueryContextRef,
+    ) -> Vec<std::result::Result<Output, Self::Error>> {
+        unimplemented!()
+    }
+
     async fn do_statement_query(
         &self,
         _stmt: sql::statements::statement::Statement,

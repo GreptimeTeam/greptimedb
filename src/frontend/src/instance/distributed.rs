@@ -25,8 +25,10 @@ use catalog::{CatalogList, CatalogManager};
 use chrono::DateTime;
 use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_telemetry::{debug, error, info};
+use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use meta_client::client::MetaClient;
@@ -34,6 +36,7 @@ use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
     TableName, TableRoute,
 };
+use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::QueryStatement;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
@@ -51,13 +54,12 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    ColumnDataTypeSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu,
-    RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu, TableNotFoundSnafu,
-    TableSnafu, ToTableInsertRequestSnafu,
+    ColumnDataTypeSnafu, DeserializePartitionSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
+    TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
 use crate::instance::parse_stmt;
-use crate::partitioning::{PartitionBound, PartitionDef};
 use crate::sql::insert_to_request;
 
 #[derive(Clone)]
@@ -92,7 +94,7 @@ impl DistInstance {
         let table_routes = response.table_routes;
         ensure!(
             table_routes.len() == 1,
-            error::FindTableRoutesSnafu {
+            error::CreateTableRouteSnafu {
                 table_name: create_table.table_name.to_string()
             }
         );
@@ -107,7 +109,7 @@ impl DistInstance {
         let region_routes = &table_route.region_routes;
         ensure!(
             !region_routes.is_empty(),
-            error::FindRegionRoutesSnafu {
+            error::FindRegionRouteSnafu {
                 table_name: create_table.table_name.to_string()
             }
         );
@@ -119,7 +121,7 @@ impl DistInstance {
 
         for datanode in table_route.find_leaders() {
             let client = self.datanode_clients.get_client(&datanode).await;
-            let client = Database::new("greptime", client);
+            let client = Database::with_client(client);
 
             let regions = table_route.find_leader_regions(&datanode);
             let mut create_expr_for_region = create_table.clone();
@@ -168,7 +170,19 @@ impl DistInstance {
             Statement::ShowTables(stmt) => {
                 show_tables(stmt, self.catalog_manager.clone(), query_ctx)
             }
-            Statement::DescribeTable(stmt) => describe_table(stmt, self.catalog_manager.clone()),
+            Statement::DescribeTable(stmt) => {
+                let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), query_ctx)
+                    .map_err(BoxedError::new)
+                    .context(error::ExternalSnafu)?;
+                let table = self
+                    .catalog_manager
+                    .table(&catalog, &schema, &table)
+                    .context(CatalogSnafu)?
+                    .with_context(|| TableNotFoundSnafu {
+                        table_name: stmt.name().to_string(),
+                    })?;
+                describe_table(table)
+            }
             Statement::Explain(stmt) => {
                 explain(Box::new(stmt), self.query_engine.clone(), query_ctx).await
             }
@@ -346,16 +360,21 @@ impl DistInstance {
     // GRPC InsertRequest to Table InsertRequest, than split Table InsertRequest, than assemble each GRPC InsertRequest, is rather inefficient,
     // should operate on GRPC InsertRequest directly.
     // Also remember to check the "region_number" carried in InsertRequest, too.
-    async fn handle_dist_insert(&self, request: InsertRequest) -> Result<Output> {
+    async fn handle_dist_insert(
+        &self,
+        request: InsertRequest,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let catalog = &ctx.current_catalog();
+        let schema = &ctx.current_schema();
         let table_name = &request.table_name;
-        // TODO(LFC): InsertRequest should carry catalog name, too.
         let table = self
             .catalog_manager
-            .table(DEFAULT_CATALOG_NAME, &request.schema_name, table_name)
+            .table(catalog, schema, table_name)
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu { table_name })?;
 
-        let request = common_grpc_expr::insert::to_table_insert_request(request)
+        let request = common_grpc_expr::insert::to_table_insert_request(catalog, schema, request)
             .context(ToTableInsertRequestSnafu)?;
 
         let affected_rows = table.insert(request).await.context(TableSnafu)?;
@@ -374,6 +393,14 @@ impl SqlQueryHandler for DistInstance {
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         self.handle_sql(query, query_ctx).await
+    }
+
+    async fn do_promql_query(
+        &self,
+        _: &str,
+        _: QueryContextRef,
+    ) -> Vec<std::result::Result<Output, Self::Error>> {
+        unimplemented!()
     }
 
     async fn do_statement_query(
@@ -509,8 +536,9 @@ fn parse_partitions(
 
     partition_entries
         .into_iter()
-        .map(|x| PartitionDef::new(partition_columns.clone(), x).try_into())
-        .collect::<Result<Vec<MetaPartition>>>()
+        .map(|x| MetaPartition::try_from(PartitionDef::new(partition_columns.clone(), x)))
+        .collect::<std::result::Result<_, _>>()
+        .context(DeserializePartitionSnafu)
 }
 
 fn find_partition_entries(

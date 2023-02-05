@@ -26,7 +26,6 @@ use crate::statements::drop::DropTable;
 use crate::statements::explain::Explain;
 use crate::statements::show::{ShowCreateTable, ShowDatabases, ShowKind, ShowTables};
 use crate::statements::statement::Statement;
-use crate::statements::table_idents_to_full_name;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
@@ -271,12 +270,7 @@ impl<'a> ParserContext<'a> {
                 name: table_idents.to_string(),
             }
         );
-        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_idents)?;
-        Ok(Statement::DescribeTable(DescribeTable {
-            catalog_name,
-            schema_name,
-            table_name,
-        }))
+        Ok(Statement::DescribeTable(DescribeTable::new(table_idents)))
     }
 
     fn parse_explain(&mut self) -> Result<Statement> {
@@ -314,12 +308,7 @@ impl<'a> ParserContext<'a> {
             }
         );
 
-        let (catalog_name, schema_name, table_name) = table_idents_to_full_name(&table_ident)?;
-        Ok(Statement::DropTable(DropTable {
-            catalog_name,
-            schema_name,
-            table_name,
-        }))
+        Ok(Statement::DropTable(DropTable::new(table_ident)))
     }
 
     // Report unexpected token
@@ -388,8 +377,9 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use sqlparser::ast::{Query as SpQuery, Statement as SpStatement, WildcardAdditionalOptions};
+    use sqlparser::ast::{
+        Ident, ObjectName, Query as SpQuery, Statement as SpStatement, WildcardAdditionalOptions,
+    };
     use sqlparser::dialect::GenericDialect;
 
     use super::*;
@@ -588,11 +578,7 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropTable(DropTable {
-                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: "foo".to_string()
-            })
+            Statement::DropTable(DropTable::new(ObjectName(vec![Ident::new("foo")])))
         );
 
         let sql = "DROP TABLE my_schema.foo";
@@ -600,11 +586,10 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropTable(DropTable {
-                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                schema_name: "my_schema".to_string(),
-                table_name: "foo".to_string()
-            })
+            Statement::DropTable(DropTable::new(ObjectName(vec![
+                Ident::new("my_schema"),
+                Ident::new("foo")
+            ])))
         );
 
         let sql = "DROP TABLE my_catalog.my_schema.foo";
@@ -612,11 +597,11 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropTable(DropTable {
-                catalog_name: "my_catalog".to_string(),
-                schema_name: "my_schema".to_string(),
-                table_name: "foo".to_string()
-            })
+            Statement::DropTable(DropTable::new(ObjectName(vec![
+                Ident::new("my_catalog"),
+                Ident::new("my_schema"),
+                Ident::new("foo")
+            ])))
         )
     }
 }

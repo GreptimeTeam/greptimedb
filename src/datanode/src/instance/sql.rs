@@ -13,19 +13,21 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::prelude::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
 use query::parser::{QueryLanguageParser, QueryStatement};
+use servers::error as server_error;
+use servers::promql::PromqlHandler;
 use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContextRef;
+use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::ast::ObjectName;
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
-use table::requests::CreateDatabaseRequest;
+use table::requests::{CreateDatabaseRequest, DropTableRequest};
 
 use crate::error::{self, BumpTableIdSnafu, ExecuteSqlSnafu, Result, TableIdProviderNotFoundSnafu};
 use crate::instance::Instance;
@@ -100,12 +102,11 @@ impl Instance {
                 let name = c.name.clone();
                 let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
-                let request = self.sql_handler.create_to_request(table_id, c, table_ref)?;
+                let request = self
+                    .sql_handler
+                    .create_to_request(table_id, c, &table_ref)?;
                 let table_id = request.id;
-                info!(
-                    "Creating table, catalog: {:?}, schema: {:?}, table name: {:?}, table id: {}",
-                    catalog, schema, table, table_id
-                );
+                info!("Creating table: {table_ref}, table id = {table_id}",);
 
                 self.sql_handler
                     .execute(SqlRequest::CreateTable(request), query_ctx)
@@ -121,7 +122,13 @@ impl Instance {
                     .await
             }
             QueryStatement::Sql(Statement::DropTable(drop_table)) => {
-                let req = self.sql_handler.drop_table_to_request(drop_table);
+                let (catalog_name, schema_name, table_name) =
+                    table_idents_to_full_name(drop_table.table_name(), query_ctx.clone())?;
+                let req = DropTableRequest {
+                    catalog_name,
+                    schema_name,
+                    table_name,
+                };
                 self.sql_handler
                     .execute(SqlRequest::DropTable(req), query_ctx)
                     .await
@@ -150,16 +157,14 @@ impl Instance {
             QueryStatement::Sql(Statement::ShowCreateTable(_stmt)) => {
                 unimplemented!("SHOW CREATE TABLE is unimplemented yet");
             }
-            QueryStatement::Sql(Statement::Use(schema)) => {
-                let catalog = query_ctx.current_catalog();
-                let catalog = catalog.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
-
+            QueryStatement::Sql(Statement::Use(ref schema)) => {
+                let catalog = &query_ctx.current_catalog();
                 ensure!(
-                    self.is_valid_schema(catalog, &schema)?,
+                    self.is_valid_schema(catalog, schema)?,
                     error::DatabaseNotFoundSnafu { catalog, schema }
                 );
 
-                query_ctx.set_current_schema(&schema);
+                query_ctx.set_current_schema(schema);
 
                 Ok(Output::RecordBatches(RecordBatches::empty()))
             }
@@ -180,18 +185,18 @@ impl Instance {
 // TODO(LFC): Refactor consideration: move this function to some helper mod,
 // could be done together or after `TableReference`'s refactoring, when issue #559 is resolved.
 /// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>`) to tuple.
-fn table_idents_to_full_name(
+pub fn table_idents_to_full_name(
     obj_name: &ObjectName,
     query_ctx: QueryContextRef,
 ) -> Result<(String, String, String)> {
     match &obj_name.0[..] {
         [table] => Ok((
-            DEFAULT_CATALOG_NAME.to_string(),
-            query_ctx.current_schema().unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string()),
+            query_ctx.current_catalog(),
+            query_ctx.current_schema(),
             table.value.clone(),
         )),
         [schema, table] => Ok((
-            DEFAULT_CATALOG_NAME.to_string(),
+            query_ctx.current_catalog(),
             schema.value.clone(),
             table.value.clone(),
         )),
@@ -219,6 +224,16 @@ impl SqlQueryHandler for Instance {
         vec![result]
     }
 
+    async fn do_promql_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<Result<Output>> {
+        let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
+        let result = self.execute_promql(query, query_ctx).await;
+        vec![result]
+    }
+
     async fn do_statement_query(
         &self,
         stmt: Statement,
@@ -237,10 +252,22 @@ impl SqlQueryHandler for Instance {
     }
 }
 
+#[async_trait]
+impl PromqlHandler for Instance {
+    async fn do_query(&self, query: &str) -> server_error::Result<Output> {
+        let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
+        self.execute_promql(query, QueryContext::arc())
+            .await
+            .map_err(BoxedError::new)
+            .with_context(|_| server_error::ExecuteQuerySnafu { query })
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
 
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use session::context::QueryContext;
 
     use super::*;
@@ -256,10 +283,7 @@ mod test {
         let bare = ObjectName(vec![my_table.into()]);
 
         let using_schema = "foo";
-        let query_ctx = Arc::new(QueryContext::with(
-            DEFAULT_CATALOG_NAME.to_owned(),
-            using_schema.to_string(),
-        ));
+        let query_ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, using_schema));
         let empty_ctx = Arc::new(QueryContext::new());
 
         assert_eq!(

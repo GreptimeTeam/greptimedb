@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use catalog::RenameTableRequest;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use snafu::prelude::*;
 use sql::statements::alter::{AlterTable, AlterTableOperation};
@@ -27,12 +26,10 @@ use crate::sql::SqlHandler;
 impl SqlHandler {
     pub(crate) async fn alter(&self, req: AlterTableRequest) -> Result<Output> {
         let ctx = EngineContext {};
-        let catalog_name = req.catalog_name.as_deref().unwrap_or(DEFAULT_CATALOG_NAME);
-        let schema_name = req.schema_name.as_deref().unwrap_or(DEFAULT_SCHEMA_NAME);
         let table_name = req.table_name.clone();
         let table_ref = TableReference {
-            catalog: catalog_name,
-            schema: schema_name,
+            catalog: &req.catalog_name,
+            schema: &req.schema_name,
             table: &table_name,
         };
 
@@ -98,8 +95,8 @@ impl SqlHandler {
             },
         };
         Ok(AlterTableRequest {
-            catalog_name: Some(table_ref.catalog.to_string()),
-            schema_name: Some(table_ref.schema.to_string()),
+            catalog_name: table_ref.catalog.to_string(),
+            schema_name: table_ref.schema.to_string(),
             table_name: table_ref.table.to_string(),
             alter_kind,
         })
@@ -134,10 +131,13 @@ mod tests {
         let handler = create_mock_sql_handler().await;
         let alter_table = parse_sql("ALTER TABLE my_metric_1 ADD tagk_i STRING Null;");
         let req = handler
-            .alter_to_request(alter_table, TableReference::bare("my_metric_1"))
+            .alter_to_request(
+                alter_table,
+                TableReference::full("greptime", "public", "my_metric_1"),
+            )
             .unwrap();
-        assert_eq!(req.catalog_name, Some("greptime".to_string()));
-        assert_eq!(req.schema_name, Some("public".to_string()));
+        assert_eq!(req.catalog_name, "greptime");
+        assert_eq!(req.schema_name, "public");
         assert_eq!(req.table_name, "my_metric_1");
 
         let alter_kind = req.alter_kind;
@@ -159,10 +159,13 @@ mod tests {
         let handler = create_mock_sql_handler().await;
         let alter_table = parse_sql("ALTER TABLE test_table RENAME table_t;");
         let req = handler
-            .alter_to_request(alter_table, TableReference::bare("test_table"))
+            .alter_to_request(
+                alter_table,
+                TableReference::full("greptime", "public", "test_table"),
+            )
             .unwrap();
-        assert_eq!(req.catalog_name, Some("greptime".to_string()));
-        assert_eq!(req.schema_name, Some("public".to_string()));
+        assert_eq!(req.catalog_name, "greptime");
+        assert_eq!(req.schema_name, "public");
         assert_eq!(req.table_name, "test_table");
 
         let alter_kind = req.alter_kind;

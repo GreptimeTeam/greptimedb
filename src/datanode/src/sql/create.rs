@@ -122,7 +122,7 @@ impl SqlHandler {
         &self,
         table_id: TableId,
         stmt: CreateTable,
-        table_ref: TableReference,
+        table_ref: &TableReference,
     ) -> Result<CreateTableRequest> {
         let mut ts_index = usize::MAX;
         let mut primary_keys = vec![];
@@ -259,7 +259,7 @@ mod tests {
                        PRIMARY KEY(host)) engine=mito with(regions=1);"#,
         );
         let c = handler
-            .create_to_request(42, parsed_stmt, TableReference::bare("demo_table"))
+            .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap();
         assert_eq!("demo_table", c.table_name);
         assert_eq!(42, c.id);
@@ -282,7 +282,7 @@ mod tests {
                       TIME INDEX (ts)) engine=mito with(regions=1);"#,
         );
         let c = handler
-            .create_to_request(42, parsed_stmt, TableReference::bare("demo_table"))
+            .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap();
         assert!(c.primary_key_indices.is_empty());
         assert_eq!(c.schema.timestamp_index(), Some(1));
@@ -300,7 +300,7 @@ mod tests {
         );
 
         let error = handler
-            .create_to_request(42, parsed_stmt, TableReference::bare("demo_table"))
+            .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap_err();
         assert_matches!(error, Error::KeyColumnNotFound { .. });
     }
@@ -322,7 +322,7 @@ mod tests {
         let handler = create_mock_sql_handler().await;
 
         let error = handler
-            .create_to_request(42, create_table, TableReference::full("c", "s", "demo"))
+            .create_to_request(42, create_table, &TableReference::full("c", "s", "demo"))
             .unwrap_err();
         assert_matches!(error, Error::InvalidPrimaryKey { .. });
     }
@@ -344,7 +344,7 @@ mod tests {
         let handler = create_mock_sql_handler().await;
 
         let request = handler
-            .create_to_request(42, create_table, TableReference::full("c", "s", "demo"))
+            .create_to_request(42, create_table, &TableReference::full("c", "s", "demo"))
             .unwrap();
 
         assert_eq!(42, request.id);

@@ -1304,6 +1304,7 @@ dependencies = [
  "arrow-flight",
  "async-stream",
  "common-base",
+ "common-catalog",
  "common-error",
  "common-grpc",
  "common-grpc-expr",
@@ -1518,9 +1519,12 @@ dependencies = [
  "common-error",
  "common-runtime",
  "common-telemetry",
+ "futures",
+ "object-store",
  "serde",
  "serde_json",
  "snafu",
+ "tempdir",
  "tokio",
  "uuid",
 ]
@@ -2687,6 +2691,7 @@ dependencies = [
  "meta-srv",
  "moka",
  "openmetrics-parser",
+ "partition",
  "prost 0.11.6",
  "query",
  "rustls",
@@ -4716,6 +4721,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "partition"
+version = "0.1.0"
+dependencies = [
+ "common-error",
+ "common-query",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
+ "datatypes",
+ "meta-client",
+ "moka",
+ "serde",
+ "serde_json",
+ "snafu",
+ "store-api",
+ "table",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5205,7 +5229,7 @@ dependencies = [
 [[package]]
 name = "promql-parser"
 version = "0.0.1"
-source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=fec3c8bcee982b8add2a77d07818d3cbe92b89fe#fec3c8bcee982b8add2a77d07818d3cbe92b89fe"
+source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=d027ce428a6a2df5a652b8558608c77d33c31644#d027ce428a6a2df5a652b8558608c77d33c31644"
 dependencies = [
  "cfgrammar",
  "lazy_static",
@@ -6674,6 +6698,7 @@ name = "session"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "common-catalog",
  "common-telemetry",
 ]
 
@@ -6915,9 +6940,9 @@ dependencies = [
 
 [[package]]
 name = "sqlness"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ffa69a2ae10018ec72a3cb7574e3a33a3fc322ed03740f6e435fd7f0c1db4a7"
+checksum = "16a494ea677f9de93e8c25ec33b1073f8f72d61466d4595ecf1462ba877fe924"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",
@@ -6939,7 +6964,10 @@ dependencies = [
  "common-error",
  "common-grpc",
  "common-query",
+ "common-time",
+ "serde",
  "sqlness",
+ "tinytemplate",
  "tokio",
 ]
 

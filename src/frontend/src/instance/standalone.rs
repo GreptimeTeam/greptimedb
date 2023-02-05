@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::v1::GreptimeRequest;
+use api::v1::greptime_request::Request as GreptimeRequest;
 use async_trait::async_trait;
 use common_query::Output;
 use datanode::error::Error as DatanodeError;
@@ -47,6 +47,14 @@ impl SqlQueryHandler for StandaloneSqlQueryHandler {
             .collect()
     }
 
+    async fn do_promql_query(
+        &self,
+        _: &str,
+        _: QueryContextRef,
+    ) -> Vec<std::result::Result<Output, Self::Error>> {
+        unimplemented!()
+    }
+
     async fn do_statement_query(
         &self,
         stmt: Statement,
@@ -77,9 +85,9 @@ impl StandaloneGrpcQueryHandler {
 impl GrpcQueryHandler for StandaloneGrpcQueryHandler {
     type Error = error::Error;
 
-    async fn do_query(&self, query: GreptimeRequest) -> Result<Output> {
+    async fn do_query(&self, query: GreptimeRequest, ctx: QueryContextRef) -> Result<Output> {
         self.0
-            .do_query(query)
+            .do_query(query, ctx)
             .await
             .context(error::InvokeDatanodeSnafu)
     }

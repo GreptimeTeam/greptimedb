@@ -28,6 +28,7 @@ use crate::mysql::MysqlOptions;
 use crate::opentsdb::OpentsdbOptions;
 use crate::postgres::PostgresOptions;
 use crate::prometheus::PrometheusOptions;
+use crate::promql::PromqlOptions;
 use crate::server::Services;
 use crate::Plugins;
 
@@ -41,6 +42,7 @@ pub struct FrontendOptions {
     pub opentsdb_options: Option<OpentsdbOptions>,
     pub influxdb_options: Option<InfluxdbOptions>,
     pub prometheus_options: Option<PrometheusOptions>,
+    pub promql_options: Option<PromqlOptions>,
     pub mode: Mode,
     pub meta_client_opts: Option<MetaClientOpts>,
 }
@@ -55,6 +57,7 @@ impl Default for FrontendOptions {
             opentsdb_options: Some(OpentsdbOptions::default()),
             influxdb_options: Some(InfluxdbOptions::default()),
             prometheus_options: Some(PrometheusOptions::default()),
+            promql_options: Some(PromqlOptions::default()),
             mode: Mode::Standalone,
             meta_client_opts: None,
         }

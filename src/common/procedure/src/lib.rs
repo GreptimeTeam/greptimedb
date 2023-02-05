@@ -15,7 +15,12 @@
 //! Common traits and structures for the procedure framework.
 
 pub mod error;
+#[allow(dead_code)]
+mod local;
 mod procedure;
+// TODO(yingwen): Remove this attribute once ProcedureManager is implemented.
+#[allow(dead_code)]
+mod store;
 
 pub use crate::error::{Error, Result};
 pub use crate::procedure::{

@@ -103,13 +103,13 @@ fn run_ron_testcases() {
         info!(".ron test {}", testcase.name);
         match testcase.predicate {
             Predicate::ParseIsOk { result } => {
-                let copr = parse_and_compile_copr(&testcase.code);
+                let copr = parse_and_compile_copr(&testcase.code, None);
                 let mut copr = copr.unwrap();
                 copr.script = "".into();
                 assert_eq!(copr, *result);
             }
             Predicate::ParseIsErr { reason } => {
-                let copr = parse_and_compile_copr(&testcase.code);
+                let copr = parse_and_compile_copr(&testcase.code, None);
                 assert!(copr.is_err(), "Expect to be err, actual {copr:#?}");
 
                 let res = &copr.unwrap_err();
@@ -183,7 +183,7 @@ def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#;
     let pyast = parser::parse(python_source, parser::Mode::Interactive, "<embedded>").unwrap();
-    let copr = parse_and_compile_copr(python_source);
+    let copr = parse_and_compile_copr(python_source, None);
     dbg!(copr);
 }
 
