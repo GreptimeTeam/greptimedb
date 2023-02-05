@@ -118,20 +118,23 @@ fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
 
 pub async fn setup_test_engine_and_table() -> (
     MitoEngine<EngineImpl<NoopLogStore>>,
+    EngineImpl<NoopLogStore>,
     TableRef,
     SchemaRef,
+    ObjectStore,
     TempDir,
 ) {
     let (dir, object_store) = new_test_object_store("setup_test_engine_and_table").await;
 
+    let storage_engine = EngineImpl::new(
+        StorageEngineConfig::default(),
+        Arc::new(NoopLogStore::default()),
+        object_store.clone(),
+    );
     let table_engine = MitoEngine::new(
         EngineConfig::default(),
-        EngineImpl::new(
-            StorageEngineConfig::default(),
-            Arc::new(NoopLogStore::default()),
-            object_store.clone(),
-        ),
-        object_store,
+        storage_engine.clone(),
+        object_store.clone(),
     );
 
     let schema = Arc::new(schema_for_test());
@@ -143,7 +146,14 @@ pub async fn setup_test_engine_and_table() -> (
         .await
         .unwrap();
 
-    (table_engine, table, schema, dir)
+    (
+        table_engine,
+        storage_engine,
+        table,
+        schema,
+        object_store,
+        dir,
+    )
 }
 
 pub async fn setup_mock_engine_and_table(

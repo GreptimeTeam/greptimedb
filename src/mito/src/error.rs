@@ -178,6 +178,12 @@ pub enum Error {
         region: RegionNumber,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Invalid region name: {}", region_name))]
+    InvalidRegionName {
+        region_name: String,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -207,6 +213,7 @@ impl ErrorExt for Error {
 
             ScanTableManifest { .. } | UpdateTableManifest { .. } => StatusCode::StorageUnavailable,
             RegionNotFound { .. } => StatusCode::Internal,
+            InvalidRegionName { .. } => StatusCode::Internal,
         }
     }
 
