@@ -167,11 +167,6 @@ pub struct RegisterSchemaRequest {
     pub schema: String,
 }
 
-/// Formats table fully-qualified name
-pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {
-    format!("{catalog}.{schema}.{table}")
-}
-
 pub trait CatalogProviderFactory {
     fn create(&self, catalog_name: String) -> CatalogProviderRef;
 }
@@ -198,8 +193,10 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager>(
                 .create_table(&EngineContext::default(), req.create_table_request.clone())
                 .await
                 .with_context(|_| CreateTableSnafu {
-                    table_info: format!(
-                        "{catalog_name}.{schema_name}.{table_name}, id: {table_id}",
+                    table_info: common_catalog::format_full_table_name(
+                        catalog_name,
+                        schema_name,
+                        table_name,
                     ),
                 })?;
             manager

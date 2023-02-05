@@ -39,8 +39,8 @@ use tokio::sync::Mutex;
 use crate::config::EngineConfig;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
-    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, MissingTimestampIndexSnafu, Result,
-    TableExistsSnafu,
+    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, MissingTimestampIndexSnafu,
+    RegionNotFoundSnafu, Result, TableExistsSnafu,
 };
 use crate::table::MitoTable;
 
@@ -335,6 +335,16 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let table_dir = table_dir(schema_name, table_id);
         let mut regions = HashMap::with_capacity(request.region_numbers.len());
 
+        let _lock = self.table_mutex.lock().await;
+        // Checks again, read lock should be enough since we are guarded by the mutex.
+        if let Some(table) = self.get_table(&table_ref) {
+            return if request.create_if_not_exists {
+                Ok(table)
+            } else {
+                TableExistsSnafu { table_name }.fail()
+            };
+        }
+
         for region_number in &request.region_numbers {
             let region_id = region_id(table_id, *region_number);
 
@@ -349,17 +359,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                     table_name,
                     region_name,
                 })?;
-
-            let _lock = self.table_mutex.lock().await;
-            // Checks again, read lock should be enough since we are guarded by the mutex.
-            if let Some(table) = self.get_table(&table_ref) {
-                if request.create_if_not_exists {
-                    return Ok(table);
-                } else {
-                    return TableExistsSnafu { table_name }.fail();
-                }
-            }
-
             let opts = CreateOptions {
                 parent_dir: table_dir.clone(),
             };
@@ -451,18 +450,21 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
             for region_number in &request.region_numbers {
                 let region_name = region_name(table_id, *region_number);
-
-                let region = match self
+                let region = self
                     .storage_engine
                     .open_region(&engine_ctx, &region_name, &opts)
                     .await
                     .map_err(BoxedError::new)
                     .context(table_error::TableOperationSnafu)?
-                {
-                    None => return Ok(None), // TODO(hl): Maybe we should return an error if specified region cannot be opened?
-                    Some(region) => region,
-                };
-
+                    .with_context(|| RegionNotFoundSnafu {
+                        table: format!(
+                            "{}.{}.{}",
+                            request.catalog_name, request.schema_name, request.table_name
+                        ),
+                        region: *region_number,
+                    })
+                    .map_err(BoxedError::new)
+                    .context(table_error::TableOperationSnafu)?;
                 regions.insert(*region_number, region);
             }
 

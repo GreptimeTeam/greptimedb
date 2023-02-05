@@ -14,3 +14,8 @@
 
 pub mod consts;
 pub mod error;
+
+/// Formats table fully-qualified name
+pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {
+    format!("{catalog}.{schema}.{table}")
+}

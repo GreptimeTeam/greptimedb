@@ -68,7 +68,6 @@ pub struct MitoTable<R: Region> {
     manifest: TableManifest,
     // guarded by `self.alter_lock`
     table_info: ArcSwap<TableInfo>,
-    // TODO(dennis): a table contains multi regions
     regions: HashMap<RegionNumber, R>,
     alter_lock: Mutex<()>,
 }
@@ -145,6 +144,7 @@ impl<R: Region> Table for MitoTable<R> {
         let mut readers = Vec::with_capacity(self.regions.len());
         let mut first_schema: Option<Arc<Schema>> = None;
 
+        let table_info = self.table_info.load();
         // TODO(hl): Currently the API between frontend and datanode is under refactoring in
         // https://github.com/GreptimeTeam/greptimedb/issues/597 . Once it's finished, query plan
         // can carry filtered region info to avoid scanning all regions on datanode.
@@ -172,14 +172,15 @@ impl<R: Region> Table for MitoTable<R> {
 
             let schema = reader.schema().clone();
             if let Some(first_schema) = &first_schema {
+                // TODO(hl): we assume all regions' schemas are the same, but undergoing table altering
+                // may make these schemas inconsistent.
                 ensure!(
                     first_schema.version() == schema.version(),
                     RegionSchemaMismatchSnafu {
-                        table: format!(
-                            "{}.{}.{}",
-                            self.table_info.load().catalog_name,
-                            self.table_info.load().schema_name,
-                            self.table_info.load().name
+                        table: common_catalog::format_full_table_name(
+                            &table_info.catalog_name,
+                            &table_info.schema_name,
+                            &table_info.name
                         )
                     }
                 );
@@ -189,6 +190,8 @@ impl<R: Region> Table for MitoTable<R> {
             readers.push(reader);
         }
 
+        // TODO(hl): we assume table contains at least one region, but with region migration this
+        // assumption may become invalid.
         let stream_schema = first_schema.unwrap();
         let schema = stream_schema.clone();
         let stream = Box::pin(async_stream::try_stream! {

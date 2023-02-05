@@ -76,7 +76,7 @@ impl Table for DistTable {
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
-        let split = self
+        let splits = self
             .partition_manager
             .split_insert_request(&self.table_name, request)
             .await
@@ -84,7 +84,7 @@ impl Table for DistTable {
             .context(TableOperationSnafu)?;
 
         let output = self
-            .dist_insert(split)
+            .dist_insert(splits)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;

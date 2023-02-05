@@ -397,8 +397,8 @@ mod tests {
         columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
-            catalog_name: "greptime".to_string(),
-            schema_name: "public".to_string(),
+            catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: common_catalog::consts::DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
             region_number: 0,
@@ -425,8 +425,8 @@ mod tests {
         columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
-            catalog_name: "greptime".to_string(),
-            schema_name: "public".to_string(),
+            catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: common_catalog::consts::DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
             region_number: 0,
