@@ -14,17 +14,18 @@ Author: "Lei, HUANG <mrsatangel@gmail.com>"
 GreptimeDB uses an LSM-tree based storage engine that flushes memtables to SSTs for persistence. 
 But currently it only supports level 0. SST files in level 0 does not guarantee to contain only rows with disjoint time ranges. 
 That is to say, different SST files in level 0 may contain overlapped timestamps. 
-The consequence is, in order to retrieve rows in some time range, all files need to be scanned, which bring a lot of IO overhead.
+The consequence is, in order to retrieve rows in some time range, all files need to be scanned, which brings a lot of IO overhead.
 
 Also, just like other LSMT engines, delete/update to existing primary keys are converted to new rows with delete/update mark and appended to SSTs on flushing. 
 We need to merge the operations to same primary keys so that we don't have to go through all SST files to find the final state of these primary keys.  
 
 ## Goal
 
-Implement a compaction mechanism to: 
+Implement a compaction framework to: 
 - maintain SSTs in timestamp order to accelerate queries with timestamp condition;
-- merge rows with same primary key; 
+- merge rows with same primary key;
 - purge expired SSTs;
+- accommodate other tasks like data rollup/indexing.
 
 
 ## Overview
@@ -79,13 +80,13 @@ a hybrid strategy that combines time window compaction with size-tired compactio
 
 We can first group SSTs in level n into buckets according to some predefined time window. Within that window, 
 SSTs are compacted in a size-tired manner (find SSTs with similar size and compact them to level n+1). 
-SSTs from different time window are neven compacted together.
+SSTs from different time windows are neven compacted together.
 That strategy guarantees SSTs in each level are mainly sorted in timestamp order which boosts queries with 
 explict timestamp condition, while size-tired compaction minimizes the impact to foreground writes. 
 
 ### Alternatives
 
-Currently, GreptimeDB's storage engine [only support one level](https://github.com/GreptimeTeam/greptimedb/blob/43aefc5d74dfa73b7819cae77b7eb546d8534a41/src/storage/src/sst.rs#L32).
+Currently, GreptimeDB's storage engine [only support two levels](https://github.com/GreptimeTeam/greptimedb/blob/43aefc5d74dfa73b7819cae77b7eb546d8534a41/src/storage/src/sst.rs#L32).
 For level 0, we can start with a simple time-window based leveled compaction, which reads from all SSTs in level 0, 
 align them to time windows with a fixed duration, merge them with SSTs in level 1 within the same time window 
 to ensure there is only one sorted run in level 1.
