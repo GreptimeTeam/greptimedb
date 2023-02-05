@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::ops::Deref;
-
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use common_telemetry::error;

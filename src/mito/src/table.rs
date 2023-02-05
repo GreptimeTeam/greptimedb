@@ -248,11 +248,6 @@ impl<R: Region> Table for MitoTable<R> {
             return Ok(0);
         }
 
-        println!(
-            "Delete from table {} with data: {:?}",
-            self.table_info().name,
-            request
-        );
         let mut write_request = self.region.write_request();
 
         let key_column_values = request.key_column_values;

@@ -40,7 +40,6 @@ impl Instance {
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        println!("statement: {:?}", stmt);
         match stmt {
             QueryStatement::Sql(Statement::Query(_)) | QueryStatement::Promql(_) => {
                 let logical_plan = self
@@ -130,7 +129,6 @@ impl Instance {
                     .execute(SqlRequest::DropTable(req), query_ctx)
                     .await
             }
-            //TODO delete statement
             QueryStatement::Sql(Statement::ShowDatabases(stmt)) => {
                 self.sql_handler
                     .execute(SqlRequest::ShowDatabases(stmt), query_ctx)

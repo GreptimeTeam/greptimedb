@@ -50,7 +50,6 @@ impl SqlHandler {
 }
 
 fn parser_selection(selection: &Option<Expr>) -> HashMap<String, VectorRef> {
-    println!("selection: {:?}", selection);
     let mut key_column_values = HashMap::new();
     match selection {
         Some(expr) => {
@@ -58,7 +57,6 @@ fn parser_selection(selection: &Option<Expr>) -> HashMap<String, VectorRef> {
         }
         _ => {}
     }
-    println!("key_column_values: {:?}", key_column_values);
     return key_column_values;
 }
 
