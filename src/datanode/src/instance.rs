@@ -28,7 +28,7 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use mito::config::EngineConfig as TableEngineConfig;
 use mito::engine::MitoEngine;
-use object_store::cache::ObjectStoreCachePolicy;
+use object_store::cache_policy::LruCachePolicy;
 use object_store::layers::{CacheLayer, LoggingLayer, MetricsLayer, RetryLayer, TracingLayer};
 use object_store::services::fs::Builder as FsBuilder;
 use object_store::services::oss::Builder as OSSBuilder;
@@ -250,10 +250,10 @@ pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Re
                 .with_context(|_| error::InitBackendSnafu {
                     config: store_config.clone(),
                 })?;
-        object_store = object_store.layer(
-            CacheLayer::new(ObjectStore::new(accessor))
-                .with_policy(ObjectStoreCachePolicy::default()),
-        );
+        let cache_capacity = oss_config.cache_capacity.unwrap();
+        let policy = LruCachePolicy::new(cache_capacity.0 as usize);
+        object_store =
+            object_store.layer(CacheLayer::new(ObjectStore::new(accessor)).with_policy(policy));
     }
     Ok(object_store)
 }
@@ -297,10 +297,10 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
                 .with_context(|_| error::InitBackendSnafu {
                     config: store_config.clone(),
                 })?;
-        object_store = object_store.layer(
-            CacheLayer::new(ObjectStore::new(accessor))
-                .with_policy(ObjectStoreCachePolicy::default()),
-        );
+        let cache_capacity = s3_config.cache_capacity.unwrap();
+        let policy = LruCachePolicy::new(cache_capacity.0 as usize);
+        object_store =
+            object_store.layer(CacheLayer::new(ObjectStore::new(accessor)).with_policy(policy));
     }
     Ok(object_store)
 }

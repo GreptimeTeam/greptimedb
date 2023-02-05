@@ -102,6 +102,7 @@ fn get_test_store_config(
                 bucket: env::var("GT_OSS_BUCKET").unwrap(),
                 endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
                 cache_path: None,
+                cache_capacity: None,
             };
 
             let accessor = oss::Builder::default()
@@ -131,6 +132,7 @@ fn get_test_store_config(
                 endpoint: None,
                 region: None,
                 cache_path: None,
+                cache_capacity: None,
             };
 
             let accessor = s3::Builder::default()
