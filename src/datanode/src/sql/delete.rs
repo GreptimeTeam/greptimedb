@@ -7,10 +7,11 @@ use catalog::CatalogManagerRef;
 use table::requests::DeleteRequest;
 use table::engine::TableReference;
 use common_query::Output;
+use datatypes::prelude::LogicalTypeId::TimestampMillisecond;
 use datatypes::prelude::VectorRef;
-use datatypes::vectors::{BooleanVector, Float64Vector, StringVector};
+use datatypes::vectors::{BooleanVector, Float64Vector, StringVector, TimestampMillisecondVector};
 use sql::ast::ColumnOption::Default;
-use sql::ast::{BinaryOperator, Expr};
+use sql::ast::{BinaryOperator, Expr, Value};
 use sql::statements::delete::Delete;
 
 use crate::sql::{SqlHandler, SqlRequest};
@@ -77,7 +78,7 @@ fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) 
         if let BinaryOperator::Eq = op {
             if let Expr::Identifier(column_name) = left.deref() {
                 if let Expr::Value(value) = right.deref() {
-                    key_column_values.insert(column_name.to_string(), value_to_vector(&value));
+                    key_column_values.insert(column_name.to_string(), value_to_vector(&column_name.to_string(), &value));
                 }
                 if let Expr::Identifier(value) = right.deref() {
                     key_column_values.insert(column_name.to_string(),
@@ -88,15 +89,19 @@ fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) 
     }
 }
 
-fn value_to_vector(value: &sql::ast::Value) -> VectorRef {
+fn value_to_vector(column_name: &String, value: &Value) -> VectorRef {
     match value {
-        sql::ast::Value::Number(n, _) => {
-            Arc::new(Float64Vector::from_vec(vec![f64::from_str(n).unwrap()]))
+        Value::Number(n, _) => {
+            if column_name == "ts" {
+                Arc::new(TimestampMillisecondVector::from_vec(vec![i64::from_str(n).unwrap()]))
+            } else {
+                Arc::new(Float64Vector::from_vec(vec![f64::from_str(n).unwrap()]))
+            }
         }
-        sql::ast::Value::SingleQuotedString(s) | sql::ast::Value::DoubleQuotedString(s) => {
+        Value::SingleQuotedString(s) | sql::ast::Value::DoubleQuotedString(s) => {
             Arc::new(StringVector::from(vec![s.to_string()]))
         }
-        sql::ast::Value::Boolean(b) => {
+        Value::Boolean(b) => {
             Arc::new(BooleanVector::from(vec![*b]))
         }
         _ => {

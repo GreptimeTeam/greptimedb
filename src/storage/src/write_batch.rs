@@ -593,6 +593,7 @@ mod tests {
 
         let mut batch = new_test_batch();
         let err = batch.delete(keys).unwrap_err();
+        println!("err: {:?}", err);
         check_err(err, "Type of column ts does not match");
     }
 
