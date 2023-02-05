@@ -2,24 +2,21 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
-use snafu::ResultExt;
+
 use catalog::CatalogManagerRef;
-use table::requests::DeleteRequest;
-use table::engine::TableReference;
 use common_query::Output;
 use datatypes::prelude::LogicalTypeId::TimestampMillisecond;
 use datatypes::prelude::VectorRef;
 use datatypes::vectors::{BooleanVector, Float64Vector, StringVector, TimestampMillisecondVector};
+use snafu::ResultExt;
 use sql::ast::ColumnOption::Default;
 use sql::ast::{BinaryOperator, Expr, Value};
 use sql::statements::delete::Delete;
+use table::engine::TableReference;
+use table::requests::DeleteRequest;
 
+use crate::error::{DeleteSnafu, Result};
 use crate::sql::{SqlHandler, SqlRequest};
-
-use crate::error::{
-    Result,
-    DeleteSnafu,
-};
 
 impl SqlHandler {
     pub(crate) async fn delete(&self, req: DeleteRequest) -> Result<Output> {
@@ -78,11 +75,16 @@ fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) 
         if let BinaryOperator::Eq = op {
             if let Expr::Identifier(column_name) = left.deref() {
                 if let Expr::Value(value) = right.deref() {
-                    key_column_values.insert(column_name.to_string(), value_to_vector(&column_name.to_string(), &value));
+                    key_column_values.insert(
+                        column_name.to_string(),
+                        value_to_vector(&column_name.to_string(), &value),
+                    );
                 }
                 if let Expr::Identifier(value) = right.deref() {
-                    key_column_values.insert(column_name.to_string(),
-                                             Arc::new(StringVector::from(vec![value.to_string()])));
+                    key_column_values.insert(
+                        column_name.to_string(),
+                        Arc::new(StringVector::from(vec![value.to_string()])),
+                    );
                 }
             }
         }
@@ -93,7 +95,9 @@ fn value_to_vector(column_name: &String, value: &Value) -> VectorRef {
     match value {
         Value::Number(n, _) => {
             if column_name == "ts" {
-                Arc::new(TimestampMillisecondVector::from_vec(vec![i64::from_str(n).unwrap()]))
+                Arc::new(TimestampMillisecondVector::from_vec(vec![
+                    i64::from_str(n).unwrap()
+                ]))
             } else {
                 Arc::new(Float64Vector::from_vec(vec![f64::from_str(n).unwrap()]))
             }
@@ -101,9 +105,7 @@ fn value_to_vector(column_name: &String, value: &Value) -> VectorRef {
         Value::SingleQuotedString(s) | sql::ast::Value::DoubleQuotedString(s) => {
             Arc::new(StringVector::from(vec![s.to_string()]))
         }
-        Value::Boolean(b) => {
-            Arc::new(BooleanVector::from(vec![*b]))
-        }
+        Value::Boolean(b) => Arc::new(BooleanVector::from(vec![*b])),
         _ => {
             //TODO not support
             Arc::new(StringVector::from(vec!["1"]))

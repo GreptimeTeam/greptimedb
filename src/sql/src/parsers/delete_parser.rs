@@ -1,8 +1,8 @@
 use snafu::ResultExt;
 use sqlparser::ast::Statement as SpStatement;
 
-use crate::parser::ParserContext;
 use crate::error::{self, Result};
+use crate::parser::ParserContext;
 use crate::statements::delete::Delete;
 use crate::statements::statement::Statement;
 
@@ -23,7 +23,7 @@ impl<'a> ParserContext<'a> {
                 sql: self.sql.to_string(),
                 keyword: unexp.to_string(),
             }
-                .fail(),
+            .fail(),
         }
     }
 }

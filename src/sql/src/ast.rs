@@ -13,7 +13,7 @@
 // limitations under the License.
 
 pub use sqlparser::ast::{
-    ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Function, FunctionArg,
-    FunctionArgExpr, Ident, ObjectName, SqlOption, TableConstraint, TimezoneInfo, Value,
-    BinaryOperator
+    BinaryOperator, ColumnDef, ColumnOption, ColumnOptionDef, DataType, Expr, Function,
+    FunctionArg, FunctionArgExpr, Ident, ObjectName, SqlOption, TableConstraint, TimezoneInfo,
+    Value,
 };

@@ -14,6 +14,7 @@
 
 pub mod alter;
 pub mod create;
+pub mod delete;
 pub mod describe;
 pub mod drop;
 pub mod explain;
@@ -21,7 +22,6 @@ pub mod insert;
 pub mod query;
 pub mod show;
 pub mod statement;
-pub mod delete;
 
 use std::str::FromStr;
 

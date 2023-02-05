@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::ops::Deref;
+
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use common_telemetry::error;
@@ -32,9 +33,9 @@ use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
 mod create;
+mod delete;
 mod drop_table;
 mod insert;
-mod delete;
 
 #[derive(Debug)]
 pub enum SqlRequest {
@@ -177,7 +178,7 @@ mod tests {
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     true,
                 )
-                    .with_time_index(true),
+                .with_time_index(true),
             ];
 
             Arc::new(

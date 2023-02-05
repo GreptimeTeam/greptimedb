@@ -64,14 +64,11 @@ impl Instance {
                 )?;
                 self.sql_handler.execute(request, query_ctx).await
             }
-            QueryStatement::Sql(Statement::Delete(d))=>{
+            QueryStatement::Sql(Statement::Delete(d)) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(d.table_name(), query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
-                let request = self.sql_handler.delete_to_request(
-                    table_ref,
-                    *d,
-                )?;
+                let request = self.sql_handler.delete_to_request(table_ref, *d)?;
                 self.sql_handler.execute(request, query_ctx).await
             }
 

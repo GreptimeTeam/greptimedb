@@ -161,7 +161,7 @@ fn build_system_catalog_schema() -> Schema {
             ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         )
-            .with_time_index(true),
+        .with_time_index(true),
         ColumnSchema::new(
             "value".to_string(),
             ConcreteDataType::binary_datatype(),
@@ -355,7 +355,7 @@ impl TryFrom<u8> for EntryType {
             b => InvalidEntryTypeSnafu {
                 entry_type: Some(b),
             }
-                .fail(),
+            .fail(),
         }
     }
 }
@@ -417,7 +417,7 @@ mod tests {
             Some("some_catalog".as_bytes()),
             None,
         )
-            .unwrap();
+        .unwrap();
         if let Entry::Catalog(e) = entry {
             assert_eq!("some_catalog", e.catalog_name);
         } else {
@@ -432,7 +432,7 @@ mod tests {
             Some("some_catalog.some_schema".as_bytes()),
             None,
         )
-            .unwrap();
+        .unwrap();
 
         if let Entry::Schema(e) = entry {
             assert_eq!("some_catalog", e.catalog_name);
@@ -449,7 +449,7 @@ mod tests {
             Some("some_catalog.some_schema.42".as_bytes()),
             Some("{\"table_name\":\"some_table\"}".as_bytes()),
         )
-            .unwrap();
+        .unwrap();
 
         if let Entry::Table(e) = entry {
             assert_eq!("some_catalog", e.catalog_name);
@@ -469,7 +469,7 @@ mod tests {
             Some("some_catalog.some_schema.42".as_bytes()),
             None,
         )
-            .unwrap();
+        .unwrap();
     }
 
     #[test]
