@@ -17,11 +17,9 @@ use std::sync::Arc;
 
 use common_error::prelude::ErrorExt;
 use common_query::Output;
-use datafusion_sql::TableReference;
+use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
 use sql::statements::statement::Statement;
-
-use crate::plan::LogicalPlan;
 
 /// SqlQueryInterceptor can track life cycle of a sql query and customize or
 /// abort its execution at given point.
@@ -67,14 +65,6 @@ pub trait SqlQueryInterceptor {
         _query_ctx: QueryContextRef,
     ) -> Result<Output, Self::Error> {
         Ok(output)
-    }
-
-    fn validate_table_reference(
-        &self,
-        _table_ref: TableReference,
-        _query_ctx: QueryContextRef,
-    ) -> Result<(), Self::Error> {
-        Ok(())
     }
 }
 
@@ -133,18 +123,6 @@ where
             this.post_execute(output, query_ctx)
         } else {
             Ok(output)
-        }
-    }
-
-    fn validate_table_reference(
-        &self,
-        table_ref: TableReference,
-        query_ctx: QueryContextRef,
-    ) -> Result<(), Self::Error> {
-        if let Some(this) = self {
-            this.validate_table_reference(table_ref, query_ctx)
-        } else {
-            Ok(())
         }
     }
 }

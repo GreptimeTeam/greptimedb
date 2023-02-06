@@ -16,7 +16,6 @@ mod datafusion;
 pub mod error;
 pub mod executor;
 mod function;
-pub mod interceptor;
 pub mod logical_optimizer;
 mod metric;
 mod optimizer;
