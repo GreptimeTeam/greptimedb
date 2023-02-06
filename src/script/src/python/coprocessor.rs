@@ -43,6 +43,7 @@ use vm::{pyclass, Interpreter, PyObjectRef, PyPayload, PyResult, VirtualMachine}
 
 use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::DecoratorArgs;
+use crate::python::dataframe::data_frame;
 use crate::python::error::{
     ensure, ret_other_error_with, ArrowSnafu, NewRecordBatchSnafu, OtherSnafu, Result,
     TypeCastSnafu,
@@ -450,6 +451,7 @@ pub(crate) fn exec_with_cached_vm(
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
+        crate::python::dataframe::data_frame::set_dataframe_in_scope(&scope, vm, "df", rb)?;
         if let Some(engine) = &copr.query_engine {
             let query_engine = PyQueryEngine {
                 inner: engine.clone(),
@@ -500,6 +502,7 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                 // TODO(discord9): edge cases, can't use "..Default::default" because Settings is `#[non_exhaustive]`
                 // so more in here: https://internals.rust-lang.org/t/allow-constructing-non-exhaustive-structs-using-default-default/13868
                 let mut settings = vm::Settings::default();
+                // disable SIG_INT handler so our own binary can take ctrl_c handler
                 settings.no_sig_int = true;
                 let interpreter = Arc::new(vm::Interpreter::with_init(settings, |vm| {
                     // not using full stdlib to prevent security issue, instead filter out a few simple util module
@@ -517,6 +520,8 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     // add our own custom datatype and module
                     PyVector::make_class(&vm.ctx);
                     vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
+
+                    vm.add_native_module("data_frame", Box::new(data_frame::make_module));
                 }));
                 info!("Initialized Python interpreter.");
                 interpreter

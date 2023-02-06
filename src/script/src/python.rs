@@ -16,9 +16,9 @@
 
 mod builtins;
 pub(crate) mod coprocessor;
+mod dataframe;
 mod engine;
 pub mod error;
-mod dataframe;
 #[cfg(test)]
 mod test;
 pub(crate) mod utils;
