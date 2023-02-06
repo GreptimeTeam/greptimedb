@@ -28,7 +28,7 @@ use common_function::scalars::udf::create_udf;
 use common_function::scalars::FunctionRef;
 use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
 use common_query::prelude::ScalarUdf;
-use common_query::Output;
+use common_query::{Output, Plugins};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
@@ -60,9 +60,9 @@ pub(crate) struct DatafusionQueryEngine {
 }
 
 impl DatafusionQueryEngine {
-    pub fn new(catalog_list: CatalogListRef) -> Self {
+    pub fn new(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
         Self {
-            state: QueryEngineState::new(catalog_list.clone()),
+            state: QueryEngineState::new(catalog_list.clone(), plugins),
         }
     }
 

@@ -63,7 +63,7 @@ impl fmt::Debug for QueryEngineState {
 }
 
 impl QueryEngineState {
-    pub fn new(catalog_list: CatalogListRef) -> Self {
+    pub fn new(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new()
             .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
@@ -82,7 +82,7 @@ impl QueryEngineState {
             df_context,
             catalog_list,
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
-            plugins: Default::default(),
+            plugins,
         }
     }
 

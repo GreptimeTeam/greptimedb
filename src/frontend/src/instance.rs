@@ -122,8 +122,12 @@ impl Instance {
             datanode_clients.clone(),
         ));
 
-        let dist_instance =
-            DistInstance::new(meta_client, catalog_manager.clone(), datanode_clients);
+        let dist_instance = DistInstance::new(
+            meta_client,
+            catalog_manager.clone(),
+            datanode_clients,
+            plugins.clone(),
+        );
         let dist_instance = Arc::new(dist_instance);
 
         Ok(Instance {

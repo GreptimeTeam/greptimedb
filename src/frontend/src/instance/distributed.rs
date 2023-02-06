@@ -61,6 +61,7 @@ use crate::error::{
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
 use crate::instance::parse_stmt;
 use crate::sql::insert_to_request;
+use crate::Plugins;
 
 #[derive(Clone)]
 pub(crate) struct DistInstance {
@@ -75,8 +76,10 @@ impl DistInstance {
         meta_client: Arc<MetaClient>,
         catalog_manager: Arc<FrontendCatalogManager>,
         datanode_clients: Arc<DatanodeClients>,
+        plugins: Arc<Plugins>,
     ) -> Self {
-        let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
+        let query_engine =
+            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins).query_engine();
         Self {
             meta_client,
             catalog_manager,
