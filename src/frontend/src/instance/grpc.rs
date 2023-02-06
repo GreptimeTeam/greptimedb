@@ -15,11 +15,12 @@
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
+use common_error::prelude::BoxedError;
 use common_query::Output;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{self, Result};
 use crate::instance::Instance;
@@ -46,7 +47,10 @@ impl GrpcQueryHandler for Instance {
                                 feat: "execute multiple statements in SQL query string through GRPC interface"
                             }
                         );
-                        result.remove(0)?
+                        result
+                            .remove(0)
+                            .map_err(BoxedError::new)
+                            .context(error::ExecuteQueryStatementSnafu)?
                     }
                     Query::LogicalPlan(_) => {
                         return error::NotSupportedSnafu {

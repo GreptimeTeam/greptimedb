@@ -82,6 +82,12 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to parse query, source: {}", source))]
+    ParseQuery {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("{source}"))]
     ExecuteGrpcQuery {
         #[snafu(backtrace)]
@@ -90,6 +96,12 @@ pub enum Error {
 
     #[snafu(display("Failed to execute sql statement, source: {}", source))]
     ExecuteStatement {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to execute query statement, source: {}", source))]
+    ExecuteQueryStatement {
         #[snafu(backtrace)]
         source: BoxedError,
     },
@@ -285,7 +297,9 @@ impl ErrorExt for Error {
             | ExecuteStatement { source, .. }
             | CheckDatabaseValidity { source, .. }
             | ExecuteAlter { source, .. }
-            | PutOpentsdbDataPoint { source, .. } => source.status_code(),
+            | PutOpentsdbDataPoint { source, .. }
+            | ParseQuery { source }
+            | ExecuteQueryStatement { source } => source.status_code(),
 
             NotSupported { .. }
             | InvalidQuery { .. }

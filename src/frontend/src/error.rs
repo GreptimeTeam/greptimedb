@@ -344,11 +344,17 @@ pub enum Error {
     },
 
     // TODO(ruihang): merge all query execution error kinds
-    #[snafu(display("failed to execute PromQL query {}, source: {}", query, source))]
+    #[snafu(display("Failed to execute PromQL query {}, source: {}", query, source))]
     ExecutePromql {
         query: String,
         #[snafu(backtrace)]
         source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to execute query statement, source: {}", source))]
+    ExecuteQueryStatement {
+        #[snafu(backtrace)]
+        source: BoxedError,
     },
 }
 
@@ -424,7 +430,9 @@ impl ErrorExt for Error {
             Error::InvokeDatanode { source } => source.status_code(),
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
             Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
-            Error::External { source } => source.status_code(),
+            Error::External { source } | Error::ExecuteQueryStatement { source } => {
+                source.status_code()
+            }
             Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
                 source.status_code()
             }

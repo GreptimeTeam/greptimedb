@@ -40,6 +40,7 @@ use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
+use servers::error as server_error;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -54,9 +55,9 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    ColumnDataTypeSnafu, DeserializePartitionSnafu, ParseQuerySnafu, ParseSqlSnafu,
-    PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu,
-    StartMetaClientSnafu, TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
+    ColumnDataTypeSnafu, DeserializePartitionSnafu,ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
+    TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
 use crate::sql::insert_to_request;
@@ -220,9 +221,14 @@ impl DistInstance {
             .context(error::ExecuteStatementSnafu)
     }
 
-    async fn handle_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+    async fn handle_sql(
+        &self,
+        sql: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<server_error::Result<Output>> {
         let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql.to_string()))
-            .context(ParseQuerySnafu);
+            .map_err(BoxedError::new)
+            .context(server_error::ParseQuerySnafu);
         match stmt {
             Ok(stmt) => {
                 let result = self.statement_query(stmt, query_ctx.clone()).await;
@@ -394,9 +400,13 @@ impl DistInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DistInstance {
-    type Error = error::Error;
+    type Error = server_error::Error;
 
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<server_error::Result<Output>> {
         self.handle_sql(query, query_ctx).await
     }
 
@@ -412,18 +422,22 @@ impl SqlQueryHandler for DistInstance {
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        match stmt {
+    ) -> server_error::Result<Output> {
+        let result = match stmt {
             QueryStatement::Sql(stmt) => self.handle_sql_statement(stmt, query_ctx).await,
             QueryStatement::Promql(_) => self.handle_promql_statement(stmt, query_ctx).await,
-        }
+        };
+        result
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQueryStatementSnafu)
     }
 
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
         self.catalog_manager
             .schema(catalog, schema)
             .map(|s| s.is_some())
-            .context(CatalogSnafu)
+            .map_err(BoxedError::new)
+            .context(server_error::CheckDatabaseValiditySnafu)
     }
 }
 
@@ -626,7 +640,6 @@ mod test {
 
     use super::*;
     use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
-    use crate::instance::standalone::StandaloneSqlQueryHandler;
 
     #[tokio::test]
     async fn test_parse_partitions() {
@@ -755,7 +768,7 @@ ENGINE=mito",
             .remove(0)
             .unwrap();
 
-        async fn assert_show_tables(instance: SqlQueryHandlerRef<error::Error>) {
+        async fn assert_show_tables(instance: SqlQueryHandlerRef<server_error::Error>) {
             let sql = "show tables in test_show_tables";
             let output = instance
                 .do_query(sql, QueryContext::arc())
@@ -779,7 +792,7 @@ ENGINE=mito",
 
         // Asserts that new table is created in Datanode as well.
         for x in datanode_instances.values() {
-            assert_show_tables(StandaloneSqlQueryHandler::arc(x.clone())).await
+            assert_show_tables(x.clone()).await
         }
     }
 }

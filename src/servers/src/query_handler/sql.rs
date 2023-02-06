@@ -17,7 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_error::prelude::*;
 use common_query::Output;
-use query::parser::QueryStatement;
+use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
 use session::context::QueryContextRef;
 
 use crate::error::{self, Result};
@@ -41,11 +41,22 @@ pub trait SqlQueryHandler {
         query_ctx: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>>;
 
+    /// Execute a query statement.
     async fn statement_query(
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
-    ) -> std::result::Result<Output, Self::Error>;
+    ) -> Result<Output>;
+
+    async fn query(&self, query: QueryLanguage, query_ctx: QueryContextRef) -> Result<Output> {
+        let stmt = QueryLanguageParser::parse(query)
+            .map_err(BoxedError::new)
+            .context(error::ParseQuerySnafu)?;
+        self.statement_query(stmt, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteQueryStatementSnafu)
+    }
 
     fn is_valid_schema(
         &self,

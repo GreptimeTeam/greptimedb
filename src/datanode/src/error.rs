@@ -252,6 +252,12 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
+    #[snafu(display("Failed to find catalog, source: {}", source))]
+    FindCatalog {
+        #[snafu(backtrace)]
+        source: servers::error::Error,
+    },
+
     #[snafu(display("Failed to find table {} from catalog, source: {}", table_name, source))]
     FindTable {
         table_name: String,
@@ -333,6 +339,7 @@ impl ErrorExt for Error {
             | Error::GetTable { source, .. }
             | Error::AlterTable { source, .. } => source.status_code(),
             Error::DropTable { source, .. } => source.status_code(),
+            Error::FindCatalog { source } => source.status_code(),
 
             Error::Insert { source, .. } => source.status_code(),
 

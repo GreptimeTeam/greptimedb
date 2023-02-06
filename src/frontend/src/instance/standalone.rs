@@ -16,9 +16,11 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request as GreptimeRequest;
 use async_trait::async_trait;
+use common_error::prelude::BoxedError;
 use common_query::Output;
 use datanode::error::Error as DatanodeError;
 use query::parser::QueryStatement;
+use servers::error as server_error;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
 use session::context::QueryContextRef;
@@ -59,11 +61,12 @@ impl SqlQueryHandler for StandaloneSqlQueryHandler {
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
-    ) -> Result<Output> {
+    ) -> server_error::Result<Output> {
         self.0
             .statement_query(stmt, query_ctx)
             .await
-            .context(error::InvokeDatanodeSnafu)
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQueryStatementSnafu)
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {

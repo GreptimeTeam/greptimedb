@@ -29,7 +29,9 @@ use sql::statements::statement::Statement;
 use table::engine::TableReference;
 use table::requests::{CreateDatabaseRequest, DropTableRequest};
 
-use crate::error::{self, BumpTableIdSnafu, ExecuteSqlSnafu, Result, TableIdProviderNotFoundSnafu};
+use crate::error::{
+    self, BumpTableIdSnafu, ExecuteSqlSnafu, FindCatalogSnafu, Result, TableIdProviderNotFoundSnafu,
+};
 use crate::instance::Instance;
 use crate::metric;
 use crate::sql::SqlRequest;
@@ -148,7 +150,8 @@ impl Instance {
             QueryStatement::Sql(Statement::Use(ref schema)) => {
                 let catalog = &query_ctx.current_catalog();
                 ensure!(
-                    self.is_valid_schema(catalog, schema)?,
+                    self.is_valid_schema(catalog, schema)
+                        .context(FindCatalogSnafu)?,
                     error::DatabaseNotFoundSnafu { catalog, schema }
                 );
 
@@ -205,12 +208,20 @@ pub fn table_idents_to_full_name(
 
 #[async_trait]
 impl SqlQueryHandler for Instance {
-    type Error = error::Error;
+    type Error = server_error::Error;
 
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<server_error::Result<Output>> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
         // we assume sql string has only 1 statement in datanode
-        let result = self.execute_sql(query, query_ctx).await;
+        let result = self
+            .execute_sql(query, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQueryStatementSnafu);
         vec![result]
     }
 
@@ -218,26 +229,31 @@ impl SqlQueryHandler for Instance {
         &self,
         query: &str,
         query_ctx: QueryContextRef,
-    ) -> Vec<Result<Output>> {
-        let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
-        let result = self.execute_promql(query, query_ctx).await;
-        vec![result]
+    ) -> Vec<server_error::Result<Output>> {
+        // let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
+        // let result = self.execute_promql(query, query_ctx).await;
+        // vec![result]
+        todo!()
     }
 
     async fn statement_query(
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
-    ) -> Result<Output> {
+    ) -> server_error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
-        self.execute_stmt(stmt, query_ctx).await
+        self.execute_stmt(stmt, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQueryStatementSnafu)
     }
 
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
         self.catalog_manager
             .schema(catalog, schema)
             .map(|s| s.is_some())
-            .context(error::CatalogSnafu)
+            .map_err(BoxedError::new)
+            .context(server_error::CheckDatabaseValiditySnafu)
     }
 }
 

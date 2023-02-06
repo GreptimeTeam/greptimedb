@@ -57,18 +57,16 @@ use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
-use crate::error::{
-    self, Error, ExecutePromqlSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, Result,
-};
+use crate::error::{self, Error, MissingMetasrvOptsSnafu, Result};
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
-use crate::instance::standalone::{StandaloneGrpcQueryHandler, StandaloneSqlQueryHandler};
+use crate::instance::standalone::StandaloneGrpcQueryHandler;
 use crate::Plugins;
 
 #[async_trait]
 pub trait FrontendInstance:
     GrpcQueryHandler<Error = Error>
-    + SqlQueryHandler<Error = Error>
+    + SqlQueryHandler<Error = server_error::Error>
     + OpentsdbProtocolHandler
     + InfluxdbLineProtocolHandler
     + PrometheusProtocolHandler
@@ -89,7 +87,7 @@ pub struct Instance {
 
     /// Script handler is None in distributed mode, only works on standalone mode.
     script_handler: Option<ScriptHandlerRef>,
-    sql_handler: SqlQueryHandlerRef<Error>,
+    sql_handler: SqlQueryHandlerRef<server_error::Error>,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
     promql_handler: Option<PromqlHandlerRef>,
 
@@ -167,7 +165,7 @@ impl Instance {
             catalog_manager: dn_instance.catalog_manager().clone(),
             script_handler: None,
             create_expr_factory: Arc::new(DefaultCreateExprFactory),
-            sql_handler: StandaloneSqlQueryHandler::arc(dn_instance.clone()),
+            sql_handler: dn_instance.clone(),
             grpc_query_handler: StandaloneGrpcQueryHandler::arc(dn_instance.clone()),
             promql_handler: Some(dn_instance.clone()),
             plugins: Default::default(),
@@ -397,19 +395,32 @@ impl Instance {
             }
             .fail(),
             QueryStatement::Sql(Statement::Use(db)) => self.handle_use(db, query_ctx),
-            _ => self.sql_handler.statement_query(stmt, query_ctx).await,
+            _ => self
+                .sql_handler
+                .statement_query(stmt, query_ctx)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteQueryStatementSnafu),
         }
     }
 }
 
 #[async_trait]
 impl SqlQueryHandler for Instance {
-    type Error = Error;
+    type Error = server_error::Error;
 
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+    async fn do_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<server_error::Result<Output>> {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query = QueryLanguage::Sql(query.to_string());
-        let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
+        let query = match query_interceptor
+            .pre_parsing(query, query_ctx.clone())
+            .map_err(BoxedError::new)
+            .context(server_error::ParseQuerySnafu)
+        {
             Ok(q) => q,
             Err(e) => return vec![Err(e)],
         };
@@ -425,69 +436,71 @@ impl SqlQueryHandler for Instance {
             Ok(stmts) => {
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
-                    // TODO(sunng87): figure out at which stage we can call
-                    // this hook after ArrowFlight adoption. We need to provide
-                    // LogicalPlan as to this hook.
-                    if let Err(e) = query_interceptor.pre_execute(&stmt, None, query_ctx.clone()) {
-                        results.push(Err(e));
-                        break;
-                    }
-                    match self.query_statement(stmt, query_ctx.clone()).await {
-                        Ok(output) => {
-                            let output_result =
-                                query_interceptor.post_execute(output, query_ctx.clone());
-                            results.push(output_result);
-                        }
-                        Err(e) => {
-                            results.push(Err(e));
-                            break;
-                        }
-                    }
+                    let result = self.statement_query(stmt, query_ctx.clone()).await;
+                    results.push(result);
                 }
                 results
             }
             Err(e) => {
-                vec![Err(e)]
+                vec![Err(e)
+                    .map_err(BoxedError::new)
+                    .context(server_error::ParseQuerySnafu)]
             }
         }
     }
 
-    async fn do_promql_query(&self, query: &str, _: QueryContextRef) -> Vec<Result<Output>> {
-        if let Some(handler) = &self.promql_handler {
-            let result = handler
-                .do_query(query)
-                .await
-                .context(ExecutePromqlSnafu { query });
-            vec![result]
-        } else {
-            vec![Err(NotSupportedSnafu {
-                feat: "PromQL Query",
-            }
-            .build())]
-        }
+    async fn do_promql_query(
+        &self,
+        query: &str,
+        _: QueryContextRef,
+    ) -> Vec<server_error::Result<Output>> {
+        // if let Some(handler) = &self.promql_handler {
+        //     let result = handler
+        //         .do_query(query)
+        //         .await
+        //         .context(ExecutePromqlSnafu { query });
+        //     vec![result]
+        // } else {
+        //     vec![Err(NotSupportedSnafu {
+        //         feat: "PromQL Query",
+        //     }
+        //     .build())]
+        // }
+        todo!()
+        // let query = QueryLanguage::Promql(query.to_string());
+
+        // let statement = QueryLanguageParser::parse(QueryLanguage::Promql(query.to_string()))
+        //     .map_err(BoxedError::new)
+        //     .context(server_error::ParseQuerySnafu)?;
     }
 
     async fn statement_query(
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
-    ) -> Result<Output> {
+    ) -> server_error::Result<Output> {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
 
         // TODO(sunng87): figure out at which stage we can call
         // this hook after ArrowFlight adoption. We need to provide
         // LogicalPlan as to this hook.
-        query_interceptor.pre_execute(&stmt, None, query_ctx.clone())?;
+        query_interceptor
+            .pre_execute(&stmt, None, query_ctx.clone())
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQueryStatementSnafu)?;
         self.query_statement(stmt, query_ctx.clone())
             .await
             .and_then(|output| query_interceptor.post_execute(output, query_ctx.clone()))
+            .map_err(BoxedError::new)
+            .context(server_error::ExecuteQueryStatementSnafu)
     }
 
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
         self.catalog_manager
             .schema(catalog, schema)
             .map(|s| s.is_some())
-            .context(error::CatalogSnafu)
+            .map_err(BoxedError::new)
+            .context(server_error::CheckDatabaseValiditySnafu)
     }
 }
 
@@ -534,6 +547,8 @@ impl PromqlHandler for Instance {
 mod tests {
     use std::sync::atomic::AtomicU32;
 
+    use common_error::prelude::ErrorExt;
+    use common_error::status_code::StatusCode;
     use session::context::QueryContext;
 
     use super::*;
@@ -791,7 +806,7 @@ mod tests {
             .await
             .remove(0)
         {
-            assert!(matches!(e, error::Error::NotSupported { .. }));
+            assert_eq!(e.status_code(), StatusCode::Unsupported);
         } else {
             unreachable!();
         }
@@ -801,7 +816,7 @@ mod tests {
             .await
             .remove(0)
         {
-            assert!(matches!(e, error::Error::NotSupported { .. }));
+            assert_eq!(e.status_code(), StatusCode::Unsupported);
         } else {
             unreachable!();
         }
