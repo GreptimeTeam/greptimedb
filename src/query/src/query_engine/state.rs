@@ -22,6 +22,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::{SessionContext, TaskContext};
 use common_query::prelude::ScalarUdf;
+use common_query::Plugins;
 use datafusion::catalog::TableReference;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
@@ -38,6 +39,8 @@ use promql::extension_plan::PromExtensionPlanner;
 use session::context::QueryContextRef;
 
 use crate::datafusion::DfCatalogListAdapter;
+use crate::error::Error;
+use crate::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
 use crate::optimizer::TypeConversionRule;
 
 /// Query engine global state
@@ -49,6 +52,7 @@ pub struct QueryEngineState {
     df_context: SessionContext,
     catalog_list: CatalogListRef,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
+    plugins: Arc<Plugins>,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -78,6 +82,7 @@ impl QueryEngineState {
             df_context,
             catalog_list,
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
+            plugins: Default::default(),
         }
     }
 
@@ -120,6 +125,10 @@ impl QueryEngineState {
         name: TableReference,
     ) -> DfResult<Arc<dyn TableSource>> {
         let state = self.df_context.state();
+
+        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        query_interceptor.validate_table_reference(name, query_ctx.clone())?;
+
         if let TableReference::Bare { table } = name {
             let name = TableReference::Partial {
                 schema: &query_ctx.current_schema(),
