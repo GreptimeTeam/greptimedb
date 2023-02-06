@@ -24,6 +24,8 @@ pub mod physical_plan;
 pub mod prelude;
 mod signature;
 
+pub type Plugins = anymap::Map<dyn core::any::Any + Send + Sync>;
+
 // sql output
 pub enum Output {
     AffectedRows(usize),

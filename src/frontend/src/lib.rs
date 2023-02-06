@@ -14,7 +14,7 @@
 
 #![feature(assert_matches)]
 
-pub type Plugins = anymap::Map<dyn core::any::Any + Send + Sync>;
+pub type Plugins = common_query::Plugins;
 
 mod catalog;
 mod datanode;

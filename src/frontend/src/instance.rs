@@ -103,7 +103,10 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn try_new_distributed(opts: &FrontendOptions) -> Result<Self> {
+    pub async fn try_new_distributed(
+        opts: &FrontendOptions,
+        plugins: Arc<Plugins>,
+    ) -> Result<Self> {
         let meta_client = Self::create_meta_client(opts).await?;
 
         let meta_backend = Arc::new(MetaKvBackend {
@@ -130,7 +133,7 @@ impl Instance {
             sql_handler: dist_instance.clone(),
             grpc_query_handler: dist_instance,
             promql_handler: None,
-            plugins: Default::default(),
+            plugins,
         })
     }
 

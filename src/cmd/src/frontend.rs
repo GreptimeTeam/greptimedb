@@ -91,10 +91,9 @@ impl StartCommand {
         let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
         let opts: FrontendOptions = self.try_into()?;
 
-        let mut instance = Instance::try_new_distributed(&opts)
+        let instance = Instance::try_new_distributed(&opts, plugins.clone())
             .await
             .context(error::StartFrontendSnafu)?;
-        instance.set_plugins(plugins.clone());
 
         let mut frontend = Frontend::new(opts, instance, plugins);
         frontend.start().await.context(error::StartFrontendSnafu)

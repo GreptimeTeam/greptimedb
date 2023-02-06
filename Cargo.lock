@@ -1533,6 +1533,7 @@ dependencies = [
 name = "common-query"
 version = "0.1.0"
 dependencies = [
+ "anymap",
  "async-trait",
  "common-base",
  "common-error",
@@ -2663,7 +2664,6 @@ dependencies = [
 name = "frontend"
 version = "0.1.0"
 dependencies = [
- "anymap",
  "api",
  "async-stream",
  "async-trait",
