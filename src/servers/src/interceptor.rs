@@ -27,7 +27,7 @@ pub trait SqlQueryInterceptor {
 
     /// Called before a query is parsed into statement.
     /// The implementation is allowed to change the query if needed.
-    fn pre_parsing<'a>(
+    fn pre_parsing(
         &self,
         query: QueryLanguage,
         _query_ctx: QueryContextRef,
