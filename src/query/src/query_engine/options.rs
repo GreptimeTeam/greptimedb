@@ -50,3 +50,53 @@ pub fn validate_table_references(name: TableReference, query_ctx: &QueryContextR
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use session::context::QueryContext;
+
+    use super::*;
+
+    #[test]
+    fn test_validate_table_ref() {
+        let context = Arc::new(QueryContext::with("greptime", "public"));
+
+        let table_ref = TableReference::Bare {
+            table: "table_name",
+        };
+        let re = validate_table_references(table_ref, &context);
+        assert!(re.is_ok());
+
+        let table_ref = TableReference::Partial {
+            schema: "public",
+            table: "table_name",
+        };
+        let re = validate_table_references(table_ref, &context);
+        assert!(re.is_ok());
+
+        let table_ref = TableReference::Partial {
+            schema: "wrong_schema",
+            table: "table_name",
+        };
+        let re = validate_table_references(table_ref, &context);
+        assert!(re.is_err());
+
+        let table_ref = TableReference::Full {
+            catalog: "greptime",
+            schema: "public",
+            table: "table_name",
+        };
+        let re = validate_table_references(table_ref, &context);
+        assert!(re.is_ok());
+
+        let table_ref = TableReference::Full {
+            catalog: "wrong_catalog",
+            schema: "public",
+            table: "table_name",
+        };
+        let re = validate_table_references(table_ref, &context);
+        assert!(re.is_err());
+    }
+}
