@@ -452,6 +452,7 @@ pub(crate) fn exec_with_cached_vm(
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
         crate::python::dataframe::data_frame::set_dataframe_in_scope(&scope, vm, "df", rb)?;
+
         if let Some(engine) = &copr.query_engine {
             let query_engine = PyQueryEngine {
                 inner: engine.clone(),
@@ -521,6 +522,8 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     PyVector::make_class(&vm.ctx);
                     vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
 
+                    data_frame::PyDataFrame::make_class(&vm.ctx);
+                    data_frame::PyExpr::make_class(&vm.ctx);
                     vm.add_native_module("data_frame", Box::new(data_frame::make_module));
                 }));
                 info!("Initialized Python interpreter.");

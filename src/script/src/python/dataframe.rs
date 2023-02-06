@@ -7,7 +7,10 @@ pub(crate) mod data_frame {
     use common_recordbatch::{DfRecordBatch, RecordBatch};
     use datafusion::dataframe::DataFrame as DfDataFrame;
     use datafusion_expr::Expr as DfExpr;
+    use rustpython_vm::builtins::{PyList, PyListRef};
     use rustpython_vm::{pyclass as rspyclass, PyPayload, PyRef, PyResult, VirtualMachine};
+
+    use crate::python::utils::block_on_async;
     #[rspyclass(module = "data_frame", name = "DataFrame")]
     #[derive(PyPayload, Debug)]
     pub struct PyDataFrame {
@@ -42,6 +45,26 @@ pub(crate) mod data_frame {
         }
 
         #[pymethod]
+        fn select_columns(&self, columns: Vec<String>, vm: &VirtualMachine) -> PyResult<Self> {
+            Ok(self
+                .inner
+                .clone()
+                .select_columns(&columns.iter().map(AsRef::as_ref).collect::<Vec<&str>>())
+                .map_err(|e| vm.new_runtime_error(e.to_string()))?
+                .into())
+        }
+
+        #[pymethod]
+        fn select(&self, expr_list: Vec<PyExprRef>, vm: &VirtualMachine) -> PyResult<Self> {
+            Ok(self
+                .inner
+                .clone()
+                .select(expr_list.iter().map(|e| e.inner.to_owned()).collect())
+                .map_err(|e| vm.new_runtime_error(e.to_string()))?
+                .into())
+        }
+
+        #[pymethod]
         fn filter(&self, predicate: PyExprRef, vm: &VirtualMachine) -> PyResult<Self> {
             Ok(self
                 .inner
@@ -73,6 +96,134 @@ pub(crate) mod data_frame {
                 .limit(skip, fetch)
                 .map_err(|e| vm.new_runtime_error(e.to_string()))?
                 .into())
+        }
+
+        #[pymethod]
+        fn union(&self, df: PyRef<PyDataFrame>, vm: &VirtualMachine) -> PyResult<Self> {
+            Ok(self
+                .inner
+                .clone()
+                .union(df.inner.clone())
+                .map_err(|e| vm.new_runtime_error(e.to_string()))?
+                .into())
+        }
+
+        #[pymethod]
+        fn union_distinct(&self, df: PyRef<PyDataFrame>, vm: &VirtualMachine) -> PyResult<Self> {
+            Ok(self
+                .inner
+                .clone()
+                .union_distinct(df.inner.clone())
+                .map_err(|e| vm.new_runtime_error(e.to_string()))?
+                .into())
+        }
+
+        #[pymethod]
+        fn distinct(&self, vm: &VirtualMachine) -> PyResult<Self> {
+            Ok(self
+                .inner
+                .clone()
+                .distinct()
+                .map_err(|e| vm.new_runtime_error(e.to_string()))?
+                .into())
+        }
+
+        #[pymethod]
+        fn sort(&self, expr: Vec<PyExprRef>, vm: &VirtualMachine) -> PyResult<Self> {
+            Ok(self
+                .inner
+                .clone()
+                .sort(expr.iter().map(|e| e.inner.clone()).collect())
+                .map_err(|e| vm.new_runtime_error(e.to_string()))?
+                .into())
+        }
+
+        #[pymethod]
+        fn join(
+            &self,
+            right: PyRef<PyDataFrame>,
+            join_type: String,
+            left_cols: Vec<String>,
+            right_cols: Vec<String>,
+            filter: Option<PyExprRef>,
+            vm: &VirtualMachine,
+        ) -> PyResult<Self> {
+            use datafusion::prelude::JoinType;
+            let join_type = match join_type.as_str() {
+                "inner" | "Inner" => JoinType::Inner,
+                "left" | "Left" => JoinType::Left,
+                "right" | "Right" => JoinType::Right,
+                "full" | "Full" => JoinType::Full,
+                "leftSemi" | "LeftSemi" => JoinType::LeftSemi,
+                "rightSemi" | "RightSemi" => JoinType::RightSemi,
+                "leftAnti" | "LeftAnti" => JoinType::LeftAnti,
+                "rightAnti" | "RightAnti" => JoinType::RightAnti,
+                _ => return Err(vm.new_runtime_error(format!("Unknown join type: {join_type}"))),
+            };
+            let left_cols: Vec<&str> = left_cols.iter().map(AsRef::as_ref).collect();
+            let right_cols: Vec<&str> = right_cols.iter().map(AsRef::as_ref).collect();
+            let filter = filter.map(|f| f.inner.clone());
+            Ok(self
+                .inner
+                .clone()
+                .join(
+                    right.inner.clone(),
+                    join_type,
+                    &left_cols,
+                    &right_cols,
+                    filter,
+                )
+                .map_err(|e| vm.new_runtime_error(e.to_string()))?
+                .into())
+        }
+
+        #[pymethod]
+        fn intersect(&self, df: PyRef<PyDataFrame>, vm: &VirtualMachine) -> PyResult<Self> {
+            Ok(self
+                .inner
+                .clone()
+                .intersect(df.inner.clone())
+                .map_err(|e| vm.new_runtime_error(e.to_string()))?
+                .into())
+        }
+
+        #[pymethod]
+        fn except(&self, df: PyRef<PyDataFrame>, vm: &VirtualMachine) -> PyResult<Self> {
+            Ok(self
+                .inner
+                .clone()
+                .except(df.inner.clone())
+                .map_err(|e| vm.new_runtime_error(e.to_string()))?
+                .into())
+        }
+
+        #[pymethod]
+        /// collect `DataFrame` results into List[List[Vector]]
+        fn collect(&self, vm: &VirtualMachine) -> PyResult<PyListRef> {
+            // let res = self.inner.collect().map_err(|e| vm.new_runtime_error(e.to_string()))?;
+            let inner = self.inner.to_owned();
+            let res = block_on_async(async { inner.collect().await });
+            let res = res
+                .map_err(|e| vm.new_runtime_error(format!("{e:?}")))?
+                .map_err(|e| vm.new_runtime_error(e.to_string()))?;
+            let outer_lst: Vec<_> = res
+                .iter()
+                .map(|elem| -> PyResult<_> {
+                    let inner_lst: Vec<_> = elem
+                        .columns()
+                        .iter()
+                        .map(|arr| -> PyResult<_> {
+                            datatypes::vectors::Helper::try_into_vector(arr)
+                                .map(crate::python::PyVector::from)
+                                .map(|v| vm.new_pyobj(v))
+                                .map_err(|e| vm.new_runtime_error(e.to_string()))
+                        })
+                        .collect::<Result<_, _>>()?;
+                    let inner_lst = PyList::new_ref(inner_lst, vm.as_ref());
+                    Ok(inner_lst.into())
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(PyList::new_ref(outer_lst, vm.as_ref()))
         }
     }
 
