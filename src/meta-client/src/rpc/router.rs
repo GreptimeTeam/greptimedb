@@ -175,7 +175,7 @@ impl TableRoute {
             .iter()
             .flat_map(|x| &x.leader_peer)
             .cloned()
-            .collect::<_>()
+            .collect()
     }
 
     pub fn find_leader_regions(&self, datanode: &Peer) -> Vec<u32> {
@@ -189,7 +189,7 @@ impl TableRoute {
                 }
                 None
             })
-            .collect::<Vec<u32>>()
+            .collect()
     }
 }
 

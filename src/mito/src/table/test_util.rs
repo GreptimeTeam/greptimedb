@@ -116,14 +116,16 @@ fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
     }
 }
 
-pub async fn setup_test_engine_and_table() -> (
-    MitoEngine<EngineImpl<NoopLogStore>>,
-    EngineImpl<NoopLogStore>,
-    TableRef,
-    SchemaRef,
-    ObjectStore,
-    TempDir,
-) {
+pub struct TestEngineComponents {
+    pub table_engine: MitoEngine<EngineImpl<NoopLogStore>>,
+    pub storage_engine: EngineImpl<NoopLogStore>,
+    pub table_ref: TableRef,
+    pub schema_ref: SchemaRef,
+    pub object_store: ObjectStore,
+    pub dir: TempDir,
+}
+
+pub async fn setup_test_engine_and_table() -> TestEngineComponents {
     let (dir, object_store) = new_test_object_store("setup_test_engine_and_table").await;
 
     let storage_engine = EngineImpl::new(
@@ -146,14 +148,14 @@ pub async fn setup_test_engine_and_table() -> (
         .await
         .unwrap();
 
-    (
+    TestEngineComponents {
         table_engine,
         storage_engine,
-        table,
-        schema,
+        table_ref: table,
+        schema_ref: schema,
         object_store,
         dir,
-    )
+    }
 }
 
 pub async fn setup_mock_engine_and_table(

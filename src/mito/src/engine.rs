@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -21,18 +20,18 @@ use common_error::ext::BoxedError;
 use common_telemetry::tracing::log::info;
 use common_telemetry::{debug, logging};
 use datatypes::schema::SchemaRef;
-use futures::TryStreamExt;
-use object_store::{ObjectMode, ObjectStore};
+use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
     ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder, ColumnId,
     CreateOptions, EngineContext as StorageEngineContext, OpenOptions, Region,
-    RegionDescriptorBuilder, RegionId, RegionNumber, RowKeyDescriptor, RowKeyDescriptorBuilder,
-    StorageEngine,
+    RegionDescriptorBuilder, RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
 use table::engine::{EngineContext, TableEngine, TableReference};
 use table::error::TableOperationSnafu;
-use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
+use table::metadata::{
+    TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion,
+};
 use table::requests::{
     AlterKind, AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest,
 };
@@ -43,9 +42,10 @@ use tokio::sync::Mutex;
 use crate::config::EngineConfig;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
-    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, InvalidRegionNameSnafu,
-    MissingTimestampIndexSnafu, RegionNotFoundSnafu, Result, TableExistsSnafu,
+    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, MissingTimestampIndexSnafu,
+    RegionNotFoundSnafu, Result, TableExistsSnafu,
 };
+use crate::manifest::TableManifest;
 use crate::table::MitoTable;
 
 pub const MITO_ENGINE: &str = "mito";
@@ -56,17 +56,6 @@ const INIT_TABLE_VERSION: TableVersion = 0;
 #[inline]
 fn region_name(table_id: TableId, n: u32) -> String {
     format!("{table_id}_{n:010}")
-}
-
-/// Decompose the components of region name.
-fn decompose_region_name(region_name: &str) -> Result<(TableId, RegionNumber)> {
-    let parts = region_name.split('_').collect::<Vec<_>>();
-    ensure!(parts.len() >= 2, InvalidRegionNameSnafu { region_name });
-    let table_id = TableId::from_str(parts[0].trim())
-        .map_err(|_| InvalidRegionNameSnafu { region_name }.build())?;
-    let region_number = RegionNumber::from_str(parts[1].trim())
-        .map_err(|_| InvalidRegionNameSnafu { region_name }.build())?;
-    Ok((table_id, region_number))
 }
 
 #[inline]
@@ -461,23 +450,19 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let opts = OpenOptions {
                 parent_dir: table_dir.to_string(),
             };
-            let existing_regions = self
-                .stat_table_regions(schema_name, table_id)
-                .await
-                .map_err(BoxedError::new)
-                .context(TableOperationSnafu)?;
+
+            let Some((manifest, table_info)) = self
+                .recover_table_manifest_and_info(table_name, &table_dir)
+                .await? else { return Ok(None) };
+
             debug!(
-                "Opening table {}, existing regions: {:?}",
-                table_id, existing_regions
+                "Opening table {}, table info recovered: {:?}",
+                table_id, table_info
             );
 
-            if existing_regions.is_empty() {
-                return Ok(None);
-            }
-
-            let mut regions = HashMap::with_capacity(existing_regions.len());
-            for region_number in existing_regions {
-                let region_name = region_name(table_id, region_number);
+            let mut regions = HashMap::with_capacity(table_info.meta.region_numbers.len());
+            for region_number in &table_info.meta.region_numbers {
+                let region_name = region_name(table_id, *region_number);
                 let region = self
                     .storage_engine
                     .open_region(&engine_ctx, &region_name, &opts)
@@ -489,19 +474,14 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                             "{}.{}.{}",
                             request.catalog_name, request.schema_name, request.table_name
                         ),
-                        region: region_number,
+                        region: *region_number,
                     })
                     .map_err(BoxedError::new)
                     .context(table_error::TableOperationSnafu)?;
-                regions.insert(region_number, region);
+                regions.insert(*region_number, region);
             }
 
-            let table = Arc::new(
-                MitoTable::open(table_name, &table_dir, regions, self.object_store.clone())
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(table_error::TableOperationSnafu)?,
-            );
+            let table = Arc::new(MitoTable::new(table_info, regions, manifest));
 
             self.tables
                 .write()
@@ -513,6 +493,24 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         logging::info!("Mito engine opened table {}", table_name);
 
         Ok(table)
+    }
+
+    async fn recover_table_manifest_and_info(
+        &self,
+        table_name: &str,
+        table_dir: &str,
+    ) -> TableResult<Option<(TableManifest, TableInfo)>> {
+        let manifest = MitoTable::<<S as StorageEngine>::Region>::build_manifest(
+            table_dir,
+            self.object_store.clone(),
+        );
+        let  Some(table_info) =
+            MitoTable::<<S as StorageEngine>::Region>::recover_table_info(table_name, &manifest)
+                .await
+                .map_err(BoxedError::new)
+                .context(TableOperationSnafu)? else { return Ok(None) };
+
+        Ok(Some((manifest, table_info)))
     }
 
     fn get_table(&self, table_ref: &TableReference) -> Option<TableRef> {
@@ -582,34 +580,6 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .remove(&table_reference.to_string())
             .is_some())
     }
-
-    /// List the existing regions of some table without actually open it.
-    async fn stat_table_regions(
-        &self,
-        schema_name: &str,
-        table_id: TableId,
-    ) -> Result<Vec<RegionNumber>> {
-        let table_id_str = table_id.to_string();
-        let table_dir = table_dir(schema_name, table_id);
-        let dir = self.object_store.object(&table_dir);
-        let mut lister = dir.list().await.unwrap();
-        let mut regions = vec![];
-        while let Some(obj) = lister.try_next().await.unwrap() {
-            match obj.mode().await.unwrap() {
-                ObjectMode::DIR => {
-                    if obj.name().starts_with(&table_id_str) {
-                        // safety: OpenDAL guarantees dir object's name end with "/"
-                        // https://docs.rs/opendal/0.25.1/opendal/struct.Object.html#method.name
-                        let region_name = obj.name().strip_suffix('/').unwrap();
-                        let (_, region_number) = decompose_region_name(region_name)?;
-                        regions.push(region_number);
-                    }
-                }
-                _ => continue,
-            }
-        }
-        Ok(regions)
-    }
 }
 
 impl<S: StorageEngine> MitoEngineInner<S> {
@@ -645,7 +615,9 @@ mod tests {
 
     use super::*;
     use crate::table::test_util;
-    use crate::table::test_util::{new_insert_request, schema_for_test, TABLE_NAME};
+    use crate::table::test_util::{
+        new_insert_request, schema_for_test, TestEngineComponents, TABLE_NAME,
+    };
 
     async fn setup_table_with_column_default_constraint() -> (TempDir, String, TableRef) {
         let table_name = "test_default_constraint";
@@ -822,10 +794,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_table_insert_scan() {
-        let (_engine, _, table, schema, _, _dir) = test_util::setup_test_engine_and_table().await;
-
+        let TestEngineComponents {
+            table_ref: table,
+            schema_ref,
+            dir: _dir,
+            ..
+        } = test_util::setup_test_engine_and_table().await;
         assert_eq!(TableType::Base, table.table_type());
-        assert_eq!(schema, table.schema());
+        assert_eq!(schema_ref, table.schema());
 
         let insert_req = new_insert_request("demo".to_string(), HashMap::default());
         assert_eq!(0, table.insert(insert_req).await.unwrap());
@@ -904,7 +880,11 @@ mod tests {
     async fn test_create_table_scan_batches() {
         common_telemetry::init_default_ut_logging();
 
-        let (_engine, _, table, _schema, _, _dir) = test_util::setup_test_engine_and_table().await;
+        let TestEngineComponents {
+            table_ref: table,
+            dir: _dir,
+            ..
+        } = test_util::setup_test_engine_and_table().await;
 
         // TODO(yingwen): Custom batch size once the table support setting batch_size.
         let default_batch_size = ReadContext::default().batch_size;
@@ -1001,8 +981,15 @@ mod tests {
         };
 
         let (_engine, storage_engine, table, object_store, _dir) = {
-            let (table_engine, storage_engine, table, _schema, object_store, dir) =
-                test_util::setup_test_engine_and_table().await;
+            let TestEngineComponents {
+                table_engine,
+                storage_engine,
+                table_ref: table,
+                object_store,
+                dir,
+                ..
+            } = test_util::setup_test_engine_and_table().await;
+
             assert_eq!(MITO_ENGINE, table_engine.name());
             // Now try to open the table again.
             let reopened = table_engine
@@ -1029,45 +1016,11 @@ mod tests {
             .downcast_ref::<MitoTable<RegionImpl<NoopLogStore>>>()
             .unwrap();
 
+        let left = table.table_info();
         // assert recovered table_info is correct
-        assert_eq!(table.table_info(), reopened.table_info());
+        let right = reopened.table_info();
+        assert_eq!(left, right);
         assert_eq!(reopened.manifest().last_version(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_stats_region_of_existing_table() {
-        common_telemetry::init_default_ut_logging();
-        let ctx = EngineContext::default();
-
-        // the test table id is 1
-        let table_id = 1;
-        let open_req = OpenTableRequest {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: test_util::TABLE_NAME.to_string(),
-            table_id,
-        };
-
-        let (engine, _storage_engine, _, _object_store, _dir) = {
-            let (table_engine, storage_engine, table, _schema, object_store, dir) =
-                test_util::setup_test_engine_and_table().await;
-            assert_eq!(MITO_ENGINE, table_engine.name());
-            // Now try to open the table again.
-            let reopened = table_engine
-                .open_table(&ctx, open_req.clone())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(table.schema(), reopened.schema());
-            (table_engine, storage_engine, table, object_store, dir)
-        };
-
-        let regions = engine
-            .inner
-            .stat_table_regions("public", table_id)
-            .await
-            .unwrap();
-        assert_eq!(vec![0], regions);
     }
 
     #[test]
@@ -1192,8 +1145,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_alter_rename_table() {
-        let (table_engine, storage_engine, _table, _, object_store, _dir) =
-            test_util::setup_test_engine_and_table().await;
+        let TestEngineComponents {
+            table_engine,
+            storage_engine,
+            object_store,
+            dir: _dir,
+            ..
+        } = test_util::setup_test_engine_and_table().await;
         let ctx = EngineContext::default();
 
         // register another table
@@ -1333,7 +1291,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_table_delete_rows() {
-        let (_engine, _, table, _schema, _, _dir) = test_util::setup_test_engine_and_table().await;
+        let TestEngineComponents {
+            table_ref: table,
+            dir: _dir,
+            ..
+        } = test_util::setup_test_engine_and_table().await;
 
         let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(4);
         let hosts: VectorRef =

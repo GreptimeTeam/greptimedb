@@ -29,7 +29,6 @@ const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
 // TODO(fys): Extract the common logic in datanode and frontend in the future.
 // This function convert insert statement to an `InsertRequest` to region 0.
-#[allow(dead_code)]
 pub(crate) fn insert_to_request(table: &TableRef, stmt: Insert) -> Result<InsertRequest> {
     let columns = stmt.columns();
     let values = stmt.values().context(error::ParseSqlSnafu)?;

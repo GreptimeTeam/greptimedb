@@ -53,7 +53,7 @@ use tokio::sync::Mutex;
 use crate::error;
 use crate::error::{
     ProjectedColumnNotFoundSnafu, RegionNotFoundSnafu, Result, ScanTableManifestSnafu,
-    TableInfoNotFoundSnafu, UpdateTableManifestSnafu,
+    UpdateTableManifestSnafu,
 };
 use crate::manifest::action::*;
 use crate::manifest::TableManifest;
@@ -91,9 +91,10 @@ impl<R: Region> Table for MitoTable<R> {
             .regions
             .get(&request.region_number)
             .with_context(|| RegionNotFoundSnafu {
-                table: format!(
-                    "{}.{}.{}",
-                    request.catalog_name, request.schema_name, request.table_name
+                table: common_catalog::format_full_table_name(
+                    &request.catalog_name,
+                    &request.schema_name,
+                    &request.table_name,
                 ),
                 region: request.region_number,
             })
@@ -347,7 +348,7 @@ fn column_qualified_name(table_name: &str, region_name: &str, column_name: &str)
 }
 
 impl<R: Region> MitoTable<R> {
-    fn new(
+    pub(crate) fn new(
         table_info: TableInfo,
         regions: HashMap<RegionNumber, R>,
         manifest: TableManifest,
@@ -438,22 +439,11 @@ impl<R: Region> MitoTable<R> {
         Ok(MitoTable::new(table_info, regions, manifest))
     }
 
-    pub async fn open(
-        table_name: &str,
-        table_dir: &str,
-        regions: HashMap<RegionNumber, R>,
-        object_store: ObjectStore,
-    ) -> Result<MitoTable<R>> {
-        let manifest = TableManifest::new(&table_manifest_dir(table_dir), object_store);
-
-        let mut table_info = Self::recover_table_info(table_name, &manifest)
-            .await?
-            .context(TableInfoNotFoundSnafu { table_name })?;
-        table_info.meta.region_numbers = regions.keys().cloned().collect::<Vec<_>>();
-        Ok(MitoTable::new(table_info, regions, manifest))
+    pub(crate) fn build_manifest(table_dir: &str, object_store: ObjectStore) -> TableManifest {
+        TableManifest::new(&table_manifest_dir(table_dir), object_store)
     }
 
-    async fn recover_table_info(
+    pub(crate) async fn recover_table_info(
         table_name: &str,
         manifest: &TableManifest,
     ) -> Result<Option<TableInfo>> {
