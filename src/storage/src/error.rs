@@ -412,6 +412,9 @@ pub enum Error {
 
     #[snafu(display("Failed to decode parquet file time range, msg: {}", msg))]
     DecodeParquetTimeRange { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Compaction rate limited, msg: {}", msg))]
+    CompactionRateLimited { msg: String, backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -481,6 +484,7 @@ impl ErrorExt for Error {
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
+            CompactionRateLimited { .. } => StatusCode::Internal,
         }
     }
 

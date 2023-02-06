@@ -34,6 +34,7 @@ snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
 table = { path = "../table" }
 tokio.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
 uuid.workspace = true
 

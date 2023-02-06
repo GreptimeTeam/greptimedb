@@ -12,30 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Storage engine implementation.
+use crate::error::Result;
+use crate::sst::FileHandle;
 
-mod background;
-mod chunk;
-pub mod codec;
-mod compaction;
-pub mod config;
-mod engine;
-pub mod error;
-mod flush;
-pub mod manifest;
-pub mod memtable;
-pub mod metadata;
-pub mod proto;
-pub mod read;
-pub mod region;
-pub mod schema;
-mod snapshot;
-mod sst;
-mod sync;
-#[cfg(test)]
-mod test_util;
-mod version;
-mod wal;
-pub mod write_batch;
+#[allow(unused)]
+pub(crate) struct CompactionTask {
+    inputs: Vec<CompactionInput>,
+}
 
-pub use engine::EngineImpl;
+#[allow(unused)]
+impl CompactionTask {
+    // TODO(hl): Actual SST compaction tasks
+    pub async fn run(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[allow(unused)]
+pub(crate) struct CompactionInput {
+    input_level: u8,
+    output_level: u8,
+    file: FileHandle,
+}
