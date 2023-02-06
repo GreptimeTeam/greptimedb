@@ -118,23 +118,14 @@ impl<'a> ParquetWriter<'a> {
 
         let file_meta = arrow_writer.close().context(WriteParquetSnafu)?;
 
-        let (start_timestamp, end_timestamp) =
-            match decode_timestamp_range(&file_meta, store_schema) {
-                Ok(Some((start, end))) => (Some(start), Some(end)),
-                Ok(None) => (None, None),
-                Err(e) => {
-                    error!(e;"Failed to calculate time range of parquet file");
-                    (None, None)
-                }
-            };
+        let time_range = decode_timestamp_range(&file_meta, store_schema)
+            .ok()
+            .flatten();
 
         object.write(buf).await.context(WriteObjectSnafu {
             path: object.path(),
         })?;
-        Ok(SstInfo {
-            start_timestamp,
-            end_timestamp,
-        })
+        Ok(SstInfo { time_range })
     }
 }
 
@@ -467,20 +458,18 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
 
-        let SstInfo {
-            start_timestamp,
-            end_timestamp,
-        } = writer
+        let SstInfo { time_range } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
 
-        assert_eq!(Some(Timestamp::new_millisecond(0)), start_timestamp);
         assert_eq!(
-            Some(Timestamp::new_millisecond((rows_total - 1) as i64)),
-            end_timestamp
+            Some((
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond((rows_total - 1) as i64)
+            )),
+            time_range
         );
-
         let operator = ObjectStore::new(
             object_store::backend::fs::Builder::default()
                 .root(dir.path().to_str().unwrap())
@@ -540,17 +529,18 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
 
-        let SstInfo {
-            start_timestamp,
-            end_timestamp,
-        } = writer
+        let SstInfo { time_range } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
 
-        assert_eq!(Some(Timestamp::new_millisecond(1000)), start_timestamp);
-        assert_eq!(Some(Timestamp::new_millisecond(2003)), end_timestamp);
-
+        assert_eq!(
+            Some((
+                Timestamp::new_millisecond(1000),
+                Timestamp::new_millisecond(2003)
+            )),
+            time_range
+        );
         let operator = ObjectStore::new(
             object_store::backend::fs::Builder::default()
                 .root(dir.path().to_str().unwrap())

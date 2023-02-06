@@ -185,18 +185,14 @@ impl<S: LogStore> FlushJob<S> {
             // TODO(hl): Check if random file name already exists in meta.
             let iter = m.iter(&iter_ctx)?;
             futures.push(async move {
-                let SstInfo {
-                    start_timestamp,
-                    end_timestamp,
-                } = self
+                let SstInfo { time_range } = self
                     .sst_layer
                     .write_sst(&file_name, iter, &WriteOptions::default())
                     .await?;
 
                 Ok(FileMeta {
                     file_name,
-                    start_timestamp,
-                    end_timestamp,
+                    time_range,
                     level: 0,
                 })
             });
