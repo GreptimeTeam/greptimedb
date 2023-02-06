@@ -8,7 +8,11 @@ pub(crate) mod data_frame {
     use datafusion::dataframe::DataFrame as DfDataFrame;
     use datafusion_expr::Expr as DfExpr;
     use rustpython_vm::builtins::{PyList, PyListRef};
-    use rustpython_vm::{pyclass as rspyclass, PyPayload, PyRef, PyResult, VirtualMachine};
+    use rustpython_vm::function::PyComparisonValue;
+    use rustpython_vm::types::{Comparable, PyComparisonOp};
+    use rustpython_vm::{
+        pyclass as rspyclass, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
+    };
 
     use crate::python::utils::block_on_async;
     #[rspyclass(module = "data_frame", name = "DataFrame")]
@@ -228,7 +232,7 @@ pub(crate) mod data_frame {
     }
 
     #[rspyclass(module = "data_frame", name = "Expr")]
-    #[derive(PyPayload, Debug)]
+    #[derive(PyPayload, Debug, Clone)]
     pub struct PyExpr {
         pub inner: DfExpr,
     }
@@ -249,43 +253,61 @@ pub(crate) mod data_frame {
         }
     }
 
-    #[rspyclass]
+    impl Comparable for PyExpr {
+        /// .
+        fn slot_richcompare(
+            zelf: &PyObject,
+            other: &PyObject,
+            op: PyComparisonOp,
+            vm: &VirtualMachine,
+        ) -> PyResult<rustpython_vm::function::Either<PyObjectRef, PyComparisonValue>> {
+            if let (Some(zelf), Some(other)) =
+                (zelf.downcast_ref::<Self>(), other.downcast_ref::<Self>())
+            {
+                let ret = zelf.richcompare((**other).clone(), op, vm)?;
+                let ret = ret.into_pyobject(vm);
+                Ok(rustpython_vm::function::Either::A(ret))
+            } else {
+                Err(vm.new_type_error(format!(
+                    "unexpected payload {zelf:?} and {other:?} for op {}",
+                    op.method_name(&vm.ctx).as_str()
+                )))
+            }
+        }
+        fn cmp(
+            _zelf: &rustpython_vm::Py<Self>,
+            _other: &PyObject,
+            _op: PyComparisonOp,
+            _vm: &VirtualMachine,
+        ) -> PyResult<PyComparisonValue> {
+            Ok(PyComparisonValue::NotImplemented)
+        }
+    }
+
+    #[rspyclass(with(Comparable))]
     impl PyExpr {
+        fn richcompare(
+            &self,
+            other: Self,
+            op: PyComparisonOp,
+            _vm: &VirtualMachine,
+        ) -> PyResult<Self> {
+            let f = match op {
+                PyComparisonOp::Eq => DfExpr::eq,
+                PyComparisonOp::Ne => DfExpr::not_eq,
+                PyComparisonOp::Gt => DfExpr::gt,
+                PyComparisonOp::Lt => DfExpr::lt,
+                PyComparisonOp::Ge => DfExpr::gt_eq,
+                PyComparisonOp::Le => DfExpr::lt_eq,
+            };
+            Ok(f(self.inner.clone(), other.inner).into())
+        }
         #[pymethod]
         fn alias(&self, name: String) -> PyResult<PyExpr> {
             Ok(self.inner.clone().alias(name).into())
         }
 
         // bunch of binary op function(not use macro for macro expansion order doesn't support)
-        #[pymethod(magic)]
-        fn eq(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().eq(other.inner.clone()).into())
-        }
-
-        #[pymethod(magic)]
-        fn ne(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().not_eq(other.inner.clone()).into())
-        }
-
-        #[pymethod(magic)]
-        fn le(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().lt_eq(other.inner.clone()).into())
-        }
-
-        #[pymethod(magic)]
-        fn lt(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().lt(other.inner.clone()).into())
-        }
-
-        #[pymethod(magic)]
-        fn ge(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().gt_eq(other.inner.clone()).into())
-        }
-
-        #[pymethod(magic)]
-        fn gt(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().gt(other.inner.clone()).into())
-        }
 
         #[pymethod(magic)]
         fn and(&self, other: PyExprRef) -> PyResult<PyExpr> {
