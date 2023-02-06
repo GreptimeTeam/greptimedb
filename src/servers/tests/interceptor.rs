@@ -15,8 +15,8 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use query::interceptor::SqlQueryInterceptor;
 use servers::error::{self, Result};
+use servers::interceptor::SqlQueryInterceptor;
 use session::context::{QueryContext, QueryContextRef};
 
 pub struct NoopInterceptor;

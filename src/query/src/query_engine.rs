@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod context;
+pub mod options;
 mod state;
 
 use std::sync::Arc;
