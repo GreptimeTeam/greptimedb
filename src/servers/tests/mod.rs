@@ -25,7 +25,7 @@ use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
 use servers::error::Result;
-use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
+use servers::query_handler::sql::{QueryHandler, ServerQueryHandlerRef};
 use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
 use table::test_util::MemTable;
@@ -55,7 +55,7 @@ impl DummyInstance {
 }
 
 #[async_trait]
-impl SqlQueryHandler for DummyInstance {
+impl QueryHandler for DummyInstance {
     async fn statement_query(
         &self,
         stmt: QueryStatement,
@@ -121,6 +121,6 @@ fn create_testing_script_handler(table: MemTable) -> ScriptHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }
 
-fn create_testing_sql_query_handler(table: MemTable) -> ServerSqlQueryHandlerRef {
+fn create_testing_sql_query_handler(table: MemTable) -> ServerQueryHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }

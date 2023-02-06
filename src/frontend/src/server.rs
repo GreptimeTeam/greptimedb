@@ -26,7 +26,7 @@ use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
 use servers::promql::PromqlServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
-use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
+use servers::query_handler::sql::ServerQueryHandlerAdaptor;
 use servers::server::Server;
 use snafu::ResultExt;
 use tokio::try_join;
@@ -87,7 +87,7 @@ impl Services {
             let mysql_server = MysqlServer::create_server(
                 mysql_io_runtime,
                 Arc::new(MysqlSpawnRef::new(
-                    ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
+                    ServerQueryHandlerAdaptor::arc(instance.clone()),
                     user_provider.clone(),
                 )),
                 Arc::new(MysqlSpawnConfig::new(
@@ -119,7 +119,7 @@ impl Services {
             );
 
             let pg_server = Box::new(PostgresServer::new(
-                ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
+                ServerQueryHandlerAdaptor::arc(instance.clone()),
                 opts.tls.clone(),
                 pg_io_runtime,
                 user_provider.clone(),
@@ -152,7 +152,7 @@ impl Services {
             let http_addr = parse_addr(&http_options.addr)?;
 
             let mut http_server = HttpServer::new(
-                ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
+                ServerQueryHandlerAdaptor::arc(instance.clone()),
                 http_options.clone(),
             );
             if let Some(user_provider) = user_provider.clone() {

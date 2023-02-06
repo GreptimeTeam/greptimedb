@@ -44,7 +44,7 @@ mod tests {
     use common_recordbatch::RecordBatches;
     use itertools::Itertools;
     use query::parser::QueryLanguage;
-    use servers::query_handler::sql::SqlQueryHandler;
+    use servers::query_handler::sql::QueryHandler;
     use session::context::QueryContext;
 
     use super::*;

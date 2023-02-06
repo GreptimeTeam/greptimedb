@@ -26,10 +26,10 @@ use crate::{create_testing_script_handler, create_testing_sql_query_handler};
 
 #[tokio::test]
 async fn test_sql_not_provided() {
-    let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
+    let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
     let Json(json) = http_handler::sql(
         State(ApiState {
-            sql_handler,
+            query_handler,
             script_handler: None,
         }),
         Query(http_handler::SqlQuery::default()),
@@ -49,11 +49,11 @@ async fn test_sql_output_rows() {
     common_telemetry::init_default_ut_logging();
 
     let query = create_query();
-    let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
+    let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
 
     let Json(json) = http_handler::sql(
         State(ApiState {
-            sql_handler,
+            query_handler,
             script_handler: None,
         }),
         query,
@@ -90,13 +90,13 @@ def test(n):
     return n;
 "#
     .to_string();
-    let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
+    let query_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
     let script_handler = create_testing_script_handler(MemTable::default_numbers_table());
     let body = RawBody(Body::from(script.clone()));
     let invalid_query = create_invalid_script_query();
     let Json(json) = script_handler::scripts(
         State(ApiState {
-            sql_handler: sql_handler.clone(),
+            query_handler: query_handler.clone(),
             script_handler: Some(script_handler.clone()),
         }),
         invalid_query,
@@ -110,7 +110,7 @@ def test(n):
     let exec = create_script_query();
     let Json(json) = script_handler::scripts(
         State(ApiState {
-            sql_handler,
+            query_handler,
             script_handler: Some(script_handler),
         }),
         exec,

@@ -46,7 +46,7 @@ use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
 use servers::promql::{PromqlHandler, PromqlHandlerRef};
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
-use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
+use servers::query_handler::sql::{QueryHandler, QueryHandlerRef};
 use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpentsdbProtocolHandler, PrometheusProtocolHandler, ScriptHandler,
     ScriptHandlerRef,
@@ -66,7 +66,7 @@ use crate::Plugins;
 #[async_trait]
 pub trait FrontendInstance:
     GrpcQueryHandler<Error = Error>
-    + SqlQueryHandler
+    + QueryHandler
     + OpentsdbProtocolHandler
     + InfluxdbLineProtocolHandler
     + PrometheusProtocolHandler
@@ -87,7 +87,7 @@ pub struct Instance {
 
     /// Script handler is None in distributed mode, only works on standalone mode.
     script_handler: Option<ScriptHandlerRef>,
-    sql_handler: SqlQueryHandlerRef,
+    sql_handler: QueryHandlerRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
     promql_handler: Option<PromqlHandlerRef>,
 
@@ -445,7 +445,7 @@ impl Instance {
 }
 
 #[async_trait]
-impl SqlQueryHandler for Instance {
+impl QueryHandler for Instance {
     async fn query(
         &self,
         query: QueryLanguage,

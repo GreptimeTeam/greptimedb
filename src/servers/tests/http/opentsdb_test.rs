@@ -21,7 +21,7 @@ use common_query::Output;
 use servers::error::{self, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::opentsdb::codec::DataPoint;
-use servers::query_handler::sql::SqlQueryHandler;
+use servers::query_handler::sql::QueryHandler;
 use servers::query_handler::OpentsdbProtocolHandler;
 use session::context::QueryContextRef;
 use tokio::sync::mpsc;
@@ -45,7 +45,7 @@ impl OpentsdbProtocolHandler for DummyInstance {
 }
 
 #[async_trait]
-impl SqlQueryHandler for DummyInstance {
+impl QueryHandler for DummyInstance {
     async fn statement_query(
         &self,
         _stmt: query::parser::QueryStatement,

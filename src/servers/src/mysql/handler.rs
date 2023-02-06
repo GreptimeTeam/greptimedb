@@ -32,11 +32,11 @@ use tokio::io::AsyncWrite;
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error::{self, Result};
 use crate::mysql::writer::MysqlResultWriter;
-use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::query_handler::sql::ServerQueryHandlerRef;
 
 // An intermediate shim for executing MySQL queries.
 pub struct MysqlInstanceShim {
-    query_handler: ServerSqlQueryHandlerRef,
+    query_handler: ServerQueryHandlerRef,
     salt: [u8; 20],
     session: Arc<Session>,
     user_provider: Option<UserProviderRef>,
@@ -44,7 +44,7 @@ pub struct MysqlInstanceShim {
 
 impl MysqlInstanceShim {
     pub fn create(
-        query_handler: ServerSqlQueryHandlerRef,
+        query_handler: ServerQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
         client_addr: SocketAddr,
     ) -> MysqlInstanceShim {

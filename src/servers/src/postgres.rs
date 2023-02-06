@@ -36,7 +36,7 @@ use session::context::{QueryContext, QueryContextRef};
 
 use self::auth_handler::PgLoginVerifier;
 use crate::auth::UserProviderRef;
-use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::query_handler::sql::ServerQueryHandlerRef;
 
 pub(crate) struct GreptimeDBStartupParameters {
     version: &'static str,
@@ -66,7 +66,7 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 }
 
 pub struct PostgresServerHandler {
-    query_handler: ServerSqlQueryHandlerRef,
+    query_handler: ServerQueryHandlerRef,
     login_verifier: PgLoginVerifier,
     force_tls: bool,
     param_provider: Arc<GreptimeDBStartupParameters>,
@@ -78,7 +78,7 @@ pub struct PostgresServerHandler {
 
 #[derive(Builder)]
 pub(crate) struct MakePostgresServerHandler {
-    query_handler: ServerSqlQueryHandlerRef,
+    query_handler: ServerQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
     #[builder(default = "Arc::new(GreptimeDBStartupParameters::new())")]
     param_provider: Arc<GreptimeDBStartupParameters>,

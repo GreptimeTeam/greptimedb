@@ -31,7 +31,7 @@ use tokio_rustls::rustls::ServerConfig;
 use crate::auth::UserProviderRef;
 use crate::error::{Error, Result};
 use crate::mysql::handler::MysqlInstanceShim;
-use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::query_handler::sql::ServerQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 
 // Default size of ResultSet write buffer: 100KB
@@ -40,13 +40,13 @@ const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;
 /// [`MysqlSpawnRef`] stores arc refs
 /// that should be passed to new [`MysqlInstanceShim`]s.
 pub struct MysqlSpawnRef {
-    query_handler: ServerSqlQueryHandlerRef,
+    query_handler: ServerQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
 }
 
 impl MysqlSpawnRef {
     pub fn new(
-        query_handler: ServerSqlQueryHandlerRef,
+        query_handler: ServerQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
     ) -> MysqlSpawnRef {
         MysqlSpawnRef {
@@ -55,7 +55,7 @@ impl MysqlSpawnRef {
         }
     }
 
-    fn query_handler(&self) -> ServerSqlQueryHandlerRef {
+    fn query_handler(&self) -> ServerQueryHandlerRef {
         self.query_handler.clone()
     }
     fn user_provider(&self) -> Option<UserProviderRef> {

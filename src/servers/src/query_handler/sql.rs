@@ -22,17 +22,20 @@ use session::context::QueryContextRef;
 
 use crate::error::{self, Result};
 
-pub type SqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
-pub type ServerSqlQueryHandlerRef = SqlQueryHandlerRef;
+pub type QueryHandlerRef = Arc<dyn QueryHandler + Send + Sync>;
+pub type ServerQueryHandlerRef = QueryHandlerRef;
 
 #[async_trait]
-pub trait SqlQueryHandler {
-    /// Execute a query statement.
+pub trait QueryHandler {
+    /// Execute a [QueryStatement].
     async fn statement_query(
         &self,
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output>;
+
+    /// Check if the given catalog and schema are valid.
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool>;
 
     async fn query(&self, query: QueryLanguage, query_ctx: QueryContextRef) -> Result<Output> {
         let stmt = QueryLanguageParser::parse(query)
@@ -44,6 +47,7 @@ pub trait SqlQueryHandler {
             .context(error::ExecuteQueryStatementSnafu)
     }
 
+    /// Execute a [QueryLanguage] that may return multiple [Output]s.
     async fn query_multiple(
         &self,
         query: QueryLanguage,
@@ -74,20 +78,18 @@ pub trait SqlQueryHandler {
             QueryLanguage::Promql(_) => vec![self.query(query, query_ctx).await],
         }
     }
-
-    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool>;
 }
 
-pub struct ServerSqlQueryHandlerAdaptor(SqlQueryHandlerRef);
+pub struct ServerQueryHandlerAdaptor(QueryHandlerRef);
 
-impl ServerSqlQueryHandlerAdaptor {
-    pub fn arc(handler: SqlQueryHandlerRef) -> Arc<Self> {
+impl ServerQueryHandlerAdaptor {
+    pub fn arc(handler: QueryHandlerRef) -> Arc<Self> {
         Arc::new(Self(handler))
     }
 }
 
 #[async_trait]
-impl SqlQueryHandler for ServerSqlQueryHandlerAdaptor {
+impl QueryHandler for ServerQueryHandlerAdaptor {
     async fn statement_query(
         &self,
         stmt: QueryStatement,

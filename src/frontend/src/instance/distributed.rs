@@ -41,7 +41,7 @@ use query::parser::QueryStatement;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
-use servers::query_handler::sql::SqlQueryHandler;
+use servers::query_handler::sql::QueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -380,7 +380,7 @@ impl DistInstance {
 }
 
 #[async_trait]
-impl SqlQueryHandler for DistInstance {
+impl QueryHandler for DistInstance {
     async fn statement_query(
         &self,
         stmt: QueryStatement,
@@ -596,7 +596,7 @@ fn find_partition_columns(
 mod test {
     use itertools::Itertools;
     use query::parser::QueryLanguage;
-    use servers::query_handler::sql::SqlQueryHandlerRef;
+    use servers::query_handler::sql::QueryHandlerRef;
     use session::context::QueryContext;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
@@ -719,7 +719,7 @@ ENGINE=mito",
         );
         dist_instance.query(sql, QueryContext::arc()).await.unwrap();
 
-        async fn assert_show_tables(instance: SqlQueryHandlerRef) {
+        async fn assert_show_tables(instance: QueryHandlerRef) {
             let query = QueryLanguage::Sql("show tables in test_show_tables".to_string());
             let output = instance.query(query, QueryContext::arc()).await.unwrap();
             match output {

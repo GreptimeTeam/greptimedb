@@ -21,7 +21,7 @@ use common_telemetry::timer;
 use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
 use servers::error as server_error;
 use servers::promql::PromqlHandler;
-use servers::query_handler::sql::SqlQueryHandler;
+use servers::query_handler::sql::QueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::ast::ObjectName;
@@ -207,7 +207,7 @@ pub fn table_idents_to_full_name(
 }
 
 #[async_trait]
-impl SqlQueryHandler for Instance {
+impl QueryHandler for Instance {
     async fn statement_query(
         &self,
         stmt: QueryStatement,

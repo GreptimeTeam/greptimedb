@@ -29,7 +29,7 @@ use super::PostgresServerHandler;
 use crate::auth::{Identity, Password, UserProviderRef};
 use crate::error;
 use crate::error::Result;
-use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::query_handler::sql::ServerQueryHandlerRef;
 
 pub(crate) struct PgLoginVerifier {
     user_provider: Option<UserProviderRef>,
@@ -238,7 +238,7 @@ enum DbResolution {
 /// A function extracted to resolve lifetime and readability issues:
 fn resolve_db_info<C>(
     client: &mut C,
-    query_handler: ServerSqlQueryHandlerRef,
+    query_handler: ServerQueryHandlerRef,
 ) -> PgWireResult<DbResolution>
 where
     C: ClientInfo + Unpin + Send,

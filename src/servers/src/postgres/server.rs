@@ -28,7 +28,7 @@ use tokio_rustls::TlsAcceptor;
 use super::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
 use crate::auth::UserProviderRef;
 use crate::error::Result;
-use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::query_handler::sql::ServerQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::TlsOption;
 
@@ -41,7 +41,7 @@ pub struct PostgresServer {
 impl PostgresServer {
     /// Creates a new Postgres server with provided query_handler and async runtime
     pub fn new(
-        query_handler: ServerSqlQueryHandlerRef,
+        query_handler: ServerQueryHandlerRef,
         tls: TlsOption,
         io_runtime: Arc<Runtime>,
         user_provider: Option<UserProviderRef>,

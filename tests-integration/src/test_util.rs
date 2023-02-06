@@ -42,7 +42,7 @@ use servers::grpc::GrpcServer;
 use servers::http::{HttpOptions, HttpServer};
 use servers::promql::PromqlServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
-use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
+use servers::query_handler::sql::ServerQueryHandlerAdaptor;
 use servers::server::Server;
 use servers::Mode;
 use snafu::ResultExt;
@@ -278,7 +278,7 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
     .await
     .unwrap();
     let http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(instance),
+        ServerQueryHandlerAdaptor::arc(instance),
         HttpOptions::default(),
     );
     (http_server.make_app(), guard)
@@ -300,7 +300,7 @@ pub async fn setup_test_http_app_with_frontend(
     .await
     .unwrap();
     let mut http_server = HttpServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(Arc::new(frontend)),
+        ServerQueryHandlerAdaptor::arc(Arc::new(frontend)),
         HttpOptions::default(),
     );
     http_server.set_script_handler(instance.clone());

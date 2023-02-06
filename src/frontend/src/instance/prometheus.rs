@@ -162,7 +162,7 @@ mod tests {
     use api::prometheus::remote::{Label, LabelMatcher, Sample};
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
     use query::parser::QueryLanguage;
-    use servers::query_handler::sql::SqlQueryHandler;
+    use servers::query_handler::sql::QueryHandler;
     use session::context::QueryContext;
 
     use super::*;

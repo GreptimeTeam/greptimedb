@@ -22,7 +22,7 @@ use servers::error::Error::InternalIo;
 use servers::grpc::GrpcServer;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
-use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
+use servers::query_handler::sql::ServerQueryHandlerAdaptor;
 use servers::server::Server;
 use servers::tls::TlsOption;
 use servers::Mode;
@@ -70,7 +70,7 @@ impl Services {
                 Some(MysqlServer::create_server(
                     mysql_io_runtime,
                     Arc::new(MysqlSpawnRef::new(
-                        ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
+                        ServerQueryHandlerAdaptor::arc(instance.clone()),
                         None,
                     )),
                     Arc::new(MysqlSpawnConfig::new(

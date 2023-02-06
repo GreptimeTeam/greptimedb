@@ -41,13 +41,13 @@ pub async fn sql(
     // TODO(fys): pass _user_info into query context
     _user_info: Extension<UserInfo>,
 ) -> Json<JsonResponse> {
-    let sql_handler = &state.sql_handler;
+    let query_handler = &state.query_handler;
     let start = Instant::now();
     let resp = if let Some(sql) = &params.sql {
-        match super::query_context_from_db(sql_handler.clone(), params.db) {
+        match super::query_context_from_db(query_handler.clone(), params.db) {
             Ok(query_ctx) => {
                 JsonResponse::from_output(
-                    sql_handler
+                    query_handler
                         .query_multiple(QueryLanguage::Sql(sql.clone()), query_ctx)
                         .await,
                 )
@@ -78,12 +78,12 @@ pub async fn promql(
     // TODO(fys): pass _user_info into query context
     _user_info: Extension<UserInfo>,
 ) -> Json<JsonResponse> {
-    let sql_handler = &state.sql_handler;
+    let query_handler = &state.query_handler;
     let start = Instant::now();
-    let resp = match super::query_context_from_db(sql_handler.clone(), None) {
+    let resp = match super::query_context_from_db(query_handler.clone(), None) {
         Ok(query_ctx) => {
             JsonResponse::from_output(
-                sql_handler
+                query_handler
                     .query_multiple(QueryLanguage::Promql(params.query), query_ctx)
                     .await,
             )

@@ -19,7 +19,7 @@ use common_error::prelude::BoxedError;
 use common_query::Output;
 use query::parser::QueryLanguage;
 use servers::query_handler::grpc::GrpcQueryHandler;
-use servers::query_handler::sql::SqlQueryHandler;
+use servers::query_handler::sql::QueryHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
@@ -40,7 +40,7 @@ impl GrpcQueryHandler for Instance {
                         err_msg: "Missing field 'QueryRequest.query'",
                     })?;
                 match query {
-                    Query::Sql(sql) => SqlQueryHandler::query(self, QueryLanguage::Sql(sql), ctx)
+                    Query::Sql(sql) => QueryHandler::query(self, QueryLanguage::Sql(sql), ctx)
                         .await
                         .map_err(BoxedError::new)
                         .context(error::ExecuteQueryStatementSnafu)?,

@@ -22,16 +22,16 @@ use datanode::error::Error as DatanodeError;
 use query::parser::QueryStatement;
 use servers::error as server_error;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
-use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
+use servers::query_handler::sql::{QueryHandler, QueryHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
 
-pub(crate) struct StandaloneSqlQueryHandler(SqlQueryHandlerRef);
+pub(crate) struct StandaloneSqlQueryHandler(QueryHandlerRef);
 
 #[async_trait]
-impl SqlQueryHandler for StandaloneSqlQueryHandler {
+impl QueryHandler for StandaloneSqlQueryHandler {
     async fn statement_query(
         &self,
         stmt: QueryStatement,
