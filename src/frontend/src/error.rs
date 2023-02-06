@@ -346,7 +346,10 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to describe schema for given statement, source: {}", source))]
-    DescribeStatement { source: query::error::Error },
+    DescribeStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

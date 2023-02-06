@@ -104,7 +104,12 @@ impl QueryEngine for DatafusionQueryEngine {
     }
 
     fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema> {
-        self.statement_to_plan(stmt, query_ctx)?.schema()
+        // TODO(sunng87): consider cache optmised logical plan between describe
+        // and execute
+        let plan = self.statement_to_plan(stmt, query_ctx)?;
+        let mut ctx = QueryEngineContext::new(self.state.clone());
+        let optimised_plan = self.optimize_logical_plan(&mut ctx, &plan)?;
+        optimised_plan.schema()
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
