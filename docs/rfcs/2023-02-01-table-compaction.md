@@ -82,7 +82,7 @@ We can first group SSTs in level n into buckets according to some predefined tim
 SSTs are compacted in a size-tired manner (find SSTs with similar size and compact them to level n+1). 
 SSTs from different time windows are neven compacted together.
 That strategy guarantees SSTs in each level are mainly sorted in timestamp order which boosts queries with 
-explict timestamp condition, while size-tired compaction minimizes the impact to foreground writes. 
+explicit timestamp condition, while size-tired compaction minimizes the impact to foreground writes. 
 
 ### Alternatives
 
