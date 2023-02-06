@@ -14,7 +14,7 @@
 
 use std::num::NonZeroUsize;
 use std::ops::DerefMut;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;
@@ -23,18 +23,19 @@ use opendal::layers::CachePolicy;
 use opendal::raw::output::Reader;
 use opendal::raw::{Accessor, RpDelete, RpRead};
 use opendal::{ErrorKind, OpDelete, OpRead, OpWrite, Result};
+use tokio::sync::Mutex;
 
 struct LruValue;
 
 #[derive(Debug)]
 pub struct LruCachePolicy {
-    lru_cache: Arc<RwLock<LruCache<String, LruValue>>>,
+    lru_cache: Arc<Mutex<LruCache<String, LruValue>>>,
 }
 
 impl LruCachePolicy {
     pub fn new(capacity: usize) -> Self {
         Self {
-            lru_cache: Arc::new(RwLock::new(LruCache::new(
+            lru_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(capacity).unwrap(),
             ))),
         }
@@ -61,7 +62,7 @@ impl CachePolicy for LruCachePolicy {
             match cache.read(&cache_path, OpRead::default()).await {
                 Ok(v) => {
                     // update lru when cache hit
-                    let mut lru_cache = lru_cache.write().unwrap();
+                    let mut lru_cache = lru_cache.lock().await;
                     lru_cache.get_or_insert(cache_path.clone(), || LruValue {});
                     Ok(v)
                 }
@@ -75,7 +76,7 @@ impl CachePolicy for LruCachePolicy {
                         Ok(v) => {
                             let r = {
                                 // push new cache file name to lru
-                                let mut lru_cache = lru_cache.write().unwrap();
+                                let mut lru_cache = lru_cache.lock().await;
                                 lru_cache.push(cache_path.clone(), LruValue {})
                             };
                             // delete the evicted cache file
@@ -103,7 +104,7 @@ impl CachePolicy for LruCachePolicy {
         let lru_cache = self.lru_cache.clone();
         Box::pin(async move {
             let cache_files: Vec<String> = {
-                let mut guard = lru_cache.write().unwrap();
+                let mut guard = lru_cache.lock().await;
                 let lru = guard.deref_mut();
                 let cache_files = lru
                     .iter()

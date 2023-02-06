@@ -19,6 +19,7 @@ use std::{fs, path};
 use backon::ExponentialBackoff;
 use catalog::remote::MetaKvBackend;
 use catalog::{CatalogManager, CatalogManagerRef, RegisterTableRequest};
+use common_base::readable_size::ReadableSize;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER_TABLE_ID};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::logging::info;
@@ -43,7 +44,9 @@ use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 use table::Table;
 
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig, WalConfig};
+use crate::datanode::{
+    DatanodeOptions, ObjectStoreConfig, WalConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE,
+};
 use crate::error::{
     self, CatalogSnafu, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu,
     NewCatalogSnafu, OpenLogStoreSnafu, Result,
@@ -241,21 +244,44 @@ pub(crate) async fn new_oss_object_store(store_config: &ObjectStoreConfig) -> Re
         config: store_config.clone(),
     })?;
 
-    let mut object_store = ObjectStore::new(accessor);
-    if let Some(path) = oss_config.cache_path.as_ref() {
-        let accessor =
-            FsBuilder::default()
-                .root(path)
-                .build()
-                .with_context(|_| error::InitBackendSnafu {
+    create_object_store_with_cache(ObjectStore::new(accessor), store_config)
+}
+
+fn create_object_store_with_cache(
+    object_store: ObjectStore,
+    store_config: &ObjectStoreConfig,
+) -> Result<ObjectStore> {
+    let (cache_path, cache_capacity) = match store_config {
+        ObjectStoreConfig::S3(s3_config) => {
+            let path = s3_config.cache_path.as_ref();
+            let capacity = s3_config
+                .cache_capacity
+                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
+            (path, capacity)
+        }
+        ObjectStoreConfig::Oss(oss_config) => {
+            let path = oss_config.cache_path.as_ref();
+            let capacity = oss_config
+                .cache_capacity
+                .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
+            (path, capacity)
+        }
+        _ => (None, ReadableSize(0)),
+    };
+
+    if let Some(path) = cache_path {
+        let cache_store =
+            ObjectStore::new(FsBuilder::default().root(path).build().with_context(|_| {
+                error::InitBackendSnafu {
                     config: store_config.clone(),
-                })?;
-        let cache_capacity = oss_config.cache_capacity.unwrap();
+                }
+            })?);
         let policy = LruCachePolicy::new(cache_capacity.0 as usize);
-        object_store =
-            object_store.layer(CacheLayer::new(ObjectStore::new(accessor)).with_policy(policy));
+        let cache_layer = CacheLayer::new(cache_store).with_policy(policy);
+        Ok(object_store.layer(cache_layer))
+    } else {
+        Ok(object_store)
     }
-    Ok(object_store)
 }
 
 pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {
@@ -288,21 +314,7 @@ pub(crate) async fn new_s3_object_store(store_config: &ObjectStoreConfig) -> Res
         config: store_config.clone(),
     })?;
 
-    let mut object_store = ObjectStore::new(accessor);
-    if let Some(path) = s3_config.cache_path.as_ref() {
-        let accessor =
-            FsBuilder::default()
-                .root(path)
-                .build()
-                .with_context(|_| error::InitBackendSnafu {
-                    config: store_config.clone(),
-                })?;
-        let cache_capacity = s3_config.cache_capacity.unwrap();
-        let policy = LruCachePolicy::new(cache_capacity.0 as usize);
-        object_store =
-            object_store.layer(CacheLayer::new(ObjectStore::new(accessor)).with_policy(policy));
-    }
-    Ok(object_store)
+    create_object_store_with_cache(ObjectStore::new(accessor), store_config)
 }
 
 pub(crate) async fn new_fs_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {

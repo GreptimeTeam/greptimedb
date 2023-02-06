@@ -25,6 +25,8 @@ use crate::error::Result;
 use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
+pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ObjectStoreConfig {
