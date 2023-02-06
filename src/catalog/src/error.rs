@@ -181,6 +181,12 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("{source}"))]
+    Internal {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display("Failed to execute system catalog table scan, source: {}", source))]
     SystemCatalogTableScanExec {
         #[snafu(backtrace)]
@@ -203,6 +209,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
+
+    #[snafu(display("Failed to serialize or deserialize catalog entry: {}", source))]
+    CatalogEntrySerde {
+        #[snafu(backtrace)]
+        source: common_catalog::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -224,7 +236,9 @@ impl ErrorExt for Error {
             Error::SystemCatalogTypeMismatch { .. } => StatusCode::Internal,
 
             Error::ReadSystemCatalog { source, .. } => source.status_code(),
-            Error::InvalidCatalogValue { source, .. } => source.status_code(),
+            Error::InvalidCatalogValue { source, .. } | Error::CatalogEntrySerde { source } => {
+                source.status_code()
+            }
 
             Error::TableExists { .. } => StatusCode::TableAlreadyExists,
             Error::TableNotExist { .. } => StatusCode::TableNotFound,
@@ -240,9 +254,11 @@ impl ErrorExt for Error {
             Error::MetaSrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
-            Error::InvalidTableSchema { source, .. } => source.status_code(),
-            Error::InvalidTableInfoInCatalog { .. } => StatusCode::Unexpected,
-            Error::SchemaProviderOperation { source } => source.status_code(),
+            Error::InvalidTableSchema { source, .. }
+            | Error::InvalidTableInfoInCatalog { source } => source.status_code(),
+            Error::SchemaProviderOperation { source } | Error::Internal { source } => {
+                source.status_code()
+            }
 
             Error::Unimplemented { .. } => StatusCode::Unsupported,
         }

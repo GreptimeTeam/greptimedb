@@ -170,8 +170,12 @@ impl<'a> TableRouteKey<'a> {
 
     #[inline]
     pub fn removed_key(&self) -> String {
-        format!("{}-{}", REMOVED_PREFIX, self.key())
+        to_removed_key(&self.key())
     }
+}
+
+pub(crate) fn to_removed_key(key: &str) -> String {
+    format!("{REMOVED_PREFIX}-{key}")
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Hash)]

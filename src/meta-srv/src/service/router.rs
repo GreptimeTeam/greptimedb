@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::meta::{
-    router_server, CreateRequest, DeleteRequest, Error, MoveValueRequest, Peer, PeerDict,
+    router_server, BatchPutRequest, CreateRequest, DeleteRequest, Error, KeyValue, MoveValueRequest, Peer, PeerDict, RangeRequest,
     PutRequest, Region, RegionRoute, ResponseHeader, RouteRequest, RouteResponse, Table, TableName,
     TableRoute, TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
+use table::metadata::RawTableInfo;
 use tonic::{Request, Response};
 
 use crate::error;
@@ -90,10 +93,19 @@ async fn handle_create(
         header,
         table_name,
         partitions,
+        table_info,
     } = req;
     let table_name = table_name.context(error::EmptyTableNameSnafu)?;
-    let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
 
+    let mut table_info: RawTableInfo =
+        serde_json::from_slice(&table_info).with_context(|_| error::DeserializeFromJsonSnafu {
+            input: format!(
+                "Corrupted table info: {}",
+                String::from_utf8_lossy(&table_info)
+            ),
+        })?;
+
+    let cluster_id = header.as_ref().map_or(0, |h| h.cluster_id);
     let peers = selector.select(cluster_id, &ctx).await?;
     if peers.is_empty() {
         let header = Some(ResponseHeader::failed(
@@ -106,13 +118,15 @@ async fn handle_create(
         });
     }
     let id = table_id_sequence.next().await?;
+    table_info.ident.table_id = id as u32;
+
     let table_route_key = TableRouteKey::with_table_name(id, &table_name)
         .key()
         .into_bytes();
 
     let table = Table {
         id,
-        table_name: Some(table_name),
+        table_name: Some(table_name.clone()),
         ..Default::default()
     };
     let mut region_routes = Vec::with_capacity(partitions.len());
@@ -139,13 +153,85 @@ async fn handle_create(
         peers: peers.clone(),
         table_route: Some(table_route.clone()),
     };
-    put_into_store(&ctx.kv_store, table_route_key, table_route_value).await?;
+
+    let table_global_key = TableGlobalKey {
+        catalog_name: table_name.catalog_name.clone(),
+        schema_name: table_name.schema_name.clone(),
+        table_name: table_name.table_name.clone(),
+    }
+    .to_string()
+    .into_bytes();
+
+    let table_global_value = create_table_global_value(&table_route_value, table_info)?
+        .as_bytes()
+        .context(error::InvalidCatalogValueSnafu)?;
+
+    let req = BatchPutRequest {
+        kvs: vec![
+            KeyValue {
+                key: table_global_key,
+                value: table_global_value,
+            },
+            KeyValue {
+                key: table_route_key,
+                value: table_route_value.into(),
+            },
+        ],
+        prev_kv: true,
+        ..Default::default()
+    };
+
+    let resp = ctx.kv_store.batch_put(req).await?;
+    if !resp.prev_kvs.is_empty() {
+        warn!(
+            "Caution: table meta values are replaced! \
+            Maybe last creation procedure for table {table_name:?} was aborted?"
+        );
+    }
 
     let header = Some(ResponseHeader::success(cluster_id));
     Ok(RouteResponse {
         header,
         peers,
         table_routes: vec![table_route],
+    })
+}
+
+fn create_table_global_value(
+    table_route_value: &TableRouteValue,
+    table_info: RawTableInfo,
+) -> Result<TableGlobalValue> {
+    let peers = &table_route_value.peers;
+    let region_routes = &table_route_value
+        .table_route
+        .as_ref()
+        .context(error::UnexpectedSnafu {
+            violated: "table route should have been set",
+        })?
+        .region_routes;
+
+    let node_id = peers[region_routes[0].leader_peer_index as usize].id;
+
+    let mut regions_id_map = HashMap::with_capacity(region_routes.len());
+    for route in region_routes.iter() {
+        let node_id = peers[route.leader_peer_index as usize].id;
+        let region_id = route
+            .region
+            .as_ref()
+            .context(error::UnexpectedSnafu {
+                violated: "region should have been set",
+            })?
+            .id as u32;
+        regions_id_map
+            .entry(node_id)
+            .or_insert_with(Vec::new)
+            .push(region_id);
+    }
+
+    Ok(TableGlobalValue {
+        node_id,
+        regions_id_map,
+        table_info,
     })
 }
 
@@ -187,6 +273,9 @@ async fn handle_delete(req: DeleteRequest, ctx: Context) -> Result<RouteResponse
         .with_context(|| error::TableNotFoundSnafu {
             name: format!("{tgk}"),
         })?;
+
+    let _ = remove_table_global_value(&ctx.kv_store, &tgk).await?;
+
     let trk = TableRouteKey::with_table_global_key(tgv.table_id() as u64, &tgk);
     let (_, trv) = remove_table_route_value(&ctx.kv_store, &trk).await?;
     let (peers, table_routes) = fill_table_routes(vec![(tgv, trv)])?;
@@ -291,6 +380,20 @@ async fn remove_table_route_value(
     Ok((v.0, trv))
 }
 
+async fn remove_table_global_value(
+    kv_store: &KvStoreRef,
+    key: &TableGlobalKey,
+) -> Result<(Vec<u8>, TableGlobalValue)> {
+    let key = key.to_string();
+    let removed_key = crate::keys::to_removed_key(&key);
+    let kv = move_value(kv_store, key.as_bytes(), removed_key)
+        .await?
+        .context(error::TableNotFoundSnafu { name: key })?;
+    let value: TableGlobalValue =
+        TableGlobalValue::from_bytes(&kv.1).context(error::InvalidCatalogValueSnafu)?;
+    Ok((kv.0, value))
+}
+
 async fn get_table_global_value(
     kv_store: &KvStoreRef,
     key: &TableGlobalKey,
@@ -339,4 +442,18 @@ async fn put_into_store(
     let _ = kv_store.put(put_req).await?;
 
     Ok(())
+}
+
+async fn get_from_store(kv_store: &KvStoreRef, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+    let req = RangeRequest {
+        key,
+        ..Default::default()
+    };
+    let res = kv_store.range(req).await?;
+    let mut kvs = res.kvs;
+    if kvs.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(kvs.pop().unwrap().value))
+    }
 }

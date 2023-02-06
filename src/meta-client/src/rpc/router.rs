@@ -20,34 +20,40 @@ use api::v1::meta::{
     Table as PbTable,
 };
 use serde::{Deserialize, Serialize, Serializer};
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
+use table::metadata::RawTableInfo;
 
 use crate::error;
 use crate::error::Result;
 use crate::rpc::{util, Peer, TableName};
 
 #[derive(Debug, Clone)]
-pub struct CreateRequest {
+pub struct CreateRequest<'a> {
     pub table_name: TableName,
     pub partitions: Vec<Partition>,
+    pub table_info: &'a RawTableInfo,
 }
 
-impl From<CreateRequest> for PbCreateRequest {
-    fn from(mut req: CreateRequest) -> Self {
-        Self {
+impl TryFrom<CreateRequest<'_>> for PbCreateRequest {
+    type Error = error::Error;
+
+    fn try_from(mut req: CreateRequest) -> Result<Self> {
+        Ok(Self {
             header: None,
             table_name: Some(req.table_name.into()),
             partitions: req.partitions.drain(..).map(Into::into).collect(),
-        }
+            table_info: serde_json::to_vec(&req.table_info).context(error::SerdeJsonSnafu)?,
+        })
     }
 }
 
-impl CreateRequest {
+impl<'a> CreateRequest<'a> {
     #[inline]
-    pub fn new(table_name: TableName) -> Self {
+    pub fn new(table_name: TableName, table_info: &'a RawTableInfo) -> Self {
         Self {
             table_name,
             partitions: vec![],
+            table_info,
         }
     }
 
@@ -302,8 +308,49 @@ mod tests {
         RouteResponse as PbRouteResponse, Table as PbTable, TableName as PbTableName,
         TableRoute as PbTableRoute,
     };
+    use chrono::DateTime;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, RawSchema};
+    use table::metadata::{RawTableMeta, TableIdent, TableType};
 
     use super::*;
+
+    fn new_table_info() -> RawTableInfo {
+        RawTableInfo {
+            ident: TableIdent {
+                table_id: 0,
+                version: 0,
+            },
+            name: "t1".to_string(),
+            desc: None,
+            catalog_name: "c1".to_string(),
+            schema_name: "s1".to_string(),
+            meta: RawTableMeta {
+                schema: RawSchema {
+                    column_schemas: vec![
+                        ColumnSchema::new(
+                            "ts",
+                            ConcreteDataType::timestamp_millisecond_datatype(),
+                            false,
+                        ),
+                        ColumnSchema::new("c1", ConcreteDataType::string_datatype(), true),
+                        ColumnSchema::new("c2", ConcreteDataType::string_datatype(), true),
+                    ],
+                    timestamp_index: Some(0),
+                    version: 0,
+                },
+                primary_key_indices: vec![],
+                value_indices: vec![],
+                engine: "mito".to_string(),
+                next_column_id: 0,
+                region_numbers: vec![],
+                engine_options: HashMap::new(),
+                options: HashMap::new(),
+                created_on: DateTime::default(),
+            },
+            table_type: TableType::Base,
+        }
+    }
 
     #[test]
     fn test_create_request_trans() {
@@ -319,9 +366,9 @@ mod tests {
                     value_list: vec![b"v11".to_vec(), b"v22".to_vec()],
                 },
             ],
+            table_info: &new_table_info(),
         };
-
-        let into_req: PbCreateRequest = req.into();
+        let into_req: PbCreateRequest = req.try_into().unwrap();
 
         assert!(into_req.header.is_none());
         let table_name = into_req.table_name;

@@ -16,7 +16,7 @@ use std::any::Any;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use catalog::error::{self as catalog_err, InvalidCatalogValueSnafu};
+use catalog::error::{self as catalog_err, InvalidCatalogValueSnafu, Result as CatalogResult};
 use catalog::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, SchemaKey,
     TableGlobalKey, TableGlobalValue,
@@ -60,12 +60,10 @@ impl FrontendCatalogManager {
         self.backend.clone()
     }
 
-    #[cfg(test)]
     pub(crate) fn partition_manager(&self) -> PartitionRuleManagerRef {
         self.partition_manager.clone()
     }
 
-    #[cfg(test)]
     pub(crate) fn datanode_clients(&self) -> Arc<DatanodeClients> {
         self.datanode_clients.clone()
     }
@@ -79,15 +77,13 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(())
     }
 
-    async fn register_table(&self, _request: RegisterTableRequest) -> catalog::error::Result<bool> {
-        unimplemented!()
+    // TODO(LFC): Handle the table caching in (de)register_table.
+    async fn register_table(&self, _request: RegisterTableRequest) -> CatalogResult<bool> {
+        Ok(true)
     }
 
-    async fn deregister_table(
-        &self,
-        _request: DeregisterTableRequest,
-    ) -> catalog::error::Result<bool> {
-        unimplemented!()
+    async fn deregister_table(&self, _request: DeregisterTableRequest) -> CatalogResult<bool> {
+        Ok(true)
     }
 
     async fn register_schema(
@@ -289,7 +285,7 @@ impl SchemaProvider for FrontendSchemaProvider {
         let partition_manager = self.partition_manager.clone();
         let datanode_clients = self.datanode_clients.clone();
         let table_name = TableName::new(&self.catalog_name, &self.schema_name, name);
-        let result: Result<Option<TableRef>, catalog::error::Error> = std::thread::spawn(|| {
+        let result: CatalogResult<Option<TableRef>> = std::thread::spawn(|| {
             common_runtime::block_on_read(async move {
                 let res = match backend.get(table_global_key.to_string().as_bytes()).await? {
                     None => {
