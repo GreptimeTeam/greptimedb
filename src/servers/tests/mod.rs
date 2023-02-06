@@ -20,11 +20,11 @@ use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaPr
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
-use query::parser::{QueryLanguage, QueryLanguageParser};
+use query::parser::QueryStatement;
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
-use servers::error::{Error, Result};
+use servers::error::Result;
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
@@ -56,32 +56,16 @@ impl DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    type Error = Error;
-
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(query.to_owned())).unwrap();
+    async fn statement_query(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let plan = self
             .query_engine
             .statement_to_plan(stmt, query_ctx)
             .unwrap();
-        let output = self.query_engine.execute(&plan).await.unwrap();
-        vec![Ok(output)]
-    }
-
-    async fn do_promql_query(
-        &self,
-        _: &str,
-        _: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>> {
-        unimplemented!()
-    }
-
-    async fn statement_query(
-        &self,
-        _stmt: query::parser::QueryStatement,
-        _query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        unimplemented!()
+        Ok(self.query_engine.execute(&plan).await.unwrap())
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {

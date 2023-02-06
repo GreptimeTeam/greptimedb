@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use query::parser::QueryLanguage;
 use servers::error::Result;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::ScriptHandler;
@@ -35,9 +36,11 @@ def double_that(col)->vector[u32]:
     "#;
     instance.insert_script("double_that", src).await?;
     let res = instance
-        .do_query("select double_that(uint32s) from numbers", query_ctx)
+        .query(
+            QueryLanguage::Sql("select double_that(uint32s) from numbers".to_string()),
+            query_ctx,
+        )
         .await
-        .remove(0)
         .unwrap();
     match res {
         common_query::Output::AffectedRows(_) => (),

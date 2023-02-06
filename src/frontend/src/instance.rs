@@ -66,7 +66,7 @@ use crate::Plugins;
 #[async_trait]
 pub trait FrontendInstance:
     GrpcQueryHandler<Error = Error>
-    + SqlQueryHandler<Error = server_error::Error>
+    + SqlQueryHandler
     + OpentsdbProtocolHandler
     + InfluxdbLineProtocolHandler
     + PrometheusProtocolHandler
@@ -87,7 +87,7 @@ pub struct Instance {
 
     /// Script handler is None in distributed mode, only works on standalone mode.
     script_handler: Option<ScriptHandlerRef>,
-    sql_handler: SqlQueryHandlerRef<server_error::Error>,
+    sql_handler: SqlQueryHandlerRef,
     grpc_query_handler: GrpcQueryHandlerRef<Error>,
     promql_handler: Option<PromqlHandlerRef>,
 
@@ -403,21 +403,15 @@ impl Instance {
                 .context(error::ExecuteQueryStatementSnafu),
         }
     }
-}
 
-#[async_trait]
-impl SqlQueryHandler for Instance {
-    type Error = server_error::Error;
-
-    async fn do_query(
+    async fn do_query_multiple_sql(
         &self,
-        query: &str,
+        sql: QueryLanguage,
         query_ctx: QueryContextRef,
     ) -> Vec<server_error::Result<Output>> {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
-        let query = QueryLanguage::Sql(query.to_string());
         let query = match query_interceptor
-            .pre_parsing(query, query_ctx.clone())
+            .pre_parsing(sql, query_ctx.clone())
             .map_err(BoxedError::new)
             .context(server_error::ParseQuerySnafu)
         {
@@ -448,30 +442,41 @@ impl SqlQueryHandler for Instance {
             }
         }
     }
+}
 
-    async fn do_promql_query(
+#[async_trait]
+impl SqlQueryHandler for Instance {
+    async fn query(
         &self,
-        query: &str,
-        _: QueryContextRef,
-    ) -> Vec<server_error::Result<Output>> {
-        // if let Some(handler) = &self.promql_handler {
-        //     let result = handler
-        //         .do_query(query)
-        //         .await
-        //         .context(ExecutePromqlSnafu { query });
-        //     vec![result]
-        // } else {
-        //     vec![Err(NotSupportedSnafu {
-        //         feat: "PromQL Query",
-        //     }
-        //     .build())]
-        // }
-        todo!()
-        // let query = QueryLanguage::Promql(query.to_string());
+        query: QueryLanguage,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let query = query_interceptor
+            .pre_parsing(query, query_ctx.clone())
+            .map_err(BoxedError::new)
+            .context(server_error::ParseQuerySnafu)?;
+        let stmt = QueryLanguageParser::parse(query)
+            .map_err(BoxedError::new)
+            .context(server_error::ParseQuerySnafu)?;
+        let stmt = query_interceptor
+            .post_parsing(stmt, query_ctx.clone())
+            .map_err(BoxedError::new)
+            .context(server_error::ParseQuerySnafu)?;
+        self.statement_query(stmt, query_ctx).await
+    }
 
-        // let statement = QueryLanguageParser::parse(QueryLanguage::Promql(query.to_string()))
-        //     .map_err(BoxedError::new)
-        //     .context(server_error::ParseQuerySnafu)?;
+    async fn query_multiple(
+        &self,
+        query: QueryLanguage,
+        query_ctx: QueryContextRef,
+    ) -> Vec<server_error::Result<Output>> {
+        match query {
+            QueryLanguage::Sql(_) => self.do_query_multiple_sql(query, query_ctx).await,
+            QueryLanguage::Promql(_) => {
+                vec![self.query(query, query_ctx).await]
+            }
+        }
     }
 
     async fn statement_query(
@@ -561,7 +566,8 @@ mod tests {
         let standalone = tests::create_standalone_instance("test_execute_sql").await;
         let instance = standalone.instance;
 
-        let sql = r#"CREATE TABLE demo(
+        let sql = QueryLanguage::Sql(
+            r#"CREATE TABLE demo(
                             host STRING,
                             ts TIMESTAMP,
                             cpu DOUBLE NULL,
@@ -569,35 +575,31 @@ mod tests {
                             disk_util DOUBLE DEFAULT 9.9,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0)
-            .unwrap();
+                        ) engine=mito with(regions=1);"#
+                .to_string(),
+        );
+        let output = instance.query(sql, query_ctx.clone()).await.unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 0),
             _ => unreachable!(),
         }
 
-        let sql = r#"insert into demo(host, cpu, memory, ts) values
+        let sql = QueryLanguage::Sql(
+            r#"insert into demo(host, cpu, memory, ts) values
                                 ('frontend.host1', 1.1, 100, 1000),
                                 ('frontend.host2', null, null, 2000),
                                 ('frontend.host3', 3.3, 300, 3000)
-                                "#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0)
-            .unwrap();
+                                "#
+            .to_string(),
+        );
+        let output = instance.query(sql, query_ctx.clone()).await.unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 3),
             _ => unreachable!(),
         }
 
-        let sql = "select * from demo";
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0)
-            .unwrap();
+        let sql = QueryLanguage::Sql("select * from demo".to_string());
+        let output = instance.query(sql, query_ctx.clone()).await.unwrap();
         match output {
             Output::RecordBatches(_) => {
                 unreachable!("Output::RecordBatches");
@@ -621,11 +623,10 @@ mod tests {
             }
         };
 
-        let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0)
-            .unwrap();
+        let sql = QueryLanguage::Sql(
+            "select * from demo where ts>cast(1000000000 as timestamp)".to_string(),
+        );
+        let output = instance.query(sql, query_ctx.clone()).await.unwrap();
         match output {
             Output::RecordBatches(_) => {
                 unreachable!("Output::RecordBatches")
@@ -723,7 +724,8 @@ mod tests {
         plugins.insert::<SqlQueryInterceptorRef<Error>>(counter_hook.clone());
         Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
 
-        let sql = r#"CREATE TABLE demo(
+        let sql = QueryLanguage::Sql(
+            r#"CREATE TABLE demo(
                             host STRING,
                             ts TIMESTAMP,
                             cpu DOUBLE NULL,
@@ -731,11 +733,10 @@ mod tests {
                             disk_util DOUBLE DEFAULT 9.9,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+                        ) engine=mito with(regions=1);"#
+                .to_string(),
+        );
+        let output = instance.query(sql, QueryContext::arc()).await.unwrap();
 
         // assert that the hook is called 3 times
         assert_eq!(4, counter_hook.c.load(std::sync::atomic::Ordering::Relaxed));
@@ -782,7 +783,8 @@ mod tests {
         plugins.insert::<SqlQueryInterceptorRef<Error>>(hook.clone());
         Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
 
-        let sql = r#"CREATE TABLE demo(
+        let sql = QueryLanguage::Sql(
+            r#"CREATE TABLE demo(
                             host STRING,
                             ts TIMESTAMP,
                             cpu DOUBLE NULL,
@@ -790,35 +792,22 @@ mod tests {
                             disk_util DOUBLE DEFAULT 9.9,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0)
-            .unwrap();
+                        ) engine=mito with(regions=1);"#
+                .to_string(),
+        );
+        let output = instance.query(sql, query_ctx.clone()).await.unwrap();
 
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 0),
             _ => unreachable!(),
         }
 
-        let sql = r#"CREATE DATABASE tomcat"#;
-        if let Err(e) = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0)
-        {
-            assert_eq!(e.status_code(), StatusCode::Unsupported);
-        } else {
-            unreachable!();
-        }
+        let sql = QueryLanguage::Sql(r#"CREATE DATABASE tomcat"#.to_string());
+        let e = instance.query(sql, query_ctx.clone()).await.unwrap_err();
+        assert_eq!(e.status_code(), StatusCode::Unsupported);
 
-        let sql = r#"SHOW DATABASES"#;
-        if let Err(e) = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0)
-        {
-            assert_eq!(e.status_code(), StatusCode::Unsupported);
-        } else {
-            unreachable!();
-        }
+        let sql = QueryLanguage::Sql(r#"SHOW DATABASES"#.to_string());
+        let e = instance.query(sql, query_ctx).await.unwrap_err();
+        assert_eq!(e.status_code(), StatusCode::Unsupported);
     }
 }

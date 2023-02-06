@@ -43,6 +43,7 @@ mod tests {
     use common_query::Output;
     use common_recordbatch::RecordBatches;
     use itertools::Itertools;
+    use query::parser::QueryLanguage;
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
@@ -98,12 +99,13 @@ mod tests {
         assert!(result.is_ok());
 
         let output = instance
-            .do_query(
-                "select * from my_metric_1 order by greptime_timestamp",
+            .query(
+                QueryLanguage::Sql(
+                    "select * from my_metric_1 order by greptime_timestamp".to_string(),
+                ),
                 Arc::new(QueryContext::new()),
             )
             .await
-            .remove(0)
             .unwrap();
         match output {
             Output::Stream(stream) => {

@@ -17,10 +17,11 @@ use api::v1::query_request::Query;
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_query::Output;
+use query::parser::QueryLanguage;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
 use crate::instance::Instance;
@@ -39,19 +40,10 @@ impl GrpcQueryHandler for Instance {
                         err_msg: "Missing field 'QueryRequest.query'",
                     })?;
                 match query {
-                    Query::Sql(sql) => {
-                        let mut result = SqlQueryHandler::do_query(self, &sql, ctx).await;
-                        ensure!(
-                            result.len() == 1,
-                            error::NotSupportedSnafu {
-                                feat: "execute multiple statements in SQL query string through GRPC interface"
-                            }
-                        );
-                        result
-                            .remove(0)
-                            .map_err(BoxedError::new)
-                            .context(error::ExecuteQueryStatementSnafu)?
-                    }
+                    Query::Sql(sql) => SqlQueryHandler::query(self, QueryLanguage::Sql(sql), ctx)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(error::ExecuteQueryStatementSnafu)?,
                     Query::LogicalPlan(_) => {
                         return error::NotSupportedSnafu {
                             feat: "Execute LogicalPlan in Frontend",

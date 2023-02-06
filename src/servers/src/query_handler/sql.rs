@@ -22,25 +22,11 @@ use session::context::QueryContextRef;
 
 use crate::error::{self, Result};
 
-pub type SqlQueryHandlerRef<E> = Arc<dyn SqlQueryHandler<Error = E> + Send + Sync>;
-pub type ServerSqlQueryHandlerRef = SqlQueryHandlerRef<error::Error>;
+pub type SqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
+pub type ServerSqlQueryHandlerRef = SqlQueryHandlerRef;
 
 #[async_trait]
 pub trait SqlQueryHandler {
-    type Error: ErrorExt;
-
-    async fn do_query(
-        &self,
-        query: &str,
-        query_ctx: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>>;
-
-    async fn do_promql_query(
-        &self,
-        query: &str,
-        query_ctx: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>>;
-
     /// Execute a query statement.
     async fn statement_query(
         &self,
@@ -58,56 +44,50 @@ pub trait SqlQueryHandler {
             .context(error::ExecuteQueryStatementSnafu)
     }
 
-    fn is_valid_schema(
+    async fn query_multiple(
         &self,
-        catalog: &str,
-        schema: &str,
-    ) -> std::result::Result<bool, Self::Error>;
+        query: QueryLanguage,
+        query_ctx: QueryContextRef,
+    ) -> Vec<Result<Output>> {
+        match query {
+            QueryLanguage::Sql(_) => {
+                let stmts = QueryLanguageParser::parse_multiple(query)
+                    .map_err(BoxedError::new)
+                    .context(error::ParseQuerySnafu);
+                if let Err(e) = stmts {
+                    return vec![Err(e)];
+                }
+
+                let stmts = stmts.unwrap();
+                let mut outputs = Vec::with_capacity(stmts.len());
+                for stmt in stmts {
+                    let output = self
+                        .statement_query(stmt, query_ctx.clone())
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(error::ExecuteQueryStatementSnafu);
+                    outputs.push(output);
+                }
+
+                outputs
+            }
+            QueryLanguage::Promql(_) => vec![self.query(query, query_ctx).await],
+        }
+    }
+
+    fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool>;
 }
 
-pub struct ServerSqlQueryHandlerAdaptor<E>(SqlQueryHandlerRef<E>);
+pub struct ServerSqlQueryHandlerAdaptor(SqlQueryHandlerRef);
 
-impl<E> ServerSqlQueryHandlerAdaptor<E> {
-    pub fn arc(handler: SqlQueryHandlerRef<E>) -> Arc<Self> {
+impl ServerSqlQueryHandlerAdaptor {
+    pub fn arc(handler: SqlQueryHandlerRef) -> Arc<Self> {
         Arc::new(Self(handler))
     }
 }
 
 #[async_trait]
-impl<E> SqlQueryHandler for ServerSqlQueryHandlerAdaptor<E>
-where
-    E: ErrorExt + Send + Sync + 'static,
-{
-    type Error = error::Error;
-
-    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        self.0
-            .do_query(query, query_ctx)
-            .await
-            .into_iter()
-            .map(|x| {
-                x.map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu { query })
-            })
-            .collect()
-    }
-
-    async fn do_promql_query(
-        &self,
-        query: &str,
-        query_ctx: QueryContextRef,
-    ) -> Vec<Result<Output>> {
-        self.0
-            .do_promql_query(query, query_ctx)
-            .await
-            .into_iter()
-            .map(|x| {
-                x.map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu { query })
-            })
-            .collect()
-    }
-
+impl SqlQueryHandler for ServerSqlQueryHandlerAdaptor {
     async fn statement_query(
         &self,
         stmt: QueryStatement,

@@ -37,7 +37,7 @@ use meta_client::rpc::{
     TableName, TableRoute,
 };
 use partition::partition::{PartitionBound, PartitionDef};
-use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
+use query::parser::QueryStatement;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::error as server_error;
@@ -55,7 +55,7 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    ColumnDataTypeSnafu, DeserializePartitionSnafu,ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
+    ColumnDataTypeSnafu, DeserializePartitionSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
     TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
@@ -221,25 +221,6 @@ impl DistInstance {
             .context(error::ExecuteStatementSnafu)
     }
 
-    async fn handle_sql(
-        &self,
-        sql: &str,
-        query_ctx: QueryContextRef,
-    ) -> Vec<server_error::Result<Output>> {
-        let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql.to_string()))
-            .map_err(BoxedError::new)
-            .context(server_error::ParseQuerySnafu);
-        match stmt {
-            Ok(stmt) => {
-                let result = self.statement_query(stmt, query_ctx.clone()).await;
-                vec![result]
-            }
-
-            // results
-            Err(e) => vec![Err(e)],
-        }
-    }
-
     /// Handles distributed database creation
     async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
         let key = SchemaKey {
@@ -400,24 +381,6 @@ impl DistInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DistInstance {
-    type Error = server_error::Error;
-
-    async fn do_query(
-        &self,
-        query: &str,
-        query_ctx: QueryContextRef,
-    ) -> Vec<server_error::Result<Output>> {
-        self.handle_sql(query, query_ctx).await
-    }
-
-    async fn do_promql_query(
-        &self,
-        _: &str,
-        _: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>> {
-        unimplemented!()
-    }
-
     async fn statement_query(
         &self,
         stmt: QueryStatement,
@@ -632,6 +595,7 @@ fn find_partition_columns(
 #[cfg(test)]
 mod test {
     use itertools::Itertools;
+    use query::parser::QueryLanguage;
     use servers::query_handler::sql::SqlQueryHandlerRef;
     use session::context::QueryContext;
     use sql::dialect::GenericDialect;
@@ -690,23 +654,15 @@ ENGINE=mito",
         let instance = crate::tests::create_distributed_instance("test_show_databases").await;
         let dist_instance = &instance.dist_instance;
 
-        let sql = "create database test_show_databases";
-        let output = dist_instance
-            .handle_sql(sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+        let sql = QueryLanguage::Sql("create database test_show_databases".to_string());
+        let output = dist_instance.query(sql, QueryContext::arc()).await.unwrap();
         match output {
             Output::AffectedRows(rows) => assert_eq!(rows, 1),
             _ => unreachable!(),
         }
 
-        let sql = "show databases";
-        let output = dist_instance
-            .handle_sql(sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+        let sql = QueryLanguage::Sql("show databases".to_string());
+        let output = dist_instance.query(sql, QueryContext::arc()).await.unwrap();
         match output {
             Output::RecordBatches(r) => {
                 let expected1 = vec![
@@ -742,14 +698,11 @@ ENGINE=mito",
         let dist_instance = &instance.dist_instance;
         let datanode_instances = instance.datanodes;
 
-        let sql = "create database test_show_tables";
-        dist_instance
-            .handle_sql(sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+        let sql = QueryLanguage::Sql("create database test_show_tables".to_string());
+        dist_instance.query(sql, QueryContext::arc()).await.unwrap();
 
-        let sql = "
+        let sql = QueryLanguage::Sql(
+            "
             CREATE TABLE greptime.test_show_tables.dist_numbers (
                 ts BIGINT,
                 n INT,
@@ -761,20 +714,14 @@ ENGINE=mito",
                 PARTITION r2 VALUES LESS THAN (50),
                 PARTITION r3 VALUES LESS THAN (MAXVALUE),
             )
-            ENGINE=mito";
-        dist_instance
-            .handle_sql(sql, QueryContext::arc())
-            .await
-            .remove(0)
-            .unwrap();
+            ENGINE=mito"
+                .to_string(),
+        );
+        dist_instance.query(sql, QueryContext::arc()).await.unwrap();
 
-        async fn assert_show_tables(instance: SqlQueryHandlerRef<server_error::Error>) {
-            let sql = "show tables in test_show_tables";
-            let output = instance
-                .do_query(sql, QueryContext::arc())
-                .await
-                .remove(0)
-                .unwrap();
+        async fn assert_show_tables(instance: SqlQueryHandlerRef) {
+            let query = QueryLanguage::Sql("show tables in test_show_tables".to_string());
+            let output = instance.query(query, QueryContext::arc()).await.unwrap();
             match output {
                 Output::RecordBatches(r) => {
                     let expected = r#"+--------------+

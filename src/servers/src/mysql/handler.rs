@@ -22,6 +22,7 @@ use common_telemetry::{error, trace};
 use opensrv_mysql::{
     AsyncMysqlShim, ErrorKind, InitWriter, ParamParser, QueryResultWriter, StatementMetaWriter,
 };
+use query::parser::QueryLanguage;
 use rand::RngCore;
 use session::context::Channel;
 use session::Session;
@@ -80,7 +81,10 @@ impl MysqlInstanceShim {
                 vec![Ok(output)]
             } else {
                 self.query_handler
-                    .do_query(query, self.session.context())
+                    .query_multiple(
+                        QueryLanguage::Sql(query.to_string()),
+                        self.session.context(),
+                    )
                     .await
             };
 

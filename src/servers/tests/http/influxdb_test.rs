@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use axum::{http, Router};
 use axum_test_helper::TestClient;
 use common_query::Output;
-use servers::error::{Error, Result};
+use servers::error::Result;
 use servers::http::{HttpOptions, HttpServer};
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -48,20 +48,6 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    type Error = Error;
-
-    async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
-        unimplemented!()
-    }
-
-    async fn do_promql_query(
-        &self,
-        _: &str,
-        _: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>> {
-        unimplemented!()
-    }
-
     async fn statement_query(
         &self,
         _stmt: query::parser::QueryStatement,

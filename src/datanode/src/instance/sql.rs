@@ -208,34 +208,6 @@ pub fn table_idents_to_full_name(
 
 #[async_trait]
 impl SqlQueryHandler for Instance {
-    type Error = server_error::Error;
-
-    async fn do_query(
-        &self,
-        query: &str,
-        query_ctx: QueryContextRef,
-    ) -> Vec<server_error::Result<Output>> {
-        let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
-        // we assume sql string has only 1 statement in datanode
-        let result = self
-            .execute_sql(query, query_ctx)
-            .await
-            .map_err(BoxedError::new)
-            .context(server_error::ExecuteQueryStatementSnafu);
-        vec![result]
-    }
-
-    async fn do_promql_query(
-        &self,
-        query: &str,
-        query_ctx: QueryContextRef,
-    ) -> Vec<server_error::Result<Output>> {
-        // let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
-        // let result = self.execute_promql(query, query_ctx).await;
-        // vec![result]
-        todo!()
-    }
-
     async fn statement_query(
         &self,
         stmt: QueryStatement,

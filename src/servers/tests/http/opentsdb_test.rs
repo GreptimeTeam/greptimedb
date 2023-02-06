@@ -46,20 +46,6 @@ impl OpentsdbProtocolHandler for DummyInstance {
 
 #[async_trait]
 impl SqlQueryHandler for DummyInstance {
-    type Error = error::Error;
-
-    async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
-        unimplemented!()
-    }
-
-    async fn do_promql_query(
-        &self,
-        _: &str,
-        _: QueryContextRef,
-    ) -> Vec<std::result::Result<Output, Self::Error>> {
-        unimplemented!()
-    }
-
     async fn statement_query(
         &self,
         _stmt: query::parser::QueryStatement,

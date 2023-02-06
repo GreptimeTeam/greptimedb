@@ -29,6 +29,7 @@ use pgwire::api::stmt::NoopQueryParser;
 use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use query::parser::QueryLanguage;
 
 use super::PostgresServerHandler;
 use crate::error::{self, Error, Result};
@@ -41,7 +42,10 @@ impl SimpleQueryHandler for PostgresServerHandler {
     {
         let outputs = self
             .query_handler
-            .do_query(query, self.query_ctx.clone())
+            .query_multiple(
+                QueryLanguage::Sql(query.to_string()),
+                self.query_ctx.clone(),
+            )
             .await;
 
         let mut results = Vec::with_capacity(outputs.len());

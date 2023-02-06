@@ -567,7 +567,6 @@ mod test {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::error::Error;
     use crate::query_handler::sql::{ServerSqlQueryHandlerAdaptor, SqlQueryHandler};
 
     struct DummyInstance {
@@ -576,20 +575,6 @@ mod test {
 
     #[async_trait]
     impl SqlQueryHandler for DummyInstance {
-        type Error = Error;
-
-        async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
-            unimplemented!()
-        }
-
-        async fn do_promql_query(
-            &self,
-            _: &str,
-            _: QueryContextRef,
-        ) -> Vec<std::result::Result<Output, Self::Error>> {
-            unimplemented!()
-        }
-
         async fn statement_query(
             &self,
             _stmt: query::parser::QueryStatement,

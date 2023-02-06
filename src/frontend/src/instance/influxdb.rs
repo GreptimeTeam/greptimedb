@@ -43,6 +43,7 @@ mod test {
 
     use common_query::Output;
     use common_recordbatch::RecordBatches;
+    use query::parser::QueryLanguage;
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
@@ -77,13 +78,15 @@ monitor1,host=host2 memory=1027 1663840496400340001";
         };
         instance.exec(&request, QueryContext::arc()).await.unwrap();
 
-        let mut output = instance
-            .do_query(
-                "SELECT ts, host, cpu, memory FROM monitor1 ORDER BY ts",
+        let output = instance
+            .query(
+                QueryLanguage::Sql(
+                    "SELECT ts, host, cpu, memory FROM monitor1 ORDER BY ts".to_string(),
+                ),
                 QueryContext::arc(),
             )
-            .await;
-        let output = output.remove(0).unwrap();
+            .await
+            .unwrap();
         let Output::Stream(stream) = output else { unreachable!() };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(

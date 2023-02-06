@@ -20,6 +20,7 @@ use axum::extract::{Json, Query, State};
 use axum::Extension;
 use common_error::status_code::StatusCode;
 use common_telemetry::metric;
+use query::parser::QueryLanguage;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::UserInfo;
@@ -45,7 +46,12 @@ pub async fn sql(
     let resp = if let Some(sql) = &params.sql {
         match super::query_context_from_db(sql_handler.clone(), params.db) {
             Ok(query_ctx) => {
-                JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
+                JsonResponse::from_output(
+                    sql_handler
+                        .query_multiple(QueryLanguage::Sql(sql.clone()), query_ctx)
+                        .await,
+                )
+                .await
             }
             Err(resp) => resp,
         }
@@ -76,8 +82,12 @@ pub async fn promql(
     let start = Instant::now();
     let resp = match super::query_context_from_db(sql_handler.clone(), None) {
         Ok(query_ctx) => {
-            JsonResponse::from_output(sql_handler.do_promql_query(&params.query, query_ctx).await)
-                .await
+            JsonResponse::from_output(
+                sql_handler
+                    .query_multiple(QueryLanguage::Promql(params.query), query_ctx)
+                    .await,
+            )
+            .await
         }
         Err(resp) => resp,
     };

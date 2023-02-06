@@ -161,6 +161,7 @@ mod tests {
     use api::prometheus::remote::label_matcher::Type as MatcherType;
     use api::prometheus::remote::{Label, LabelMatcher, Sample};
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
+    use query::parser::QueryLanguage;
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
@@ -194,15 +195,14 @@ mod tests {
         let db = "prometheus";
         let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
 
-        assert!(SqlQueryHandler::do_query(
-            instance.as_ref(),
-            "CREATE DATABASE IF NOT EXISTS prometheus",
-            ctx.clone(),
-        )
-        .await
-        .get(0)
-        .unwrap()
-        .is_ok());
+        let _ = instance
+            .as_ref()
+            .query(
+                QueryLanguage::Sql("CREATE DATABASE IF NOT EXISTS prometheus".to_string()),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
 
         instance.write(write_request, ctx.clone()).await.unwrap();
 
