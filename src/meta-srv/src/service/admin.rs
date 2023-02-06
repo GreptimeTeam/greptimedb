@@ -30,7 +30,7 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = Router::new().route("/health", health::HealthHandler);
 
     let router = router.route(
-        "/heartbeart",
+        "/heartbeat",
         heartbeat::HeartBeatHandler {
             meta_peer_client: meta_srv.meta_peer_client(),
         },
