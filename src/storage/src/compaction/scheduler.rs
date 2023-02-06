@@ -12,20 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_telemetry::info;
+use common_telemetry::{debug, info};
 use table::metadata::TableId;
 use tokio::sync::{Notify, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::compaction::dedup_deque::DedupDeque;
+use crate::compaction::picker::{Picker, SimplePicker};
 use crate::compaction::rate_limit::{
     CascadeRateLimiter, RateLimitToken, RateLimitTokenPtr, RateLimiter,
 };
-use crate::compaction::task::CompactionTask;
+use crate::compaction::task::{CompactionTask, CompactionTaskImpl};
 use crate::error::Result;
 
 /// Table compaction request.
@@ -87,9 +89,13 @@ impl LocalCompactionScheduler {
             req_queue: request_queue.clone(),
             cancel_token: cancel_token.child_token(),
             limiter: Arc::new(CascadeRateLimiter::new(vec![])),
+            picker: SimplePicker::new(),
+            _phantom_data: PhantomData::<CompactionTaskImpl>::default(),
         };
-        let join_handle: JoinHandle<()> =
-            common_runtime::spawn_bg(async move { handler.run().await });
+        let join_handle = common_runtime::spawn_bg(async move {
+            debug!("Compaction handler loop spawned");
+            handler.run().await;
+        });
         Self {
             join_handle,
             request_queue,
@@ -100,17 +106,19 @@ impl LocalCompactionScheduler {
 }
 
 #[allow(unused)]
-struct CompactionHandler {
-    req_queue: Arc<RwLock<DedupDeque<TableId, CompactionRequest>>>,
+struct CompactionHandler<R, T: CompactionTask, P: Picker<R, T>> {
+    req_queue: Arc<RwLock<DedupDeque<TableId, R>>>,
     cancel_token: CancellationToken,
     task_notifier: Arc<Notify>,
-    limiter: Arc<CascadeRateLimiter<CompactionRequest>>,
+    limiter: Arc<CascadeRateLimiter<R>>,
+    picker: P,
+    _phantom_data: PhantomData<T>,
 }
 
 #[allow(unused)]
-impl CompactionHandler {
+impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
     /// Runs table compaction requests dispatch loop.
-    pub async fn run(self) {
+    pub async fn run(&self) {
         let task_notifier = self.task_notifier.clone();
         let limiter = self.limiter.clone();
         loop {
@@ -118,6 +126,7 @@ impl CompactionHandler {
                 _ = task_notifier.notified() => {
                     // poll requests as many as possible until rate limited, and then wait for
                     // notification (some task's finished).
+                    debug!("Notified, task size: {:?}", self.req_queue.read().await.len());
                     while let Some((table_id,  req)) = self.poll_task().await {
                         if let Ok(token) = limiter.acquire_token(&req) {
                             self.handle_compaction_request(req, token).await;
@@ -138,38 +147,95 @@ impl CompactionHandler {
     }
 
     #[inline]
-    async fn poll_task(&self) -> Option<(TableId, CompactionRequest)> {
+    async fn poll_task(&self) -> Option<(TableId, R)> {
         let mut queue = self.req_queue.write().await;
         queue.pop_front()
     }
 
     /// Puts request back to the front of request queue.
     #[inline]
-    async fn put_back_req(&self, table_id: TableId, req: CompactionRequest) {
+    async fn put_back_req(&self, table_id: TableId, req: R) {
         let mut queue = self.req_queue.write().await;
         queue.push_front(table_id, req);
     }
 
     // Handles compaction request, submit task to bg runtime.
-    async fn handle_compaction_request(
-        &self,
-        mut req: CompactionRequest,
-        token: RateLimitTokenPtr,
-    ) {
+    async fn handle_compaction_request(&self, mut req: R, token: RateLimitTokenPtr) -> Result<()> {
         let cloned_notify = self.task_notifier.clone();
-        let task = self.build_compaction_task(req).await;
+        let task = self.build_compaction_task(req).await?;
 
         common_runtime::spawn_bg(async move {
-            task.run();
-            // releases rate limit token
+            task.run().await; // TODO(hl): handle errors
+                              // releases rate limit token
             token.try_release();
             // notify scheduler to schedule next task when current task finishes.
             cloned_notify.notify_one();
         });
+
+        Ok(())
     }
 
     // TODO(hl): generate compaction task(find SSTs to compact along with the output of compaction)
-    async fn build_compaction_task(&self, req: CompactionRequest) -> CompactionTask {
-        todo!()
+    async fn build_compaction_task(&self, req: R) -> crate::error::Result<T> {
+        self.picker.pick(&req)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::Barrier;
+
+    use super::*;
+    use crate::compaction::picker::tests::MockPicker;
+    use crate::compaction::rate_limit::MaxInflightTaskLimiter;
+
+    #[tokio::test]
+    async fn test_schedule_handler() {
+        common_telemetry::init_default_ut_logging();
+        let queue = Arc::new(RwLock::new(DedupDeque::default()));
+        let task_finished = Arc::new(AtomicUsize::new(0));
+
+        let task_finished_clone = task_finished.clone();
+        let barrier = Arc::new(Barrier::new(3));
+        let barrier_clone = barrier.clone();
+        let picker = MockPicker {
+            cbs: vec![Arc::new(move || {
+                debug!("Running callback");
+                task_finished_clone.fetch_add(1, Ordering::Relaxed);
+                let barrier_clone_2 = barrier_clone.clone();
+                Box::pin(async move {
+                    barrier_clone_2.wait().await;
+                })
+            })],
+        };
+        let handler = Arc::new(CompactionHandler {
+            req_queue: queue.clone(),
+            cancel_token: Default::default(),
+            task_notifier: Arc::new(Default::default()),
+            limiter: Arc::new(CascadeRateLimiter::new(vec![Box::new(
+                MaxInflightTaskLimiter::new(3),
+            )])),
+            picker,
+            _phantom_data: Default::default(),
+        });
+
+        let handler_cloned = handler.clone();
+        common_runtime::spawn_bg(async move { handler_cloned.run().await });
+
+        queue
+            .write()
+            .await
+            .push_back(1, CompactionRequest::default());
+        handler.task_notifier.notify_one();
+        queue
+            .write()
+            .await
+            .push_back(2, CompactionRequest::default());
+        handler.task_notifier.notify_one();
+
+        barrier.wait().await;
+        assert_eq!(2, task_finished.load(Ordering::Relaxed));
     }
 }

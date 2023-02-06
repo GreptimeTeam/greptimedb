@@ -15,15 +15,20 @@
 use crate::error::Result;
 use crate::sst::FileHandle;
 
-#[allow(unused)]
-pub(crate) struct CompactionTask {
-    inputs: Vec<CompactionInput>,
+#[async_trait::async_trait]
+pub(crate) trait CompactionTask: Send + Sync + 'static {
+    async fn run(&self) -> Result<()>;
 }
 
 #[allow(unused)]
-impl CompactionTask {
+pub(crate) struct CompactionTaskImpl {
+    inputs: Vec<CompactionInput>,
+}
+
+#[async_trait::async_trait]
+impl CompactionTask for CompactionTaskImpl {
     // TODO(hl): Actual SST compaction tasks
-    pub async fn run(self) -> Result<()> {
+    async fn run(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -33,4 +38,41 @@ pub(crate) struct CompactionInput {
     input_level: u8,
     output_level: u8,
     file: FileHandle,
+}
+
+#[cfg(test)]
+pub mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+
+    use common_telemetry::debug;
+
+    use super::*;
+    use crate::compaction::task::CompactionTask;
+
+    pub type CallbackRef =
+        Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send + Sync>> + Send + Sync>;
+    pub struct NoopCompactionTask {
+        pub cbs: Vec<CallbackRef>,
+    }
+
+    impl NoopCompactionTask {
+        pub fn new(cbs: Vec<CallbackRef>) -> Self {
+            Self { cbs }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CompactionTask for NoopCompactionTask {
+        async fn run(&self) -> Result<()> {
+            debug!("Running NoopCompactionTask");
+            for cb in &self.cbs {
+                debug!("Running callback");
+                let f = cb();
+                f.await;
+            }
+            Ok(())
+        }
+    }
 }

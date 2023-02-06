@@ -77,9 +77,9 @@ impl<R> RateLimiter for MaxInflightTaskLimiter<R> {
             .fail();
         }
 
-        return Ok(Box::new(MaxInflightLimiterToken {
+        Ok(Box::new(MaxInflightLimiterToken {
             counter: self.inflight_task.clone(),
-        }));
+        }))
     }
 }
 
