@@ -12,41 +12,55 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compaction::scheduler::CompactionRequest;
+use crate::compaction::scheduler::CompactionRequestImpl;
 use crate::compaction::task::{CompactionTask, CompactionTaskImpl};
 
 /// Picker picks input SST files and build the compaction task.
 /// Different compaction strategy may implement different pickers.
-pub(crate) trait Picker<R, T: CompactionTask>: 'static {
+pub trait Picker<R, T: CompactionTask>: Send + 'static {
     fn pick(&self, req: &R) -> crate::error::Result<T>;
 }
 
 /// L0 -> L1 all-to-all compaction based on time windows.
 pub(crate) struct SimplePicker {}
 
+#[allow(unused)]
 impl SimplePicker {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl Picker<CompactionRequest, CompactionTaskImpl> for SimplePicker {
-    fn pick(&self, _req: &CompactionRequest) -> crate::error::Result<CompactionTaskImpl> {
+impl Picker<CompactionRequestImpl, CompactionTaskImpl> for SimplePicker {
+    fn pick(&self, _req: &CompactionRequestImpl) -> crate::error::Result<CompactionTaskImpl> {
         todo!()
     }
 }
 
 #[cfg(test)]
 pub mod tests {
+    use std::marker::PhantomData;
+
     use super::*;
+    use crate::compaction::scheduler::CompactionRequest;
     use crate::compaction::task::tests::{CallbackRef, NoopCompactionTask};
 
-    pub(crate) struct MockPicker {
+    pub(crate) struct MockPicker<R: CompactionRequest> {
         pub cbs: Vec<CallbackRef>,
+        _phantom_data: PhantomData<R>,
     }
 
-    impl Picker<CompactionRequest, NoopCompactionTask> for MockPicker {
-        fn pick(&self, _req: &CompactionRequest) -> crate::error::Result<NoopCompactionTask> {
+    impl<R: CompactionRequest> MockPicker<R> {
+        pub fn new(cbs: Vec<CallbackRef>) -> Self {
+            Self {
+                cbs,
+                _phantom_data: Default::default(),
+            }
+        }
+    }
+
+    impl<R: CompactionRequest> Picker<R, NoopCompactionTask> for MockPicker<R> {
+        fn pick(&self, _req: &R) -> crate::error::Result<NoopCompactionTask> {
             Ok(NoopCompactionTask::new(self.cbs.clone()))
         }
     }

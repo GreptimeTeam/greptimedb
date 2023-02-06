@@ -23,31 +23,35 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::compaction::dedup_deque::DedupDeque;
-use crate::compaction::picker::{Picker, SimplePicker};
+use crate::compaction::picker::Picker;
 use crate::compaction::rate_limit::{
     CascadeRateLimiter, RateLimitToken, RateLimitTokenPtr, RateLimiter,
 };
-use crate::compaction::task::{CompactionTask, CompactionTaskImpl};
+use crate::compaction::task::CompactionTask;
 use crate::error::Result;
 
 /// Table compaction request.
 #[derive(Default)]
-pub struct CompactionRequest {
+pub struct CompactionRequestImpl {
     table_id: TableId,
 }
 
-impl CompactionRequest {
+impl CompactionRequest for CompactionRequestImpl {
     #[inline]
-    pub fn table_id(&self) -> TableId {
+    fn table_id(&self) -> TableId {
         self.table_id
     }
 }
 
+pub trait CompactionRequest: Send + Sync + Default + 'static {
+    fn table_id(&self) -> TableId;
+}
+
 /// CompactionScheduler defines a set of API to schedule compaction tasks.
 #[async_trait]
-pub trait CompactionScheduler {
+pub trait CompactionScheduler<R> {
     /// Schedules a compaction request.
-    async fn schedule(&self, request: CompactionRequest) -> Result<()>;
+    async fn schedule(&self, request: R) -> Result<()>;
 
     /// Stops compaction scheduler.
     async fn stop(&self) -> Result<()>;
@@ -55,16 +59,19 @@ pub trait CompactionScheduler {
 
 /// Compaction task scheduler based on local state.
 #[allow(unused)]
-pub struct LocalCompactionScheduler {
-    request_queue: Arc<RwLock<DedupDeque<TableId, CompactionRequest>>>,
+pub struct LocalCompactionScheduler<R: CompactionRequest> {
+    request_queue: Arc<RwLock<DedupDeque<TableId, R>>>,
     cancel_token: CancellationToken,
     task_notifier: Arc<Notify>,
     join_handle: JoinHandle<()>,
 }
 
 #[async_trait]
-impl CompactionScheduler for LocalCompactionScheduler {
-    async fn schedule(&self, request: CompactionRequest) -> Result<()> {
+impl<R> CompactionScheduler<R> for LocalCompactionScheduler<R>
+where
+    R: CompactionRequest + Send + Sync,
+{
+    async fn schedule(&self, request: R) -> Result<()> {
         let mut queue = self.request_queue.write().await;
         queue.push_back(request.table_id(), request);
         self.task_notifier.notify_one();
@@ -78,9 +85,16 @@ impl CompactionScheduler for LocalCompactionScheduler {
 }
 
 #[allow(unused)]
-impl LocalCompactionScheduler {
-    pub fn new() -> Self {
-        let request_queue: Arc<RwLock<DedupDeque<TableId, CompactionRequest>>> =
+impl<R> LocalCompactionScheduler<R>
+where
+    R: CompactionRequest,
+{
+    pub fn new<P, T>(picker: P) -> Self
+    where
+        T: CompactionTask,
+        P: Picker<R, T> + Send + Sync,
+    {
+        let request_queue: Arc<RwLock<DedupDeque<TableId, R>>> =
             Arc::new(RwLock::new(DedupDeque::default()));
         let cancel_token = CancellationToken::new();
         let task_notifier = Arc::new(Notify::new());
@@ -89,8 +103,8 @@ impl LocalCompactionScheduler {
             req_queue: request_queue.clone(),
             cancel_token: cancel_token.child_token(),
             limiter: Arc::new(CascadeRateLimiter::new(vec![])),
-            picker: SimplePicker::new(),
-            _phantom_data: PhantomData::<CompactionTaskImpl>::default(),
+            picker,
+            _phantom_data: PhantomData::<T>::default(),
         };
         let join_handle = common_runtime::spawn_bg(async move {
             debug!("Compaction handler loop spawned");
@@ -200,16 +214,14 @@ mod tests {
         let task_finished_clone = task_finished.clone();
         let barrier = Arc::new(Barrier::new(3));
         let barrier_clone = barrier.clone();
-        let picker = MockPicker {
-            cbs: vec![Arc::new(move || {
-                debug!("Running callback");
-                task_finished_clone.fetch_add(1, Ordering::Relaxed);
-                let barrier_clone_2 = barrier_clone.clone();
-                Box::pin(async move {
-                    barrier_clone_2.wait().await;
-                })
-            })],
-        };
+        let picker = MockPicker::new(vec![Arc::new(move || {
+            debug!("Running callback");
+            task_finished_clone.fetch_add(1, Ordering::Relaxed);
+            let barrier_clone_2 = barrier_clone.clone();
+            Box::pin(async move {
+                barrier_clone_2.wait().await;
+            })
+        })]);
         let handler = Arc::new(CompactionHandler {
             req_queue: queue.clone(),
             cancel_token: Default::default(),
@@ -227,15 +239,59 @@ mod tests {
         queue
             .write()
             .await
-            .push_back(1, CompactionRequest::default());
+            .push_back(1, CompactionRequestImpl::default());
         handler.task_notifier.notify_one();
         queue
             .write()
             .await
-            .push_back(2, CompactionRequest::default());
+            .push_back(2, CompactionRequestImpl::default());
         handler.task_notifier.notify_one();
 
         barrier.wait().await;
+        assert_eq!(2, task_finished.load(Ordering::Relaxed));
+    }
+
+    #[derive(Default, Debug)]
+    struct MockRequest {
+        table_id: TableId,
+    }
+
+    impl CompactionRequest for MockRequest {
+        fn table_id(&self) -> TableId {
+            self.table_id
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scheduler() {
+        let task_finished = Arc::new(AtomicUsize::new(0));
+
+        let task_finished_clone = task_finished.clone();
+        let barrier = Arc::new(Barrier::new(3));
+        let barrier_clone = barrier.clone();
+
+        let picker = MockPicker::new(vec![Arc::new(move || {
+            debug!("Running callback");
+            task_finished_clone.fetch_add(1, Ordering::Relaxed);
+            let barrier_clone_2 = barrier_clone.clone();
+            Box::pin(async move {
+                barrier_clone_2.wait().await;
+            })
+        })]);
+        let scheduler = LocalCompactionScheduler::new(picker);
+
+        scheduler
+            .schedule(MockRequest { table_id: 1 })
+            .await
+            .unwrap();
+
+        scheduler
+            .schedule(MockRequest { table_id: 2 })
+            .await
+            .unwrap();
+
+        barrier.wait().await;
+
         assert_eq!(2, task_finished.load(Ordering::Relaxed));
     }
 }

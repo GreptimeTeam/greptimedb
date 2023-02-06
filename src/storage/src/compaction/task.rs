@@ -16,7 +16,7 @@ use crate::error::Result;
 use crate::sst::FileHandle;
 
 #[async_trait::async_trait]
-pub(crate) trait CompactionTask: Send + Sync + 'static {
+pub trait CompactionTask: Send + Sync + 'static {
     async fn run(&self) -> Result<()>;
 }
 
