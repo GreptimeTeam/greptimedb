@@ -12,29 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
+use query::parser::QueryLanguage;
 use servers::error::{self, Result};
 use servers::interceptor::SqlQueryInterceptor;
 use session::context::{QueryContext, QueryContextRef};
 
-pub struct NoopInterceptor;
+pub struct RewriteInterceptor;
 
-impl SqlQueryInterceptor for NoopInterceptor {
+impl SqlQueryInterceptor for RewriteInterceptor {
     type Error = error::Error;
 
-    fn pre_parsing<'a>(&self, query: &'a str, _query_ctx: QueryContextRef) -> Result<Cow<'a, str>> {
-        let modified_query = format!("{query};");
-        Ok(Cow::Owned(modified_query))
+    fn pre_parsing(
+        &self,
+        _query: QueryLanguage,
+        _query_ctx: QueryContextRef,
+    ) -> Result<QueryLanguage> {
+        let modified_query = QueryLanguage::Sql("SELECT 1;".to_string());
+        Ok(modified_query)
     }
 }
 
 #[test]
 fn test_default_interceptor_behaviour() {
-    let di = NoopInterceptor;
+    let di = RewriteInterceptor;
     let ctx = Arc::new(QueryContext::new());
 
-    let query = "SELECT 1";
-    assert_eq!("SELECT 1;", di.pre_parsing(query, ctx).unwrap());
+    let query = QueryLanguage::Promql("blabla[1m]".to_string());
+    assert_eq!(
+        QueryLanguage::Sql("SELECT 1;".to_string()),
+        di.pre_parsing(query, ctx).unwrap()
+    );
 }

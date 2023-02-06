@@ -41,6 +41,7 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
+use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
 use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
 use servers::promql::{PromqlHandler, PromqlHandlerRef};
@@ -52,8 +53,6 @@ use servers::query_handler::{
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
-use sql::dialect::GenericDialect;
-use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
 
 use crate::catalog::FrontendCatalogManager;
@@ -365,27 +364,15 @@ impl FrontendInstance for Instance {
     }
 }
 
-fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
-    ParserContext::create_with_dialect(sql, &GenericDialect {}).context(error::ParseSqlSnafu)
-}
-
 impl Instance {
-    async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
+    async fn query_statement(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         // TODO(sunng87): provide a better form to log or track statement
-        let query = &format!("{:?}", &stmt);
         match stmt.clone() {
-            Statement::CreateDatabase(_)
-            | Statement::ShowDatabases(_)
-            | Statement::CreateTable(_)
-            | Statement::ShowTables(_)
-            | Statement::DescribeTable(_)
-            | Statement::Explain(_)
-            | Statement::Query(_)
-            | Statement::Insert(_)
-            | Statement::Alter(_) => {
-                return self.sql_handler.do_statement_query(stmt, query_ctx).await;
-            }
-            Statement::DropTable(drop_stmt) => {
+            QueryStatement::Sql(Statement::DropTable(drop_stmt)) => {
                 let (catalog_name, schema_name, table_name) =
                     table_idents_to_full_name(drop_stmt.table_name(), query_ctx.clone())
                         .map_err(BoxedError::new)
@@ -405,8 +392,12 @@ impl Instance {
                     )
                     .await;
             }
-            Statement::ShowCreateTable(_) => error::NotSupportedSnafu { feat: query }.fail(),
-            Statement::Use(db) => self.handle_use(db, query_ctx),
+            QueryStatement::Sql(Statement::ShowCreateTable(_)) => error::NotSupportedSnafu {
+                feat: format!("{:?}", &stmt),
+            }
+            .fail(),
+            QueryStatement::Sql(Statement::Use(db)) => self.handle_use(db, query_ctx),
+            _ => self.sql_handler.statement_query(stmt, query_ctx).await,
         }
     }
 }
@@ -417,14 +408,20 @@ impl SqlQueryHandler for Instance {
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let query = QueryLanguage::Sql(query.to_string());
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
             Ok(q) => q,
             Err(e) => return vec![Err(e)],
         };
 
-        match parse_stmt(query.as_ref())
-            .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
-        {
+        match QueryLanguageParser::parse_multiple(query)
+            .context(error::ParseQuerySnafu)
+            .and_then(|stmts| {
+                stmts
+                    .into_iter()
+                    .map(|stmt| query_interceptor.post_parsing(stmt, query_ctx.clone()))
+                    .collect::<Result<Vec<_>>>()
+            }) {
             Ok(stmts) => {
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
@@ -470,9 +467,9 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_statement_query(
+    async fn statement_query(
         &self,
-        stmt: Statement,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
@@ -535,7 +532,6 @@ impl PromqlHandler for Instance {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
     use std::sync::atomic::AtomicU32;
 
     use session::context::QueryContext;
@@ -651,27 +647,34 @@ mod tests {
 
             fn pre_parsing<'a>(
                 &self,
-                query: &'a str,
+                query: QueryLanguage,
                 _query_ctx: QueryContextRef,
-            ) -> Result<Cow<'a, str>> {
+            ) -> Result<QueryLanguage> {
                 self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                assert!(query.starts_with("CREATE TABLE demo"));
-                Ok(Cow::Borrowed(query))
+                if let QueryLanguage::Sql(sql) = &query {
+                    assert!(sql.starts_with("CREATE TABLE demo"));
+                } else {
+                    panic!("unexpected query language");
+                }
+                Ok(query)
             }
 
             fn post_parsing(
                 &self,
-                statements: Vec<Statement>,
+                statement: QueryStatement,
                 _query_ctx: QueryContextRef,
-            ) -> Result<Vec<Statement>> {
+            ) -> Result<QueryStatement> {
                 self.c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                assert!(matches!(statements[0], Statement::CreateTable(_)));
-                Ok(statements)
+                assert!(matches!(
+                    statement,
+                    QueryStatement::Sql(Statement::CreateTable(_))
+                ));
+                Ok(statement)
             }
 
             fn pre_execute(
                 &self,
-                _statement: &Statement,
+                _statement: &QueryStatement,
                 _plan: Option<&query::plan::LogicalPlan>,
                 _query_ctx: QueryContextRef,
             ) -> Result<()> {
@@ -737,21 +740,20 @@ mod tests {
 
             fn post_parsing(
                 &self,
-                statements: Vec<Statement>,
+                statement: QueryStatement,
                 _query_ctx: QueryContextRef,
-            ) -> Result<Vec<Statement>> {
-                for s in &statements {
-                    match s {
-                        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {
-                            return Err(Error::NotSupported {
-                                feat: "Database operations".to_owned(),
-                            })
-                        }
-                        _ => {}
+            ) -> Result<QueryStatement> {
+                match statement {
+                    QueryStatement::Sql(Statement::CreateDatabase(_))
+                    | QueryStatement::Sql(Statement::ShowDatabases(_)) => {
+                        return Err(Error::NotSupported {
+                            feat: "Database operations".to_owned(),
+                        })
                     }
+                    _ => {}
                 }
 
-                Ok(statements)
+                Ok(statement)
             }
         }
 
@@ -794,7 +796,7 @@ mod tests {
             unreachable!();
         }
 
-        let sql = r#"SELECT 1; SHOW DATABASES"#;
+        let sql = r#"SHOW DATABASES"#;
         if let Err(e) = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
             .await
             .remove(0)

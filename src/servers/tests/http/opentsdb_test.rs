@@ -60,9 +60,9 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
-    async fn do_statement_query(
+    async fn statement_query(
         &self,
-        _stmt: sql::statements::statement::Statement,
+        _stmt: query::parser::QueryStatement,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
         unimplemented!()

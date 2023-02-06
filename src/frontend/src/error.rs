@@ -56,6 +56,12 @@ pub enum Error {
         source: sql::error::Error,
     },
 
+    #[snafu(display("Failed to parse query, source: {}", source))]
+    ParseQuery {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
         #[snafu(backtrace)]
@@ -407,7 +413,9 @@ impl ErrorExt for Error {
             | Error::FindNewColumnsOnInsertion { source } => source.status_code(),
 
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
-            Error::ExecuteStatement { source, .. } => source.status_code(),
+            Error::ExecuteStatement { source, .. } | Error::ParseQuery { source } => {
+                source.status_code()
+            }
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,

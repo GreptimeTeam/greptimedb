@@ -224,14 +224,13 @@ impl SqlQueryHandler for Instance {
         vec![result]
     }
 
-    async fn do_statement_query(
+    async fn statement_query(
         &self,
-        stmt: Statement,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
-        self.execute_stmt(QueryStatement::Sql(stmt), query_ctx)
-            .await
+        self.execute_stmt(stmt, query_ctx).await
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {

@@ -27,7 +27,7 @@ use sql::statements::statement::Statement;
 use crate::error::{MultipleStatementsSnafu, QueryParseSnafu, Result};
 use crate::metric::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryLanguage {
     Sql(String),
     Promql(String),
@@ -47,6 +47,23 @@ impl QueryLanguageParser {
             QueryLanguage::Sql(sql) => Self::parse_sql(&sql),
             QueryLanguage::Promql(promql) => Self::parse_promql(&promql),
         }
+    }
+
+    pub fn parse_multiple(query: QueryLanguage) -> Result<Vec<QueryStatement>> {
+        match query {
+            QueryLanguage::Sql(sql) => Self::parse_multiple_sql(&sql),
+            QueryLanguage::Promql(promql) => Self::parse_promql(&promql).map(|stmt| vec![stmt]),
+        }
+    }
+
+    fn parse_multiple_sql(query: &str) -> Result<Vec<QueryStatement>> {
+        let _timer = timer!(METRIC_PARSE_SQL_ELAPSED);
+        let mut statements = ParserContext::create_with_dialect(query, &GenericDialect {})
+            .map_err(BoxedError::new)
+            .context(QueryParseSnafu {
+                query: query.to_string(),
+            })?;
+        Ok(statements.drain(..).map(QueryStatement::Sql).collect())
     }
 
     fn parse_sql(sql: &str) -> Result<QueryStatement> {

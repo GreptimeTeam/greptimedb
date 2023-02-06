@@ -37,7 +37,7 @@ use meta_client::rpc::{
     TableName, TableRoute,
 };
 use partition::partition::{PartitionBound, PartitionDef};
-use query::parser::QueryStatement;
+use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::query_handler::sql::SqlQueryHandler;
@@ -54,12 +54,11 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
-    ColumnDataTypeSnafu, DeserializePartitionSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
-    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
-    TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
+    ColumnDataTypeSnafu, DeserializePartitionSnafu, ParseQuerySnafu, ParseSqlSnafu,
+    PrimaryKeyNotFoundSnafu, RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu,
+    StartMetaClientSnafu, TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
-use crate::instance::parse_stmt;
 use crate::sql::insert_to_request;
 
 #[derive(Clone)]
@@ -142,7 +141,7 @@ impl DistInstance {
         Ok(Output::AffectedRows(0))
     }
 
-    async fn handle_statement(
+    async fn handle_sql_statement(
         &self,
         stmt: Statement,
         query_ctx: QueryContextRef,
@@ -206,25 +205,31 @@ impl DistInstance {
         .context(error::ExecuteStatementSnafu)
     }
 
+    async fn handle_promql_statement(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let plan = self
+            .query_engine
+            .statement_to_plan(stmt, query_ctx)
+            .context(error::ExecuteStatementSnafu {})?;
+        self.query_engine
+            .execute(&plan)
+            .await
+            .context(error::ExecuteStatementSnafu)
+    }
+
     async fn handle_sql(&self, sql: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let stmts = parse_stmt(sql);
-        match stmts {
-            Ok(stmts) => {
-                let mut results = Vec::with_capacity(stmts.len());
-
-                for stmt in stmts {
-                    let result = self.handle_statement(stmt, query_ctx.clone()).await;
-                    let is_err = result.is_err();
-
-                    results.push(result);
-
-                    if is_err {
-                        break;
-                    }
-                }
-
-                results
+        let stmt = QueryLanguageParser::parse(QueryLanguage::Sql(sql.to_string()))
+            .context(ParseQuerySnafu);
+        match stmt {
+            Ok(stmt) => {
+                let result = self.statement_query(stmt, query_ctx.clone()).await;
+                vec![result]
             }
+
+            // results
             Err(e) => vec![Err(e)],
         }
     }
@@ -403,12 +408,15 @@ impl SqlQueryHandler for DistInstance {
         unimplemented!()
     }
 
-    async fn do_statement_query(
+    async fn statement_query(
         &self,
-        stmt: Statement,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        self.handle_statement(stmt, query_ctx).await
+        match stmt {
+            QueryStatement::Sql(stmt) => self.handle_sql_statement(stmt, query_ctx).await,
+            QueryStatement::Promql(_) => self.handle_promql_statement(stmt, query_ctx).await,
+        }
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {

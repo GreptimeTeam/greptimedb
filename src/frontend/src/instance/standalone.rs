@@ -18,11 +18,11 @@ use api::v1::greptime_request::Request as GreptimeRequest;
 use async_trait::async_trait;
 use common_query::Output;
 use datanode::error::Error as DatanodeError;
+use query::parser::QueryStatement;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
 
@@ -55,13 +55,13 @@ impl SqlQueryHandler for StandaloneSqlQueryHandler {
         unimplemented!()
     }
 
-    async fn do_statement_query(
+    async fn statement_query(
         &self,
-        stmt: Statement,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         self.0
-            .do_statement_query(stmt, query_ctx)
+            .statement_query(stmt, query_ctx)
             .await
             .context(error::InvokeDatanodeSnafu)
     }

@@ -17,8 +17,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_error::prelude::*;
 use common_query::Output;
+use query::parser::QueryStatement;
 use session::context::QueryContextRef;
-use sql::statements::statement::Statement;
 
 use crate::error::{self, Result};
 
@@ -41,9 +41,9 @@ pub trait SqlQueryHandler {
         query_ctx: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>>;
 
-    async fn do_statement_query(
+    async fn statement_query(
         &self,
-        stmt: Statement,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> std::result::Result<Output, Self::Error>;
 
@@ -52,11 +52,6 @@ pub trait SqlQueryHandler {
         catalog: &str,
         schema: &str,
     ) -> std::result::Result<bool, Self::Error>;
-
-    async fn foo(&self) -> std::result::Result<(), Self::Error> {
-        println!("");
-        unimplemented!()
-    }
 }
 
 pub struct ServerSqlQueryHandlerAdaptor<E>(SqlQueryHandlerRef<E>);
@@ -102,13 +97,13 @@ where
             .collect()
     }
 
-    async fn do_statement_query(
+    async fn statement_query(
         &self,
-        stmt: Statement,
+        stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         self.0
-            .do_statement_query(stmt, query_ctx)
+            .statement_query(stmt, query_ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteStatementSnafu)

@@ -12,45 +12,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use common_error::prelude::ErrorExt;
 use common_query::Output;
+use query::parser::{QueryLanguage, QueryStatement};
 use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
-use sql::statements::statement::Statement;
 
 /// SqlQueryInterceptor can track life cycle of a sql query and customize or
 /// abort its execution at given point.
 pub trait SqlQueryInterceptor {
     type Error: ErrorExt;
 
-    /// Called before a query string is parsed into sql statements.
-    /// The implementation is allowed to change the sql string if needed.
+    /// Called before a query is parsed into statement.
+    /// The implementation is allowed to change the query if needed.
     fn pre_parsing<'a>(
         &self,
-        query: &'a str,
+        query: QueryLanguage,
         _query_ctx: QueryContextRef,
-    ) -> Result<Cow<'a, str>, Self::Error> {
-        Ok(Cow::Borrowed(query))
+    ) -> Result<QueryLanguage, Self::Error> {
+        Ok(query)
     }
 
-    /// Called after sql is parsed into statements. This interceptor is called
-    /// on each statement and the implementation can alter the statement or
-    /// abort execution by raising an error.
+    /// Called after query is parsed into statement. This interceptor can alter
+    /// the statement or abort execution by raising an error.
     fn post_parsing(
         &self,
-        statements: Vec<Statement>,
+        statement: QueryStatement,
         _query_ctx: QueryContextRef,
-    ) -> Result<Vec<Statement>, Self::Error> {
-        Ok(statements)
+    ) -> Result<QueryStatement, Self::Error> {
+        Ok(statement)
     }
 
     /// Called before sql is actually executed. This hook is not called at the moment.
     fn pre_execute(
         &self,
-        _statement: &Statement,
+        _statement: &QueryStatement,
         _plan: Option<&LogicalPlan>,
         _query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
@@ -77,23 +75,23 @@ where
 {
     type Error = E;
 
-    fn pre_parsing<'a>(
+    fn pre_parsing(
         &self,
-        query: &'a str,
+        query: QueryLanguage,
         query_ctx: QueryContextRef,
-    ) -> Result<Cow<'a, str>, Self::Error> {
+    ) -> Result<QueryLanguage, Self::Error> {
         if let Some(this) = self {
             this.pre_parsing(query, query_ctx)
         } else {
-            Ok(Cow::Borrowed(query))
+            Ok(query)
         }
     }
 
     fn post_parsing(
         &self,
-        statements: Vec<Statement>,
+        statements: QueryStatement,
         query_ctx: QueryContextRef,
-    ) -> Result<Vec<Statement>, Self::Error> {
+    ) -> Result<QueryStatement, Self::Error> {
         if let Some(this) = self {
             this.post_parsing(statements, query_ctx)
         } else {
@@ -103,7 +101,7 @@ where
 
     fn pre_execute(
         &self,
-        statement: &Statement,
+        statement: &QueryStatement,
         plan: Option<&LogicalPlan>,
         query_ctx: QueryContextRef,
     ) -> Result<(), Self::Error> {
