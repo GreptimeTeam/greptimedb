@@ -100,6 +100,9 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to describe statement, source: {}", source))]
+    DescribeStatement { source: BoxedError },
+
     #[snafu(display("Failed to execute alter: {}, source: {}", query, source))]
     ExecuteAlter {
         query: String,
@@ -307,6 +310,7 @@ impl ErrorExt for Error {
             TlsRequired { .. } => StatusCode::Unknown,
             StartFrontend { source, .. } => source.status_code(),
             Auth { source, .. } => source.status_code(),
+            DescribeStatement { source } => source.status_code(),
 
             NotFoundAuthHeader { .. } => StatusCode::AuthHeaderNotFound,
             InvisibleASCII { .. }

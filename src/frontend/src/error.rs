@@ -344,6 +344,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
+
+    #[snafu(display("Failed to describe schema for given statement, source: {}", source))]
+    DescribeStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -407,7 +413,9 @@ impl ErrorExt for Error {
             | Error::FindNewColumnsOnInsertion { source } => source.status_code(),
 
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
-            Error::ExecuteStatement { source, .. } => source.status_code(),
+            Error::ExecuteStatement { source, .. } | Error::DescribeStatement { source } => {
+                source.status_code()
+            }
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,

@@ -68,6 +68,9 @@ pub enum Error {
 
     #[snafu(display("The SQL string has multiple statements, query: {}", query))]
     MultipleStatements { query: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to convert datatype: {}", source))]
+    Datatype { source: datatypes::error::Error },
 }
 
 impl ErrorExt for Error {
@@ -83,6 +86,7 @@ impl ErrorExt for Error {
             Catalog { source } => source.status_code(),
             VectorComputation { source } => source.status_code(),
             CreateRecordBatch { source } => source.status_code(),
+            Datatype { source } => source.status_code(),
             QueryExecution { source } | QueryPlan { source } => source.status_code(),
         }
     }
