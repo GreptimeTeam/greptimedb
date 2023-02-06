@@ -172,7 +172,7 @@ For future plans, check out [GreptimeDB roadmap](https://github.com/GreptimeTeam
 
 ## Community
 
-Our core team is thrilled too see you participate in any ways you like. When you are stuck, try to
+Our core team is thrilled to see you participate in any ways you like. When you are stuck, try to
 ask for help by filling an issue with a detailed description of what you were trying to do
 and what went wrong. If you have any questions or if you would like to get involved in our
 community, please check out:
