@@ -576,7 +576,7 @@ pub fn check_permission(
         Statement::Query(_) | Statement::Explain(_) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {}
-        // show create table and alter is not supported yet
+        // show create table and alter are not supported yet
         Statement::ShowCreateTable(_) | Statement::Alter(_) => {}
 
         Statement::Insert(insert) => {
