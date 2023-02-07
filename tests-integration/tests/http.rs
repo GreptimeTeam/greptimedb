@@ -317,7 +317,7 @@ pub async fn test_scripts_api(store_type: StorageType) {
     let client = TestClient::new(app);
 
     let res = client
-        .post("/v1/scripts?name=test")
+        .post("/v1/scripts?schema=schema_test&name=test")
         .body(
             r#"
 @copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
@@ -334,7 +334,10 @@ def test(n):
     assert!(body.output().is_none());
 
     // call script
-    let res = client.post("/v1/run-script?name=test").send().await;
+    let res = client
+        .post("/v1/run-script?schema=schema_test&name=test")
+        .send()
+        .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
 

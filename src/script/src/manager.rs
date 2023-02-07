@@ -65,20 +65,25 @@ impl ScriptManager {
         Ok(script)
     }
 
-    pub async fn insert_and_compile(&self, name: &str, script: &str) -> Result<Arc<PyScript>> {
+    pub async fn insert_and_compile(
+        &self,
+        schema: &str,
+        name: &str,
+        script: &str,
+    ) -> Result<Arc<PyScript>> {
         let compiled_script = self.compile(name, script).await?;
-        self.table.insert(name, script).await?;
+        self.table.insert(schema, name, script).await?;
         Ok(compiled_script)
     }
 
-    pub async fn execute(&self, name: &str) -> Result<Output> {
+    pub async fn execute(&self, schema: &str, name: &str) -> Result<Output> {
         let script = {
             let s = self.compiled.read().unwrap().get(name).cloned();
 
             if s.is_some() {
                 s
             } else {
-                self.try_find_script_and_compile(name).await?
+                self.try_find_script_and_compile(schema, name).await?
             }
         };
 
@@ -90,8 +95,12 @@ impl ScriptManager {
             .context(ExecutePythonSnafu { name })
     }
 
-    async fn try_find_script_and_compile(&self, name: &str) -> Result<Option<Arc<PyScript>>> {
-        let script = self.table.find_script_by_name(name).await?;
+    async fn try_find_script_and_compile(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<Option<Arc<PyScript>>> {
+        let script = self.table.find_script_by_name(schema, name).await?;
 
         Ok(Some(self.compile(name, &script).await?))
     }
@@ -149,9 +158,11 @@ mod tests {
             .unwrap();
         catalog_manager.start().await.unwrap();
 
+        let schema = "schema";
         let name = "test";
         mgr.table
             .insert(
+                schema,
                 name,
                 r#"
 @copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
@@ -168,7 +179,7 @@ def test(n):
         }
 
         // try to find and compile
-        let script = mgr.try_find_script_and_compile(name).await.unwrap();
+        let script = mgr.try_find_script_and_compile(schema, name).await.unwrap();
         assert!(script.is_some());
 
         {
