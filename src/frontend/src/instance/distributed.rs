@@ -38,7 +38,6 @@ use meta_client::rpc::{
 };
 use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::QueryStatement;
-use query::query_engine::options::QueryOptions;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::query_handler::sql::SqlQueryHandler;
@@ -60,7 +59,7 @@ use crate::error::{
     TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
 use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
-use crate::instance::{parse_stmt, validate_catalog_and_schema};
+use crate::instance::parse_stmt;
 use crate::sql::insert_to_request;
 use crate::Plugins;
 
@@ -70,7 +69,6 @@ pub(crate) struct DistInstance {
     catalog_manager: Arc<FrontendCatalogManager>,
     datanode_clients: Arc<DatanodeClients>,
     query_engine: QueryEngineRef,
-    plugins: Arc<Plugins>,
 }
 
 impl DistInstance {
@@ -88,7 +86,6 @@ impl DistInstance {
             catalog_manager,
             datanode_clients,
             query_engine,
-            plugins,
         }
     }
 
@@ -154,12 +151,6 @@ impl DistInstance {
         stmt: Statement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let need_validate = self
-            .plugins
-            .get::<QueryOptions>()
-            .map(|opts| opts.validate_table_references)
-            .unwrap_or_default();
-
         match stmt {
             Statement::Query(_) => {
                 // validation of query and explain is done in query engine
@@ -170,33 +161,18 @@ impl DistInstance {
                 self.query_engine.execute(&plan).await
             }
             Statement::CreateDatabase(stmt) => {
-                let schema = stmt.name.to_string();
-                validate_catalog_and_schema(need_validate, None, &schema, &query_ctx)?;
-
                 let expr = CreateDatabaseExpr {
-                    database_name: schema,
+                    database_name: stmt.name.to_string(),
                     create_if_not_exists: stmt.if_not_exists,
                 };
                 Ok(self.handle_create_database(expr).await?)
             }
             Statement::CreateTable(stmt) => {
                 let create_expr = &mut DefaultCreateExprFactory.create_expr_by_stmt(&stmt).await?;
-                validate_catalog_and_schema(
-                    need_validate,
-                    Some(&create_expr.catalog_name),
-                    &create_expr.schema_name,
-                    &query_ctx,
-                )?;
                 Ok(self.create_table(create_expr, stmt.partitions).await?)
             }
-            Statement::ShowDatabases(stmt) => {
-                // TODO(shuiyisong): validate catalog and schema
-                show_databases(stmt, self.catalog_manager.clone())
-            }
+            Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
             Statement::ShowTables(stmt) => {
-                if let Some(database) = &stmt.database {
-                    validate_catalog_and_schema(need_validate, None, database, &query_ctx)?;
-                }
                 show_tables(stmt, self.catalog_manager.clone(), query_ctx)
             }
             Statement::DescribeTable(stmt) => {
@@ -204,7 +180,6 @@ impl DistInstance {
                     table_idents_to_full_name(stmt.name(), query_ctx.clone())
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
-                validate_catalog_and_schema(need_validate, Some(&catalog), &schema, &query_ctx)?;
                 let table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table)
@@ -220,8 +195,6 @@ impl DistInstance {
             }
             Statement::Insert(insert) => {
                 let (catalog, schema, table) = insert.full_table_name().context(ParseSqlSnafu)?;
-                validate_catalog_and_schema(need_validate, Some(&catalog), &schema, &query_ctx)?;
-
                 let table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table)

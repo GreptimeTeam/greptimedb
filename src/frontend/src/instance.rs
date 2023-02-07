@@ -34,6 +34,7 @@ use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{debug, info};
+use datafusion_common::TableReference;
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
@@ -54,6 +55,7 @@ use servers::query_handler::{
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use sql::ast::ObjectName;
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
@@ -61,8 +63,8 @@ use sql::statements::statement::Statement;
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, Error, ExecutePromqlSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, Result,
-    SqlExecInterceptedSnafu,
+    self, Error, ExecutePromqlSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, ParseSqlSnafu,
+    Result, SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
@@ -389,6 +391,9 @@ impl Instance {
             .get::<QueryOptions>()
             .map(|opts| opts.validate_table_references)
             .unwrap_or_default();
+        if need_validate {
+            validate_catalog_and_schema(&stmt, &query_ctx)?;
+        }
 
         match stmt.clone() {
             Statement::CreateDatabase(_)
@@ -407,14 +412,6 @@ impl Instance {
                     table_idents_to_full_name(drop_stmt.table_name(), query_ctx.clone())
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
-
-                validate_catalog_and_schema(
-                    need_validate,
-                    Some(&catalog_name),
-                    &schema_name,
-                    &query_ctx,
-                )?;
-
                 let expr = DropTableExpr {
                     catalog_name,
                     schema_name,
@@ -431,10 +428,7 @@ impl Instance {
                     .await;
             }
             Statement::ShowCreateTable(_) => NotSupportedSnafu { feat: query }.fail(),
-            Statement::Use(db) => {
-                validate_catalog_and_schema(need_validate, None, &db, &query_ctx)?;
-                self.handle_use(db, query_ctx)
-            }
+            Statement::Use(db) => self.handle_use(db, query_ctx),
         }
     }
 }
@@ -570,22 +564,89 @@ impl PromqlHandler for Instance {
     }
 }
 
-pub fn validate_catalog_and_schema(
-    need_validate: bool,
-    catalog: Option<&str>,
-    schema: &str,
-    query_ctx: &QueryContextRef,
-) -> Result<()> {
-    if need_validate {
-        query::query_engine::options::validate_catalog_and_schema(catalog, schema, query_ctx)
-            .map_err(BoxedError::new)
-            .context(SqlExecInterceptedSnafu)?;
+pub fn validate_catalog_and_schema(stmt: &Statement, query_ctx: &QueryContextRef) -> Result<()> {
+    match stmt {
+        Statement::Query(_) | Statement::Explain(_) => {}
+        Statement::Insert(insert) => {
+            let (catalog, schema, _) = insert.full_table_name().context(ParseSqlSnafu)?;
+            validate_param(Some(&catalog), &schema, query_ctx)?;
+        }
+        Statement::CreateTable(stmt) => {
+            let tab_ref = obj_name_to_tab_ref(&stmt.name)?;
+            validate_tab_ref(tab_ref, query_ctx)?;
+        }
+        Statement::DropTable(drop_stmt) => {
+            let tab_ref = obj_name_to_tab_ref(drop_stmt.table_name())?;
+            validate_tab_ref(tab_ref, query_ctx)?;
+        }
+        Statement::CreateDatabase(stmt) => {
+            validate_param(None, &stmt.name.to_string(), query_ctx)?;
+        }
+        Statement::Alter(_) => {
+            unreachable!();
+        }
+        Statement::ShowDatabases(_) => {
+            // TODO(shuiyisong): validate catalog and schema
+        }
+        Statement::ShowTables(stmt) => {
+            if let Some(database) = &stmt.database {
+                validate_param(None, database, query_ctx)?;
+            }
+        }
+        Statement::ShowCreateTable(_) => {
+            NotSupportedSnafu {
+                feat: format!("{:?}", &stmt),
+            }
+            .fail()?;
+        }
+        Statement::DescribeTable(stmt) => {
+            let tab_ref = obj_name_to_tab_ref(stmt.name())?;
+            validate_tab_ref(tab_ref, query_ctx)?;
+        }
+        Statement::Use(db) => {
+            validate_param(None, db, query_ctx)?;
+        }
     }
     Ok(())
 }
 
+fn obj_name_to_tab_ref(obj: &ObjectName) -> Result<TableReference> {
+    match &obj.0[..] {
+        [table] => Ok(TableReference::Bare {
+            table: &table.value,
+        }),
+        [schema, table] => Ok(TableReference::Partial {
+            schema: &schema.value,
+            table: &table.value,
+        }),
+        [catalog, schema, table] => Ok(TableReference::Full {
+            catalog: &catalog.value,
+            schema: &schema.value,
+            table: &table.value,
+        }),
+        _ => error::InvalidSqlSnafu {
+            err_msg: format!(
+                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj}",
+            ),
+        }.fail(),
+    }
+}
+
+fn validate_tab_ref(tab_ref: TableReference, query_ctx: &QueryContextRef) -> Result<()> {
+    query::query_engine::options::validate_table_references(tab_ref, query_ctx)
+        .map_err(BoxedError::new)
+        .context(SqlExecInterceptedSnafu)
+}
+
+fn validate_param(catalog: Option<&str>, schema: &str, query_ctx: &QueryContextRef) -> Result<()> {
+    query::query_engine::options::validate_catalog_and_schema(catalog, schema, query_ctx)
+        .map_err(BoxedError::new)
+        .context(SqlExecInterceptedSnafu)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::assert_matches::assert_matches;
     use std::borrow::Cow;
     use std::sync::atomic::AtomicU32;
 
@@ -593,6 +654,63 @@ mod tests {
 
     use super::*;
     use crate::tests;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_exec_validation() {
+        let query_ctx = Arc::new(QueryContext::new());
+
+        let standalone = tests::create_standalone_instance("test_execute_sql").await;
+        let mut instance = standalone.instance;
+
+        let mut plugins = Plugins::new();
+        plugins.insert(QueryOptions {
+            validate_table_references: true,
+        });
+        Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
+
+        // test use database
+        let sql = r#"USE public;"#;
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .remove(0);
+        assert!(output.is_ok());
+
+        let sql = r#"USE other;"#;
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .remove(0);
+        assert_matches!(output.unwrap_err(), Error::SqlExecIntercepted { .. });
+
+        let create_table = r#"CREATE TABLE demo(
+                            host STRING,
+                            ts TIMESTAMP,
+                            cpu DOUBLE NULL,
+                            memory DOUBLE NULL,
+                            disk_util DOUBLE DEFAULT 9.9,
+                            TIME INDEX (ts),
+                            PRIMARY KEY(host)
+                        ) engine=mito with(regions=1);"#;
+        let output = SqlQueryHandler::do_query(&*instance, create_table, query_ctx.clone())
+            .await
+            .remove(0)
+            .unwrap();
+        match output {
+            Output::AffectedRows(rows) => assert_eq!(rows, 0),
+            _ => unreachable!(),
+        }
+
+        // test drop table
+        let sql = r#"DROP TABLE greptime.wrongschema.demo;"#;
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .remove(0);
+        assert_matches!(output.unwrap_err(), Error::SqlExecIntercepted { .. });
+        let sql = r#"DROP TABLE greptime.public.demo;"#;
+        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+            .await
+            .remove(0);
+        assert!(output.is_ok());
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_execute_sql() {
