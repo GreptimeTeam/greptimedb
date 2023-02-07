@@ -563,6 +563,7 @@ mod test {
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
+    use query::parser::QueryStatement;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
 
@@ -577,15 +578,15 @@ mod test {
     impl QueryHandler for DummyInstance {
         async fn statement_query(
             &self,
-            _stmt: query::parser::QueryStatement,
+            _stmt: QueryStatement,
             _query_ctx: QueryContextRef,
         ) -> Result<Output> {
             unimplemented!()
         }
 
-        fn do_describe(
+        fn describe(
             &self,
-            _stmt: sql::statements::statement::Statement,
+            _stmt: QueryStatement,
             _query_ctx: QueryContextRef,
         ) -> Result<Option<Schema>> {
             unimplemented!()

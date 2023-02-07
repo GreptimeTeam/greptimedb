@@ -509,8 +509,12 @@ impl QueryHandler for Instance {
             .context(server_error::CheckDatabaseValiditySnafu)
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
-        self.sql_handler.do_describe(stmt, query_ctx)
+    fn describe(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Option<Schema>> {
+        self.sql_handler.describe(stmt, query_ctx)
     }
 }
 

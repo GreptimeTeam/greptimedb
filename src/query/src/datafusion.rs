@@ -369,9 +369,8 @@ mod tests {
     #[test]
     fn test_describe() {
         let engine = create_test_engine();
-        let sql = "select sum(number) from numbers limit 20";
-
-        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+        let sql = QueryLanguage::Sql("select sum(number) from numbers limit 20".to_string());
+        let stmt = QueryLanguageParser::parse(sql).unwrap();
 
         let schema = engine
             .describe(stmt, Arc::new(QueryContext::new()))

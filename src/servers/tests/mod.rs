@@ -21,7 +21,7 @@ use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use datatypes::schema::Schema;
-use query::parser::{QueryLanguageParser, QueryStatement};
+use query::parser::QueryStatement;
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
@@ -70,12 +70,9 @@ impl QueryHandler for DummyInstance {
         Ok(self.query_engine.execute(&plan).await.unwrap())
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
-        if let Statement::Query(_) = stmt {
-            let schema = self
-                .query_engine
-                .describe(QueryStatement::Sql(stmt), query_ctx)
-                .unwrap();
+    fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+        if let QueryStatement::Sql(Statement::Query(_)) = stmt {
+            let schema = self.query_engine.describe(stmt, query_ctx).unwrap();
             Ok(Some(schema))
         } else {
             Ok(None)

@@ -19,7 +19,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
 use datatypes::schema::Schema;
-use query::parser::{QueryLanguageParser, QueryStatement};
+use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
 use servers::error as server_error;
 use servers::promql::PromqlHandler;
 use servers::query_handler::sql::QueryHandler;
@@ -229,12 +229,17 @@ impl QueryHandler for Instance {
             .context(server_error::CheckDatabaseValiditySnafu)
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
-        if let Statement::Query(_) = stmt {
+    fn describe(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Option<Schema>> {
+        if let QueryStatement::Sql(Statement::Query(_)) = stmt {
             self.query_engine
-                .describe(QueryStatement::Sql(stmt), query_ctx)
+                .describe(stmt, query_ctx)
                 .map(Some)
-                .context(error::DescribeStatementSnafu)
+                .map_err(BoxedError::new)
+                .context(server_error::DescribeStatementSnafu)
         } else {
             Ok(None)
         }

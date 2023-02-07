@@ -403,12 +403,17 @@ impl QueryHandler for DistInstance {
             .context(server_error::CheckDatabaseValiditySnafu)
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
-        if let Statement::Query(_) = stmt {
+    fn describe(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Option<Schema>> {
+        if let QueryStatement::Sql(Statement::Query(_)) = stmt {
             self.query_engine
-                .describe(QueryStatement::Sql(stmt), query_ctx)
+                .describe(stmt, query_ctx)
                 .map(Some)
-                .context(error::DescribeStatementSnafu)
+                .map_err(BoxedError::new)
+                .context(server_error::DescribeStatementSnafu)
         } else {
             Ok(None)
         }

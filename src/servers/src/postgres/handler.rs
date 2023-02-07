@@ -34,7 +34,7 @@ use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
-use query::parser::QueryLanguage;
+use query::parser::{QueryLanguage, QueryStatement};
 use sql::dialect::GenericDialect;
 use sql::parser::ParserContext;
 use sql::statements::statement::Statement;
@@ -376,9 +376,8 @@ impl ExtendedQueryHandler for PostgresServerHandler {
 
         let output = self
             .query_handler
-            .do_query(&sql, self.query_ctx.clone())
-            .await
-            .remove(0);
+            .query(QueryLanguage::Sql(sql), self.query_ctx.clone())
+            .await;
 
         output_to_query_response(output, false)
     }
@@ -394,7 +393,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
         let (stmt, _) = statement.statement();
         if let Some(schema) = self
             .query_handler
-            .do_describe(stmt.clone(), self.query_ctx.clone())
+            .describe(QueryStatement::Sql(stmt.clone()), self.query_ctx.clone())
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?
         {
             schema_to_pg(&schema).map_err(|e| PgWireError::ApiError(Box::new(e)))

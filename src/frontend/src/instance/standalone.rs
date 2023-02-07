@@ -49,10 +49,12 @@ impl QueryHandler for StandaloneSqlQueryHandler {
         self.0.is_valid_schema(catalog, schema)
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
-        self.0
-            .do_describe(stmt, query_ctx)
-            .context(error::InvokeDatanodeSnafu)
+    fn describe(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Option<Schema>> {
+        self.0.describe(stmt, query_ctx)
     }
 }
 

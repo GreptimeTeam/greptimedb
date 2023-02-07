@@ -20,7 +20,8 @@ use axum::{http, Router};
 use axum_test_helper::TestClient;
 use common_query::Output;
 use datatypes::schema::Schema;
-use servers::error::{Error, Result};
+use query::parser::QueryStatement;
+use servers::error::Result;
 use servers::http::{HttpOptions, HttpServer};
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::sql::QueryHandler;
@@ -51,15 +52,15 @@ impl InfluxdbLineProtocolHandler for DummyInstance {
 impl QueryHandler for DummyInstance {
     async fn statement_query(
         &self,
-        _stmt: query::parser::QueryStatement,
+        _stmt: QueryStatement,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
         unimplemented!()
     }
 
-    fn do_describe(
+    fn describe(
         &self,
-        _stmt: sql::statements::statement::Statement,
+        _stmt: QueryStatement,
         _query_ctx: QueryContextRef,
     ) -> Result<Option<Schema>> {
         unimplemented!()

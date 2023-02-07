@@ -49,7 +49,8 @@ pub trait QueryHandler {
     }
 
     // TODO(LFC): revisit this for mysql prepared statement
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>>;
+    /// Retrieve query schema without execute it.
+    fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Option<Schema>>;
 
     /// Execute a [QueryLanguage] that may return multiple [Output]s.
     async fn query_multiple(
@@ -106,9 +107,9 @@ impl QueryHandler for ServerQueryHandlerAdaptor {
             .context(error::ExecuteStatementSnafu)
     }
 
-    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+    fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
         self.0
-            .do_describe(stmt, query_ctx)
+            .describe(stmt, query_ctx)
             .map_err(BoxedError::new)
             .context(error::DescribeStatementSnafu)
     }
