@@ -16,9 +16,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use common_error::ext::ErrorExt;
-
-use crate::error::CompactionRateLimitedSnafu;
+use crate::error::{CompactionRateLimitedSnafu, Result};
 
 pub trait RateLimitToken {
     /// Releases the token.
@@ -27,7 +25,7 @@ pub trait RateLimitToken {
     fn try_release(&self);
 }
 
-pub type RateLimitTokenPtr = Box<dyn RateLimitToken + Send + Sync>;
+pub type BoxedRateLimitToken = Box<dyn RateLimitToken + Send + Sync>;
 
 impl<T: RateLimitToken + ?Sized> RateLimitToken for Box<T> {
     fn try_release(&self) {
@@ -37,14 +35,13 @@ impl<T: RateLimitToken + ?Sized> RateLimitToken for Box<T> {
 
 /// Rate limiter
 pub trait RateLimiter {
-    type Error: ErrorExt;
     type Request;
 
     /// Acquires a token from rate limiter. Returns `Err` on failure.  
-    fn acquire_token(&self, req: &Self::Request) -> Result<RateLimitTokenPtr, Self::Error>;
+    fn acquire_token(&self, req: &Self::Request) -> Result<BoxedRateLimitToken>;
 }
 
-pub type RateLimiterPtr<R, E> = Box<dyn RateLimiter<Error = E, Request = R> + Send + Sync>;
+pub type BoxedRateLimiter<R> = Box<dyn RateLimiter<Request = R> + Send + Sync>;
 
 /// Limits max inflight tasks number.
 pub struct MaxInflightTaskLimiter<R> {
@@ -65,10 +62,9 @@ impl<R> MaxInflightTaskLimiter<R> {
 }
 
 impl<R> RateLimiter for MaxInflightTaskLimiter<R> {
-    type Error = crate::error::Error;
     type Request = R;
 
-    fn acquire_token(&self, _: &Self::Request) -> Result<RateLimitTokenPtr, Self::Error> {
+    fn acquire_token(&self, _: &Self::Request) -> Result<BoxedRateLimitToken> {
         if self.inflight_task.fetch_add(1, Ordering::Relaxed) >= self.max_inflight_task {
             self.inflight_task.fetch_sub(1, Ordering::Relaxed);
             return CompactionRateLimitedSnafu {
@@ -95,20 +91,19 @@ impl RateLimitToken for MaxInflightLimiterToken {
 
 /// A composite rate limiter that allows token acquisition only when all internal limiters allow.
 pub struct CascadeRateLimiter<T> {
-    limits: Vec<RateLimiterPtr<T, crate::error::Error>>,
+    limits: Vec<BoxedRateLimiter<T>>,
 }
 
 impl<T> CascadeRateLimiter<T> {
-    pub fn new(limits: Vec<RateLimiterPtr<T, crate::error::Error>>) -> Self {
+    pub fn new(limits: Vec<BoxedRateLimiter<T>>) -> Self {
         Self { limits }
     }
 }
 
 impl<T> RateLimiter for CascadeRateLimiter<T> {
-    type Error = crate::error::Error;
     type Request = T;
 
-    fn acquire_token(&self, req: &Self::Request) -> Result<RateLimitTokenPtr, Self::Error> {
+    fn acquire_token(&self, req: &Self::Request) -> Result<BoxedRateLimitToken> {
         let mut res = vec![];
         for limit in &self.limits {
             match limit.acquire_token(req) {
@@ -127,7 +122,7 @@ impl<T> RateLimiter for CascadeRateLimiter<T> {
 
 /// Composite token that releases all acquired token when released.
 pub struct CompositeToken {
-    tokens: Vec<RateLimitTokenPtr>,
+    tokens: Vec<BoxedRateLimitToken>,
 }
 
 impl RateLimitToken for CompositeToken {

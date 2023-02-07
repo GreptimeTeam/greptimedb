@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::compaction::dedup_deque::DedupDeque;
 use crate::compaction::picker::Picker;
 use crate::compaction::rate_limit::{
-    CascadeRateLimiter, MaxInflightTaskLimiter, RateLimitToken, RateLimitTokenPtr, RateLimiter,
+    BoxedRateLimitToken, CascadeRateLimiter, MaxInflightTaskLimiter, RateLimitToken, RateLimiter,
 };
 use crate::compaction::task::CompactionTask;
 use crate::error::{Result, StopCompactionSchedulerSnafu};
@@ -101,9 +101,10 @@ where
 
     async fn stop(&self) -> Result<()> {
         self.cancel_token.cancel();
-        // safety: LocalCompactionScheduler is guaranteed to have a present join_handle field
-        let handle = { self.join_handle.lock().unwrap().take().unwrap() };
-        handle.await.context(StopCompactionSchedulerSnafu)?;
+        let handle = { self.join_handle.lock().unwrap().take() };
+        if let Some(handle) = handle {
+            handle.await.context(StopCompactionSchedulerSnafu)?;
+        }
         Ok(())
     }
 }
@@ -207,10 +208,15 @@ impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
     }
 
     // Handles compaction request, submit task to bg runtime.
-    async fn handle_compaction_request(&self, mut req: R, token: RateLimitTokenPtr) -> Result<()> {
+    async fn handle_compaction_request(
+        &self,
+        mut req: R,
+        token: BoxedRateLimitToken,
+    ) -> Result<()> {
         let cloned_notify = self.task_notifier.clone();
         let task = self.build_compaction_task(req).await?;
 
+        // TODO(hl): we need to keep a track of task handle here to allow task cancellation.
         common_runtime::spawn_bg(async move {
             task.run().await; // TODO(hl): handle errors
 
