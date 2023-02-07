@@ -26,7 +26,7 @@ use crate::sequence::Sequence;
 use crate::service::store::kv::{KvStoreRef, ResetableKvStoreRef};
 use crate::service::store::memory::MemStore;
 
-#[allow(dead_code)]
+// TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
     options: Option<MetaSrvOptions>,
     kv_store: Option<KvStoreRef>,
