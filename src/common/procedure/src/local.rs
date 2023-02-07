@@ -15,7 +15,7 @@
 mod lock;
 mod runner;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
@@ -38,15 +38,15 @@ use crate::{
 struct ExecMeta {
     /// Current procedure state.
     state: ProcedureState,
-    /// Id of subprocedures.
-    subprocedures: Vec<ProcedureId>,
+    /// Id of child procedures.
+    children: Vec<ProcedureId>,
 }
 
 impl Default for ExecMeta {
     fn default() -> ExecMeta {
         ExecMeta {
             state: ProcedureState::Running,
-            subprocedures: Vec::new(),
+            children: Vec::new(),
         }
     }
 }
@@ -106,9 +106,20 @@ impl ProcedureMeta {
     }
 
     /// Push `procedure_id` of the subprocedure to the metadata.
-    fn push_subprocedure(&self, procedure_id: ProcedureId) {
+    fn push_child(&self, procedure_id: ProcedureId) {
         let mut meta = self.exec_meta.lock().unwrap();
-        meta.subprocedures.push(procedure_id);
+        meta.children.push(procedure_id);
+    }
+
+    /// Append subprocedures to given `buffer`.
+    fn list_children(&self, buffer: &mut Vec<ProcedureId>) {
+        let meta = self.exec_meta.lock().unwrap();
+        buffer.extend_from_slice(&meta.children);
+    }
+
+    /// Returns the number of subprocedures.
+    fn num_children(&self) -> usize {
+        self.exec_meta.lock().unwrap().children.len()
     }
 }
 
@@ -205,6 +216,53 @@ impl ManagerContext {
             parent_id: message.parent_id,
             step: message.step,
         })
+    }
+
+    /// Returns all procedures in the tree (including given procedure).
+    fn procedures_in_tree(&self, meta: &ProcedureMetaRef) -> Vec<ProcedureId> {
+        let sub_num = meta.num_children();
+        // Reserve capacity for the root procedure and its children.
+        let mut procedures = Vec::with_capacity(1 + sub_num);
+
+        // Push the root procedure to the queue.
+        let mut queue = VecDeque::with_capacity(1 + sub_num);
+        queue.push_back(meta.clone());
+
+        let mut children_ids = Vec::with_capacity(sub_num);
+        let mut children = Vec::with_capacity(sub_num);
+        while let Some(meta) = queue.pop_front() {
+            procedures.push(meta.id);
+
+            children_ids.clear();
+            meta.list_children(&mut children_ids);
+            self.find_procedures(&children_ids, &mut children);
+
+            for child in children.drain(..) {
+                queue.push_back(child);
+            }
+        }
+
+        procedures
+    }
+
+    /// Finds procedures by given `procedure_ids`.
+    ///
+    /// Ignores the id if corresponding procedure is not found.
+    fn find_procedures(&self, procedure_ids: &[ProcedureId], metas: &mut Vec<ProcedureMetaRef>) {
+        let procedures = self.procedures.read().unwrap();
+        for procedure_id in procedure_ids {
+            if let Some(meta) = procedures.get(procedure_id) {
+                metas.push(meta.clone());
+            }
+        }
+    }
+
+    /// Remove cached [ProcedureMessage] by ids.
+    fn remove_messages(&self, procedure_ids: &[ProcedureId]) {
+        let mut messages = self.messages.lock().unwrap();
+        for procedure_id in procedure_ids {
+            messages.remove(procedure_id);
+        }
     }
 }
 

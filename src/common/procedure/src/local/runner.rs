@@ -69,6 +69,13 @@ impl Runner {
                 .lock_map
                 .release_lock(key.key(), self.meta.id);
         }
+
+        // If this is the root procedure, clean up message cache.
+        if self.meta.parent_id.is_none() {
+            let procedure_ids = self.manager_ctx.procedures_in_tree(&self.meta);
+            self.manager_ctx.remove_messages(&procedure_ids);
+        }
+
         // We can't remove the metadata of the procedure now as users and its parent might
         // need to query its state.
         // TODO(yingwen): 1. Add TTL to the metadata; 2. Only keep state in the procedure store
@@ -184,7 +191,7 @@ impl Runner {
 
         self.manager_ctx.insert_procedure(meta);
         // Add the id of the subprocedure to the metadata.
-        self.meta.push_subprocedure(procedure_id);
+        self.meta.push_child(procedure_id);
 
         common_runtime::spawn_bg(async move {
             // Run the root procedure.
