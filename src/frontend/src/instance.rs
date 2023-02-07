@@ -413,7 +413,7 @@ impl Instance {
                     )
                     .await;
             }
-            Statement::ShowCreateTable(_) => error::NotSupportedSnafu { feat: query }.fail(),
+            Statement::ShowCreateTable(_) => NotSupportedSnafu { feat: query }.fail(),
             Statement::Use(db) => self.handle_use(db, query_ctx),
         }
     }

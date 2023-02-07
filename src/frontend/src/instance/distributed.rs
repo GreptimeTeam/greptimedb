@@ -315,7 +315,7 @@ impl DistInstance {
         self.meta_client
             .create_route(request)
             .await
-            .context(error::RequestMetaSnafu)
+            .context(RequestMetaSnafu)
     }
 
     // TODO(LFC): Maybe move this to FrontendCatalogManager's "register_table" method?
@@ -334,7 +334,7 @@ impl DistInstance {
 
         let value = create_table_global_value(create_table, table_route)?
             .as_bytes()
-            .context(error::CatalogEntrySerdeSnafu)?;
+            .context(CatalogEntrySerdeSnafu)?;
 
         if let Err(existing) = self
             .catalog_manager
@@ -590,8 +590,7 @@ fn find_partition_entries(
                 let v = match v {
                     SqlValue::Number(n, _) if n == "MAXVALUE" => PartitionBound::MaxValue,
                     _ => PartitionBound::Value(
-                        sql_value_to_value(column_name, data_type, v)
-                            .context(error::ParseSqlSnafu)?,
+                        sql_value_to_value(column_name, data_type, v).context(ParseSqlSnafu)?,
                     ),
                 };
                 values.push(v);
