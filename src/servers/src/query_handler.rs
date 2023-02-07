@@ -44,8 +44,8 @@ pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 
 #[async_trait]
 pub trait ScriptHandler {
-    async fn insert_script(&self, name: &str, script: &str) -> Result<()>;
-    async fn execute_script(&self, name: &str) -> Result<Output>;
+    async fn insert_script(&self, schema: &str, name: &str, script: &str) -> Result<()>;
+    async fn execute_script(&self, schema: &str, name: &str) -> Result<Output>;
 }
 
 #[async_trait]

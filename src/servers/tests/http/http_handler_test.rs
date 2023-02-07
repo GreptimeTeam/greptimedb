@@ -104,7 +104,7 @@ def test(n):
     )
     .await;
     assert!(!json.success(), "{json:?}");
-    assert_eq!(json.error().unwrap(), "Invalid argument: invalid name");
+    assert_eq!(json.error().unwrap(), "Invalid argument: invalid schema");
 
     let body = RawBody(Body::from(script));
     let exec = create_script_query();
@@ -124,12 +124,16 @@ def test(n):
 
 fn create_script_query() -> Query<script_handler::ScriptQuery> {
     Query(script_handler::ScriptQuery {
+        schema: Some("test".to_string()),
         name: Some("test".to_string()),
     })
 }
 
 fn create_invalid_script_query() -> Query<script_handler::ScriptQuery> {
-    Query(script_handler::ScriptQuery { name: None })
+    Query(script_handler::ScriptQuery {
+        schema: None,
+        name: None,
+    })
 }
 
 fn create_query() -> Query<http_handler::SqlQuery> {

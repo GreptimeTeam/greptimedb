@@ -86,7 +86,7 @@ impl QueryHandler for DummyInstance {
 
 #[async_trait]
 impl ScriptHandler for DummyInstance {
-    async fn insert_script(&self, name: &str, script: &str) -> Result<()> {
+    async fn insert_script(&self, schema: &str, name: &str, script: &str) -> Result<()> {
         let script = self
             .py_engine
             .compile(script, CompileContext::default())
@@ -96,13 +96,15 @@ impl ScriptHandler for DummyInstance {
         self.scripts
             .write()
             .unwrap()
-            .insert(name.to_string(), Arc::new(script));
+            .insert(format!("{schema}_{name}"), Arc::new(script));
 
         Ok(())
     }
 
-    async fn execute_script(&self, name: &str) -> Result<Output> {
-        let py_script = self.scripts.read().unwrap().get(name).unwrap().clone();
+    async fn execute_script(&self, schema: &str, name: &str) -> Result<Output> {
+        let key = format!("{schema}_{name}");
+
+        let py_script = self.scripts.read().unwrap().get(&key).unwrap().clone();
 
         Ok(py_script.execute(EvalContext::default()).await.unwrap())
     }

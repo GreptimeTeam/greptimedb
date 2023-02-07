@@ -34,7 +34,9 @@ async fn test_insert_py_udf_and_query() -> Result<()> {
 def double_that(col)->vector[u32]:
     return col*2
     "#;
-    instance.insert_script("double_that", src).await?;
+    instance
+        .insert_script("schema_test", "double_that", src)
+        .await?;
     let res = instance
         .query(
             QueryLanguage::Sql("select double_that(uint32s) from numbers".to_string()),
