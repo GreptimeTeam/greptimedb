@@ -4104,7 +4104,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "lazy_static",
- "lru",
+ "lru 0.8.1",
  "mio",
  "mysql_common",
  "once_cell",

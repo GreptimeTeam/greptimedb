@@ -15,9 +15,9 @@
 use std::collections::HashMap;
 
 use api::v1::meta::{
-    router_server, BatchPutRequest, CreateRequest, DeleteRequest, Error, KeyValue, MoveValueRequest, Peer, PeerDict, RangeRequest,
-    PutRequest, Region, RegionRoute, ResponseHeader, RouteRequest, RouteResponse, Table, TableName,
-    TableRoute, TableRouteValue,
+    router_server, BatchPutRequest, CreateRequest, DeleteRequest, Error, KeyValue,
+    MoveValueRequest, Peer, PeerDict, Region, RegionRoute, ResponseHeader, RouteRequest,
+    RouteResponse, Table, TableName, TableRoute, TableRouteValue,
 };
 use catalog::helper::{TableGlobalKey, TableGlobalValue};
 use common_telemetry::warn;
@@ -425,35 +425,4 @@ async fn move_value(
     let res = kv_store.move_value(move_req).await?;
 
     Ok(res.kv.map(|kv| (kv.key, kv.value)))
-}
-
-async fn put_into_store(
-    kv_store: &KvStoreRef,
-    key: impl Into<Vec<u8>>,
-    value: impl Into<Vec<u8>>,
-) -> Result<()> {
-    let key = key.into();
-    let value = value.into();
-    let put_req = PutRequest {
-        key,
-        value,
-        ..Default::default()
-    };
-    let _ = kv_store.put(put_req).await?;
-
-    Ok(())
-}
-
-async fn get_from_store(kv_store: &KvStoreRef, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
-    let req = RangeRequest {
-        key,
-        ..Default::default()
-    };
-    let res = kv_store.range(req).await?;
-    let mut kvs = res.kvs;
-    if kvs.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(kvs.pop().unwrap().value))
-    }
 }

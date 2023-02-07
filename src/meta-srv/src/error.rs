@@ -265,7 +265,8 @@ impl ErrorExt for Error {
             | Error::NextSequence { .. }
             | Error::MoveValue { .. }
             | Error::InvalidKvsLength { .. }
-            | Error::InvalidTxnResult { .. } => StatusCode::Unexpected,
+            | Error::InvalidTxnResult { .. }
+            | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
         }
