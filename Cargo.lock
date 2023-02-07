@@ -2440,9 +2440,9 @@ checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
-version = "0.8.31"
+version = "0.8.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9852635589dc9f9ea1b6fe9f05b50ef208c85c834a562f0c6abb1c475736ec2b"
+checksum = "071a31f4ee85403370b58aca746f01041ede6f0da2730960ad001edc2b71b394"
 dependencies = [
  "cfg-if 1.0.0",
 ]
@@ -4724,6 +4724,7 @@ dependencies = [
 name = "partition"
 version = "0.1.0"
 dependencies = [
+ "common-catalog",
  "common-error",
  "common-query",
  "datafusion",
@@ -4822,9 +4823,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.8.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6594056c6fc1c40b203ce6647d55bda25f249bc2b06bffaad3a4032a6d110e88"
+checksum = "2c2d164b7e92ef8f93e4e4588097804dd7aa275465b29e169b0fb2d36270890a"
 dependencies = [
  "async-trait",
  "base64 0.21.0",

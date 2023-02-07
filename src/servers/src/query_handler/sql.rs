@@ -17,6 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_error::prelude::*;
 use common_query::Output;
+use datatypes::schema::Schema;
 use query::parser::{QueryLanguage, QueryLanguageParser, QueryStatement};
 use session::context::QueryContextRef;
 
@@ -46,6 +47,9 @@ pub trait QueryHandler {
             .map_err(BoxedError::new)
             .context(error::ExecuteQueryStatementSnafu)
     }
+
+    // TODO(LFC): revisit this for mysql prepared statement
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>>;
 
     /// Execute a [QueryLanguage] that may return multiple [Output]s.
     async fn query_multiple(
@@ -100,6 +104,13 @@ impl QueryHandler for ServerQueryHandlerAdaptor {
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteStatementSnafu)
+    }
+
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+        self.0
+            .do_describe(stmt, query_ctx)
+            .map_err(BoxedError::new)
+            .context(error::DescribeStatementSnafu)
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {

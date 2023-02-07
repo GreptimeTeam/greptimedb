@@ -34,6 +34,7 @@ use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::timer;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
+use datatypes::schema::Schema;
 use promql::planner::PromPlanner;
 use promql_parser::parser::EvalStmt;
 use session::context::QueryContextRef;
@@ -100,6 +101,15 @@ impl QueryEngine for DatafusionQueryEngine {
             QueryStatement::Sql(stmt) => self.plan_sql_stmt(stmt, query_ctx),
             QueryStatement::Promql(stmt) => self.plan_promql_stmt(stmt, query_ctx),
         }
+    }
+
+    fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema> {
+        // TODO(sunng87): consider cache optmised logical plan between describe
+        // and execute
+        let plan = self.statement_to_plan(stmt, query_ctx)?;
+        let mut ctx = QueryEngineContext::new(self.state.clone());
+        let optimised_plan = self.optimize_logical_plan(&mut ctx, &plan)?;
+        optimised_plan.schema()
     }
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output> {
@@ -273,6 +283,8 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::Output;
     use common_recordbatch::util;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{UInt64Vector, VectorRef};
     use session::context::QueryContext;
     use table::table::numbers::NumbersTable;
@@ -352,5 +364,26 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_describe() {
+        let engine = create_test_engine();
+        let sql = "select sum(number) from numbers limit 20";
+
+        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
+
+        let schema = engine
+            .describe(stmt, Arc::new(QueryContext::new()))
+            .unwrap();
+
+        assert_eq!(
+            schema.column_schemas()[0],
+            ColumnSchema::new(
+                "SUM(numbers.number)",
+                ConcreteDataType::uint64_datatype(),
+                true
+            )
+        );
     }
 }

@@ -324,7 +324,6 @@ impl RemoteCatalogManager {
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
             table_id,
-            region_numbers: region_numbers.clone(),
         };
         match self
             .engine

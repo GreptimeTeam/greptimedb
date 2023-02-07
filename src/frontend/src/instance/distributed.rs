@@ -30,7 +30,7 @@ use common_query::Output;
 use common_telemetry::{debug, error, info};
 use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::RawSchema;
+use datatypes::schema::{RawSchema, Schema};
 use meta_client::client::MetaClient;
 use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
@@ -401,6 +401,17 @@ impl QueryHandler for DistInstance {
             .map(|s| s.is_some())
             .map_err(BoxedError::new)
             .context(server_error::CheckDatabaseValiditySnafu)
+    }
+
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+        if let Statement::Query(_) = stmt {
+            self.query_engine
+                .describe(QueryStatement::Sql(stmt), query_ctx)
+                .map(Some)
+                .context(error::DescribeStatementSnafu)
+        } else {
+            Ok(None)
+        }
     }
 }
 

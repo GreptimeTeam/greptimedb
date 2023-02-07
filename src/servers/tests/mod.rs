@@ -20,7 +20,8 @@ use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaPr
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
-use query::parser::QueryStatement;
+use datatypes::schema::Schema;
+use query::parser::{QueryLanguageParser, QueryStatement};
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
@@ -28,6 +29,7 @@ use servers::error::Result;
 use servers::query_handler::sql::{QueryHandler, ServerQueryHandlerRef};
 use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 use table::test_util::MemTable;
 
 mod auth;
@@ -66,6 +68,18 @@ impl QueryHandler for DummyInstance {
             .statement_to_plan(stmt, query_ctx)
             .unwrap();
         Ok(self.query_engine.execute(&plan).await.unwrap())
+    }
+
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+        if let Statement::Query(_) = stmt {
+            let schema = self
+                .query_engine
+                .describe(QueryStatement::Sql(stmt), query_ctx)
+                .unwrap();
+            Ok(Some(schema))
+        } else {
+            Ok(None)
+        }
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {

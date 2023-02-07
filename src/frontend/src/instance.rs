@@ -36,6 +36,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{debug, info};
 use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
+use datatypes::schema::Schema;
 use distributed::DistInstance;
 use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
@@ -506,6 +507,10 @@ impl QueryHandler for Instance {
             .map(|s| s.is_some())
             .map_err(BoxedError::new)
             .context(server_error::CheckDatabaseValiditySnafu)
+    }
+
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+        self.sql_handler.do_describe(stmt, query_ctx)
     }
 }
 

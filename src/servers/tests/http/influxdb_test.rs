@@ -19,7 +19,8 @@ use async_trait::async_trait;
 use axum::{http, Router};
 use axum_test_helper::TestClient;
 use common_query::Output;
-use servers::error::Result;
+use datatypes::schema::Schema;
+use servers::error::{Error, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::influxdb::InfluxdbRequest;
 use servers::query_handler::sql::QueryHandler;
@@ -53,6 +54,14 @@ impl QueryHandler for DummyInstance {
         _stmt: query::parser::QueryStatement,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        unimplemented!()
+    }
+
+    fn do_describe(
+        &self,
+        _stmt: sql::statements::statement::Statement,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Option<Schema>> {
         unimplemented!()
     }
 

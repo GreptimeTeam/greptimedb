@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum_test_helper::TestClient;
 use common_query::Output;
+use datatypes::schema::Schema;
 use servers::error::{self, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::opentsdb::codec::DataPoint;
@@ -51,6 +52,14 @@ impl QueryHandler for DummyInstance {
         _stmt: query::parser::QueryStatement,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        unimplemented!()
+    }
+
+    fn do_describe(
+        &self,
+        _stmt: sql::statements::statement::Statement,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Option<Schema>> {
         unimplemented!()
     }
 

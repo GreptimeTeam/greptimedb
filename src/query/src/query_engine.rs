@@ -24,6 +24,7 @@ use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::physical_plan::PhysicalPlan;
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
+use datatypes::schema::Schema;
 use session::context::QueryContextRef;
 
 use crate::datafusion::DatafusionQueryEngine;
@@ -42,6 +43,8 @@ pub trait QueryEngine: Send + Sync {
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan>;
+
+    fn describe(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Schema>;
 
     async fn execute(&self, plan: &LogicalPlan) -> Result<Output>;
 

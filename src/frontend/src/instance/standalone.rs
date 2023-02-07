@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_query::Output;
 use datanode::error::Error as DatanodeError;
+use datatypes::schema::Schema;
 use query::parser::QueryStatement;
 use servers::error as server_error;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
@@ -46,6 +47,12 @@ impl QueryHandler for StandaloneSqlQueryHandler {
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> server_error::Result<bool> {
         self.0.is_valid_schema(catalog, schema)
+    }
+
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+        self.0
+            .do_describe(stmt, query_ctx)
+            .context(error::InvokeDatanodeSnafu)
     }
 }
 

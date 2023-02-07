@@ -136,7 +136,7 @@ mod test {
             sort_by: [], \
             having: None, \
             qualify: None \
-        }), order_by: [], limit: None, offset: None, fetch: None, lock: None } }))");
+            }), order_by: [], limit: None, offset: None, fetch: None, lock: None }, param_types: [] }))");
 
         assert_eq!(format!("{stmt:?}"), expected);
     }

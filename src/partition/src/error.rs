@@ -23,7 +23,7 @@ use store_api::storage::RegionId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to get cache, error: {}", err_msg))]
+    #[snafu(display("Failed to get meta info from cache, error: {}", err_msg))]
     GetCache {
         err_msg: String,
         backtrace: Backtrace,
