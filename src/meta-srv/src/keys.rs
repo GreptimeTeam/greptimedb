@@ -174,7 +174,7 @@ impl<'a> TableRouteKey<'a> {
     }
 }
 
-#[derive(Eq, PartialEq, Debug, Hash)]
+#[derive(Eq, PartialEq, Debug, Clone, Hash)]
 pub struct StatKey {
     pub cluster_id: u64,
     pub node_id: u64,
@@ -246,7 +246,7 @@ impl TryFrom<StatValue> for Vec<u8> {
 
     fn try_from(stats: StatValue) -> Result<Self> {
         Ok(serde_json::to_string(&stats)
-            .context(crate::error::SerializeToJsonSnafu {
+            .context(error::SerializeToJsonSnafu {
                 input: format!("{stats:?}"),
             })?
             .into_bytes())

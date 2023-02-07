@@ -15,15 +15,10 @@
 pub mod lease_based;
 pub mod load_based;
 
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 
-use self::lease_based::LeaseBasedSelector;
-use self::load_based::LoadBasedSelector;
 use crate::error;
 use crate::error::Result;
-use crate::metasrv::SelectorRef;
 
 pub type Namespace = u64;
 
@@ -39,15 +34,6 @@ pub trait Selector: Send + Sync {
 pub enum SelectorType {
     LoadBased,
     LeaseBased,
-}
-
-impl From<SelectorType> for SelectorRef {
-    fn from(selector_type: SelectorType) -> Self {
-        match selector_type {
-            SelectorType::LoadBased => Arc::new(LoadBasedSelector) as SelectorRef,
-            SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
-        }
-    }
 }
 
 impl Default for SelectorType {
@@ -91,8 +77,8 @@ mod tests {
         let selector_type = loadbased.try_into().unwrap();
         assert_eq!(SelectorType::LoadBased, selector_type);
 
-        let unknow = "unknow";
-        let selector_type: Result<SelectorType> = unknow.try_into();
+        let unknown = "unknown";
+        let selector_type: Result<SelectorType> = unknown.try_into();
         assert!(selector_type.is_err());
     }
 }

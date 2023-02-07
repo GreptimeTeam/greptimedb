@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod builder;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -19,16 +21,12 @@ use api::v1::meta::Peer;
 use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 
+use crate::cluster::MetaPeerClient;
 use crate::election::Election;
-use crate::handler::{
-    CheckLeaderHandler, CollectStatsHandler, HeartbeatHandlerGroup, KeepLeaseHandler,
-    OnLeaderStartHandler, PersistStatsHandler, ResponseHeaderHandler,
-};
-use crate::selector::lease_based::LeaseBasedSelector;
+use crate::handler::HeartbeatHandlerGroup;
 use crate::selector::{Selector, SelectorType};
-use crate::sequence::{Sequence, SequenceRef};
+use crate::sequence::SequenceRef;
 use crate::service::store::kv::{KvStoreRef, ResetableKvStoreRef};
-use crate::service::store::memory::MemStore;
 
 pub const TABLE_ID_SEQ: &str = "table_id";
 
@@ -100,50 +98,10 @@ pub struct MetaSrv {
     selector: SelectorRef,
     handler_group: HeartbeatHandlerGroup,
     election: Option<ElectionRef>,
+    meta_peer_client: Option<MetaPeerClient>,
 }
 
 impl MetaSrv {
-    pub async fn new(
-        options: MetaSrvOptions,
-        kv_store: KvStoreRef,
-        selector: Option<SelectorRef>,
-        election: Option<ElectionRef>,
-        handler_group: Option<HeartbeatHandlerGroup>,
-    ) -> Self {
-        let started = Arc::new(AtomicBool::new(false));
-        let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_store.clone()));
-        let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector {}));
-        let in_memory = Arc::new(MemStore::default());
-        let handler_group = match handler_group {
-            Some(hg) => hg,
-            None => {
-                let group = HeartbeatHandlerGroup::default();
-                let keep_lease_handler = KeepLeaseHandler::new(kv_store.clone());
-                group.add_handler(ResponseHeaderHandler::default()).await;
-                // `KeepLeaseHandler` should preferably be in front of `CheckLeaderHandler`,
-                // because even if the current meta-server node is no longer the leader it can
-                // still help the datanode to keep lease.
-                group.add_handler(keep_lease_handler).await;
-                group.add_handler(CheckLeaderHandler::default()).await;
-                group.add_handler(OnLeaderStartHandler::default()).await;
-                group.add_handler(CollectStatsHandler::default()).await;
-                group.add_handler(PersistStatsHandler::default()).await;
-                group
-            }
-        };
-
-        Self {
-            started,
-            options,
-            in_memory,
-            kv_store,
-            table_id_sequence,
-            selector,
-            handler_group,
-            election,
-        }
-    }
-
     pub async fn start(&self) {
         if self
             .started
@@ -209,6 +167,11 @@ impl MetaSrv {
     #[inline]
     pub fn election(&self) -> Option<ElectionRef> {
         self.election.clone()
+    }
+
+    #[inline]
+    pub fn meta_peer_client(&self) -> Option<MetaPeerClient> {
+        self.meta_peer_client.clone()
     }
 
     #[inline]

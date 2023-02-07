@@ -18,6 +18,7 @@ use futures::Stream;
 use tonic::{Response, Status};
 
 pub mod admin;
+pub mod cluster;
 mod heartbeat;
 pub mod router;
 pub mod store;

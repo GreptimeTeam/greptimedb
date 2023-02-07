@@ -20,7 +20,8 @@ use api::v1::meta::store_server::StoreServer;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use tower::service_fn;
 
-use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
+use crate::metasrv::builder::MetaSrvBuilder;
+use crate::metasrv::{MetaSrvOptions, SelectorRef};
 use crate::service::store::etcd::EtcdStore;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::store::memory::MemStore;
@@ -52,7 +53,16 @@ pub async fn mock(
     selector: Option<SelectorRef>,
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
-    let meta_srv = MetaSrv::new(opts, kv_store, selector, None, None).await;
+
+    let builder = MetaSrvBuilder::new().options(opts).kv_store(kv_store);
+
+    let builder = match selector {
+        Some(s) => builder.selector(s),
+        None => builder,
+    };
+
+    let meta_srv = builder.build().await;
+
     let (client, server) = tokio::io::duplex(1024);
     tokio::spawn(async move {
         tonic::transport::Server::builder()

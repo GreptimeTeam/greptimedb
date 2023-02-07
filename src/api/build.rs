@@ -21,6 +21,7 @@ fn main() {
                 "greptime/v1/meta/heartbeat.proto",
                 "greptime/v1/meta/route.proto",
                 "greptime/v1/meta/store.proto",
+                "greptime/v1/meta/cluster.proto",
                 "prometheus/remote/remote.proto",
             ],
             &["."],

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod health;
+mod heartbeat;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -25,8 +26,15 @@ use tonic::transport::NamedService;
 
 use crate::metasrv::MetaSrv;
 
-pub fn make_admin_service(_: MetaSrv) -> Admin {
+pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = Router::new().route("/health", health::HealthHandler);
+
+    let router = router.route(
+        "/heartbeat",
+        heartbeat::HeartBeatHandler {
+            meta_peer_client: meta_srv.meta_peer_client(),
+        },
+    );
 
     let router = Router::nest("/admin", router);
 
