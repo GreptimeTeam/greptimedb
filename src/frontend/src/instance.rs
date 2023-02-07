@@ -575,7 +575,7 @@ pub fn check_permission(
         // query and explain will be checked in QueryEngineState
         Statement::Query(_) | Statement::Explain(_) => {}
         // database ops won't be checked
-        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {}
+        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::Use(_) => {}
         // show create table and alter are not supported yet
         Statement::ShowCreateTable(_) | Statement::Alter(_) => {}
 
@@ -599,9 +599,6 @@ pub fn check_permission(
         Statement::DescribeTable(stmt) => {
             let tab_ref = obj_name_to_tab_ref(stmt.name())?;
             validate_tab_ref(tab_ref, query_ctx)?;
-        }
-        Statement::Use(db) => {
-            validate_param(None, db, query_ctx)?;
         }
     }
     Ok(())
@@ -643,11 +640,12 @@ fn validate_param(catalog: Option<&str>, schema: &str, query_ctx: &QueryContextR
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches::assert_matches;
     use std::borrow::Cow;
+    use std::collections::HashMap;
     use std::sync::atomic::AtomicU32;
 
     use session::context::QueryContext;
+    use strfmt::Format;
 
     use super::*;
     use crate::tests;
@@ -655,58 +653,110 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_exec_validation() {
         let query_ctx = Arc::new(QueryContext::new());
-
-        let standalone = tests::create_standalone_instance("test_execute_sql").await;
-        let mut instance = standalone.instance;
-
         let mut plugins = Plugins::new();
         plugins.insert(QueryOptions {
             validate_table_references: true,
         });
-        Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
+        let plugins = Arc::new(plugins);
 
-        // test use database
-        let sql = r#"USE public;"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0);
-        assert!(output.is_ok());
+        let sql = r#"
+        SELECT * FROM demo;
+        EXPLAIN SELECT * FROM demo;
+        CREATE DATABASE test_database;
+        SHOW DATABASES;
+        "#;
+        let stmts = parse_stmt(sql).unwrap();
+        assert_eq!(stmts.len(), 4);
+        for stmt in stmts {
+            let re = check_permission(plugins.clone(), &stmt, &query_ctx);
+            assert!(re.is_ok());
+        }
 
-        let sql = r#"USE other;"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0);
-        assert_matches!(output.unwrap_err(), Error::SqlExecIntercepted { .. });
+        let sql = r#"
+        SHOW CREATE TABLE demo;
+        ALTER TABLE demo ADD COLUMN new_col INT;
+        "#;
+        let stmts = parse_stmt(sql).unwrap();
+        assert_eq!(stmts.len(), 2);
+        for stmt in stmts {
+            let re = check_permission(plugins.clone(), &stmt, &query_ctx);
+            assert!(re.is_ok());
+        }
 
-        let create_table = r#"CREATE TABLE demo(
+        let sql = "USE randomschema";
+        let stmts = parse_stmt(sql).unwrap();
+        let re = check_permission(plugins.clone(), &stmts[0], &query_ctx);
+        assert!(re.is_ok());
+
+        fn replace_test(template_sql: &str, plugins: Arc<Plugins>, query_ctx: &QueryContextRef) {
+            // test right
+            let right = vec![("", ""), ("", "public."), ("greptime.", "public.")];
+            for (catalog, schema) in right {
+                let sql = do_fmt(template_sql, catalog, schema);
+                do_test(&sql, plugins.clone(), query_ctx, true);
+            }
+
+            let wrong = vec![
+                ("", "wrongschema."),
+                ("greptime.", "wrongschema."),
+                ("wrongcatalog.", "public."),
+                ("wrongcatalog.", "wrongschema."),
+            ];
+            for (catalog, schema) in wrong {
+                let sql = do_fmt(template_sql, catalog, schema);
+                do_test(&sql, plugins.clone(), query_ctx, false);
+            }
+        }
+
+        fn do_fmt(template: &str, catalog: &str, schema: &str) -> String {
+            let mut vars = HashMap::new();
+            vars.insert("catalog".to_string(), catalog);
+            vars.insert("schema".to_string(), schema);
+
+            template.format(&vars).unwrap()
+        }
+
+        fn do_test(sql: &str, plugins: Arc<Plugins>, query_ctx: &QueryContextRef, is_ok: bool) {
+            let stmt = &parse_stmt(sql).unwrap()[0];
+            let re = check_permission(plugins.clone(), stmt, query_ctx);
+            if is_ok {
+                assert!(re.is_ok());
+            } else {
+                assert!(re.is_err());
+            }
+        }
+
+        // test insert
+        let sql = "INSERT INTO {catalog}{schema}monitor(host) VALUES ('host1');";
+        replace_test(sql, plugins.clone(), &query_ctx);
+
+        // test create table
+        let sql = r#"CREATE TABLE {catalog}{schema}demo(
                             host STRING,
                             ts TIMESTAMP,
-                            cpu DOUBLE NULL,
-                            memory DOUBLE NULL,
-                            disk_util DOUBLE DEFAULT 9.9,
                             TIME INDEX (ts),
                             PRIMARY KEY(host)
                         ) engine=mito with(regions=1);"#;
-        let output = SqlQueryHandler::do_query(&*instance, create_table, query_ctx.clone())
-            .await
-            .remove(0)
-            .unwrap();
-        match output {
-            Output::AffectedRows(rows) => assert_eq!(rows, 0),
-            _ => unreachable!(),
-        }
+        replace_test(sql, plugins.clone(), &query_ctx);
 
         // test drop table
-        let sql = r#"DROP TABLE greptime.wrongschema.demo;"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0);
-        assert_matches!(output.unwrap_err(), Error::SqlExecIntercepted { .. });
-        let sql = r#"DROP TABLE greptime.public.demo;"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0);
-        assert!(output.is_ok());
+        let sql = "DROP TABLE {catalog}{schema}demo;";
+        replace_test(sql, plugins.clone(), &query_ctx);
+
+        // test show tables
+        let sql = "SHOW TABLES FROM public";
+        let stmt = parse_stmt(sql).unwrap();
+        let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
+        assert!(re.is_ok());
+
+        let sql = "SHOW TABLES FROM wrongschema";
+        let stmt = parse_stmt(sql).unwrap();
+        let re = check_permission(plugins.clone(), &stmt[0], &query_ctx);
+        assert!(re.is_err());
+
+        // test describe table
+        let sql = "DESC TABLE {catalog}{schema}demo;";
+        replace_test(sql, plugins.clone(), &query_ctx);
     }
 
     #[tokio::test(flavor = "multi_thread")]

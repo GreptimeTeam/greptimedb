@@ -2702,6 +2702,7 @@ dependencies = [
  "snafu",
  "sql",
  "store-api",
+ "strfmt",
  "substrait 0.1.0",
  "table",
  "tempdir",
@@ -7109,6 +7110,12 @@ checksum = "b0d670ce4e348a2081843569e0f79b21c99c91bb9028b3b3ecb0f050306de547"
 dependencies = [
  "num-traits",
 ]
+
+[[package]]
+name = "strfmt"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b73de159e5e71c4c7579ea3041d3e765f46790555790c24489195554210f1fb4"
 
 [[package]]
 name = "string_cache"
