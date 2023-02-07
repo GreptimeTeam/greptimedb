@@ -167,9 +167,9 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Invalid KVs length, expect: {}, actual: {}", expect, actual))]
+    #[snafu(display("Invalid KVs length, expected: {}, actual: {}", expected, actual))]
     InvalidKvsLength {
-        expect: usize,
+        expected: usize,
         actual: usize,
         backtrace: Backtrace,
     },

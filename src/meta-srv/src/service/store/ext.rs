@@ -45,8 +45,8 @@ where
         ensure!(
             kvs.len() == 1,
             error::InvalidKvsLengthSnafu {
+                expected: 1_usize,
                 actual: kvs.len(),
-                expect: 1_usize
             }
         );
 
