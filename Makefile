@@ -35,7 +35,7 @@ integration-test: ## Run integation test.
 
 .PHONY: sqlness-test
 sqlness-test: ## Run sqlness test.
-	cargo run --bin sqlness-runner
+	cargo sqlness
 
 .PHONY: check
 check: ## Cargo check all the targets.

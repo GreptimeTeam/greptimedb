@@ -31,7 +31,7 @@ Sqlness walks through every file recursively and runs them.
 ## Run the test
 Unlike other tests, this harness is in a binary target form. You can run it with
 ```shell
-cargo run --bin sqlness-runner
+cargo sqlness
 ```
 It automatically finishes the following procedures: compile `GreptimeDB`, start it, grab tests and feed it to
 the server, then collect and compare the results. You only need to check whether there are new `.output` files.
