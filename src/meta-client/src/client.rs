@@ -14,12 +14,14 @@
 
 mod heartbeat;
 mod load_balance;
+mod lock;
 mod router;
 mod store;
 
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_telemetry::info;
 use heartbeat::Client as HeartbeatClient;
+use lock::Client as LockClient;
 use router::Client as RouterClient;
 use snafu::OptionExt;
 use store::Client as StoreClient;
@@ -27,6 +29,7 @@ use store::Client as StoreClient;
 pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::error;
 use crate::error::Result;
+use crate::rpc::lock::{LockRequest, LockResponse, UnlockRequest};
 use crate::rpc::router::DeleteRequest;
 use crate::rpc::{
     BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, CreateRequest,
@@ -42,6 +45,7 @@ pub struct MetaClientBuilder {
     enable_heartbeat: bool,
     enable_router: bool,
     enable_store: bool,
+    enable_lock: bool,
     channel_manager: Option<ChannelManager>,
 }
 
@@ -74,6 +78,13 @@ impl MetaClientBuilder {
         }
     }
 
+    pub fn enable_lock(self) -> Self {
+        Self {
+            enable_lock: true,
+            ..self
+        }
+    }
+
     pub fn channel_manager(self, channel_manager: ChannelManager) -> Self {
         Self {
             channel_manager: Some(channel_manager),
@@ -88,9 +99,12 @@ impl MetaClientBuilder {
             MetaClient::new(self.id)
         };
 
-        if let (false, false, false) =
-            (self.enable_heartbeat, self.enable_router, self.enable_store)
-        {
+        if let (false, false, false, false) = (
+            self.enable_heartbeat,
+            self.enable_router,
+            self.enable_store,
+            self.enable_lock,
+        ) {
             panic!("At least one client needs to be enabled.")
         }
 
@@ -103,7 +117,10 @@ impl MetaClientBuilder {
             client.router = Some(RouterClient::new(self.id, mgr.clone()));
         }
         if self.enable_store {
-            client.store = Some(StoreClient::new(self.id, mgr));
+            client.store = Some(StoreClient::new(self.id, mgr.clone()));
+        }
+        if self.enable_lock {
+            client.lock = Some(LockClient::new(self.id, mgr));
         }
 
         client
@@ -117,6 +134,7 @@ pub struct MetaClient {
     heartbeat: Option<HeartbeatClient>,
     router: Option<RouterClient>,
     store: Option<StoreClient>,
+    lock: Option<LockClient>,
 }
 
 impl MetaClient {
@@ -151,8 +169,13 @@ impl MetaClient {
             info!("Router client started");
         }
         if let Some(client) = &mut self.store {
-            client.start(urls).await?;
+            client.start(urls.clone()).await?;
             info!("Store client started");
+        }
+
+        if let Some(client) = &mut self.lock {
+            client.start(urls).await?;
+            info!("Lock client started");
         }
 
         Ok(())
@@ -260,6 +283,15 @@ impl MetaClient {
             .try_into()
     }
 
+    pub async fn lock(&self, req: LockRequest) -> Result<LockResponse> {
+        self.lock_client()?.lock(req.into()).await.map(Into::into)
+    }
+
+    pub async fn unlock(&self, req: UnlockRequest) -> Result<()> {
+        self.lock_client()?.unlock(req.into()).await?;
+        Ok(())
+    }
+
     #[inline]
     pub fn heartbeat_client(&self) -> Result<HeartbeatClient> {
         self.heartbeat.clone().context(error::NotStartedSnafu {
@@ -278,6 +310,13 @@ impl MetaClient {
     pub fn store_client(&self) -> Result<StoreClient> {
         self.store.clone().context(error::NotStartedSnafu {
             name: "store_client",
+        })
+    }
+
+    #[inline]
+    pub fn lock_client(&self) -> Result<LockClient> {
+        self.lock.clone().context(error::NotStartedSnafu {
+            name: "lock_client",
         })
     }
 

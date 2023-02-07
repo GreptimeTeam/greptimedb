@@ -1,0 +1,42 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+pub mod etcd;
+
+use std::sync::Arc;
+
+use crate::error::Result;
+
+pub type Key = Vec<u8>;
+
+// default expire time: 10 seconds
+pub const DEFAULT_EXPIRE_TIME: u64 = 10;
+
+pub struct Opts {
+    // If the expiration time is exceeded and currently holds the lock, the lock is
+    // aytomatically released. The unit is second.
+    pub expire: Option<u64>,
+}
+
+#[async_trait::async_trait]
+pub trait DistLock: Send + Sync {
+    // Lock acquires a distributed shared lock on a given named lock. On success, it
+    // will return a unique key that exists so long as the lock is held by the caller.
+    async fn lock(&self, name: Vec<u8>, opts: Opts) -> Result<Key>;
+
+    // Unlock takes a key returned by Lock and releases the hold on lock.
+    async fn unlock(&self, key: Vec<u8>) -> Result<()>;
+}
+
+pub type DistLockRef = Arc<dyn DistLock>;
