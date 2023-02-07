@@ -40,6 +40,7 @@ jobs:
             os: macos-latest
             file: greptime-darwin-amd64
     runs-on: ${{ matrix.os }}
+    if: github.repository == 'GreptimeTeam/greptimedb'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -132,6 +133,7 @@ jobs:
     name: Release artifacts
     needs: [build]
     runs-on: ubuntu-latest
+    if: github.repository == 'GreptimeTeam/greptimedb'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -174,6 +176,7 @@ jobs:
     name: Build docker image
     needs: [build]
     runs-on: ubuntu-latest
+    if: github.repository == 'GreptimeTeam/greptimedb'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
