@@ -25,11 +25,9 @@ use opendal::raw::{Accessor, RpDelete, RpRead};
 use opendal::{ErrorKind, OpDelete, OpRead, OpWrite, Result};
 use tokio::sync::Mutex;
 
-struct LruValue;
-
 #[derive(Debug)]
 pub struct LruCachePolicy {
-    lru_cache: Arc<Mutex<LruCache<String, LruValue>>>,
+    lru_cache: Arc<Mutex<LruCache<String, ()>>>,
 }
 
 impl LruCachePolicy {
@@ -63,7 +61,7 @@ impl CachePolicy for LruCachePolicy {
                 Ok(v) => {
                     // update lru when cache hit
                     let mut lru_cache = lru_cache.lock().await;
-                    lru_cache.get_or_insert(cache_path.clone(), || LruValue {});
+                    lru_cache.get_or_insert(cache_path.clone(), || ());
                     Ok(v)
                 }
                 Err(err) if err.kind() == ErrorKind::ObjectNotFound => {
@@ -77,7 +75,7 @@ impl CachePolicy for LruCachePolicy {
                             let r = {
                                 // push new cache file name to lru
                                 let mut lru_cache = lru_cache.lock().await;
-                                lru_cache.push(cache_path.clone(), LruValue {})
+                                lru_cache.push(cache_path.clone(), ())
                             };
                             // delete the evicted cache file
                             if let Some((k, _v)) = r {
