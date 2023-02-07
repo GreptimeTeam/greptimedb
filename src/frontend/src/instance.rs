@@ -386,14 +386,7 @@ impl Instance {
         // TODO(sunng87): provide a better form to log or track statement
         let query = &format!("{:?}", &stmt);
 
-        let need_validate = self
-            .plugins
-            .get::<QueryOptions>()
-            .map(|opts| opts.validate_table_references)
-            .unwrap_or_default();
-        if need_validate {
-            validate_catalog_and_schema(&stmt, &query_ctx)?;
-        }
+        check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
         match stmt.clone() {
             Statement::CreateDatabase(_)
@@ -564,9 +557,28 @@ impl PromqlHandler for Instance {
     }
 }
 
-pub fn validate_catalog_and_schema(stmt: &Statement, query_ctx: &QueryContextRef) -> Result<()> {
+pub fn check_permission(
+    plugins: Arc<Plugins>,
+    stmt: &Statement,
+    query_ctx: &QueryContextRef,
+) -> Result<()> {
+    let need_validate = plugins
+        .get::<QueryOptions>()
+        .map(|opts| opts.validate_table_references)
+        .unwrap_or_default();
+
+    if !need_validate {
+        return Ok(());
+    }
+
     match stmt {
+        // query and explain will be checked in QueryEngineState
         Statement::Query(_) | Statement::Explain(_) => {}
+        // database ops won't be checked
+        Statement::CreateDatabase(_) | Statement::ShowDatabases(_) => {}
+        // show create table and alter is not supported yet
+        Statement::ShowCreateTable(_) | Statement::Alter(_) => {}
+
         Statement::Insert(insert) => {
             let (catalog, schema, _) = insert.full_table_name().context(ParseSqlSnafu)?;
             validate_param(Some(&catalog), &schema, query_ctx)?;
@@ -579,25 +591,10 @@ pub fn validate_catalog_and_schema(stmt: &Statement, query_ctx: &QueryContextRef
             let tab_ref = obj_name_to_tab_ref(drop_stmt.table_name())?;
             validate_tab_ref(tab_ref, query_ctx)?;
         }
-        Statement::CreateDatabase(stmt) => {
-            validate_param(None, &stmt.name.to_string(), query_ctx)?;
-        }
-        Statement::Alter(_) => {
-            unreachable!();
-        }
-        Statement::ShowDatabases(_) => {
-            // TODO(shuiyisong): validate catalog and schema
-        }
         Statement::ShowTables(stmt) => {
             if let Some(database) = &stmt.database {
                 validate_param(None, database, query_ctx)?;
             }
-        }
-        Statement::ShowCreateTable(_) => {
-            NotSupportedSnafu {
-                feat: format!("{:?}", &stmt),
-            }
-            .fail()?;
         }
         Statement::DescribeTable(stmt) => {
             let tab_ref = obj_name_to_tab_ref(stmt.name())?;
