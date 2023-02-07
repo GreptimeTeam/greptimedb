@@ -78,7 +78,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            QueryParse { .. } | MultipleStatements { .. } => StatusCode::InvalidSyntax,
+            MultipleStatements { .. } => StatusCode::InvalidSyntax,
             UnsupportedExpr { .. }
             | CatalogNotFound { .. }
             | SchemaNotFound { .. }
@@ -87,7 +87,9 @@ impl ErrorExt for Error {
             VectorComputation { source } => source.status_code(),
             CreateRecordBatch { source } => source.status_code(),
             Datatype { source } => source.status_code(),
-            QueryExecution { source } | QueryPlan { source } => source.status_code(),
+            QueryExecution { source } | QueryPlan { source } | QueryParse { source, .. } => {
+                source.status_code()
+            }
         }
     }
 
