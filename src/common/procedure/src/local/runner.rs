@@ -149,13 +149,16 @@ impl Runner {
 
     /// Submit a subprocedure.
     fn submit_subprocedure(&self, procedure_id: ProcedureId, mut procedure: BoxedProcedure) {
-        if let Some(procedure_and_parent) = self.manager_ctx.load_one_procedure(procedure_id) {
+        let mut step = 0;
+        if let Some(loaded_procedure) = self.manager_ctx.load_one_procedure(procedure_id) {
             // Try to load procedure state from the message to avoid re-run the subprocedure
             // from initial state.
-            assert_eq!(self.meta.id, procedure_and_parent.1.unwrap());
+            assert_eq!(self.meta.id, loaded_procedure.parent_id.unwrap());
 
             // Use the dumped procedure from the procedure store.
-            procedure = procedure_and_parent.0;
+            procedure = loaded_procedure.procedure;
+            // Update step number.
+            step = loaded_procedure.step;
         }
 
         if self.manager_ctx.contains_procedure(procedure_id) {
@@ -188,7 +191,7 @@ impl Runner {
             meta: meta.clone(),
             procedure,
             manager_ctx: self.manager_ctx.clone(),
-            step: 0,
+            step,
             store: self.store.clone(),
         };
 

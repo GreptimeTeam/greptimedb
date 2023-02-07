@@ -36,6 +36,8 @@ pub struct ProcedureMessage {
     pub data: String,
     /// Parent procedure id.
     pub parent_id: Option<ProcedureId>,
+    /// Current step.
+    pub step: u32,
 }
 
 /// Procedure storage layer.
@@ -63,6 +65,7 @@ impl ProcedureStore {
             type_name: type_name.to_string(),
             data,
             parent_id,
+            step,
         };
         let key = ParsedKey {
             procedure_id,
@@ -306,12 +309,13 @@ mod tests {
             type_name: "TestMessage".to_string(),
             data: "no parent id".to_string(),
             parent_id: None,
+            step: 4,
         };
 
         let json = serde_json::to_string(&message).unwrap();
         assert_eq!(
             json,
-            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":null}"#
+            r#"{"type_name":"TestMessage","data":"no parent id","parent_id":null,"step":4}"#
         );
 
         let procedure_id = ProcedureId::parse_str("9f805a1f-05f7-490c-9f91-bd56e3cc54c1").unwrap();
@@ -381,6 +385,7 @@ mod tests {
             type_name: "MockProcedure".to_string(),
             data: "test store procedure".to_string(),
             parent_id: None,
+            step: 0,
         };
         assert_eq!(expect, *msg);
     }

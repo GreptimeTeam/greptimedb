@@ -105,8 +105,12 @@ impl ProcedureMeta {
 
 /// Reference counted pointer to [ProcedureMeta].
 type ProcedureMetaRef = Arc<ProcedureMeta>;
-/// Procedure and its parent procedure id.
-struct ProcedureAndParent(BoxedProcedure, Option<ProcedureId>);
+/// Procedure loaded from store.
+struct LoadedProcedure {
+    procedure: BoxedProcedure,
+    parent_id: Option<ProcedureId>,
+    step: u32,
+}
 
 /// Shared context of the manager.
 pub(crate) struct ManagerContext {
@@ -162,7 +166,7 @@ impl ManagerContext {
     }
 
     /// Load procedure with specific `procedure_id` from cached [ProcedureMessage]s.
-    fn load_one_procedure(&self, procedure_id: ProcedureId) -> Option<ProcedureAndParent> {
+    fn load_one_procedure(&self, procedure_id: ProcedureId) -> Option<LoadedProcedure> {
         let messages = self.messages.lock().unwrap();
         let message = messages.get(&procedure_id)?;
 
@@ -187,7 +191,11 @@ impl ManagerContext {
             })
             .ok()?;
 
-        Some(ProcedureAndParent(procedure, message.parent_id))
+        Some(LoadedProcedure {
+            procedure,
+            parent_id: message.parent_id,
+            step: message.step,
+        })
     }
 }
 
@@ -265,7 +273,7 @@ impl ProcedureManager for LocalManager {
     }
 
     async fn recover(&self) -> Result<()> {
-        unimplemented!()
+        todo!("Recover procedure and messages")
     }
 
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
