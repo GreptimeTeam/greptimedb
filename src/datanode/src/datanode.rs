@@ -25,6 +25,8 @@ use crate::error::Result;
 use crate::instance::{Instance, InstanceRef};
 use crate::server::Services;
 
+pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ObjectStoreConfig {
@@ -48,6 +50,8 @@ pub struct S3Config {
     pub secret_access_key: String,
     pub endpoint: Option<String>,
     pub region: Option<String>,
+    pub cache_path: Option<String>,
+    pub cache_capacity: Option<ReadableSize>,
 }
 
 #[derive(Debug, Clone, Serialize, Default, Deserialize)]
@@ -58,6 +62,8 @@ pub struct OssConfig {
     pub access_key_id: String,
     pub access_key_secret: String,
     pub endpoint: String,
+    pub cache_path: Option<String>,
+    pub cache_capacity: Option<ReadableSize>,
 }
 
 impl Default for ObjectStoreConfig {
