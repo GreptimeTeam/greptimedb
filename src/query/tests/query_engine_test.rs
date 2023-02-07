@@ -19,14 +19,15 @@ mod pow;
 #[allow(unused)]
 mod function;
 
+use std::assert_matches::assert_matches;
 use std::sync::Arc;
 
-use catalog::local::{MemoryCatalogProvider, MemorySchemaProvider};
+use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_query::prelude::{create_udf, make_scalar_function, Volatility};
-use common_query::Output;
+use common_query::{Output, Plugins};
 use common_recordbatch::{util, RecordBatch};
 use datafusion::datasource::DefaultTableSource;
 use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
@@ -36,6 +37,7 @@ use datatypes::vectors::UInt32Vector;
 use query::error::{QueryExecutionSnafu, Result};
 use query::parser::QueryLanguageParser;
 use query::plan::LogicalPlan;
+use query::query_engine::options::QueryOptions;
 use query::query_engine::QueryEngineFactory;
 use session::context::QueryContext;
 use snafu::ResultExt;
@@ -107,9 +109,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn test_udf() -> Result<()> {
-    common_telemetry::init_default_ut_logging();
+fn catalog_list() -> Arc<MemoryCatalogManager> {
     let catalog_list = catalog::local::new_memory_catalog_list()
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
@@ -125,6 +125,39 @@ async fn test_udf() -> Result<()> {
     catalog_list
         .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
         .unwrap();
+    catalog_list
+}
+
+#[tokio::test]
+async fn test_query_validate() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    let catalog_list = catalog_list();
+
+    // set plugins
+    let mut plugins = Plugins::new();
+    plugins.insert(QueryOptions {
+        validate_table_references: true,
+    });
+    let plugins = Arc::new(plugins);
+
+    let factory = QueryEngineFactory::new_with_plugins(catalog_list, plugins);
+    let engine = factory.query_engine();
+
+    let stmt = QueryLanguageParser::parse_sql("select number from public.numbers").unwrap();
+    let re = engine.statement_to_plan(stmt, Arc::new(QueryContext::new()));
+    assert!(re.is_ok());
+
+    let stmt = QueryLanguageParser::parse_sql("select number from wrongschema.numbers").unwrap();
+    let re = engine.statement_to_plan(stmt, Arc::new(QueryContext::new()));
+    assert!(re.is_err());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_udf() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    let catalog_list = catalog_list();
 
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
