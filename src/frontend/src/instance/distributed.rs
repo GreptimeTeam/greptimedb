@@ -175,10 +175,9 @@ impl DistInstance {
                 show_tables(stmt, self.catalog_manager.clone(), query_ctx)
             }
             Statement::DescribeTable(stmt) => {
-                let (catalog, schema, table) =
-                    table_idents_to_full_name(stmt.name(), query_ctx.clone())
-                        .map_err(BoxedError::new)
-                        .context(error::ExternalSnafu)?;
+                let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), query_ctx)
+                    .map_err(BoxedError::new)
+                    .context(error::ExternalSnafu)?;
                 let table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table)
@@ -193,6 +192,7 @@ impl DistInstance {
             }
             Statement::Insert(insert) => {
                 let (catalog, schema, table) = insert.full_table_name().context(ParseSqlSnafu)?;
+
                 let table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table)
