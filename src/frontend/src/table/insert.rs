@@ -62,8 +62,7 @@ impl DistTable {
             let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
             let instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 
-            // TODO(fys): a separate runtime should be used here.
-            let join = tokio::spawn(async move {
+            let join = common_runtime::spawn_write(async move {
                 instance
                     .grpc_insert(to_grpc_insert_request(region_id, insert)?)
                     .await
@@ -186,6 +185,7 @@ mod tests {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
+            region_number: 0,
         }
     }
 

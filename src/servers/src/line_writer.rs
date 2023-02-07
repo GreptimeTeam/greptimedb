@@ -153,6 +153,7 @@ impl LineWriter {
             schema_name: self.db,
             table_name: self.table_name,
             columns_values,
+            region_number: 0, // TODO(hl): Check if assign 0 region is ok?
         }
     }
 }

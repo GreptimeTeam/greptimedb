@@ -155,18 +155,19 @@ fn split_insert_request(
     let table_name = &insert.table_name;
     dist_insert
         .into_iter()
-        .map(|(region_id, vector_map)| {
+        .map(|(region_number, vector_map)| {
             let columns_values = vector_map
                 .into_iter()
                 .map(|(column_name, mut builder)| (column_name.to_string(), builder.to_vector()))
                 .collect();
             (
-                region_id,
+                region_number,
                 InsertRequest {
                     catalog_name: catalog_name.to_string(),
                     schema_name: schema_name.to_string(),
                     table_name: table_name.to_string(),
                     columns_values,
+                    region_number,
                 },
             )
         })
@@ -396,10 +397,11 @@ mod tests {
         columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
-            catalog_name: "greptime".to_string(),
-            schema_name: "public".to_string(),
+            catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: common_catalog::consts::DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
+            region_number: 0,
         }
     }
 
@@ -423,10 +425,11 @@ mod tests {
         columns_values.insert("id".to_string(), builder.to_vector());
 
         InsertRequest {
-            catalog_name: "greptime".to_string(),
-            schema_name: "public".to_string(),
+            catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: common_catalog::consts::DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "demo".to_string(),
             columns_values,
+            region_number: 0,
         }
     }
 

@@ -28,7 +28,7 @@ use crate::error::{self, Result};
 const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
 // TODO(fys): Extract the common logic in datanode and frontend in the future.
-#[allow(dead_code)]
+// This function convert insert statement to an `InsertRequest` to region 0.
 pub(crate) fn insert_to_request(table: &TableRef, stmt: Insert) -> Result<InsertRequest> {
     let columns = stmt.columns();
     let values = stmt.values().context(error::ParseSqlSnafu)?;
@@ -86,6 +86,7 @@ pub(crate) fn insert_to_request(table: &TableRef, stmt: Insert) -> Result<Insert
             .into_iter()
             .map(|(cs, mut b)| (cs.name.to_string(), b.to_vector()))
             .collect(),
+        region_number: 0,
     })
 }
 

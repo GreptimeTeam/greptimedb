@@ -99,6 +99,8 @@ pub enum Error {
         column_name: String,
         backtrace: Backtrace,
     },
+    #[snafu(display("Regions schemas mismatch in table: {}", table))]
+    RegionSchemaMismatch { table: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to operate table, source: {}", source))]
     TableOperation { source: BoxedError },
@@ -122,6 +124,7 @@ impl ErrorExt for Error {
             Error::SchemaBuild { source, .. } => source.status_code(),
             Error::TableOperation { source } => source.status_code(),
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
+            Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
         }
     }

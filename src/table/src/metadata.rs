@@ -416,7 +416,7 @@ impl TryFrom<RawTableMeta> for TableMeta {
             primary_key_indices: raw.primary_key_indices,
             value_indices: raw.value_indices,
             engine: raw.engine,
-            region_numbers: vec![],
+            region_numbers: raw.region_numbers,
             next_column_id: raw.next_column_id,
             engine_options: raw.engine_options,
             options: raw.options,
