@@ -40,7 +40,7 @@ use session::context::QueryContextRef;
 
 use crate::datafusion::DfCatalogListAdapter;
 use crate::optimizer::TypeConversionRule;
-use crate::query_engine::options::{validate_table_references, QueryEngineOptions};
+use crate::query_engine::options::{validate_table_references, QueryOptions};
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -125,7 +125,7 @@ impl QueryEngineState {
     ) -> DfResult<Arc<dyn TableSource>> {
         let state = self.df_context.state();
 
-        if let Some(opts) = self.plugins.get::<QueryEngineOptions>() {
+        if let Some(opts) = self.plugins.get::<QueryOptions>() {
             if opts.validate_table_references {
                 validate_table_references(name, &query_ctx)?;
             }

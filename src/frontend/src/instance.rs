@@ -42,6 +42,7 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
+use query::query_engine::options::QueryOptions;
 use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
 use servers::promql::{PromqlHandler, PromqlHandlerRef};
@@ -61,6 +62,7 @@ use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
     self, Error, ExecutePromqlSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, Result,
+    SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
@@ -381,6 +383,13 @@ impl Instance {
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         // TODO(sunng87): provide a better form to log or track statement
         let query = &format!("{:?}", &stmt);
+
+        let need_validate = self
+            .plugins
+            .get::<QueryOptions>()
+            .map(|opts| opts.validate_table_references)
+            .unwrap_or_default();
+
         match stmt.clone() {
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
@@ -398,6 +407,14 @@ impl Instance {
                     table_idents_to_full_name(drop_stmt.table_name(), query_ctx.clone())
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
+
+                validate_catalog_and_schema(
+                    need_validate,
+                    Some(&catalog_name),
+                    &schema_name,
+                    &query_ctx,
+                )?;
+
                 let expr = DropTableExpr {
                     catalog_name,
                     schema_name,
@@ -414,7 +431,10 @@ impl Instance {
                     .await;
             }
             Statement::ShowCreateTable(_) => NotSupportedSnafu { feat: query }.fail(),
-            Statement::Use(db) => self.handle_use(db, query_ctx),
+            Statement::Use(db) => {
+                validate_catalog_and_schema(need_validate, None, &db, &query_ctx)?;
+                self.handle_use(db, query_ctx)
+            }
         }
     }
 }
@@ -548,6 +568,20 @@ impl PromqlHandler for Instance {
             .fail()
         }
     }
+}
+
+pub fn validate_catalog_and_schema(
+    need_validate: bool,
+    catalog: Option<&str>,
+    schema: &str,
+    query_ctx: &QueryContextRef,
+) -> Result<()> {
+    if need_validate {
+        query::query_engine::options::validate_catalog_and_schema(catalog, schema, query_ctx)
+            .map_err(BoxedError::new)
+            .context(SqlExecInterceptedSnafu)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
