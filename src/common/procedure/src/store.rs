@@ -67,7 +67,7 @@ impl ProcedureStore {
         let key = ParsedKey {
             procedure_id,
             step,
-            is_committed: false,
+            key_type: KeyType::Step,
         }
         .to_string();
         let value = serde_json::to_string(&message).context(ToJsonSnafu)?;
@@ -86,7 +86,24 @@ impl ProcedureStore {
         let key = ParsedKey {
             procedure_id,
             step,
-            is_committed: true,
+            key_type: KeyType::Commit,
+        }
+        .to_string();
+        self.0.put(&key, Vec::new()).await?;
+
+        Ok(())
+    }
+
+    /// Write rollback flag to the storage.
+    pub(crate) async fn rollback_procedure(
+        &self,
+        procedure_id: ProcedureId,
+        step: u32,
+    ) -> Result<()> {
+        let key = ParsedKey {
+            procedure_id,
+            step,
+            key_type: KeyType::Rollback,
         }
         .to_string();
         self.0.put(&key, Vec::new()).await?;
@@ -119,7 +136,7 @@ impl ProcedureStore {
         }
 
         for (procedure_id, (parsed_key, value)) in procedure_key_values {
-            if !parsed_key.is_committed {
+            if parsed_key.key_type == KeyType::Step {
                 let Some(message) = self.load_one_message(&parsed_key, &value) else {
                     // We don't abort the loading process and just ignore errors to ensure all remaining
                     // procedures are loaded.
@@ -143,12 +160,39 @@ impl ProcedureStore {
     }
 }
 
+/// Suffix type of the key.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyType {
+    Step,
+    Commit,
+    Rollback,
+}
+
+impl KeyType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            KeyType::Step => "step",
+            KeyType::Commit => "commit",
+            KeyType::Rollback => "rollback",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<KeyType> {
+        match s {
+            "step" => Some(KeyType::Step),
+            "commit" => Some(KeyType::Commit),
+            "rollback" => Some(KeyType::Rollback),
+            _ => None,
+        }
+    }
+}
+
 /// Key to refer the procedure in the [ProcedureStore].
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedKey {
     procedure_id: ProcedureId,
     step: u32,
-    is_committed: bool,
+    key_type: KeyType,
 }
 
 impl fmt::Display for ParsedKey {
@@ -158,7 +202,7 @@ impl fmt::Display for ParsedKey {
             "{}/{:010}.{}",
             self.procedure_id,
             self.step,
-            if self.is_committed { "commit" } else { "step" }
+            self.key_type.as_str(),
         )
     }
 }
@@ -175,17 +219,13 @@ impl ParsedKey {
         let mut parts = name.split('.');
         let step_str = parts.next()?;
         let suffix = parts.next()?;
-        let is_committed = match suffix {
-            "commit" => true,
-            "step" => false,
-            _ => return None,
-        };
+        let key_type = KeyType::from_str(suffix)?;
         let step = step_str.parse().ok()?;
 
         Some(ParsedKey {
             procedure_id,
             step,
-            is_committed,
+            key_type,
         })
     }
 }
@@ -209,7 +249,7 @@ mod tests {
         let key = ParsedKey {
             procedure_id,
             step: 2,
-            is_committed: false,
+            key_type: KeyType::Step,
         };
         assert_eq!(format!("{procedure_id}/0000000002.step"), key.to_string());
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
@@ -217,9 +257,20 @@ mod tests {
         let key = ParsedKey {
             procedure_id,
             step: 2,
-            is_committed: true,
+            key_type: KeyType::Commit,
         };
         assert_eq!(format!("{procedure_id}/0000000002.commit"), key.to_string());
+        assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
+
+        let key = ParsedKey {
+            procedure_id,
+            step: 2,
+            key_type: KeyType::Rollback,
+        };
+        assert_eq!(
+            format!("{procedure_id}/0000000002.rollback"),
+            key.to_string()
+        );
         assert_eq!(key, ParsedKey::parse_str(&key.to_string()).unwrap());
     }
 
@@ -347,6 +398,24 @@ mod tests {
             .await
             .unwrap();
         store.commit_procedure(procedure_id, 1).await.unwrap();
+
+        let messages = store.load_messages().await.unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_rollback_procedure() {
+        let dir = TempDir::new("rollback_procedure").unwrap();
+        let store = new_procedure_store(&dir);
+
+        let procedure_id = ProcedureId::random();
+        let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
+
+        store
+            .store_procedure(procedure_id, 0, &procedure, None)
+            .await
+            .unwrap();
+        store.rollback_procedure(procedure_id, 1).await.unwrap();
 
         let messages = store.load_messages().await.unwrap();
         assert!(messages.is_empty());
