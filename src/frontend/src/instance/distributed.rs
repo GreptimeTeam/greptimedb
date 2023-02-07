@@ -153,7 +153,6 @@ impl DistInstance {
     ) -> Result<Output> {
         match stmt {
             Statement::Query(_) => {
-                // validation of query and explain is done in query engine
                 let plan = self
                     .query_engine
                     .statement_to_plan(QueryStatement::Sql(stmt), query_ctx)
@@ -190,7 +189,6 @@ impl DistInstance {
                 describe_table(table)
             }
             Statement::Explain(stmt) => {
-                // validation of query and explain is done in query engine
                 explain(Box::new(stmt), self.query_engine.clone(), query_ctx).await
             }
             Statement::Insert(insert) => {
