@@ -90,13 +90,7 @@ impl Runner {
             match self.procedure.execute(&ctx).await {
                 Ok(status) => {
                     if status.need_persist() {
-                        if let Err(e) = self.persist_procedure().await {
-                            logging::error!(
-                                e; "Failed to persist procedure {}-{}",
-                                self.procedure.type_name(),
-                                self.meta.id
-                            );
-
+                        if self.persist_procedure().await.is_err() {
                             time::sleep(ERR_WAIT_DURATION).await;
                             continue;
                         }
@@ -108,13 +102,7 @@ impl Runner {
                             self.on_suspended(subprocedures).await;
                         }
                         Status::Done => {
-                            if let Err(e) = self.commit_procedure().await {
-                                logging::error!(
-                                    e; "Failed to commit procedure {}-{}",
-                                    self.procedure.type_name(),
-                                    self.meta.id
-                                );
-
+                            if self.commit_procedure().await.is_err() {
                                 time::sleep(ERR_WAIT_DURATION).await;
                                 continue;
                             }
@@ -125,18 +113,17 @@ impl Runner {
                     }
                 }
                 Err(e) => {
-                    logging::error!(e; "Failed to execute procedure {}-{}", self.procedure.type_name(), self.meta.id);
+                    logging::error!(
+                        e;
+                        "Failed to execute procedure {}-{}",
+                        self.procedure.type_name(),
+                        self.meta.id
+                    );
 
                     self.meta.set_state(ProcedureState::Failed);
 
                     // Write rollback key so we can skip this procedure while recovering procedures.
-                    if let Err(e) = self.rollback_procedure().await {
-                        logging::error!(
-                            e; "Failed to write rollback key for procedure {}-{}",
-                            self.procedure.type_name(),
-                            self.meta.id
-                        );
-
+                    if self.rollback_procedure().await.is_err() {
                         time::sleep(ERR_WAIT_DURATION).await;
                         continue;
                     }
@@ -147,7 +134,7 @@ impl Runner {
         }
     }
 
-    /// Submit a subprocedure.
+    /// Submit a subprocedure with specific `procedure_id`.
     fn submit_subprocedure(&self, procedure_id: ProcedureId, mut procedure: BoxedProcedure) {
         let mut step = 0;
         if let Some(loaded_procedure) = self.manager_ctx.load_one_procedure(procedure_id) {
@@ -196,6 +183,8 @@ impl Runner {
         };
 
         self.manager_ctx.insert_procedure(meta);
+        // Add the id of the subprocedure to the metadata.
+        self.meta.push_subprocedure(procedure_id);
 
         common_runtime::spawn_bg(async move {
             // Run the root procedure.
@@ -232,13 +221,31 @@ impl Runner {
                 &self.procedure,
                 self.meta.parent_id,
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                logging::error!(
+                    e; "Failed to persist procedure {}-{}",
+                    self.procedure.type_name(),
+                    self.meta.id
+                );
+                e
+            })?;
         self.step += 1;
         Ok(())
     }
 
     async fn commit_procedure(&mut self) -> Result<()> {
-        self.store.commit_procedure(self.meta.id, self.step).await?;
+        self.store
+            .commit_procedure(self.meta.id, self.step)
+            .await
+            .map_err(|e| {
+                logging::error!(
+                    e; "Failed to commit procedure {}-{}",
+                    self.procedure.type_name(),
+                    self.meta.id
+                );
+                e
+            })?;
         self.step += 1;
         Ok(())
     }
@@ -246,7 +253,15 @@ impl Runner {
     async fn rollback_procedure(&mut self) -> Result<()> {
         self.store
             .rollback_procedure(self.meta.id, self.step)
-            .await?;
+            .await
+            .map_err(|e| {
+                logging::error!(
+                    e; "Failed to write rollback key for procedure {}-{}",
+                    self.procedure.type_name(),
+                    self.meta.id
+                );
+                e
+            })?;
         self.step += 1;
         Ok(())
     }

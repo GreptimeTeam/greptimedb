@@ -38,12 +38,15 @@ use crate::{
 struct ExecMeta {
     /// Current procedure state.
     state: ProcedureState,
+    /// Id of subprocedures.
+    subprocedures: Vec<ProcedureId>,
 }
 
 impl Default for ExecMeta {
     fn default() -> ExecMeta {
         ExecMeta {
             state: ProcedureState::Running,
+            subprocedures: Vec::new(),
         }
     }
 }
@@ -100,6 +103,12 @@ impl ProcedureMeta {
     fn set_state(&self, state: ProcedureState) {
         let mut meta = self.exec_meta.lock().unwrap();
         meta.state = state;
+    }
+
+    /// Push `procedure_id` of the subprocedure to the metadata.
+    fn push_subprocedure(&self, procedure_id: ProcedureId) {
+        let mut meta = self.exec_meta.lock().unwrap();
+        meta.subprocedures.push(procedure_id);
     }
 }
 
