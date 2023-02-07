@@ -9,7 +9,7 @@ aide = { version = "0.9", features = ["axum"] }
 arrow-flight.workspace = true
 api = { path = "../api" }
 async-trait = "0.1"
-axum = "0.6"
+axum = { version = "0.6", features = ["form"] }
 axum-macros = "0.3"
 base64 = "0.13"
 bytes = "1.2"
