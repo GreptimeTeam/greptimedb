@@ -127,10 +127,20 @@ impl Runner {
                 Err(e) => {
                     logging::error!(e; "Failed to execute procedure {}-{}", self.procedure.type_name(), self.meta.id);
 
-                    // TODO(yingwen): Write rollback key.
-
                     self.meta.set_state(ProcedureState::Failed);
-                    // TODO(yingwen): Retry and rollback if it can't proceed.
+
+                    // Write rollback key so we can skip this procedure while recovering procedures.
+                    if let Err(e) = self.rollback_procedure().await {
+                        logging::error!(
+                            e; "Failed to write rollback key for procedure {}-{}",
+                            self.procedure.type_name(),
+                            self.meta.id
+                        );
+
+                        time::sleep(ERR_WAIT_DURATION).await;
+                        continue;
+                    }
+
                     return Err(e);
                 }
             }
@@ -226,6 +236,14 @@ impl Runner {
 
     async fn commit_procedure(&mut self) -> Result<()> {
         self.store.commit_procedure(self.meta.id, self.step).await?;
+        self.step += 1;
+        Ok(())
+    }
+
+    async fn rollback_procedure(&mut self) -> Result<()> {
+        self.store
+            .rollback_procedure(self.meta.id, self.step)
+            .await?;
         self.step += 1;
         Ok(())
     }
