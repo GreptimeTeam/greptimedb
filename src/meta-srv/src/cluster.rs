@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use api::v1::meta::cluster_client::ClusterClient;
 use api::v1::meta::{
-    GetKvRequest, GetKvResponse, KeyValue, RangeRequest, RangeResponse, ResponseHeader,
+    BatchGetRequest, BatchGetResponse, KeyValue, RangeRequest, RangeResponse, ResponseHeader,
 };
 use common_grpc::channel_manager::ChannelManager;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -66,7 +66,7 @@ impl MetaPeerClient {
 
         let channel = self
             .channel_manager
-            .get(leader_addr)
+            .get(&leader_addr)
             .context(error::CreateChannelSnafu)?;
 
         let request = tonic::Request::new(req);
@@ -77,7 +77,7 @@ impl MetaPeerClient {
             .context(error::BatchGetSnafu)?
             .into_inner();
 
-        check_resp_header(&response.header)?;
+        check_resp_header(&response.header, Context { addr: &leader_addr })?;
 
         to_stat_kv_map(response.kvs)
     }
@@ -109,21 +109,21 @@ impl MetaPeerClient {
 
         let channel = self
             .channel_manager
-            .get(leader_addr)
+            .get(&leader_addr)
             .context(error::CreateChannelSnafu)?;
 
-        let request = tonic::Request::new(GetKvRequest {
+        let request = tonic::Request::new(BatchGetRequest {
             keys: keys.clone(),
             ..Default::default()
         });
 
-        let response: GetKvResponse = ClusterClient::new(channel.clone())
+        let response: BatchGetResponse = ClusterClient::new(channel.clone())
             .batch_get(request)
             .await
             .context(error::BatchGetSnafu)?
             .into_inner();
 
-        check_resp_header(&response.header)?;
+        check_resp_header(&response.header, Context { addr: &leader_addr })?;
 
         Ok(response.kvs)
     }
@@ -146,12 +146,21 @@ fn to_stat_kv_map(kvs: Vec<KeyValue>) -> Result<HashMap<StatKey, StatValue>> {
     Ok(map)
 }
 
-fn check_resp_header(header: &Option<ResponseHeader>) -> Result<()> {
+struct Context<'a> {
+    addr: &'a str,
+}
+
+fn check_resp_header(header: &Option<ResponseHeader>, ctx: Context) -> Result<()> {
     let header = header
         .as_ref()
         .context(error::ResponseHeaderNotFoundSnafu)?;
 
-    ensure!(!header.is_not_leader(), error::IsNotLeaderSnafu);
+    ensure!(
+        !header.is_not_leader(),
+        error::IsNotLeaderSnafu {
+            node_addr: ctx.addr
+        }
+    );
 
     Ok(())
 }
@@ -160,7 +169,7 @@ fn check_resp_header(header: &Option<ResponseHeader>) -> Result<()> {
 mod tests {
     use api::v1::meta::{Error, ErrorCode, KeyValue, ResponseHeader};
 
-    use super::{check_resp_header, to_stat_kv_map};
+    use super::{check_resp_header, to_stat_kv_map, Context};
     use crate::error;
     use crate::handler::node_stat::Stat;
     use crate::keys::{StatKey, StatValue};
@@ -205,10 +214,10 @@ mod tests {
             error: None,
             ..Default::default()
         });
-        let result = check_resp_header(&header);
+        let result = check_resp_header(&header, mock_ctx());
         assert!(result.is_ok());
 
-        let result = check_resp_header(&None);
+        let result = check_resp_header(&None, mock_ctx());
         assert!(result.is_err());
         assert!(matches!(
             result.err().unwrap(),
@@ -222,11 +231,15 @@ mod tests {
             }),
             ..Default::default()
         });
-        let result = check_resp_header(&header);
+        let result = check_resp_header(&header, mock_ctx());
         assert!(result.is_err());
         assert!(matches!(
             result.err().unwrap(),
             error::Error::IsNotLeader { .. }
         ));
+    }
+
+    fn mock_ctx<'a>() -> Context<'a> {
+        Context { addr: "addr" }
     }
 }

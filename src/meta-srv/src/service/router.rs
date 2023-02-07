@@ -22,12 +22,12 @@ use common_telemetry::warn;
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
 
-use super::store::ext::KvStoreExt;
 use crate::error;
 use crate::error::Result;
 use crate::keys::TableRouteKey;
 use crate::metasrv::{Context, MetaSrv, SelectorRef};
 use crate::sequence::SequenceRef;
+use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
 use crate::service::GrpcResult;
 

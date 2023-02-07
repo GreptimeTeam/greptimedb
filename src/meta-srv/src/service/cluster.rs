@@ -13,20 +13,21 @@
 // limitations under the License.
 
 use api::v1::meta::{
-    cluster_server, Error, GetKvRequest, GetKvResponse, RangeRequest, RangeResponse, ResponseHeader,
+    cluster_server, BatchGetRequest, BatchGetResponse, Error, RangeRequest, RangeResponse,
+    ResponseHeader,
 };
 use tonic::{Request, Response};
 
-use super::store::ext::KvStoreExt;
-use super::GrpcResult;
 use crate::metasrv::MetaSrv;
+use crate::service::store::ext::KvStoreExt;
+use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
 impl cluster_server::Cluster for MetaSrv {
-    async fn batch_get(&self, req: Request<GetKvRequest>) -> GrpcResult<GetKvResponse> {
+    async fn batch_get(&self, req: Request<BatchGetRequest>) -> GrpcResult<BatchGetResponse> {
         if !self.is_leader() {
             let is_not_leader = ResponseHeader::failed(0, Error::is_not_leader());
-            let resp = GetKvResponse {
+            let resp = BatchGetResponse {
                 header: Some(is_not_leader),
                 ..Default::default()
             };
@@ -37,7 +38,7 @@ impl cluster_server::Cluster for MetaSrv {
         let kvs = self.in_memory().batch_get(req.keys).await?;
         let success = ResponseHeader::success(0);
 
-        let get_resp = GetKvResponse {
+        let get_resp = BatchGetResponse {
             kvs,
             header: Some(success),
         };
@@ -64,11 +65,6 @@ impl cluster_server::Cluster for MetaSrv {
 
 impl MetaSrv {
     pub fn is_leader(&self) -> bool {
-        if let Some(election) = self.election() {
-            if election.is_leader() {
-                return true;
-            }
-        }
-        false
+        self.election().map(|x| x.is_leader()).unwrap_or(false)
     }
 }

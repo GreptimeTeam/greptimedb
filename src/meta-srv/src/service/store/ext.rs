@@ -15,8 +15,8 @@
 use api::v1::meta::{KeyValue, RangeRequest};
 use snafu::ensure;
 
-use super::kv::KvStore;
 use crate::error::{self, Result};
+use crate::service::store::kv::KvStore;
 
 #[async_trait::async_trait]
 pub trait KvStoreExt {
@@ -44,7 +44,10 @@ where
 
         ensure!(
             kvs.len() == 1,
-            error::InvalidKvsLengthSnafu { expect: 1_usize }
+            error::InvalidKvsLengthSnafu {
+                actual: kvs.len(),
+                expect: 1_usize
+            }
         );
 
         // Safety: the length check has been performed before using unwrap()

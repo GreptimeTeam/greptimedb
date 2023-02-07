@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_error::prelude::*;
+use tonic::codegen::http;
 use tonic::{Code, Status};
 
 #[derive(Debug, Snafu)]
@@ -166,8 +167,12 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Invalid KVs length, expect: {}", expect))]
-    InvalidKvsLength { expect: usize, backtrace: Backtrace },
+    #[snafu(display("Invalid KVs length, actual: {}, expect: {}", actual, expect))]
+    InvalidKvsLength {
+        actual: usize,
+        expect: usize,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Failed to create gRPC channel, source: {}", source))]
     CreateChannel {
@@ -187,11 +192,20 @@ pub enum Error {
     #[snafu(display("Response header not found"))]
     ResponseHeaderNotFound { backtrace: Backtrace },
 
-    #[snafu(display("The requested meta node is not leader"))]
-    IsNotLeader { backtrace: Backtrace },
+    #[snafu(display("The requested meta node is not leader, node addr: {}", node_addr))]
+    IsNotLeader {
+        node_addr: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("MetaSrv has no meta peer client"))]
     NoMetaPeerClient { backtrace: Backtrace },
+
+    #[snafu(display("Invalid http body, source: {}", source))]
+    InvalidHttpBody {
+        source: http::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -226,6 +240,7 @@ impl ErrorExt for Error {
             | Error::ResponseHeaderNotFound { .. }
             | Error::IsNotLeader { .. }
             | Error::NoMetaPeerClient { .. }
+            | Error::InvalidHttpBody { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }

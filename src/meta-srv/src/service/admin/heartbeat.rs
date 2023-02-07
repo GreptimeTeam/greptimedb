@@ -18,10 +18,10 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 
-use super::HttpHandler;
 use crate::cluster::MetaPeerClient;
 use crate::error::{self, Result};
 use crate::keys::StatValue;
+use crate::service::admin::HttpHandler;
 
 pub struct HeartBeatHandler {
     pub meta_peer_client: Option<MetaPeerClient>,
@@ -34,14 +34,15 @@ impl HttpHandler for HeartBeatHandler {
             .meta_peer_client
             .as_ref()
             .context(error::NoMetaPeerClientSnafu)?;
+
         let stat_kvs = meta_peer_client.get_all_dn_stat_kvs().await?;
         let stat_vals: Vec<StatValue> = stat_kvs.into_values().collect();
         let result = StatValues { stat_vals }.try_into()?;
 
-        Ok(http::Response::builder()
+        http::Response::builder()
             .status(http::StatusCode::OK)
             .body(result)
-            .unwrap())
+            .context(error::InvalidHttpBodySnafu)
     }
 }
 

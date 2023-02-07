@@ -25,6 +25,7 @@ use tonic::transport::server::Router;
 
 use crate::cluster::MetaPeerClient;
 use crate::election::etcd::EtcdElection;
+use crate::metasrv::builder::MetaSrvBuilder;
 use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
@@ -77,8 +78,8 @@ pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
         )
     };
 
-    let mem_kv = Arc::new(MemStore::default()) as ResetableKvStoreRef;
-    let meta_peer_client = MetaPeerClient::new(mem_kv.clone(), election.clone());
+    let in_memory = Arc::new(MemStore::default()) as ResetableKvStoreRef;
+    let meta_peer_client = MetaPeerClient::new(in_memory.clone(), election.clone());
 
     let selector = match opts.selector {
         SelectorType::LoadBased => Arc::new(LoadBasedSelector {
@@ -87,16 +88,15 @@ pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
     };
 
-    let meta_srv = MetaSrv::new(
-        opts,
-        kv_store,
-        Some(mem_kv),
-        Some(selector),
-        election,
-        None,
-        Some(meta_peer_client),
-    )
-    .await;
+    let meta_srv = MetaSrvBuilder::new()
+        .options(opts)
+        .kv_store(kv_store)
+        .in_memory(in_memory)
+        .selector(selector)
+        .election(election)
+        .meta_peer_client(meta_peer_client)
+        .build()
+        .await;
 
     meta_srv.start().await;
 

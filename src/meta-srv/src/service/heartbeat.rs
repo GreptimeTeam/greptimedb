@@ -149,23 +149,14 @@ mod tests {
     use api::v1::meta::*;
     use tonic::IntoRequest;
 
-    use super::*;
-    use crate::metasrv::MetaSrvOptions;
+    use crate::metasrv::builder::MetaSrvBuilder;
     use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_ask_leader() {
         let kv_store = Arc::new(MemStore::new());
-        let meta_srv = MetaSrv::new(
-            MetaSrvOptions::default(),
-            kv_store,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await;
+
+        let meta_srv = MetaSrvBuilder::new().kv_store(kv_store).build().await;
 
         let req = AskLeaderRequest {
             header: Some(RequestHeader::new((1, 1))),

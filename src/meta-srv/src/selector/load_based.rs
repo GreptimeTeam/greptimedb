@@ -17,12 +17,12 @@ use std::collections::HashMap;
 use api::v1::meta::Peer;
 use common_time::util as time_util;
 
-use super::{Namespace, Selector};
 use crate::cluster::MetaPeerClient;
 use crate::error::Result;
 use crate::keys::{LeaseKey, LeaseValue, StatKey};
 use crate::lease;
 use crate::metasrv::Context;
+use crate::selector::{Namespace, Selector};
 
 pub struct LoadBasedSelector {
     pub meta_peer_client: MetaPeerClient,
