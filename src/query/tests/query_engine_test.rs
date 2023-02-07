@@ -19,7 +19,6 @@ mod pow;
 #[allow(unused)]
 mod function;
 
-use std::assert_matches::assert_matches;
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
@@ -109,7 +108,7 @@ async fn test_datafusion_query_engine() -> Result<()> {
     Ok(())
 }
 
-fn catalog_list() -> Arc<MemoryCatalogManager> {
+fn catalog_list() -> Result<Arc<MemoryCatalogManager>> {
     let catalog_list = catalog::local::new_memory_catalog_list()
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
@@ -125,13 +124,13 @@ fn catalog_list() -> Arc<MemoryCatalogManager> {
     catalog_list
         .register_catalog(DEFAULT_CATALOG_NAME.to_string(), default_catalog)
         .unwrap();
-    catalog_list
+    Ok(catalog_list)
 }
 
 #[tokio::test]
 async fn test_query_validate() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    let catalog_list = catalog_list();
+    let catalog_list = catalog_list()?;
 
     // set plugins
     let mut plugins = Plugins::new();
@@ -157,7 +156,7 @@ async fn test_query_validate() -> Result<()> {
 #[tokio::test]
 async fn test_udf() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    let catalog_list = catalog_list();
+    let catalog_list = catalog_list()?;
 
     let factory = QueryEngineFactory::new(catalog_list);
     let engine = factory.query_engine();
