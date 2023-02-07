@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use axum::body::Body;
 use axum::extract::{Json, Query, RawBody, State};
+use axum::Form;
 use common_telemetry::metric;
 use metrics::counter;
 use servers::http::{handler as http_handler, script as script_handler, ApiState, JsonOutput};
@@ -34,6 +35,7 @@ async fn test_sql_not_provided() {
         }),
         Query(http_handler::SqlQuery::default()),
         axum::Extension(UserInfo::default()),
+        Form(http_handler::SqlQuery::default()),
     )
     .await;
     assert!(!json.success());
@@ -58,6 +60,34 @@ async fn test_sql_output_rows() {
         }),
         query,
         axum::Extension(UserInfo::default()),
+        Form(http_handler::SqlQuery::default()),
+    )
+    .await;
+    assert!(json.success(), "{json:?}");
+    assert!(json.error().is_none());
+    match &json.output().expect("assertion failed")[0] {
+        JsonOutput::Records(records) => {
+            assert_eq!(1, records.num_rows());
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn test_sql_form() {
+    common_telemetry::init_default_ut_logging();
+
+    let form = create_form();
+    let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
+
+    let Json(json) = http_handler::sql(
+        State(ApiState {
+            sql_handler,
+            script_handler: None,
+        }),
+        Query(http_handler::SqlQuery::default()),
+        axum::Extension(UserInfo::default()),
+        form,
     )
     .await;
     assert!(json.success(), "{json:?}");
@@ -138,6 +168,13 @@ fn create_invalid_script_query() -> Query<script_handler::ScriptQuery> {
 
 fn create_query() -> Query<http_handler::SqlQuery> {
     Query(http_handler::SqlQuery {
+        sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
+        db: None,
+    })
+}
+
+fn create_form() -> Form<http_handler::SqlQuery> {
+    Form(http_handler::SqlQuery {
         sql: Some("select sum(uint32s) from numbers limit 20".to_string()),
         db: None,
     })
