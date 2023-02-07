@@ -42,17 +42,12 @@ pub(crate) struct CompactionInput {
 
 #[cfg(test)]
 pub mod tests {
-    use std::future::Future;
-    use std::pin::Pin;
     use std::sync::Arc;
-
-    use common_telemetry::debug;
 
     use super::*;
     use crate::compaction::task::CompactionTask;
 
-    pub type CallbackRef =
-        Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send + Sync>> + Send + Sync>;
+    pub type CallbackRef = Arc<dyn Fn() + Send + Sync>;
     pub struct NoopCompactionTask {
         pub cbs: Vec<CallbackRef>,
     }
@@ -66,11 +61,8 @@ pub mod tests {
     #[async_trait::async_trait]
     impl CompactionTask for NoopCompactionTask {
         async fn run(&self) -> Result<()> {
-            debug!("Running NoopCompactionTask");
             for cb in &self.cbs {
-                debug!("Running callback");
-                let f = cb();
-                f.await;
+                cb()
             }
             Ok(())
         }

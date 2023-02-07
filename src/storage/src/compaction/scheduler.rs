@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use common_telemetry::{debug, info};
+use snafu::ResultExt;
 use table::metadata::TableId;
 use tokio::sync::{Notify, RwLock};
 use tokio::task::JoinHandle;
@@ -25,10 +26,10 @@ use tokio_util::sync::CancellationToken;
 use crate::compaction::dedup_deque::DedupDeque;
 use crate::compaction::picker::Picker;
 use crate::compaction::rate_limit::{
-    CascadeRateLimiter, RateLimitToken, RateLimitTokenPtr, RateLimiter,
+    CascadeRateLimiter, MaxInflightTaskLimiter, RateLimitToken, RateLimitTokenPtr, RateLimiter,
 };
 use crate::compaction::task::CompactionTask;
-use crate::error::Result;
+use crate::error::{Result, StopCompactionSchedulerSnafu};
 
 /// Table compaction request.
 #[derive(Default)]
@@ -47,11 +48,26 @@ pub trait CompactionRequest: Send + Sync + Default + 'static {
     fn table_id(&self) -> TableId;
 }
 
+#[derive(Debug)]
+pub struct CompactionSchedulerConfig {
+    max_inflight_task: usize,
+}
+
+impl Default for CompactionSchedulerConfig {
+    fn default() -> Self {
+        Self {
+            max_inflight_task: 16,
+        }
+    }
+}
+
 /// CompactionScheduler defines a set of API to schedule compaction tasks.
 #[async_trait]
 pub trait CompactionScheduler<R> {
     /// Schedules a compaction request.
-    async fn schedule(&self, request: R) -> Result<()>;
+    /// Returns true if request is scheduled. Returns false if task queue already
+    /// contains the request with same table id.
+    async fn schedule(&self, request: R) -> Result<bool>;
 
     /// Stops compaction scheduler.
     async fn stop(&self) -> Result<()>;
@@ -63,7 +79,7 @@ pub struct LocalCompactionScheduler<R: CompactionRequest> {
     request_queue: Arc<RwLock<DedupDeque<TableId, R>>>,
     cancel_token: CancellationToken,
     task_notifier: Arc<Notify>,
-    join_handle: JoinHandle<()>,
+    join_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[async_trait]
@@ -71,15 +87,23 @@ impl<R> CompactionScheduler<R> for LocalCompactionScheduler<R>
 where
     R: CompactionRequest + Send + Sync,
 {
-    async fn schedule(&self, request: R) -> Result<()> {
+    async fn schedule(&self, request: R) -> Result<bool> {
+        debug!(
+            "Schedule request: {}, queue size: {}",
+            request.table_id(),
+            self.remaining_requests().await
+        );
         let mut queue = self.request_queue.write().await;
-        queue.push_back(request.table_id(), request);
+        let res = queue.push_back(request.table_id(), request);
         self.task_notifier.notify_one();
-        Ok(())
+        Ok(res)
     }
 
     async fn stop(&self) -> Result<()> {
         self.cancel_token.cancel();
+        // safety: LocalCompactionScheduler is guaranteed to have a present join_handle field
+        let handle = { self.join_handle.lock().unwrap().take().unwrap() };
+        handle.await.context(StopCompactionSchedulerSnafu)?;
         Ok(())
     }
 }
@@ -89,7 +113,7 @@ impl<R> LocalCompactionScheduler<R>
 where
     R: CompactionRequest,
 {
-    pub fn new<P, T>(picker: P) -> Self
+    pub fn new<P, T>(config: CompactionSchedulerConfig, picker: P) -> Self
     where
         T: CompactionTask,
         P: Picker<R, T> + Send + Sync,
@@ -98,11 +122,14 @@ where
             Arc::new(RwLock::new(DedupDeque::default()));
         let cancel_token = CancellationToken::new();
         let task_notifier = Arc::new(Notify::new());
+
         let handler = CompactionHandler {
             task_notifier: task_notifier.clone(),
             req_queue: request_queue.clone(),
             cancel_token: cancel_token.child_token(),
-            limiter: Arc::new(CascadeRateLimiter::new(vec![])),
+            limiter: Arc::new(CascadeRateLimiter::new(vec![Box::new(
+                MaxInflightTaskLimiter::new(config.max_inflight_task),
+            )])),
             picker,
             _phantom_data: PhantomData::<T>::default(),
         };
@@ -111,11 +138,15 @@ where
             handler.run().await;
         });
         Self {
-            join_handle,
+            join_handle: Mutex::new(Some(join_handle)),
             request_queue,
             cancel_token,
             task_notifier,
         }
+    }
+
+    async fn remaining_requests(&self) -> usize {
+        self.request_queue.read().await.len()
     }
 }
 
@@ -140,13 +171,15 @@ impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
                 _ = task_notifier.notified() => {
                     // poll requests as many as possible until rate limited, and then wait for
                     // notification (some task's finished).
-                    debug!("Notified, task size: {:?}", self.req_queue.read().await.len());
+                    debug!("Notified, queue size: {:?}", self.req_queue.read().await.len());
                     while let Some((table_id,  req)) = self.poll_task().await {
                         if let Ok(token) = limiter.acquire_token(&req) {
+                            debug!("Executing compaction request: {}", table_id);
                             self.handle_compaction_request(req, token).await;
                         } else {
                             // compaction rate limited, put back to req queue to wait for next
                             // schedule
+                            debug!("Put back request {}, queue size: {}", table_id, self.req_queue.read().await.len());
                             self.put_back_req(table_id, req).await;
                             break;
                         }
@@ -180,7 +213,8 @@ impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
 
         common_runtime::spawn_bg(async move {
             task.run().await; // TODO(hl): handle errors
-                              // releases rate limit token
+
+            // releases rate limit token
             token.try_release();
             // notify scheduler to schedule next task when current task finishes.
             cloned_notify.notify_one();
@@ -197,30 +231,57 @@ impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use tokio::sync::Barrier;
+    use std::time::Duration;
 
     use super::*;
     use crate::compaction::picker::tests::MockPicker;
     use crate::compaction::rate_limit::MaxInflightTaskLimiter;
 
+    struct CountdownLatch {
+        counter: std::sync::Mutex<usize>,
+        notifies: std::sync::RwLock<Vec<Arc<Notify>>>,
+    }
+
+    impl CountdownLatch {
+        fn new(size: usize) -> Self {
+            Self {
+                counter: std::sync::Mutex::new(size),
+                notifies: std::sync::RwLock::new(vec![]),
+            }
+        }
+
+        fn countdown(&self) {
+            let mut counter = self.counter.lock().unwrap();
+            if *counter >= 1 {
+                *counter -= 1;
+                if *counter == 0 {
+                    let notifies = self.notifies.read().unwrap();
+                    for waiter in notifies.iter() {
+                        waiter.notify_one();
+                    }
+                }
+            }
+        }
+
+        async fn wait(&self) {
+            let notify = Arc::new(Notify::new());
+            {
+                let notify = notify.clone();
+                let mut notifies = self.notifies.write().unwrap();
+                notifies.push(notify);
+            }
+            notify.notified().await
+        }
+    }
+
     #[tokio::test]
     async fn test_schedule_handler() {
         common_telemetry::init_default_ut_logging();
         let queue = Arc::new(RwLock::new(DedupDeque::default()));
-        let task_finished = Arc::new(AtomicUsize::new(0));
-
-        let task_finished_clone = task_finished.clone();
-        let barrier = Arc::new(Barrier::new(3));
-        let barrier_clone = barrier.clone();
+        let latch = Arc::new(CountdownLatch::new(2));
+        let latch_cloned = latch.clone();
         let picker = MockPicker::new(vec![Arc::new(move || {
-            debug!("Running callback");
-            task_finished_clone.fetch_add(1, Ordering::Relaxed);
-            let barrier_clone_2 = barrier_clone.clone();
-            Box::pin(async move {
-                barrier_clone_2.wait().await;
-            })
+            latch_cloned.countdown();
         })]);
         let handler = Arc::new(CompactionHandler {
             req_queue: queue.clone(),
@@ -247,8 +308,9 @@ mod tests {
             .push_back(2, CompactionRequestImpl::default());
         handler.task_notifier.notify_one();
 
-        barrier.wait().await;
-        assert_eq!(2, task_finished.load(Ordering::Relaxed));
+        tokio::time::timeout(Duration::from_secs(1), latch.wait())
+            .await
+            .unwrap();
     }
 
     #[derive(Default, Debug)]
@@ -264,21 +326,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler() {
-        let task_finished = Arc::new(AtomicUsize::new(0));
+        let latch = Arc::new(CountdownLatch::new(2));
+        let latch_cloned = latch.clone();
 
-        let task_finished_clone = task_finished.clone();
-        let barrier = Arc::new(Barrier::new(3));
-        let barrier_clone = barrier.clone();
-
-        let picker = MockPicker::new(vec![Arc::new(move || {
-            debug!("Running callback");
-            task_finished_clone.fetch_add(1, Ordering::Relaxed);
-            let barrier_clone_2 = barrier_clone.clone();
-            Box::pin(async move {
-                barrier_clone_2.wait().await;
-            })
-        })]);
-        let scheduler = LocalCompactionScheduler::new(picker);
+        let picker = MockPicker::new(vec![Arc::new(move || latch_cloned.countdown())]);
+        let scheduler = LocalCompactionScheduler::new(
+            CompactionSchedulerConfig {
+                max_inflight_task: 3,
+            },
+            picker,
+        );
 
         scheduler
             .schedule(MockRequest { table_id: 1 })
@@ -290,8 +347,103 @@ mod tests {
             .await
             .unwrap();
 
-        barrier.wait().await;
+        tokio::time::timeout(Duration::from_secs(1), latch.wait())
+            .await
+            .unwrap();
+    }
 
-        assert_eq!(2, task_finished.load(Ordering::Relaxed));
+    #[tokio::test]
+    async fn test_scheduler_many() {
+        common_telemetry::init_default_ut_logging();
+        let task_size = 100;
+
+        let latch = Arc::new(CountdownLatch::new(task_size));
+        let latch_clone = latch.clone();
+
+        let picker = MockPicker::new(vec![Arc::new(move || {
+            latch_clone.countdown();
+        })]);
+
+        let config = CompactionSchedulerConfig {
+            max_inflight_task: 3,
+        };
+        let scheduler = LocalCompactionScheduler::new(config, picker);
+
+        for i in 0..task_size {
+            scheduler
+                .schedule(MockRequest {
+                    table_id: i as TableId,
+                })
+                .await
+                .unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_secs(3), latch.wait())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_interval() {
+        common_telemetry::init_default_ut_logging();
+        let task_size = 100;
+        let latch = Arc::new(CountdownLatch::new(task_size));
+        let latch_clone = latch.clone();
+
+        let picker = MockPicker::new(vec![Arc::new(move || {
+            latch_clone.countdown();
+        })]);
+
+        let config = CompactionSchedulerConfig {
+            max_inflight_task: 3,
+        };
+        let scheduler = LocalCompactionScheduler::new(config, picker);
+
+        for i in 0..task_size / 2 {
+            scheduler
+                .schedule(MockRequest {
+                    table_id: i as TableId,
+                })
+                .await
+                .unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for i in task_size / 2..task_size {
+            scheduler
+                .schedule(MockRequest {
+                    table_id: i as TableId,
+                })
+                .await
+                .unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_secs(6), latch.wait())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_schedule_duplicate_tasks() {
+        common_telemetry::init_default_ut_logging();
+        let picker = MockPicker::new(vec![]);
+        let config = CompactionSchedulerConfig {
+            max_inflight_task: 3,
+        };
+        let scheduler = LocalCompactionScheduler::new(config, picker);
+
+        let mut scheduled_task = 0;
+        for _ in 0..10 {
+            if scheduler
+                .schedule(MockRequest { table_id: 1 })
+                .await
+                .unwrap()
+            {
+                scheduled_task += 1;
+            }
+        }
+        scheduler.stop().await.unwrap();
+        debug!("Schedule tasks: {}", scheduled_task);
+        assert!(scheduled_task < 10);
     }
 }

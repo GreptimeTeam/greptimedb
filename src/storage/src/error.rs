@@ -23,6 +23,7 @@ use serde_json::error::Error as JsonError;
 use store_api::manifest::action::ProtocolVersion;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{RegionId, SequenceNumber};
+use tokio::task::JoinError;
 
 use crate::metadata::Error as MetadataError;
 use crate::write_batch;
@@ -415,6 +416,12 @@ pub enum Error {
 
     #[snafu(display("Compaction rate limited, msg: {}", msg))]
     CompactionRateLimited { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Failed to stop compaction scheduler, source: {:?}", source))]
+    StopCompactionScheduler {
+        source: JoinError,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -485,6 +492,7 @@ impl ErrorExt for Error {
             MarkWalObsolete { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
             CompactionRateLimited { .. } => StatusCode::Internal,
+            StopCompactionScheduler { .. } => StatusCode::Internal,
         }
     }
 
