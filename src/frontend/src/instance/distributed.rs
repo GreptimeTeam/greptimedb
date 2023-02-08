@@ -61,7 +61,7 @@ use crate::error::{
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
     TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
-use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
+use crate::expr_factory;
 use crate::instance::parse_stmt;
 use crate::sql::insert_to_request;
 use crate::table::DistTable;
@@ -258,7 +258,7 @@ impl DistInstance {
                 Ok(self.handle_create_database(expr).await?)
             }
             Statement::CreateTable(stmt) => {
-                let create_expr = &mut DefaultCreateExprFactory.create_expr_by_stmt(&stmt).await?;
+                let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
                 Ok(self.create_table(create_expr, stmt.partitions).await?)
             }
             Statement::DropTable(stmt) => {
@@ -662,7 +662,6 @@ mod test {
     use sql::statements::statement::Statement;
 
     use super::*;
-    use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
     use crate::instance::standalone::StandaloneSqlQueryHandler;
 
     #[tokio::test]
@@ -696,10 +695,7 @@ ENGINE=mito",
             let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
             match &result[0] {
                 Statement::CreateTable(c) => {
-                    let expr = DefaultCreateExprFactory
-                        .create_expr_by_stmt(c)
-                        .await
-                        .unwrap();
+                    let expr = expr_factory::create_to_expr(c, QueryContext::arc()).unwrap();
                     let partitions = parse_partitions(&expr, c.partitions.clone()).unwrap();
                     let json = serde_json::to_string(&partitions).unwrap();
                     assert_eq!(json, expected);

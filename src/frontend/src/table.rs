@@ -410,7 +410,7 @@ mod test {
     use table::TableRef;
 
     use super::*;
-    use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
+    use crate::expr_factory;
 
     struct DummyKvBackend;
 
@@ -823,10 +823,7 @@ mod test {
                 _ => unreachable!(),
             };
 
-        let mut expr = DefaultCreateExprFactory
-            .create_expr_by_stmt(&create_table)
-            .await
-            .unwrap();
+        let mut expr = expr_factory::create_to_expr(&create_table, QueryContext::arc()).unwrap();
         let _result = dist_instance
             .create_table(&mut expr, create_table.partitions)
             .await
