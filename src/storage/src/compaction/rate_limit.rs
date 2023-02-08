@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::error::{CompactionRateLimitedSnafu, Result};
@@ -77,19 +77,35 @@ impl<R> RateLimiter for MaxInflightTaskLimiter<R> {
             .fail();
         }
 
-        Ok(Box::new(MaxInflightLimiterToken {
-            counter: self.inflight_task.clone(),
-        }))
+        Ok(Box::new(MaxInflightLimiterToken::new(
+            self.inflight_task.clone(),
+        )))
     }
 }
 
 pub struct MaxInflightLimiterToken {
     counter: Arc<AtomicUsize>,
+    released: AtomicBool,
+}
+
+impl MaxInflightLimiterToken {
+    pub fn new(counter: Arc<AtomicUsize>) -> Self {
+        Self {
+            counter,
+            released: AtomicBool::new(false),
+        }
+    }
 }
 
 impl RateLimitToken for MaxInflightLimiterToken {
     fn try_release(&self) {
-        self.counter.fetch_sub(1, Ordering::Relaxed);
+        if self
+            .released
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.counter.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
