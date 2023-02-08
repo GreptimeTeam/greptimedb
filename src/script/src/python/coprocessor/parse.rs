@@ -29,7 +29,7 @@ use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DecoratorArgs {
-    pub arg_names: Vec<String>,
+    pub arg_names: Option<Vec<String>>,
     pub ret_names: Vec<String>,
     pub sql: Option<String>,
     // maybe add a URL for connecting or what?
@@ -263,7 +263,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
     // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
     let avail_key = HashSet::from(["args", "returns", "sql"]);
-    let opt_keys = HashSet::from(["sql"]);
+    let opt_keys = HashSet::from(["sql", "args"]);
     let mut visited_key = HashSet::new();
     let len_min = avail_key.len() - opt_keys.len();
     let len_max = avail_key.len();
@@ -298,7 +298,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                     visited_key.insert(s);
                 }
                 match s {
-                    "args" => ret_args.arg_names = pylist_to_vec(&kw.node.value)?,
+                    "args" => ret_args.arg_names = Some(pylist_to_vec(&kw.node.value)?),
                     "returns" => ret_args.ret_names = pylist_to_vec(&kw.node.value)?,
                     "sql" => ret_args.sql = Some(py_str_to_string(&kw.node.value)?),
                     _ => unreachable!(),
@@ -476,17 +476,19 @@ pub fn parse_and_compile_copr(
 
                 // make sure both arguments&returns in function
                 // and in decorator have same length
-                ensure!(
-                    deco_args.arg_names.len() == arg_types.len(),
-                    CoprParseSnafu {
-                        reason: format!(
-                            "args number in decorator({}) and function({}) doesn't match",
-                            deco_args.arg_names.len(),
-                            arg_types.len()
-                        ),
-                        loc: None
-                    }
-                );
+                if let Some(arg_names) = &deco_args.arg_names {
+                    ensure!(
+                        arg_names.len() == arg_types.len(),
+                        CoprParseSnafu {
+                            reason: format!(
+                                "args number in decorator({}) and function({}) doesn't match",
+                                arg_names.len(),
+                                arg_types.len()
+                            ),
+                            loc: None
+                        }
+                    );
+                }
                 ensure!(
                     deco_args.ret_names.len() == return_types.len(),
                     CoprParseSnafu {

@@ -19,7 +19,7 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
             result: (
                 name: "a",
                 deco_args: (
-                    arg_names: ["cpu", "mem"],
+                    arg_names: Some(["cpu", "mem"]),
                     ret_names: ["perf", "what", "how", "why"],
                 ),
                 arg_types: [
@@ -231,7 +231,7 @@ def a(cpu: vector[f64], mem: vector[f64])->(vector[f64|None], vector[into(f64)],
 "#,
         predicate: ParseIsErr(
             reason:
-            " keyword argument, found "
+            "Expect `returns` keyword"
         )
     ),
     (

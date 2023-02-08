@@ -37,17 +37,21 @@ fn gen_call(name: &str, deco_args: &DecoratorArgs, loc: &Location) -> ast::Stmt<
     // then the pretty print will point to the last line in code
     // instead of point to any of existing code written by user.
     loc.newline();
-    let args: Vec<Located<ast::ExprKind>> = deco_args
-        .arg_names
-        .iter()
-        .map(|v| {
-            let node = ast::ExprKind::Name {
-                id: v.to_owned(),
-                ctx: ast::ExprContext::Load,
-            };
-            create_located(node, loc)
-        })
-        .collect();
+    let args: Vec<Located<ast::ExprKind>> = if let Some(arg_names) = &deco_args.arg_names {
+        arg_names
+            .iter()
+            .map(|v| {
+                let node = ast::ExprKind::Name {
+                    id: v.to_owned(),
+                    ctx: ast::ExprContext::Load,
+                };
+                create_located(node, loc)
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
     let func = ast::ExprKind::Call {
         func: Box::new(create_located(
             ast::ExprKind::Name {

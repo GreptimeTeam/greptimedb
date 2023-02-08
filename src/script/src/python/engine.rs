@@ -53,7 +53,12 @@ impl std::fmt::Display for PyUDF {
             f,
             "{}({})->",
             &self.copr.name,
-            &self.copr.deco_args.arg_names.join(",")
+            self.copr
+                .deco_args
+                .arg_names
+                .as_ref()
+                .unwrap_or(&vec![])
+                .join(",")
         )
     }
 }
@@ -73,7 +78,13 @@ impl PyUDF {
 
     /// Fake a schema, should only be used with dynamically eval a Python Udf
     fn fake_schema(&self, columns: &[VectorRef]) -> SchemaRef {
-        let arg_names = &self.copr.deco_args.arg_names;
+        let empty_args = vec![];
+        let arg_names = self
+            .copr
+            .deco_args
+            .arg_names
+            .as_ref()
+            .unwrap_or(&empty_args);
         let col_sch: Vec<_> = columns
             .iter()
             .enumerate()

@@ -261,7 +261,10 @@ fn check_args_anno_real_type(
             OtherSnafu {
                 reason: format!(
                     "column {}'s Type annotation is {:?}, but actual type is {:?}",
-                    copr.deco_args.arg_names[idx], anno_ty, real_ty
+                    // It's safe to unwrap here, we already ensure the args and types number is the same when parsing
+                    copr.deco_args.arg_names.as_ref().unwrap()[idx],
+                    anno_ty,
+                    real_ty
                 )
             }
         )
@@ -453,6 +456,11 @@ pub(crate) fn exec_with_cached_vm(
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
         set_dataframe_in_scope(&scope, vm, "dataframe", rb)?;
 
+        if let Some(arg_names) = &copr.deco_args.arg_names {
+            assert_eq!(arg_names.len(), args.len());
+            set_items_in_scope(&scope, vm, arg_names, args)?;
+        }
+
         if let Some(engine) = &copr.query_engine {
             let query_engine = PyQueryEngine {
                 inner: engine.clone(),
@@ -536,7 +544,8 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
 /// using a parsed `Coprocessor` struct as input to execute python code
 pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
     // 3. get args from `rb`, and cast them into PyVector
-    let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
+    let args: Vec<PyVector> =
+        select_from_rb(rb, copr.deco_args.arg_names.as_ref().unwrap_or(&vec![]))?;
     check_args_anno_real_type(&args, copr, rb)?;
     let interpreter = init_interpreter();
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
@@ -586,7 +595,7 @@ def test(a, b, c):
             "select number as a,number as b,number as c from numbers limit 100"
         );
         assert_eq!(deco_args.ret_names, vec!["r"]);
-        assert_eq!(deco_args.arg_names, vec!["a", "b", "c"]);
+        assert_eq!(deco_args.arg_names.unwrap(), vec!["a", "b", "c"]);
         assert_eq!(copr.arg_types, vec![None, None, None]);
         assert_eq!(copr.return_types, vec![None]);
         assert_eq!(copr.script, script);
