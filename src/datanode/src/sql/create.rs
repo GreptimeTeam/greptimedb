@@ -150,7 +150,15 @@ impl SqlHandler {
             .map(|(_, col)| col.name.value.clone())
             .collect::<Vec<_>>();
 
-        for pk in pk_map.iter() {
+        ensure!(
+            pk_map.len() < 2,
+            InvalidPrimaryKeySnafu {
+                msg: "Multiple definitions of primary key found"
+            }
+        );
+
+        if pk_map.first().is_some() {
+            let pk = pk_map.first().unwrap();
             primary_keys.push(*col_map.get(&pk.clone()).context(KeyColumnNotFoundSnafu {
                 name: pk.to_string(),
             })?);
@@ -320,6 +328,21 @@ mod tests {
                       value DOUBLE,
                       host STRING PRIMARY KEY,
                       PRIMARY KEY(host)) engine=mito with(regions=1);"#,
+        );
+        let error = handler
+            .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidPrimaryKey { .. });
+    }
+
+    #[tokio::test]
+    pub async fn test_multiple_inline_primary_key_definitions() {
+        let handler = create_mock_sql_handler().await;
+        let parsed_stmt = sql_to_statement(
+            r#"create table demo_table (
+                      timestamp BIGINT TIME INDEX,
+                      value DOUBLE PRIMARY KEY,
+                      host STRING PRIMARY KEY) engine=mito with(regions=1);"#,
         );
         let error = handler
             .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
