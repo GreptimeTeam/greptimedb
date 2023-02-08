@@ -21,6 +21,7 @@ use common_runtime::Runtime;
 use common_telemetry::logging::error;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
+use pgwire::api::MakeHandler;
 use pgwire::tokio::process_socket;
 use tokio;
 use tokio_rustls::TlsAcceptor;
@@ -71,7 +72,7 @@ impl PostgresServer {
         accepting_stream.for_each(move |tcp_stream| {
             let io_runtime = io_runtime.clone();
             let tls_acceptor = tls_acceptor.clone();
-            let handler = handler.clone();
+            let handler = handler.make();
 
             async move {
                 match tcp_stream {
