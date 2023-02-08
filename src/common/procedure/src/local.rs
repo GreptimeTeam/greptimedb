@@ -431,6 +431,41 @@ mod tests {
         ctx.insert_procedure(meta);
     }
 
+    fn new_child(parent_id: ProcedureId, ctx: &ManagerContext) -> ProcedureMetaRef {
+        let mut child = test_util::procedure_meta_for_test();
+        child.parent_id = Some(parent_id);
+        let child = Arc::new(child);
+        ctx.insert_procedure(child.clone());
+
+        let mut parent = Vec::new();
+        ctx.find_procedures(&[parent_id], &mut parent);
+        parent[0].push_child(child.id);
+
+        child
+    }
+
+    #[test]
+    fn test_procedures_in_tree() {
+        let ctx = ManagerContext::new();
+        let root = Arc::new(test_util::procedure_meta_for_test());
+        ctx.insert_procedure(root.clone());
+
+        assert_eq!(1, ctx.procedures_in_tree(&root).len());
+
+        let child1 = new_child(root.id, &ctx);
+        let child2 = new_child(root.id, &ctx);
+
+        let child3 = new_child(child1.id, &ctx);
+        let child4 = new_child(child1.id, &ctx);
+
+        let child5 = new_child(child2.id, &ctx);
+
+        let expect = vec![
+            root.id, child1.id, child2.id, child3.id, child4.id, child5.id,
+        ];
+        assert_eq!(expect, ctx.procedures_in_tree(&root));
+    }
+
     #[test]
     fn test_register_loader() {
         let dir = TempDir::new("register").unwrap();
