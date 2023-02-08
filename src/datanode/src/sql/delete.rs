@@ -5,10 +5,14 @@ use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
+use common_telemetry::warn;
 use datafusion::sql::sqlparser::parser::ParserError;
 use datatypes::prelude::LogicalTypeId::TimestampMillisecond;
 use datatypes::prelude::VectorRef;
-use datatypes::vectors::{BooleanVector, Float64Vector, StringVector, TimestampMillisecondVector};
+use datatypes::vectors::{
+    BooleanVector, Float64Vector, NullVector, StringVector, TimestampMillisecondVector,
+};
+use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::ast::ColumnOption::Default;
 use sql::ast::{BinaryOperator, Expr, Value};
@@ -37,7 +41,11 @@ impl SqlHandler {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    pub(crate) fn delete_to_request(&self, stmt: Delete) -> Result<SqlRequest> {
+    pub(crate) fn delete_to_request(
+        &self,
+        stmt: Delete,
+        query_ctx: QueryContextRef,
+    ) -> Result<SqlRequest> {
         let (catalog_name, schema_name, table_name) =
             table_idents_to_full_name(stmt.table_name(), query_ctx.clone())?;
         let key_column_values = parser_selection(stmt.selection())?;
@@ -50,6 +58,8 @@ impl SqlHandler {
     }
 }
 
+/// parser selection, currently supported format is `tagkey1 = 'tagvalue1' and tagkey2 = 'tagvalue2'`.
+/// (only uses =, and in the where clause and provides all columns needed by the key.)
 fn parser_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRef>> {
     let mut key_column_values = HashMap::new();
     match selection {
@@ -62,7 +72,9 @@ fn parser_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRe
 }
 
 fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) -> Result<()> {
+    // match BinaryOp
     if let Expr::BinaryOp { left, op, right } = expr {
+        // match And operator
         if let BinaryOperator::And = op {
             if let Expr::BinaryOp { .. } = left.deref() {
                 if let Expr::BinaryOp { .. } = right.deref() {
@@ -71,12 +83,14 @@ fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) 
                     return Ok(());
                 }
             }
-        } else if let BinaryOperator::Eq = op {
+        }
+        // match eq operator
+        else if let BinaryOperator::Eq = op {
             if let Expr::Identifier(column_name) = left.deref() {
                 if let Expr::Value(value) = right.deref() {
                     key_column_values.insert(
                         column_name.to_string(),
-                        value_to_vector(&column_name.to_string(), &value),
+                        value_to_vector(&column_name.to_string(), &value)?,
                     );
                     return Ok(());
                 } else if let Expr::Identifier(value) = right.deref() {
@@ -95,24 +109,32 @@ fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) 
     .fail();
 }
 
-fn value_to_vector(column_name: &String, value: &Value) -> VectorRef {
+/// parse value to vector
+fn value_to_vector(column_name: &String, value: &Value) -> Result<VectorRef> {
+    let mut vector_ref: VectorRef = Arc::new(NullVector::new(1));
     match value {
         Value::Number(n, _) => {
             if column_name == "ts" {
-                Arc::new(TimestampMillisecondVector::from_vec(vec![
+                vector_ref = Arc::new(TimestampMillisecondVector::from_vec(vec![
                     i64::from_str(n).unwrap()
-                ]))
+                ]));
             } else {
-                Arc::new(Float64Vector::from_vec(vec![f64::from_str(n).unwrap()]))
+                vector_ref = Arc::new(Float64Vector::from_vec(vec![f64::from_str(n).unwrap()]));
             }
         }
         Value::SingleQuotedString(s) | sql::ast::Value::DoubleQuotedString(s) => {
-            Arc::new(StringVector::from(vec![s.to_string()]))
+            vector_ref = Arc::new(StringVector::from(vec![s.to_string()]));
         }
-        Value::Boolean(b) => Arc::new(BooleanVector::from(vec![*b])),
+        Value::Boolean(b) => {
+            vector_ref = Arc::new(BooleanVector::from(vec![*b]));
+        }
         _ => {
-            //TODO not support
-            Arc::new(StringVector::from(vec!["1"]))
+            warn!("Current value type is not supported, value:{value}");
+            return InvalidSqlSnafu {
+                msg: format!("Failed to parse value:{value}"),
+            }
+            .fail();
         }
     }
+    return Ok(vector_ref);
 }

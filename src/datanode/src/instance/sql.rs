@@ -65,7 +65,7 @@ impl Instance {
                 self.sql_handler.execute(request, query_ctx).await
             }
             QueryStatement::Sql(Statement::Delete(d)) => {
-                let request = self.sql_handler.delete_to_request(*d)?;
+                let request = self.sql_handler.delete_to_request(*d, query_ctx.clone())?;
                 self.sql_handler.execute(request, query_ctx).await
             }
 
