@@ -19,3 +19,6 @@ pub mod manager;
 #[cfg(feature = "python")]
 pub mod python;
 mod table;
+mod ffi_types;
+mod rspython;
+mod pyo3;
