@@ -23,5 +23,6 @@ pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantMa
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
 pub use planner::PromExtensionPlanner;
 pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulateStream};
+pub use series_devide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 
 pub(crate) type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
