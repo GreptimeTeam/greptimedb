@@ -218,15 +218,15 @@ impl ManagerContext {
         })
     }
 
-    /// Returns all procedures in the tree (including given procedure).
-    fn procedures_in_tree(&self, meta: &ProcedureMetaRef) -> Vec<ProcedureId> {
-        let sub_num = meta.num_children();
+    /// Returns all procedures in the tree (including given `root` procedure).
+    fn procedures_in_tree(&self, root: &ProcedureMetaRef) -> Vec<ProcedureId> {
+        let sub_num = root.num_children();
         // Reserve capacity for the root procedure and its children.
         let mut procedures = Vec::with_capacity(1 + sub_num);
 
         // Push the root procedure to the queue.
         let mut queue = VecDeque::with_capacity(1 + sub_num);
-        queue.push_back(meta.clone());
+        queue.push_back(root.clone());
 
         let mut children_ids = Vec::with_capacity(sub_num);
         let mut children = Vec::with_capacity(sub_num);

@@ -521,7 +521,7 @@ mod tests {
         assert!(res.is_continue(), "{res:?}");
     }
 
-    fn new_child_procedure(procedure_id: ProcedureId) -> ProcedureWithId {
+    fn new_child_procedure(procedure_id: ProcedureId, key: &str) -> ProcedureWithId {
         let mut times = 0;
         let exec_fn = move || {
             times += 1;
@@ -537,8 +537,8 @@ mod tests {
         };
         let child = ProcedureAdapter {
             data: "child".to_string(),
-            // Acquire the same lock as parent's.
-            lock_key: Some(LockKey::new("catalog.schema.table")),
+            // Chidren acquire the same locks.
+            lock_key: Some(LockKey::new(key)),
             exec_fn,
         };
 
@@ -552,6 +552,7 @@ mod tests {
     async fn test_on_suspend_by_subprocedures() {
         let mut times = 0;
         let children_ids = [ProcedureId::random(), ProcedureId::random()];
+        let keys = ["catalog.schema.table", "catalog.schema.table.region-0"];
         let manager_ctx = Arc::new(ManagerContext::new());
 
         let ctx_in_fn = manager_ctx.clone();
@@ -563,7 +564,11 @@ mod tests {
                 if times == 1 {
                     // Submit subprocedures.
                     Ok(Status::Suspended {
-                        subprocedures: children_ids.into_iter().map(new_child_procedure).collect(),
+                        subprocedures: children_ids
+                            .into_iter()
+                            .zip(keys)
+                            .map(|(id, key)| new_child_procedure(id, key))
+                            .collect(),
                         persist: true,
                     })
                 } else {
