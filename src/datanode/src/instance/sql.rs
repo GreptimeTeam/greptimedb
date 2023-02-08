@@ -182,6 +182,9 @@ impl Instance {
 
                 Ok(Output::RecordBatches(RecordBatches::empty()))
             }
+            QueryStatement::Sql(Statement::Copy(stmt)) => {
+                todo!()
+            }
         }
     }
 

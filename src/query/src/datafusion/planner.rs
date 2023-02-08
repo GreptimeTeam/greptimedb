@@ -103,7 +103,8 @@ where
             | Statement::Alter(_)
             | Statement::Insert(_)
             | Statement::DropTable(_)
-            | Statement::Use(_) => unreachable!(),
+            | Statement::Use(_)
+            | Statement::Copy(_) => unreachable!(),
         }
     }
 }

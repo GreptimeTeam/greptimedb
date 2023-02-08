@@ -117,6 +117,8 @@ impl<'a> ParserContext<'a> {
                         Ok(Statement::Use(database_name.value))
                     }
 
+                    Keyword::COPY => self.parse_copy(),
+
                     // todo(hl) support more statements.
                     _ => self.unsupported(self.peek_token_as_string()),
                 }

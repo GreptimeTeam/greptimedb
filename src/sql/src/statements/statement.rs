@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::copy::CopyTable;
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
 use crate::statements::delete::Delete;
@@ -51,6 +52,8 @@ pub enum Statement {
     // EXPLAIN QUERY
     Explain(Explain),
     Use(String),
+    // COPY
+    Copy(CopyTable),
 }
 
 /// Comment hints from SQL.
