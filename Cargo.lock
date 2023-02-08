@@ -4099,7 +4099,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "lazy_static",
- "lru",
+ "lru 0.8.1",
  "mio",
  "mysql_common",
  "once_cell",
@@ -4834,9 +4834,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c2d164b7e92ef8f93e4e4588097804dd7aa275465b29e169b0fb2d36270890a"
+checksum = "e340551bf363d84f7f25be77eedf85d1fd40f7894de252647486049a781f9c4e"
 dependencies = [
  "async-trait",
  "base64 0.21.0",

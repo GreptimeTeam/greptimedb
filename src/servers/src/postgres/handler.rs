@@ -26,10 +26,7 @@ use datatypes::schema::{Schema, SchemaRef};
 use futures::{future, stream, Stream, StreamExt};
 use pgwire::api::portal::Portal;
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
-use pgwire::api::results::{
-    binary_query_response, text_query_response, BinaryDataRowEncoder, FieldInfo, Response, Tag,
-    TextDataRowEncoder,
-};
+use pgwire::api::results::{query_response, DataRowEncoder, FieldFormat, FieldInfo, Response, Tag};
 use pgwire::api::stmt::{QueryParser, StoredStatement};
 use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, Type};
@@ -55,7 +52,7 @@ impl SimpleQueryHandler for PostgresServerHandler {
         let mut results = Vec::with_capacity(outputs.len());
 
         for output in outputs {
-            let resp = output_to_query_response(output, true)?;
+            let resp = output_to_query_response(output, FieldFormat::Text)?;
             results.push(resp);
         }
 
@@ -63,7 +60,10 @@ impl SimpleQueryHandler for PostgresServerHandler {
     }
 }
 
-fn output_to_query_response(output: Result<Output>, is_text: bool) -> PgWireResult<Response> {
+fn output_to_query_response(
+    output: Result<Output>,
+    field_format: FieldFormat,
+) -> PgWireResult<Response> {
     match output {
         Ok(Output::AffectedRows(rows)) => Ok(Response::Execution(Tag::new_for_execution(
             "OK",
@@ -71,12 +71,11 @@ fn output_to_query_response(output: Result<Output>, is_text: bool) -> PgWireResu
         ))),
         Ok(Output::Stream(record_stream)) => {
             let schema = record_stream.schema();
-            recordbatches_to_query_response(record_stream, schema, is_text)
+            recordbatches_to_query_response(record_stream, schema, field_format)
         }
         Ok(Output::RecordBatches(recordbatches)) => {
             let schema = recordbatches.schema();
-
-            recordbatches_to_query_response(recordbatches.as_stream(), schema, is_text)
+            recordbatches_to_query_response(recordbatches.as_stream(), schema, field_format)
         }
         Err(e) => Ok(Response::Error(Box::new(ErrorInfo::new(
             "ERROR".to_string(),
@@ -89,13 +88,15 @@ fn output_to_query_response(output: Result<Output>, is_text: bool) -> PgWireResu
 fn recordbatches_to_query_response<S>(
     recordbatches_stream: S,
     schema: SchemaRef,
-    is_text: bool,
+    field_format: FieldFormat,
 ) -> PgWireResult<Response>
 where
     S: Stream<Item = RecordBatchResult<RecordBatch>> + Send + Unpin + 'static,
 {
-    let pg_schema =
-        Arc::new(schema_to_pg(schema.as_ref()).map_err(|e| PgWireError::ApiError(Box::new(e)))?);
+    let pg_schema = Arc::new(
+        schema_to_pg(schema.as_ref(), field_format)
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?,
+    );
     let ncols = pg_schema.len();
 
     let pg_schema_ref = pg_schema.clone();
@@ -111,34 +112,34 @@ where
         })
         .flatten() // flatten into stream<result<row>>
         .map(move |row| {
-            row.and_then(|row| {
-                if is_text {
-                    let mut encoder = TextDataRowEncoder::new(ncols);
+            row.and_then(|row| match field_format {
+                FieldFormat::Text => {
+                    let mut encoder = DataRowEncoder::new(ncols);
                     for value in row.into_iter() {
                         encode_text_value(&value, &mut encoder)?;
                     }
                     encoder.finish()
-                } else {
-                    let mut encoder = BinaryDataRowEncoder::new(pg_schema_ref.clone());
-                    for value in row.into_iter() {
-                        encode_binary_value(&value, &mut encoder)?;
+                }
+                FieldFormat::Binary => {
+                    let mut encoder = DataRowEncoder::new(ncols);
+                    for (idx, value) in row.into_iter().enumerate() {
+                        encode_binary_value(&value, pg_schema_ref[idx].datatype(), &mut encoder)?;
                     }
                     encoder.finish()
                 }
             })
         });
 
-    if is_text {
-        Ok(Response::Query(text_query_response(
-            pg_schema.deref().clone(),
+    match field_format {
+        FieldFormat::Text => Ok(Response::Query(query_response(
+            Some(pg_schema.deref().clone()),
             data_row_stream,
-        )))
-    } else {
-        Ok(Response::Query(binary_query_response(data_row_stream)))
+        ))),
+        FieldFormat::Binary => Ok(Response::Query(query_response(None, data_row_stream))),
     }
 }
 
-fn schema_to_pg(origin: &Schema) -> Result<Vec<FieldInfo>> {
+fn schema_to_pg(origin: &Schema, field_format: FieldFormat) -> Result<Vec<FieldInfo>> {
     origin
         .column_schemas()
         .iter()
@@ -148,30 +149,31 @@ fn schema_to_pg(origin: &Schema) -> Result<Vec<FieldInfo>> {
                 None,
                 None,
                 type_gt_to_pg(&col.data_type)?,
+                field_format,
             ))
         })
         .collect::<Result<Vec<FieldInfo>>>()
 }
 
-fn encode_text_value(value: &Value, builder: &mut TextDataRowEncoder) -> PgWireResult<()> {
+fn encode_text_value(value: &Value, builder: &mut DataRowEncoder) -> PgWireResult<()> {
     match value {
-        Value::Null => builder.append_field(None::<&i8>),
-        Value::Boolean(v) => builder.append_field(Some(v)),
-        Value::UInt8(v) => builder.append_field(Some(v)),
-        Value::UInt16(v) => builder.append_field(Some(v)),
-        Value::UInt32(v) => builder.append_field(Some(v)),
-        Value::UInt64(v) => builder.append_field(Some(v)),
-        Value::Int8(v) => builder.append_field(Some(v)),
-        Value::Int16(v) => builder.append_field(Some(v)),
-        Value::Int32(v) => builder.append_field(Some(v)),
-        Value::Int64(v) => builder.append_field(Some(v)),
-        Value::Float32(v) => builder.append_field(Some(&v.0)),
-        Value::Float64(v) => builder.append_field(Some(&v.0)),
-        Value::String(v) => builder.append_field(Some(&v.as_utf8())),
-        Value::Binary(v) => builder.append_field(Some(&hex::encode(v.deref()))),
-        Value::Date(v) => builder.append_field(Some(&v.to_string())),
-        Value::DateTime(v) => builder.append_field(Some(&v.to_string())),
-        Value::Timestamp(v) => builder.append_field(Some(&v.to_iso8601_string())),
+        Value::Null => builder.encode_text_format_field(None::<&i8>),
+        Value::Boolean(v) => builder.encode_text_format_field(Some(v)),
+        Value::UInt8(v) => builder.encode_text_format_field(Some(v)),
+        Value::UInt16(v) => builder.encode_text_format_field(Some(v)),
+        Value::UInt32(v) => builder.encode_text_format_field(Some(v)),
+        Value::UInt64(v) => builder.encode_text_format_field(Some(v)),
+        Value::Int8(v) => builder.encode_text_format_field(Some(v)),
+        Value::Int16(v) => builder.encode_text_format_field(Some(v)),
+        Value::Int32(v) => builder.encode_text_format_field(Some(v)),
+        Value::Int64(v) => builder.encode_text_format_field(Some(v)),
+        Value::Float32(v) => builder.encode_text_format_field(Some(&v.0)),
+        Value::Float64(v) => builder.encode_text_format_field(Some(&v.0)),
+        Value::String(v) => builder.encode_text_format_field(Some(&v.as_utf8())),
+        Value::Binary(v) => builder.encode_text_format_field(Some(&hex::encode(v.deref()))),
+        Value::Date(v) => builder.encode_text_format_field(Some(&v.to_string())),
+        Value::DateTime(v) => builder.encode_text_format_field(Some(&v.to_string())),
+        Value::Timestamp(v) => builder.encode_text_format_field(Some(&v.to_iso8601_string())),
         Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
             err_msg: format!(
                 "cannot write value {:?} in postgres protocol: unimplemented",
@@ -181,30 +183,34 @@ fn encode_text_value(value: &Value, builder: &mut TextDataRowEncoder) -> PgWireR
     }
 }
 
-fn encode_binary_value(value: &Value, builder: &mut BinaryDataRowEncoder) -> PgWireResult<()> {
+fn encode_binary_value(
+    value: &Value,
+    datatype: &Type,
+    builder: &mut DataRowEncoder,
+) -> PgWireResult<()> {
     match value {
-        Value::Null => builder.append_field(&None::<&i8>),
-        Value::Boolean(v) => builder.append_field(v),
-        Value::UInt8(v) => builder.append_field(&(*v as i8)),
-        Value::UInt16(v) => builder.append_field(&(*v as i16)),
-        Value::UInt32(v) => builder.append_field(&(*v as i32)),
-        Value::UInt64(v) => builder.append_field(&(*v as i64)),
-        Value::Int8(v) => builder.append_field(v),
-        Value::Int16(v) => builder.append_field(v),
-        Value::Int32(v) => builder.append_field(v),
-        Value::Int64(v) => builder.append_field(v),
-        Value::Float32(v) => builder.append_field(&v.0),
-        Value::Float64(v) => builder.append_field(&v.0),
-        Value::String(v) => builder.append_field(&v.as_utf8()),
-        Value::Binary(v) => builder.append_field(&v.deref()),
+        Value::Null => builder.encode_binary_format_field(&None::<&i8>, datatype),
+        Value::Boolean(v) => builder.encode_binary_format_field(v, datatype),
+        Value::UInt8(v) => builder.encode_binary_format_field(&(*v as i8), datatype),
+        Value::UInt16(v) => builder.encode_binary_format_field(&(*v as i16), datatype),
+        Value::UInt32(v) => builder.encode_binary_format_field(&(*v as i32), datatype),
+        Value::UInt64(v) => builder.encode_binary_format_field(&(*v as i64), datatype),
+        Value::Int8(v) => builder.encode_binary_format_field(v, datatype),
+        Value::Int16(v) => builder.encode_binary_format_field(v, datatype),
+        Value::Int32(v) => builder.encode_binary_format_field(v, datatype),
+        Value::Int64(v) => builder.encode_binary_format_field(v, datatype),
+        Value::Float32(v) => builder.encode_binary_format_field(&v.0, datatype),
+        Value::Float64(v) => builder.encode_binary_format_field(&v.0, datatype),
+        Value::String(v) => builder.encode_binary_format_field(&v.as_utf8(), datatype),
+        Value::Binary(v) => builder.encode_binary_format_field(&v.deref(), datatype),
         // TODO(sunng87): correct date/time types encoding
-        Value::Date(v) => builder.append_field(&v.to_string()),
-        Value::DateTime(v) => builder.append_field(&v.to_string()),
+        Value::Date(v) => builder.encode_binary_format_field(&v.to_string(), datatype),
+        Value::DateTime(v) => builder.encode_binary_format_field(&v.to_string(), datatype),
         Value::Timestamp(v) => {
             // convert timestamp to SystemTime
             if let Some(ts) = v.convert_to(TimeUnit::Microsecond) {
                 let sys_time = std::time::UNIX_EPOCH + Duration::from_micros(ts.value() as u64);
-                builder.append_field(&sys_time)
+                builder.encode_binary_format_field(&sys_time, datatype)
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
                     err_msg: format!("Failed to conver timestamp to postgres type {v:?}",),
@@ -376,7 +382,7 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             .await
             .remove(0);
 
-        output_to_query_response(output, false)
+        output_to_query_response(output, FieldFormat::Binary)
     }
 
     async fn do_describe<C>(
@@ -393,7 +399,8 @@ impl ExtendedQueryHandler for PostgresServerHandler {
             .do_describe(stmt.clone(), self.query_ctx.clone())
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?
         {
-            schema_to_pg(&schema).map_err(|e| PgWireError::ApiError(Box::new(e)))
+            schema_to_pg(&schema, FieldFormat::Binary)
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))
         } else {
             Ok(vec![])
         }
@@ -434,56 +441,146 @@ mod test {
             ColumnSchema::new("dates", ConcreteDataType::date_datatype(), true),
         ];
         let pg_field_info = vec![
-            FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN),
-            FieldInfo::new("bools".into(), None, None, Type::BOOL),
-            FieldInfo::new("int8s".into(), None, None, Type::CHAR),
-            FieldInfo::new("int16s".into(), None, None, Type::INT2),
-            FieldInfo::new("int32s".into(), None, None, Type::INT4),
-            FieldInfo::new("int64s".into(), None, None, Type::INT8),
-            FieldInfo::new("uint8s".into(), None, None, Type::CHAR),
-            FieldInfo::new("uint16s".into(), None, None, Type::INT2),
-            FieldInfo::new("uint32s".into(), None, None, Type::INT4),
-            FieldInfo::new("uint64s".into(), None, None, Type::INT8),
-            FieldInfo::new("float32s".into(), None, None, Type::FLOAT4),
-            FieldInfo::new("float64s".into(), None, None, Type::FLOAT8),
-            FieldInfo::new("binaries".into(), None, None, Type::BYTEA),
-            FieldInfo::new("strings".into(), None, None, Type::VARCHAR),
-            FieldInfo::new("timestamps".into(), None, None, Type::TIMESTAMP),
-            FieldInfo::new("dates".into(), None, None, Type::DATE),
+            FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
+            FieldInfo::new("bools".into(), None, None, Type::BOOL, FieldFormat::Text),
+            FieldInfo::new("int8s".into(), None, None, Type::CHAR, FieldFormat::Text),
+            FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
+            FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),
+            FieldInfo::new("int64s".into(), None, None, Type::INT8, FieldFormat::Text),
+            FieldInfo::new("uint8s".into(), None, None, Type::CHAR, FieldFormat::Text),
+            FieldInfo::new("uint16s".into(), None, None, Type::INT2, FieldFormat::Text),
+            FieldInfo::new("uint32s".into(), None, None, Type::INT4, FieldFormat::Text),
+            FieldInfo::new("uint64s".into(), None, None, Type::INT8, FieldFormat::Text),
+            FieldInfo::new(
+                "float32s".into(),
+                None,
+                None,
+                Type::FLOAT4,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "float64s".into(),
+                None,
+                None,
+                Type::FLOAT8,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "binaries".into(),
+                None,
+                None,
+                Type::BYTEA,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "strings".into(),
+                None,
+                None,
+                Type::VARCHAR,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "timestamps".into(),
+                None,
+                None,
+                Type::TIMESTAMP,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new("dates".into(), None, None, Type::DATE, FieldFormat::Text),
         ];
         let schema = Schema::new(column_schemas);
-        let fs = schema_to_pg(&schema).unwrap();
+        let fs = schema_to_pg(&schema, FieldFormat::Text).unwrap();
         assert_eq!(fs, pg_field_info);
     }
 
     #[test]
     fn test_encode_text_format_data() {
         let schema = vec![
-            FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN),
-            FieldInfo::new("bools".into(), None, None, Type::BOOL),
-            FieldInfo::new("uint8s".into(), None, None, Type::CHAR),
-            FieldInfo::new("uint16s".into(), None, None, Type::INT2),
-            FieldInfo::new("uint32s".into(), None, None, Type::INT4),
-            FieldInfo::new("uint64s".into(), None, None, Type::INT8),
-            FieldInfo::new("int8s".into(), None, None, Type::CHAR),
-            FieldInfo::new("int8s".into(), None, None, Type::CHAR),
-            FieldInfo::new("int16s".into(), None, None, Type::INT2),
-            FieldInfo::new("int16s".into(), None, None, Type::INT2),
-            FieldInfo::new("int32s".into(), None, None, Type::INT4),
-            FieldInfo::new("int32s".into(), None, None, Type::INT4),
-            FieldInfo::new("int64s".into(), None, None, Type::INT8),
-            FieldInfo::new("int64s".into(), None, None, Type::INT8),
-            FieldInfo::new("float32s".into(), None, None, Type::FLOAT4),
-            FieldInfo::new("float32s".into(), None, None, Type::FLOAT4),
-            FieldInfo::new("float32s".into(), None, None, Type::FLOAT4),
-            FieldInfo::new("float64s".into(), None, None, Type::FLOAT8),
-            FieldInfo::new("float64s".into(), None, None, Type::FLOAT8),
-            FieldInfo::new("float64s".into(), None, None, Type::FLOAT8),
-            FieldInfo::new("strings".into(), None, None, Type::VARCHAR),
-            FieldInfo::new("binaries".into(), None, None, Type::BYTEA),
-            FieldInfo::new("dates".into(), None, None, Type::DATE),
-            FieldInfo::new("datetimes".into(), None, None, Type::TIMESTAMP),
-            FieldInfo::new("timestamps".into(), None, None, Type::TIMESTAMP),
+            FieldInfo::new("nulls".into(), None, None, Type::UNKNOWN, FieldFormat::Text),
+            FieldInfo::new("bools".into(), None, None, Type::BOOL, FieldFormat::Text),
+            FieldInfo::new("uint8s".into(), None, None, Type::CHAR, FieldFormat::Text),
+            FieldInfo::new("uint16s".into(), None, None, Type::INT2, FieldFormat::Text),
+            FieldInfo::new("uint32s".into(), None, None, Type::INT4, FieldFormat::Text),
+            FieldInfo::new("uint64s".into(), None, None, Type::INT8, FieldFormat::Text),
+            FieldInfo::new("int8s".into(), None, None, Type::CHAR, FieldFormat::Text),
+            FieldInfo::new("int8s".into(), None, None, Type::CHAR, FieldFormat::Text),
+            FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
+            FieldInfo::new("int16s".into(), None, None, Type::INT2, FieldFormat::Text),
+            FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),
+            FieldInfo::new("int32s".into(), None, None, Type::INT4, FieldFormat::Text),
+            FieldInfo::new("int64s".into(), None, None, Type::INT8, FieldFormat::Text),
+            FieldInfo::new("int64s".into(), None, None, Type::INT8, FieldFormat::Text),
+            FieldInfo::new(
+                "float32s".into(),
+                None,
+                None,
+                Type::FLOAT4,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "float32s".into(),
+                None,
+                None,
+                Type::FLOAT4,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "float32s".into(),
+                None,
+                None,
+                Type::FLOAT4,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "float64s".into(),
+                None,
+                None,
+                Type::FLOAT8,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "float64s".into(),
+                None,
+                None,
+                Type::FLOAT8,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "float64s".into(),
+                None,
+                None,
+                Type::FLOAT8,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "strings".into(),
+                None,
+                None,
+                Type::VARCHAR,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "binaries".into(),
+                None,
+                None,
+                Type::BYTEA,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new("dates".into(), None, None, Type::DATE, FieldFormat::Text),
+            FieldInfo::new(
+                "datetimes".into(),
+                None,
+                None,
+                Type::TIMESTAMP,
+                FieldFormat::Text,
+            ),
+            FieldInfo::new(
+                "timestamps".into(),
+                None,
+                None,
+                Type::TIMESTAMP,
+                FieldFormat::Text,
+            ),
         ];
 
         let values = vec![
@@ -513,7 +610,7 @@ mod test {
             Value::DateTime(1000001i64.into()),
             Value::Timestamp(1000001i64.into()),
         ];
-        let mut builder = TextDataRowEncoder::new(schema.len());
+        let mut builder = DataRowEncoder::new(schema.len());
         for i in values {
             assert!(encode_text_value(&i, &mut builder).is_ok());
         }
