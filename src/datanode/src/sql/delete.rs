@@ -17,6 +17,7 @@ use table::engine::TableReference;
 use table::requests::DeleteRequest;
 
 use crate::error::{self, DeleteSnafu, InvalidSqlSnafu, ParseSqlValueSnafu, Result};
+use crate::instance::sql::table_idents_to_full_name;
 use crate::sql::{SqlHandler, SqlRequest};
 
 impl SqlHandler {
@@ -36,17 +37,15 @@ impl SqlHandler {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    pub(crate) fn delete_to_request(
-        &self,
-        table_ref: TableReference,
-        stmt: Delete,
-    ) -> Result<SqlRequest> {
+    pub(crate) fn delete_to_request(&self, stmt: Delete) -> Result<SqlRequest> {
+        let (catalog_name, schema_name, table_name) =
+            table_idents_to_full_name(stmt.table_name(), query_ctx.clone())?;
         let key_column_values = parser_selection(stmt.selection())?;
         Ok(SqlRequest::Delete(DeleteRequest {
             key_column_values,
-            catalog_name: table_ref.catalog.to_string(),
-            schema_name: table_ref.schema.to_string(),
-            table_name: table_ref.table.to_string(),
+            catalog_name,
+            schema_name,
+            table_name,
         }))
     }
 }
