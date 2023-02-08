@@ -156,6 +156,7 @@ fn create_script_query() -> Query<script_handler::ScriptQuery> {
     Query(script_handler::ScriptQuery {
         schema: Some("test".to_string()),
         name: Some("test".to_string()),
+        ..Default::default()
     })
 }
 
@@ -163,6 +164,7 @@ fn create_invalid_script_query() -> Query<script_handler::ScriptQuery> {
     Query(script_handler::ScriptQuery {
         schema: None,
         name: None,
+        ..Default::default()
     })
 }
 

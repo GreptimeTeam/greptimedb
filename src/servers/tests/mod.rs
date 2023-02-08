@@ -120,12 +120,20 @@ impl ScriptHandler for DummyInstance {
         Ok(())
     }
 
-    async fn execute_script(&self, schema: &str, name: &str) -> Result<Output> {
+    async fn execute_script(
+        &self,
+        schema: &str,
+        name: &str,
+        params: HashMap<String, String>,
+    ) -> Result<Output> {
         let key = format!("{schema}_{name}");
 
         let py_script = self.scripts.read().unwrap().get(&key).unwrap().clone();
 
-        Ok(py_script.execute(EvalContext::default()).await.unwrap())
+        Ok(py_script
+            .execute(params, EvalContext::default())
+            .await
+            .unwrap())
     }
 }
 

@@ -25,6 +25,7 @@
 pub mod grpc;
 pub mod sql;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::prometheus::remote::{ReadRequest, WriteRequest};
@@ -45,7 +46,12 @@ pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 #[async_trait]
 pub trait ScriptHandler {
     async fn insert_script(&self, schema: &str, name: &str, script: &str) -> Result<()>;
-    async fn execute_script(&self, schema: &str, name: &str) -> Result<Output>;
+    async fn execute_script(
+        &self,
+        schema: &str,
+        name: &str,
+        params: HashMap<String, String>,
+    ) -> Result<Output>;
 }
 
 #[async_trait]

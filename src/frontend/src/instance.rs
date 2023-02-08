@@ -19,6 +19,7 @@ mod opentsdb;
 mod prometheus;
 mod standalone;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -508,9 +509,14 @@ impl ScriptHandler for Instance {
         }
     }
 
-    async fn execute_script(&self, schema: &str, script: &str) -> server_error::Result<Output> {
+    async fn execute_script(
+        &self,
+        schema: &str,
+        script: &str,
+        params: HashMap<String, String>,
+    ) -> server_error::Result<Output> {
         if let Some(handler) = &self.script_handler {
-            handler.execute_script(schema, script).await
+            handler.execute_script(schema, script, params).await
         } else {
             server_error::NotSupportedSnafu {
                 feat: "Script execution in Frontend",

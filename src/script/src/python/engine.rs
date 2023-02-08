@@ -14,6 +14,7 @@
 
 //! Python script engine
 use std::any::Any;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -146,9 +147,8 @@ impl Function for PyUDF {
         // FIXME(discord9): exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
         let schema = self.fake_schema(columns);
         let columns = columns.to_vec();
-        // TODO(discord9): remove unwrap
-        let rb = RecordBatch::new(schema, columns).context(UdfTempRecordBatchSnafu)?;
-        let res = exec_parsed(&self.copr, &rb).map_err(|err| {
+        let rb = Some(RecordBatch::new(schema, columns).context(UdfTempRecordBatchSnafu)?);
+        let res = exec_parsed(&self.copr, &rb, &HashMap::new()).map_err(|err| {
             PyUdfSnafu {
                 msg: format!("{err:#?}"),
             }
@@ -186,6 +186,7 @@ impl PyScript {
 pub struct CoprStream {
     stream: SendableRecordBatchStream,
     copr: CoprocessorRef,
+    params: HashMap<String, String>,
 }
 
 impl RecordBatchStream for CoprStream {
@@ -201,7 +202,7 @@ impl Stream for CoprStream {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(recordbatch))) => {
-                let batch = exec_parsed(&self.copr, &recordbatch)
+                let batch = exec_parsed(&self.copr, &Some(recordbatch), &self.params)
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
 
@@ -229,7 +230,7 @@ impl Script for PyScript {
         self
     }
 
-    async fn execute(&self, _ctx: EvalContext) -> Result<Output> {
+    async fn execute(&self, params: HashMap<String, String>, _ctx: EvalContext) -> Result<Output> {
         if let Some(sql) = &self.copr.deco_args.sql {
             let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
             ensure!(
@@ -242,7 +243,11 @@ impl Script for PyScript {
             let res = self.query_engine.execute(&plan).await?;
             let copr = self.copr.clone();
             match res {
-                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream { copr, stream }))),
+                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream {
+                    params,
+                    copr,
+                    stream,
+                }))),
                 _ => unreachable!(),
             }
         } else {
@@ -364,7 +369,10 @@ def test(number)->vector[u32]:
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let _output = script.execute(EvalContext::default()).await.unwrap();
+        let _output = script
+            .execute(HashMap::new(), EvalContext::default())
+            .await
+            .unwrap();
         let res = common_recordbatch::util::collect_batches(match _output {
             Output::Stream(s) => s,
             _ => todo!(),
@@ -393,7 +401,10 @@ def test(a, b, c):
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let output = script.execute(EvalContext::default()).await.unwrap();
+        let output = script
+            .execute(HashMap::new(), EvalContext::default())
+            .await
+            .unwrap();
         match output {
             Output::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
@@ -428,7 +439,10 @@ def test(a):
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let output = script.execute(EvalContext::default()).await.unwrap();
+        let output = script
+            .execute(HashMap::new(), EvalContext::default())
+            .await
+            .unwrap();
         match output {
             Output::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();

@@ -16,7 +16,7 @@ pub mod compile;
 pub mod parse;
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
@@ -36,7 +36,7 @@ use rustpython_vm::AsObject;
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
-use vm::builtins::{PyBaseExceptionRef, PyList, PyListRef, PyTuple};
+use vm::builtins::{PyBaseExceptionRef, PyDict, PyList, PyListRef, PyStr, PyTuple};
 use vm::convert::ToPyObject;
 use vm::scope::Scope;
 use vm::{pyclass, Interpreter, PyObjectRef, PyPayload, PyResult, VirtualMachine};
@@ -348,12 +348,12 @@ fn set_items_in_scope(
 /// You can return constant in python code like `return 1, 1.0, True`
 /// which create a constant array(with same value)(currently support int, float and bool) as column on return
 #[cfg(test)]
-pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
+pub fn exec_coprocessor(script: &str, rb: &Option<RecordBatch>) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
     let copr = parse::parse_and_compile_copr(script, None)?;
-    exec_parsed(&copr, rb)
+    exec_parsed(&copr, rb, &HashMap::new())
 }
 
 #[pyclass(module = false, name = "query_engine")]
@@ -445,10 +445,11 @@ fn set_query_engine_in_scope(
         .map_err(|e| format_py_error(e, vm))
 }
 
-pub(crate) fn exec_with_cached_vm(
+fn exec_with_cached_vm(
     copr: &Coprocessor,
-    rb: &RecordBatch,
+    rb: &Option<RecordBatch>,
     args: Vec<PyVector>,
+    params: &HashMap<String, String>,
     vm: &Arc<Interpreter>,
 ) -> Result<RecordBatch> {
     vm.enter(|vm| -> Result<RecordBatch> {
@@ -473,6 +474,19 @@ pub(crate) fn exec_with_cached_vm(
             set_query_engine_in_scope(&scope, vm, query_engine)?;
         }
 
+        if let Some(kwarg) = &copr.kwarg {
+            let dict = PyDict::new_ref(&vm.ctx);
+            for (k, v) in params {
+                dict.set_item(k, PyStr::from(v.clone()).into_pyobject(vm), vm)
+                    .map_err(|e| format_py_error(e, vm))?;
+            }
+            scope
+                .locals
+                .as_object()
+                .set_item(kwarg, vm.new_pyobj(dict), vm)
+                .map_err(|e| format_py_error(e, vm))?;
+        }
+
         // It's safe to unwrap code_object, it's already compiled before.
         let code_obj = vm.ctx.new_code(copr.code_obj.clone().unwrap());
         let ret = vm
@@ -480,21 +494,27 @@ pub(crate) fn exec_with_cached_vm(
             .map_err(|e| format_py_error(e, vm))?;
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
-        let col_len = rb.num_rows();
-        let mut cols = try_into_columns(&ret, vm, col_len)?;
-        ensure!(
-            cols.len() == copr.deco_args.ret_names.len(),
-            OtherSnafu {
-                reason: format!(
-                    "The number of return Vector is wrong, expect {}, found {}",
-                    copr.deco_args.ret_names.len(),
-                    cols.len()
-                )
-            }
-        );
+        let cols = if let Some(rb) = rb {
+            let col_len = rb.num_rows();
+            let mut cols = try_into_columns(&ret, vm, col_len)?;
+            ensure!(
+                cols.len() == copr.deco_args.ret_names.len(),
+                OtherSnafu {
+                    reason: format!(
+                        "The number of return Vector is wrong, expect {}, found {}",
+                        copr.deco_args.ret_names.len(),
+                        cols.len()
+                    )
+                }
+            );
 
-        // if cols and schema's data types is not match, try coerce it to given type(if annotated)(if error occur, return relevant error with question mark)
-        copr.check_and_cast_type(&mut cols)?;
+            // if cols and schema's data types is not match, try coerce it to given type(if annotated)(if error occur, return relevant error with question mark)
+            copr.check_and_cast_type(&mut cols)?;
+            cols
+        } else {
+            vec![]
+        };
+
         // 6. return a assembled DfRecordBatch
         let schema = copr.gen_schema(&cols)?;
         RecordBatch::new(schema, cols).context(NewRecordBatchSnafu)
@@ -544,14 +564,23 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
 }
 
 /// using a parsed `Coprocessor` struct as input to execute python code
-pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
+pub(crate) fn exec_parsed(
+    copr: &Coprocessor,
+    rb: &Option<RecordBatch>,
+    params: &HashMap<String, String>,
+) -> Result<RecordBatch> {
     // 3. get args from `rb`, and cast them into PyVector
-    let args: Vec<PyVector> =
-        select_from_rb(rb, copr.deco_args.arg_names.as_ref().unwrap_or(&vec![]))?;
-    check_args_anno_real_type(&args, copr, rb)?;
+    let args: Vec<PyVector> = if let Some(rb) = rb {
+        let args = select_from_rb(rb, copr.deco_args.arg_names.as_ref().unwrap_or(&vec![]))?;
+        check_args_anno_real_type(&args, copr, rb)?;
+        args
+    } else {
+        vec![]
+    };
+
     let interpreter = init_interpreter();
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
-    exec_with_cached_vm(copr, rb, args, &interpreter)
+    exec_with_cached_vm(copr, rb, args, params, &interpreter)
 }
 
 /// execute script just like [`exec_coprocessor`] do,
@@ -563,7 +592,7 @@ pub(crate) fn exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<Record
 #[allow(dead_code)]
 pub fn exec_copr_print(
     script: &str,
-    rb: &RecordBatch,
+    rb: &Option<RecordBatch>,
     ln_offset: usize,
     filename: &str,
 ) -> StdResult<RecordBatch, String> {

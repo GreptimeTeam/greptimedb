@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+use std::collections::HashMap;
 use std::time::Instant;
 
 use axum::extract::{Json, Query, RawBody, State};
@@ -81,10 +81,12 @@ pub async fn scripts(
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ScriptQuery {
     pub schema: Option<String>,
     pub name: Option<String>,
+    #[serde(flatten)]
+    pub params: HashMap<String, String>,
 }
 
 /// Handler to execute script
@@ -110,7 +112,7 @@ pub async fn run_script(
         // TODO(sunng87): query_context and db name resolution
 
         let output = script_handler
-            .execute_script(schema.unwrap(), name.unwrap())
+            .execute_script(schema.unwrap(), name.unwrap(), params.params)
             .await;
         let resp = JsonResponse::from_output(vec![output]).await;
 

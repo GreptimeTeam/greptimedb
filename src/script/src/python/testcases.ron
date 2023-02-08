@@ -49,7 +49,62 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64], vector[f64|None], vecto
                         datatype: None,
                         is_nullable: true
                     )),
-                ]
+                ],
+                kwarg: None,
+            )
+        )
+    ),
+    (
+        name: "correct_parse_params",
+        code: r#"
+import greptime as gt
+from greptime import pow
+def add(a, b):
+    return a + b
+def sub(a, b):
+    return a - b
+@copr(args=["cpu", "mem"], returns=["perf", "what", "how", "why"])
+def a(cpu: vector[f32], mem: vector[f64], **params) -> (vector[f64], vector[f64|None], vector[_], vector[_ | None]):
+    for key, value in params.items():
+        print("%s == %s" % (key, value))
+    return add(cpu, mem), sub(cpu, mem), cpu * mem, cpu / mem
+        "#,
+        predicate: ParseIsOk(
+            result: (
+                name: "a",
+                deco_args: (
+                    arg_names: Some(["cpu", "mem"]),
+                    ret_names: ["perf", "what", "how", "why"],
+                ),
+                arg_types: [
+                    Some((
+                        datatype: Some(Float32(())),
+                        is_nullable: false
+                    )),
+                    Some((
+                        datatype: Some(Float64(())),
+                        is_nullable: false
+                    )),
+                ],
+                return_types: [
+                    Some((
+                        datatype: Some(Float64(())),
+                        is_nullable: false
+                    )),
+                    Some((
+                        datatype: Some(Float64(())),
+                        is_nullable: true
+                    )),
+                    Some((
+                        datatype: None,
+                        is_nullable: false
+                    )),
+                    Some((
+                        datatype: None,
+                        is_nullable: true
+                    )),
+                ],
+                kwarg: Some("params"),
             )
         )
     ),
