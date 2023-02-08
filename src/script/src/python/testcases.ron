@@ -508,7 +508,7 @@ from data_frame import col
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
-    ret = df.select([col("cpu"), col("mem")]).collect()[0]
+    ret = dataframe.select([col("cpu"), col("mem")]).collect()[0]
     return ret[0], ret[1]
 "#,
         predicate: ExecIsOk(
@@ -542,7 +542,7 @@ from data_frame import col
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
-    ret = df.filter(col("cpu")>col("mem")).collect()[0]
+    ret = dataframe.filter(col("cpu")>col("mem")).collect()[0]
     return ret[0], ret[1]
 "#,
         predicate: ExecIsOk(

@@ -13,9 +13,8 @@
 // limitations under the License.
 
 use rustpython_vm::pymodule as rspymodule;
-/// TODO: use given RecordBatch to register table in `SessionContext`
+
 /// with `register_batch`, and then wrap DataFrame API in it
-/// TODO: wrap DataFrame&Expr
 #[rspymodule]
 pub(crate) mod data_frame {
     use common_recordbatch::{DfRecordBatch, RecordBatch};
@@ -27,7 +26,9 @@ pub(crate) mod data_frame {
     use rustpython_vm::{
         pyclass as rspyclass, PyObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine,
     };
+    use snafu::ResultExt;
 
+    use crate::python::error::DataFusionSnafu;
     use crate::python::utils::block_on_async;
     #[rspyclass(module = "data_frame", name = "DataFrame")]
     #[derive(PyPayload, Debug)]
@@ -47,7 +48,7 @@ pub(crate) mod data_frame {
         name: &str,
         rb: &RecordBatch,
     ) -> crate::python::error::Result<()> {
-        let df = PyDataFrame::from_record_batch(rb.df_record_batch());
+        let df = PyDataFrame::from_record_batch(rb.df_record_batch())?;
         scope
             .locals
             .set_item(name, vm.new_pyobj(df), vm)
@@ -55,11 +56,11 @@ pub(crate) mod data_frame {
     }
     #[rspyclass]
     impl PyDataFrame {
-        /// TODO: error handling
-        fn from_record_batch(rb: &DfRecordBatch) -> Self {
+        /// TODO(discord9): error handling
+        fn from_record_batch(rb: &DfRecordBatch) -> crate::python::error::Result<Self> {
             let ctx = datafusion::execution::context::SessionContext::new();
-            let inner = ctx.read_batch(rb.clone()).unwrap();
-            Self { inner }
+            let inner = ctx.read_batch(rb.clone()).context(DataFusionSnafu)?;
+            Ok(Self { inner })
         }
 
         #[pymethod]
@@ -77,7 +78,7 @@ pub(crate) mod data_frame {
             Ok(self
                 .inner
                 .clone()
-                .select(expr_list.iter().map(|e| e.inner.to_owned()).collect())
+                .select(expr_list.iter().map(|e| e.inner.clone()).collect())
                 .map_err(|e| vm.new_runtime_error(e.to_string()))?
                 .into())
         }
@@ -87,7 +88,7 @@ pub(crate) mod data_frame {
             Ok(self
                 .inner
                 .clone()
-                .filter(predicate.inner.to_owned())
+                .filter(predicate.inner.clone())
                 .map_err(|e| vm.new_runtime_error(e.to_string()))?
                 .into())
         }
@@ -99,9 +100,9 @@ pub(crate) mod data_frame {
             aggr_expr: Vec<PyExprRef>,
             vm: &VirtualMachine,
         ) -> PyResult<Self> {
-            let ret = self.inner.to_owned().aggregate(
-                group_expr.iter().map(|i| i.inner.to_owned()).collect(),
-                aggr_expr.iter().map(|i| i.inner.to_owned()).collect(),
+            let ret = self.inner.clone().aggregate(
+                group_expr.iter().map(|i| i.inner.clone()).collect(),
+                aggr_expr.iter().map(|i| i.inner.clone()).collect(),
             );
             Ok(ret.map_err(|e| vm.new_runtime_error(e.to_string()))?.into())
         }
@@ -110,7 +111,7 @@ pub(crate) mod data_frame {
         fn limit(&self, skip: usize, fetch: Option<usize>, vm: &VirtualMachine) -> PyResult<Self> {
             Ok(self
                 .inner
-                .to_owned()
+                .clone()
                 .limit(skip, fetch)
                 .map_err(|e| vm.new_runtime_error(e.to_string()))?
                 .into())
@@ -218,8 +219,7 @@ pub(crate) mod data_frame {
         #[pymethod]
         /// collect `DataFrame` results into List[List[Vector]]
         fn collect(&self, vm: &VirtualMachine) -> PyResult<PyListRef> {
-            // let res = self.inner.collect().map_err(|e| vm.new_runtime_error(e.to_string()))?;
-            let inner = self.inner.to_owned();
+            let inner = self.inner.clone();
             let res = block_on_async(async { inner.collect().await });
             let res = res
                 .map_err(|e| vm.new_runtime_error(format!("{e:?}")))?
@@ -257,7 +257,7 @@ pub(crate) mod data_frame {
         expr.into_ref(vm)
     }
 
-    // TODO: lit function that take PyObject and turn it into ScalarValue
+    // TODO(discord9): lit function that take PyObject and turn it into ScalarValue
 
     type PyExprRef = PyRef<PyExpr>;
 
@@ -268,7 +268,6 @@ pub(crate) mod data_frame {
     }
 
     impl Comparable for PyExpr {
-        /// .
         fn slot_richcompare(
             zelf: &PyObject,
             other: &PyObject,
@@ -321,15 +320,13 @@ pub(crate) mod data_frame {
             Ok(self.inner.clone().alias(name).into())
         }
 
-        // bunch of binary op function(not use macro for macro expansion order doesn't support)
-
         #[pymethod(magic)]
         fn and(&self, other: PyExprRef) -> PyResult<PyExpr> {
             Ok(self.inner.clone().and(other.inner.clone()).into())
         }
         #[pymethod(magic)]
         fn or(&self, other: PyExprRef) -> PyResult<PyExpr> {
-            Ok(self.inner.clone().and(other.inner.clone()).into())
+            Ok(self.inner.clone().or(other.inner.clone()).into())
         }
 
         /// `~` operator, return `!self`

@@ -347,7 +347,7 @@ from data_frame import col
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number)->vector[u32]:
-    return df.filter(col("number")==col("number")).collect()[0][0]
+    return dataframe.filter(col("number")==col("number")).collect()[0][0]
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())

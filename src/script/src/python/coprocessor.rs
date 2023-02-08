@@ -451,7 +451,7 @@ pub(crate) fn exec_with_cached_vm(
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
-        crate::python::dataframe::data_frame::set_dataframe_in_scope(&scope, vm, "df", rb)?;
+        crate::python::dataframe::data_frame::set_dataframe_in_scope(&scope, vm, "dataframe", rb)?;
 
         if let Some(engine) = &copr.query_engine {
             let query_engine = PyQueryEngine {
