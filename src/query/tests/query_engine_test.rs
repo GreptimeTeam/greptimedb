@@ -127,8 +127,8 @@ fn catalog_list() -> Result<Arc<MemoryCatalogManager>> {
     Ok(catalog_list)
 }
 
-#[tokio::test]
-async fn test_query_validate() -> Result<()> {
+#[test]
+fn test_query_validate() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let catalog_list = catalog_list()?;
 
