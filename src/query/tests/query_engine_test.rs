@@ -135,7 +135,7 @@ async fn test_query_validate() -> Result<()> {
     // set plugins
     let mut plugins = Plugins::new();
     plugins.insert(QueryOptions {
-        validate_table_references: true,
+        disallow_cross_schema_query: true,
     });
     let plugins = Arc::new(plugins);
 

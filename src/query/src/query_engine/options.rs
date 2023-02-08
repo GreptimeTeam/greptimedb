@@ -21,7 +21,7 @@ use crate::error::{QueryAccessDeniedSnafu, Result};
 
 #[derive(Default)]
 pub struct QueryOptions {
-    pub validate_table_references: bool,
+    pub disallow_cross_schema_query: bool,
 }
 
 pub fn validate_catalog_and_schema(

@@ -126,7 +126,7 @@ impl QueryEngineState {
         let state = self.df_context.state();
 
         if let Some(opts) = self.plugins.get::<QueryOptions>() {
-            if opts.validate_table_references {
+            if opts.disallow_cross_schema_query {
                 validate_table_references(name, &query_ctx)?;
             }
         }

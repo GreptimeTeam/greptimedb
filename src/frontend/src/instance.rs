@@ -564,7 +564,7 @@ pub fn check_permission(
 ) -> Result<()> {
     let need_validate = plugins
         .get::<QueryOptions>()
-        .map(|opts| opts.validate_table_references)
+        .map(|opts| opts.disallow_cross_schema_query)
         .unwrap_or_default();
 
     if !need_validate {
@@ -655,7 +655,7 @@ mod tests {
         let query_ctx = Arc::new(QueryContext::new());
         let mut plugins = Plugins::new();
         plugins.insert(QueryOptions {
-            validate_table_references: true,
+            disallow_cross_schema_query: true,
         });
         let plugins = Arc::new(plugins);
 
