@@ -650,8 +650,8 @@ mod tests {
     use super::*;
     use crate::tests;
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_exec_validation() {
+    #[test]
+    fn test_exec_validation() {
         let query_ctx = Arc::new(QueryContext::new());
         let mut plugins = Plugins::new();
         plugins.insert(QueryOptions {
