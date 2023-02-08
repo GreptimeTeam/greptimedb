@@ -379,6 +379,7 @@ impl Instance {
             | Statement::Explain(_)
             | Statement::Query(_)
             | Statement::Insert(_)
+            | Statement::Delete(_)
             | Statement::Alter(_)
             | Statement::DropTable(_) => self.sql_handler.do_statement_query(stmt, query_ctx).await,
             Statement::Use(db) => self.handle_use(db, query_ctx),
