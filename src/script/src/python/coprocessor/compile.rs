@@ -156,7 +156,6 @@ pub fn compile_script(
         return fail_parse_error!(format!("Expect statement in script, found: {top:?}"), None);
     }
     // use `compile::Mode::BlockExpr` so it return the result of statement
-    println!("{:?}", top);
     compile_top(
         &top,
         "<embedded>".to_owned(),
