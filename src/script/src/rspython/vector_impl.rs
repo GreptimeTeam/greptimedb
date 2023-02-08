@@ -9,7 +9,6 @@ use datatypes::arrow::compute;
 use datatypes::arrow::compute::kernels::{arithmetic, boolean};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::{ConcreteDataType, DataType};
-use datatypes::prelude::Value;
 use datatypes::value::{self, OrderedFloat};
 use datatypes::vectors::Helper;
 use once_cell::sync::Lazy;
@@ -513,8 +512,4 @@ pub(crate) fn pyobj_try_to_typed_val(
     } else {
         None
     }
-}
-
-fn to_type_error(vm: &'_ VirtualMachine) -> impl FnOnce(String) -> PyBaseExceptionRef+ '_ {
-    |msg: String| vm.new_type_error(msg)
 }

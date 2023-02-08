@@ -37,7 +37,8 @@ use rustpython_vm::{
 
 use crate::python::utils::is_instance;
 
-#[pyo3class]
+/// The Main FFI type `PyVector` that is used both in RustPython and PyO3
+#[pyo3class(name = "vector")]
 #[rspyclass(module = false, name = "vector")]
 #[derive(PyPayload, Debug)]
 pub struct PyVector {
@@ -65,42 +66,27 @@ fn emit_cast_error(
 }
 
 /// Performs `val - arr`.
-pub(crate) fn arrow_rsub(
-    arr: &dyn Array,
-    val: &dyn Array,
-) -> Result<ArrayRef, String> {
-    arithmetic::subtract_dyn(val, arr)
-        .map_err(|e| format!("rsub error: {e}"))
+pub(crate) fn arrow_rsub(arr: &dyn Array, val: &dyn Array) -> Result<ArrayRef, String> {
+    arithmetic::subtract_dyn(val, arr).map_err(|e| format!("rsub error: {e}"))
 }
 
 /// Performs `val / arr`
-pub(crate) fn arrow_rtruediv(
-    arr: &dyn Array,
-    val: &dyn Array,
-) -> Result<ArrayRef, String> {
+pub(crate) fn arrow_rtruediv(arr: &dyn Array, val: &dyn Array) -> Result<ArrayRef, String> {
     arithmetic::divide_dyn(val, arr).map_err(|e| format!("rtruediv error: {e}"))
 }
 
 /// Performs `val / arr`, but cast to i64.
-pub(crate) fn arrow_rfloordiv(
-    arr: &dyn Array,
-    val: &dyn Array,
-) -> Result<ArrayRef, String> {
-    let array = arithmetic::divide_dyn(val, arr)
-        .map_err(|e| format!("rtruediv divide error: {e}"))?;
-    compute::cast(&array, &ArrowDataType::Int64)
-        .map_err(|e| format!("rtruediv cast error: {e}"))
+pub(crate) fn arrow_rfloordiv(arr: &dyn Array, val: &dyn Array) -> Result<ArrayRef, String> {
+    let array =
+        arithmetic::divide_dyn(val, arr).map_err(|e| format!("rtruediv divide error: {e}"))?;
+    compute::cast(&array, &ArrowDataType::Int64).map_err(|e| format!("rtruediv cast error: {e}"))
 }
 
-pub(crate) fn wrap_result<F>(
-    f: F,
-) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>
+pub(crate) fn wrap_result<F>(f: F) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>
 where
     F: Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef>,
 {
-    move |left, right| {
-        f(left, right).map_err(|e| format!("arithmetic error {e}"))
-    }
+    move |left, right| f(left, right).map_err(|e| format!("arithmetic error {e}"))
 }
 
 fn is_float(datatype: &ArrowDataType) -> bool {
@@ -417,8 +403,7 @@ fn get_arrow_scalar_op(
     };
 
     move |a: &dyn Array, b: &dyn Array| -> Result<ArrayRef, String> {
-        let array =
-            op_bool_arr(a, b).map_err(|e| format!("scalar op error: {e}"))?;
+        let array = op_bool_arr(a, b).map_err(|e| format!("scalar op error: {e}"))?;
         Ok(Arc::new(array))
     }
 }
