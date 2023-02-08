@@ -147,11 +147,11 @@ impl SqlHandler {
                     })
             })
             .enumerate()
-            .map(|(_, col)| &col.name.value)
+            .map(|(_, col)| col.name.value.clone())
             .collect::<Vec<_>>();
 
         for pk in pk_map.iter() {
-            primary_keys.push(*col_map.get(pk.clone()).context(KeyColumnNotFoundSnafu {
+            primary_keys.push(*col_map.get(&pk.clone()).context(KeyColumnNotFoundSnafu {
                 name: pk.to_string(),
             })?);
         }
