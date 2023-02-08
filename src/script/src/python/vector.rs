@@ -490,6 +490,21 @@ impl PyVector {
         self.as_vector_ref().len()
     }
 
+    #[pymethod(name = "concat")]
+    fn concat(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
+        let left = self.to_arrow_array();
+        let right = other.to_arrow_array();
+
+        let res = compute::concat(&[left.as_ref(), right.as_ref()]);
+        let res = res.map_err(|err| vm.new_runtime_error(format!("Arrow Error: {err:#?}")))?;
+        let ret = Helper::try_into_vector(res.clone()).map_err(|e| {
+            vm.new_type_error(format!(
+                "Can't cast result into vector, result: {res:?}, err: {e:?}",
+            ))
+        })?;
+        Ok(ret.into())
+    }
+
     /// take a boolean array and filters the Array, returning elements matching the filter (i.e. where the values are true).
     #[pymethod(name = "filter")]
     fn filter(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {

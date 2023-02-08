@@ -16,7 +16,7 @@
 use rustpython_codegen::compile::compile_top;
 use rustpython_compiler::{CompileOpts, Mode};
 use rustpython_compiler_core::CodeObject;
-use rustpython_parser::ast::{Located, Location};
+use rustpython_parser::ast::{ArgData, Located, Location};
 use rustpython_parser::{ast, parser};
 use snafu::ResultExt;
 
@@ -111,6 +111,20 @@ pub fn compile_script(
                 type_comment: __main__,
             } = &mut stmt.node
             {
+                // Rewrite kwargs in coprocessor, make it as a positional argument
+                if !decorator_list.is_empty() {
+                    if let Some(kwarg) = kwarg {
+                        args.kwarg = None;
+                        let node = ArgData {
+                            arg: kwarg.to_owned(),
+                            annotation: None,
+                            type_comment: Some("kwargs".to_string()),
+                        };
+                        let kwarg = create_located(node, stmt.location);
+                        args.args.push(kwarg);
+                    }
+                }
+
                 *decorator_list = Vec::new();
                 // strip type annotation
                 // def a(b: int, c:int) -> int
@@ -142,6 +156,7 @@ pub fn compile_script(
         return fail_parse_error!(format!("Expect statement in script, found: {top:?}"), None);
     }
     // use `compile::Mode::BlockExpr` so it return the result of statement
+    println!("{:?}", top);
     compile_top(
         &top,
         "<embedded>".to_owned(),

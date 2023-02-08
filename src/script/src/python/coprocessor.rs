@@ -494,26 +494,21 @@ fn exec_with_cached_vm(
             .map_err(|e| format_py_error(e, vm))?;
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
-        let cols = if let Some(rb) = rb {
-            let col_len = rb.num_rows();
-            let mut cols = try_into_columns(&ret, vm, col_len)?;
-            ensure!(
-                cols.len() == copr.deco_args.ret_names.len(),
-                OtherSnafu {
-                    reason: format!(
-                        "The number of return Vector is wrong, expect {}, found {}",
-                        copr.deco_args.ret_names.len(),
-                        cols.len()
-                    )
-                }
-            );
+        let col_len = rb.as_ref().map(|rb| rb.num_rows()).unwrap_or(1);
+        let mut cols = try_into_columns(&ret, vm, col_len)?;
+        ensure!(
+            cols.len() == copr.deco_args.ret_names.len(),
+            OtherSnafu {
+                reason: format!(
+                    "The number of return Vector is wrong, expect {}, found {}",
+                    copr.deco_args.ret_names.len(),
+                    cols.len()
+                )
+            }
+        );
 
-            // if cols and schema's data types is not match, try coerce it to given type(if annotated)(if error occur, return relevant error with question mark)
-            copr.check_and_cast_type(&mut cols)?;
-            cols
-        } else {
-            vec![]
-        };
+        // if cols and schema's data types is not match, try coerce it to given type(if annotated)(if error occur, return relevant error with question mark)
+        copr.check_and_cast_type(&mut cols)?;
 
         // 6. return a assembled DfRecordBatch
         let schema = copr.gen_schema(&cols)?;

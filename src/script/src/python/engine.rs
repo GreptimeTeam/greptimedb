@@ -26,7 +26,9 @@ use common_query::error::{PyUdfSnafu, UdfTempRecordBatchSnafu};
 use common_query::prelude::Signature;
 use common_query::Output;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    RecordBatch, RecordBatchStream, RecordBatches, SendableRecordBatchStream,
+};
 use datafusion_expr::Volatility;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::vectors::VectorRef;
@@ -251,8 +253,9 @@ impl Script for PyScript {
                 _ => unreachable!(),
             }
         } else {
-            // TODO(boyan): try to retrieve sql from user request
-            error::MissingSqlSnafu {}.fail()
+            let batch = exec_parsed(&self.copr, &None, &params)?;
+            let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
+            Ok(Output::RecordBatches(batches))
         }
     }
 }
