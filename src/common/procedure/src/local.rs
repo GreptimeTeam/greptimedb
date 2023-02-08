@@ -352,21 +352,33 @@ impl ProcedureManager for LocalManager {
 
 /// Create a new [ProcedureMeta] for test purpose.
 #[cfg(test)]
-fn procedure_meta_for_test() -> ProcedureMeta {
-    ProcedureMeta {
-        id: ProcedureId::random(),
-        lock_notify: Notify::new(),
-        parent_id: None,
-        child_notify: Notify::new(),
-        parent_locks: Vec::new(),
-        lock_key: None,
-        exec_meta: Mutex::new(ExecMeta::default()),
+mod test_util {
+    use object_store::services::fs::Builder;
+    use tempdir::TempDir;
+
+    use super::*;
+
+    pub(crate) fn procedure_meta_for_test() -> ProcedureMeta {
+        ProcedureMeta {
+            id: ProcedureId::random(),
+            lock_notify: Notify::new(),
+            parent_id: None,
+            child_notify: Notify::new(),
+            parent_locks: Vec::new(),
+            lock_key: None,
+            exec_meta: Mutex::new(ExecMeta::default()),
+        }
+    }
+
+    pub(crate) fn new_object_store(dir: &TempDir) -> ObjectStore {
+        let store_dir = dir.path().to_str().unwrap();
+        let accessor = Builder::default().root(store_dir).build().unwrap();
+        ObjectStore::new(accessor)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use object_store::services::fs::Builder;
     use serde::{Deserialize, Serialize};
     use tempdir::TempDir;
 
@@ -376,7 +388,7 @@ mod tests {
 
     #[test]
     fn test_locks_needed() {
-        let mut meta = procedure_meta_for_test();
+        let mut meta = test_util::procedure_meta_for_test();
         let locks = meta.locks_needed();
         assert!(locks.is_empty());
 
@@ -393,16 +405,10 @@ mod tests {
         );
     }
 
-    fn new_object_store(dir: &TempDir) -> ObjectStore {
-        let store_dir = dir.path().to_str().unwrap();
-        let accessor = Builder::default().root(store_dir).build().unwrap();
-        ObjectStore::new(accessor)
-    }
-
     #[test]
     fn test_manager_context() {
         let ctx = ManagerContext::new();
-        let meta = Arc::new(procedure_meta_for_test());
+        let meta = Arc::new(test_util::procedure_meta_for_test());
 
         assert!(!ctx.contains_procedure(meta.id));
         assert!(ctx.state(meta.id).is_none());
@@ -419,7 +425,7 @@ mod tests {
     #[should_panic]
     fn test_manager_context_insert_duplicate() {
         let ctx = ManagerContext::new();
-        let meta = Arc::new(procedure_meta_for_test());
+        let meta = Arc::new(test_util::procedure_meta_for_test());
 
         ctx.insert_procedure(meta.clone());
         ctx.insert_procedure(meta);
@@ -429,7 +435,7 @@ mod tests {
     fn test_register_loader() {
         let dir = TempDir::new("register").unwrap();
         let config = ManagerConfig {
-            object_store: new_object_store(&dir),
+            object_store: test_util::new_object_store(&dir),
         };
         let manager = LocalManager::new(config);
 
@@ -482,7 +488,7 @@ mod tests {
     async fn test_submit_procedure() {
         let dir = TempDir::new("submit").unwrap();
         let config = ManagerConfig {
-            object_store: new_object_store(&dir),
+            object_store: test_util::new_object_store(&dir),
         };
         let manager = LocalManager::new(config);
 

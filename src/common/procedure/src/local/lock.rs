@@ -142,11 +142,11 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::local;
+    use crate::local::test_util;
 
     #[test]
     fn test_lock_no_waiter() {
-        let meta = Arc::new(local::procedure_meta_for_test());
+        let meta = Arc::new(test_util::procedure_meta_for_test());
         let mut lock = Lock::from_owner(meta);
 
         assert!(!lock.switch_owner());
@@ -154,10 +154,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_with_waiter() {
-        let owner = Arc::new(local::procedure_meta_for_test());
+        let owner = Arc::new(test_util::procedure_meta_for_test());
         let mut lock = Lock::from_owner(owner);
 
-        let waiter = Arc::new(local::procedure_meta_for_test());
+        let waiter = Arc::new(test_util::procedure_meta_for_test());
         lock.waiters.push_back(waiter.clone());
 
         assert!(lock.switch_owner());
@@ -171,11 +171,11 @@ mod tests {
     async fn test_lock_map() {
         let key = "hello";
 
-        let owner = Arc::new(local::procedure_meta_for_test());
+        let owner = Arc::new(test_util::procedure_meta_for_test());
         let lock_map = Arc::new(LockMap::new());
         lock_map.acquire_lock(key, owner.clone()).await;
 
-        let waiter = Arc::new(local::procedure_meta_for_test());
+        let waiter = Arc::new(test_util::procedure_meta_for_test());
         let waiter_id = waiter.id;
 
         // Waiter release the lock, this should not take effect.

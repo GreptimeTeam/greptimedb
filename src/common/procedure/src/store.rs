@@ -243,8 +243,16 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
-    use crate::store::state_store::ObjectStateStore;
     use crate::{Context, LockKey, Procedure, Status};
+
+    fn procedure_store_for_test(dir: &TempDir) -> ProcedureStore {
+        let store_dir = dir.path().to_str().unwrap();
+        let accessor = Builder::default().root(store_dir).build().unwrap();
+        let object_store = ObjectStore::new(accessor);
+        let state_store = ObjectStateStore::new(object_store);
+
+        ProcedureStore::new(Arc::new(state_store))
+    }
 
     #[test]
     fn test_parsed_key() {
@@ -356,19 +364,10 @@ mod tests {
         }
     }
 
-    fn new_procedure_store(dir: &TempDir) -> ProcedureStore {
-        let store_dir = dir.path().to_str().unwrap();
-        let accessor = Builder::default().root(store_dir).build().unwrap();
-        let object_store = ObjectStore::new(accessor);
-        let state_store = ObjectStateStore::new(object_store);
-
-        ProcedureStore(Arc::new(state_store))
-    }
-
     #[tokio::test]
     async fn test_store_procedure() {
         let dir = TempDir::new("store_procedure").unwrap();
-        let store = new_procedure_store(&dir);
+        let store = procedure_store_for_test(&dir);
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
@@ -393,7 +392,7 @@ mod tests {
     #[tokio::test]
     async fn test_commit_procedure() {
         let dir = TempDir::new("commit_procedure").unwrap();
-        let store = new_procedure_store(&dir);
+        let store = procedure_store_for_test(&dir);
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
@@ -411,7 +410,7 @@ mod tests {
     #[tokio::test]
     async fn test_rollback_procedure() {
         let dir = TempDir::new("rollback_procedure").unwrap();
-        let store = new_procedure_store(&dir);
+        let store = procedure_store_for_test(&dir);
 
         let procedure_id = ProcedureId::random();
         let procedure: BoxedProcedure = Box::new(MockProcedure::new("test store procedure"));
@@ -429,7 +428,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_messages() {
         let dir = TempDir::new("load_messages").unwrap();
-        let store = new_procedure_store(&dir);
+        let store = procedure_store_for_test(&dir);
 
         // store 3 steps
         let id0 = ProcedureId::random();
