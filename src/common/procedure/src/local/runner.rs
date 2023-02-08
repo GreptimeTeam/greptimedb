@@ -26,6 +26,7 @@ use crate::{BoxedProcedure, Context, ProcedureId, ProcedureState, ProcedureWithI
 
 const ERR_WAIT_DURATION: Duration = Duration::from_secs(30);
 
+// TODO(yingwen): Support cancellation.
 pub(crate) struct Runner {
     pub(crate) meta: ProcedureMetaRef,
     pub(crate) procedure: BoxedProcedure,
@@ -36,7 +37,7 @@ pub(crate) struct Runner {
 
 impl Runner {
     /// Run the procedure.
-    pub(crate) async fn run(mut self) {
+    pub(crate) async fn run(mut self) -> Result<()> {
         logging::info!(
             "Runner {}-{} starts",
             self.procedure.type_name(),
@@ -55,13 +56,16 @@ impl Runner {
                 .await;
         }
 
-        // Execute the procedure.
+        let mut result = Ok(());
+        // Execute the procedure. We need to release the lock whenever the the execution
+        // is successful or fail.
         if let Err(e) = self.execute_procedure().await {
             logging::error!(
                 e; "Failed to execute procedure {}-{}",
                 self.procedure.type_name(),
                 self.meta.id
             );
+            result = Err(e);
         }
 
         if let Some(key) = &lock_key {
@@ -86,6 +90,8 @@ impl Runner {
             self.procedure.type_name(),
             self.meta.id
         );
+
+        result
     }
 
     async fn execute_procedure(&mut self) -> Result<()> {
@@ -98,7 +104,7 @@ impl Runner {
                 Ok(status) => {
                     if status.need_persist() {
                         if self.persist_procedure().await.is_err() {
-                            time::sleep(ERR_WAIT_DURATION).await;
+                            self.wait_on_err().await;
                             continue;
                         }
                     }
@@ -110,7 +116,7 @@ impl Runner {
                         }
                         Status::Done => {
                             if self.commit_procedure().await.is_err() {
-                                time::sleep(ERR_WAIT_DURATION).await;
+                                self.wait_on_err().await;
                                 continue;
                             }
 
@@ -131,7 +137,7 @@ impl Runner {
 
                     // Write rollback key so we can skip this procedure while recovering procedures.
                     if self.rollback_procedure().await.is_err() {
-                        time::sleep(ERR_WAIT_DURATION).await;
+                        self.wait_on_err().await;
                         continue;
                     }
 
@@ -197,6 +203,10 @@ impl Runner {
             // Run the root procedure.
             runner.run().await
         });
+    }
+
+    async fn wait_on_err(&self) {
+        time::sleep(ERR_WAIT_DURATION).await;
     }
 
     async fn on_suspended(&self, subprocedures: Vec<ProcedureWithId>) {

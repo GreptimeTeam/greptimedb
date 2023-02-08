@@ -233,10 +233,12 @@ impl ManagerContext {
         while let Some(meta) = queue.pop_front() {
             procedures.push(meta.id);
 
+            // Find metadatas of children.
             children_ids.clear();
             meta.list_children(&mut children_ids);
             self.find_procedures(&children_ids, &mut children);
 
+            // Traverse children later.
             for child in children.drain(..) {
                 queue.push_back(child);
             }
@@ -311,7 +313,7 @@ impl LocalManager {
 
         common_runtime::spawn_bg(async move {
             // Run the root procedure.
-            runner.run().await
+            let _ = runner.run().await;
         });
     }
 }
