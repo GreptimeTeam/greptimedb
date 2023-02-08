@@ -15,14 +15,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use snafu::{ensure, OptionExt, ResultExt};
-
 use catalog::{RegisterSchemaRequest, RegisterTableRequest};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_telemetry::tracing::info;
 use common_telemetry::tracing::log::error;
 use datatypes::schema::SchemaBuilder;
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnOption, TableConstraint};
 use sql::statements::column_def_to_schema;
 use sql::statements::create::CreateTable;
@@ -136,27 +135,25 @@ impl SqlHandler {
             .map(|(k, v)| (v, k))
             .collect::<HashMap<_, _>>();
 
-        let pk_map = stmt.columns
+        let pk_map = stmt
+            .columns
             .iter()
-            .filter(|col| col.options
-                .iter()
-                .any(|options| match options.option.clone() {
-                    ColumnOption::Unique { is_primary } => {
-                        is_primary
-                    }
-                    _ => { false }
-                }
-                ))
+            .filter(|col| {
+                col.options
+                    .iter()
+                    .any(|options| match options.option.clone() {
+                        ColumnOption::Unique { is_primary } => is_primary,
+                        _ => false,
+                    })
+            })
             .enumerate()
             .map(|(_, col)| &col.name.value)
             .collect::<Vec<_>>();
 
         for pk in pk_map.iter() {
-            primary_keys.push(*col_map.get(pk.clone()).context(
-                KeyColumnNotFoundSnafu {
-                    name: pk.to_string(),
-                },
-            )?);
+            primary_keys.push(*col_map.get(pk.clone()).context(KeyColumnNotFoundSnafu {
+                name: pk.to_string(),
+            })?);
         }
 
         for c in stmt.constraints {
@@ -177,13 +174,14 @@ impl SqlHandler {
                             return error::InvalidSqlSnafu {
                                 msg: format!("Cannot recognize named UNIQUE constraint: {name}"),
                             }
-                                .fail();
+                            .fail();
                         }
                     } else if is_primary {
                         if !primary_keys.is_empty() {
                             return InvalidPrimaryKeySnafu {
                                 msg: "Multiple definitions of primary key found",
-                            }.fail();
+                            }
+                            .fail();
                         }
                         for col in columns {
                             primary_keys.push(*col_map.get(&col.value).context(
@@ -198,14 +196,14 @@ impl SqlHandler {
                                 "Unrecognized non-primary unnamed UNIQUE constraint: {name:?}",
                             ),
                         }
-                            .fail();
+                        .fail();
                     }
                 }
                 _ => {
                     return ConstraintNotSupportedSnafu {
                         constraint: format!("{c:?}"),
                     }
-                        .fail();
+                    .fail();
                 }
             }
         }
@@ -260,10 +258,9 @@ mod tests {
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
 
+    use super::*;
     use crate::error::Error;
     use crate::tests::test_util::create_mock_sql_handler;
-
-    use super::*;
 
     fn sql_to_statement(sql: &str) -> CreateTable {
         let mut res = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
