@@ -500,12 +500,14 @@ pub fn parse_and_compile_copr(
                         loc: None
                     }
                 );
+                let kwarg = fn_args.kwarg.as_ref().map(|arg| arg.node.arg.clone());
                 coprocessor = Some(Coprocessor {
-                    code_obj: Some(compile::compile_script(name, &deco_args, script)?),
+                    code_obj: Some(compile::compile_script(name, &deco_args, &kwarg, script)?),
                     name: name.to_string(),
                     deco_args,
                     arg_types,
                     return_types,
+                    kwarg,
                     script: script.to_owned(),
                     query_engine: query_engine.as_ref().map(|e| Arc::downgrade(e).into()),
                 });

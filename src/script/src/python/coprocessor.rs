@@ -73,6 +73,8 @@ pub struct Coprocessor {
     pub arg_types: Vec<Option<AnnotationInfo>>,
     /// get from python function returns' annotation, first is type, second is is_nullable
     pub return_types: Vec<Option<AnnotationInfo>>,
+    /// kwargs in coprocessor function's signature
+    pub kwarg: Option<String>,
     /// store its corresponding script, also skip serde when in `cfg(test)` to reduce work in compare
     #[cfg_attr(test, serde(skip))]
     pub script: String,
@@ -582,7 +584,7 @@ def add(a, b):
     return a + b
 
 @copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
-def test(a, b, c):
+def test(a, b, c, **params):
     import greptime as g
     return add(a, b) / g.sqrt(c)
 "#;
@@ -598,6 +600,7 @@ def test(a, b, c):
         assert_eq!(deco_args.arg_names.unwrap(), vec!["a", "b", "c"]);
         assert_eq!(copr.arg_types, vec![None, None, None]);
         assert_eq!(copr.return_types, vec![None]);
+        assert_eq!(copr.kwarg, Some("params".to_string()));
         assert_eq!(copr.script, script);
         assert!(copr.code_obj.is_some());
     }
