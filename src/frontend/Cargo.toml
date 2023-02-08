@@ -10,7 +10,7 @@ api = { path = "../api" }
 async-stream.workspace = true
 async-trait = "0.1"
 catalog = { path = "../catalog" }
-chrono = "0.4"
+chrono.workspace = true
 client = { path = "../client" }
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }

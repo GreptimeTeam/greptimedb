@@ -52,6 +52,7 @@ arrow-flight = "29.0"
 arrow-schema = { version = "29.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
 # TODO(LFC): Use released Datafusion when it officially dpendent on Arrow 29.0
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "4917235a398ae20145c87d20984e6367dc1a0c1e" }
@@ -65,6 +66,7 @@ parquet = "29.0"
 paste = "1.0"
 prost = "0.11"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 snafu = { version = "0.7", features = ["backtraces"] }
 sqlparser = "0.28"
 tokio = { version = "1.24.2", features = ["full"] }

@@ -36,6 +36,7 @@ message CreateRequest {
 
   TableName table_name = 2;
   repeated Partition partitions = 3;
+  bytes table_info = 4;
 }
 
 message RouteRequest {

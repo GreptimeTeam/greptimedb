@@ -18,23 +18,26 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{AlterExpr, CreateDatabaseExpr, CreateTableExpr, InsertRequest, TableId};
+use api::v1::{
+    AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest, TableId,
+};
 use async_trait::async_trait;
-use catalog::helper::{SchemaKey, SchemaValue, TableGlobalKey, TableGlobalValue};
-use catalog::{CatalogList, CatalogManager};
+use catalog::helper::{SchemaKey, SchemaValue};
+use catalog::{CatalogList, CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use client::Database;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_query::Output;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, info};
 use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{RawSchema, Schema};
 use meta_client::client::MetaClient;
+use meta_client::rpc::router::DeleteRequest as MetaDeleteRequest;
 use meta_client::rpc::{
     CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
-    TableName, TableRoute,
+    TableName,
 };
 use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::QueryStatement;
@@ -58,9 +61,10 @@ use crate::error::{
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
     TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
-use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
+use crate::expr_factory;
 use crate::instance::parse_stmt;
 use crate::sql::insert_to_request;
+use crate::table::DistTable;
 
 #[derive(Clone)]
 pub(crate) struct DistInstance {
@@ -90,7 +94,17 @@ impl DistInstance {
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
     ) -> Result<Output> {
-        let response = self.create_table_in_meta(create_table, partitions).await?;
+        let table_name = TableName::new(
+            &create_table.catalog_name,
+            &create_table.schema_name,
+            &create_table.table_name,
+        );
+
+        let mut table_info = create_table_info(create_table)?;
+
+        let response = self
+            .create_table_in_meta(create_table, partitions, &table_info)
+            .await?;
         let table_routes = response.table_routes;
         ensure!(
             table_routes.len() == 1,
@@ -100,11 +114,9 @@ impl DistInstance {
         );
         let table_route = table_routes.first().unwrap();
         info!(
-            "Create table {:?}.{:?}.{}, table routes: {:?}",
-            create_table.catalog_name,
-            create_table.schema_name,
-            create_table.table_name,
-            table_route
+            "Creating distributed table {table_name} with table routes: {}",
+            serde_json::to_string_pretty(table_route)
+                .unwrap_or_else(|_| format!("{table_route:#?}"))
         );
         let region_routes = &table_route.region_routes;
         ensure!(
@@ -113,11 +125,37 @@ impl DistInstance {
                 table_name: create_table.table_name.to_string()
             }
         );
-        create_table.table_id = Some(TableId {
-            id: table_route.table.id as u32,
-        });
-        self.put_table_global_meta(create_table, table_route)
-            .await?;
+
+        let table_id = table_route.table.id as u32;
+        table_info.ident.table_id = table_id;
+        let table_info = Arc::new(table_info.try_into().context(error::CreateTableInfoSnafu)?);
+
+        create_table.table_id = Some(TableId { id: table_id });
+
+        let table = DistTable::new(
+            table_name.clone(),
+            table_info,
+            self.catalog_manager.partition_manager(),
+            self.catalog_manager.datanode_clients(),
+            self.catalog_manager.backend(),
+        );
+
+        let request = RegisterTableRequest {
+            catalog: table_name.catalog_name.clone(),
+            schema: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+            table_id,
+            table: Arc::new(table),
+        };
+        ensure!(
+            self.catalog_manager
+                .register_table(request)
+                .await
+                .context(CatalogSnafu)?,
+            error::TableAlreadyExistSnafu {
+                table: table_name.to_string()
+            }
+        );
 
         for datanode in table_route.find_leaders() {
             let client = self.datanode_clients.get_client(&datanode).await;
@@ -142,6 +180,63 @@ impl DistInstance {
         Ok(Output::AffectedRows(0))
     }
 
+    async fn drop_table(&self, table_name: TableName) -> Result<Output> {
+        let _ = self
+            .catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_name.to_string(),
+            })?;
+
+        let route_response = self
+            .meta_client
+            .delete_route(MetaDeleteRequest {
+                table_name: table_name.clone(),
+            })
+            .await
+            .context(RequestMetaSnafu)?;
+
+        let request = DeregisterTableRequest {
+            catalog: table_name.catalog_name.clone(),
+            schema: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+        };
+        ensure!(
+            self.catalog_manager
+                .deregister_table(request)
+                .await
+                .context(CatalogSnafu)?,
+            error::TableNotFoundSnafu {
+                table_name: table_name.to_string()
+            }
+        );
+
+        let expr = DropTableExpr {
+            catalog_name: table_name.catalog_name.clone(),
+            schema_name: table_name.schema_name.clone(),
+            table_name: table_name.table_name.clone(),
+        };
+        for table_route in route_response.table_routes.iter() {
+            for datanode in table_route.find_leaders() {
+                debug!("Dropping table {table_name} on Datanode {datanode:?}");
+
+                let client = self.datanode_clients.get_client(&datanode).await;
+                let client = Database::new(&expr.catalog_name, &expr.schema_name, client);
+                client
+                    .drop_table(expr.clone())
+                    .await
+                    .context(RequestDatanodeSnafu)?;
+            }
+        }
+
+        Ok(Output::AffectedRows(1))
+    }
+
     async fn handle_statement(
         &self,
         stmt: Statement,
@@ -163,8 +258,16 @@ impl DistInstance {
                 Ok(self.handle_create_database(expr).await?)
             }
             Statement::CreateTable(stmt) => {
-                let create_expr = &mut DefaultCreateExprFactory.create_expr_by_stmt(&stmt).await?;
+                let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
                 Ok(self.create_table(create_expr, stmt.partitions).await?)
+            }
+            Statement::DropTable(stmt) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+                let table_name = TableName::new(catalog, schema, table);
+                return self.drop_table(table_name).await;
             }
             Statement::ShowDatabases(stmt) => show_databases(stmt, self.catalog_manager.clone()),
             Statement::ShowTables(stmt) => {
@@ -201,7 +304,12 @@ impl DistInstance {
                     table.insert(insert_request).await.context(TableSnafu)?,
                 ));
             }
-            _ => unreachable!(),
+            _ => {
+                return error::NotSupportedSnafu {
+                    feat: format!("{stmt:?}"),
+                }
+                .fail()
+            }
         }
         .context(error::ExecuteStatementSnafu)
     }
@@ -293,6 +401,7 @@ impl DistInstance {
         &self,
         create_table: &CreateTableExpr,
         partitions: Option<Partitions>,
+        table_info: &RawTableInfo,
     ) -> Result<RouteResponse> {
         let mut catalog_name = create_table.catalog_name.clone();
         if catalog_name.is_empty() {
@@ -308,52 +417,12 @@ impl DistInstance {
         let request = MetaCreateRequest {
             table_name,
             partitions,
+            table_info,
         };
         self.meta_client
             .create_route(request)
             .await
             .context(error::RequestMetaSnafu)
-    }
-
-    // TODO(LFC): Maybe move this to FrontendCatalogManager's "register_table" method?
-    async fn put_table_global_meta(
-        &self,
-        create_table: &CreateTableExpr,
-        table_route: &TableRoute,
-    ) -> Result<()> {
-        let table_name = &table_route.table.table_name;
-        let key = TableGlobalKey {
-            catalog_name: table_name.catalog_name.clone(),
-            schema_name: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-        }
-        .to_string();
-
-        let value = create_table_global_value(create_table, table_route)?
-            .as_bytes()
-            .context(error::CatalogEntrySerdeSnafu)?;
-
-        if let Err(existing) = self
-            .catalog_manager
-            .backend()
-            .compare_and_set(key.as_bytes(), &[], &value)
-            .await
-            .context(CatalogSnafu)?
-        {
-            let existing_bytes = existing.unwrap(); // this unwrap is safe since we compare with empty bytes and failed
-            let existing_value =
-                TableGlobalValue::from_bytes(&existing_bytes).context(CatalogEntrySerdeSnafu)?;
-            if existing_value.table_info.ident.table_id
-                != create_table.table_id.as_ref().unwrap().id
-            {
-                error!(
-                    "Table with name {} already exists, value in catalog: {:?}",
-                    key, existing_bytes
-                );
-                return error::TableAlreadyExistSnafu { table: key }.fail();
-            }
-        }
-        Ok(())
     }
 
     // TODO(LFC): Refactor insertion implementation for DistTable,
@@ -430,38 +499,7 @@ impl SqlQueryHandler for DistInstance {
     }
 }
 
-fn create_table_global_value(
-    create_table: &CreateTableExpr,
-    table_route: &TableRoute,
-) -> Result<TableGlobalValue> {
-    let table_name = &table_route.table.table_name;
-
-    let region_routes = &table_route.region_routes;
-    let node_id = region_routes[0]
-        .leader_peer
-        .as_ref()
-        .with_context(|| error::FindLeaderPeerSnafu {
-            region: region_routes[0].region.id,
-            table_name: table_name.to_string(),
-        })?
-        .id;
-
-    let mut regions_id_map = HashMap::new();
-    for route in region_routes.iter() {
-        let node_id = route
-            .leader_peer
-            .as_ref()
-            .with_context(|| error::FindLeaderPeerSnafu {
-                region: route.region.id,
-                table_name: table_name.to_string(),
-            })?
-            .id;
-        regions_id_map
-            .entry(node_id)
-            .or_insert_with(Vec::new)
-            .push(route.region.id as u32);
-    }
-
+fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
     let mut column_schemas = Vec::with_capacity(create_table.column_defs.len());
     let mut column_name_to_index_map = HashMap::new();
 
@@ -518,22 +556,18 @@ fn create_table_global_value(
 
     let table_info = RawTableInfo {
         ident: TableIdent {
-            table_id: table_route.table.id as u32,
+            // The table id of distributed table is assigned by Meta, set "0" here as a placeholder.
+            table_id: 0,
             version: 0,
         },
-        name: table_name.table_name.clone(),
+        name: create_table.table_name.clone(),
         desc,
-        catalog_name: table_name.catalog_name.clone(),
-        schema_name: table_name.schema_name.clone(),
+        catalog_name: create_table.catalog_name.clone(),
+        schema_name: create_table.schema_name.clone(),
         meta,
         table_type: TableType::Base,
     };
-
-    Ok(TableGlobalValue {
-        node_id,
-        regions_id_map,
-        table_info,
-    })
+    Ok(table_info)
 }
 
 fn parse_partitions(
@@ -628,7 +662,6 @@ mod test {
     use sql::statements::statement::Statement;
 
     use super::*;
-    use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
     use crate::instance::standalone::StandaloneSqlQueryHandler;
 
     #[tokio::test]
@@ -662,10 +695,7 @@ ENGINE=mito",
             let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
             match &result[0] {
                 Statement::CreateTable(c) => {
-                    let expr = DefaultCreateExprFactory
-                        .create_expr_by_stmt(c)
-                        .await
-                        .unwrap();
+                    let expr = expr_factory::create_to_expr(c, QueryContext::arc()).unwrap();
                     let partitions = parse_partitions(&expr, c.partitions.clone()).unwrap();
                     let json = serde_json::to_string(&partitions).unwrap();
                     assert_eq!(json, expected);

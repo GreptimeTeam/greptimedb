@@ -68,13 +68,13 @@ impl GrpcQueryHandler for Instance {
 #[cfg(test)]
 mod test {
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     use api::v1::column::{SemanticType, Values};
     use api::v1::ddl_request::Expr as DdlExpr;
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
-        CreateDatabaseExpr, CreateTableExpr, DdlRequest, InsertRequest, QueryRequest,
+        CreateDatabaseExpr, CreateTableExpr, DdlRequest, DropTableExpr, InsertRequest,
+        QueryRequest,
     };
     use catalog::helper::{TableGlobalKey, TableGlobalValue};
     use common_query::Output;
@@ -92,7 +92,9 @@ mod test {
             tests::create_distributed_instance("test_distributed_handle_ddl_request").await;
         let frontend = &instance.frontend;
 
-        test_handle_ddl_request(frontend).await
+        test_handle_ddl_request(frontend.as_ref()).await;
+
+        verify_table_is_dropped(&instance);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -101,22 +103,26 @@ mod test {
             tests::create_standalone_instance("test_standalone_handle_ddl_request").await;
         let instance = &standalone.instance;
 
-        test_handle_ddl_request(instance).await
+        test_handle_ddl_request(instance.as_ref()).await;
     }
 
-    async fn test_handle_ddl_request(instance: &Arc<Instance>) {
-        let query = Request::Ddl(DdlRequest {
+    async fn query(instance: &Instance, request: Request) -> Output {
+        GrpcQueryHandler::do_query(instance, request, QueryContext::arc())
+            .await
+            .unwrap()
+    }
+
+    async fn test_handle_ddl_request(instance: &Instance) {
+        let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateDatabase(CreateDatabaseExpr {
                 database_name: "database_created_through_grpc".to_string(),
                 create_if_not_exists: true,
             })),
         });
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let output = query(instance, request).await;
         assert!(matches!(output, Output::AffectedRows(1)));
 
-        let query = Request::Ddl(DdlRequest {
+        let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::CreateTable(CreateTableExpr {
                 catalog_name: "greptime".to_string(),
                 schema_name: "database_created_through_grpc".to_string(),
@@ -139,12 +145,10 @@ mod test {
                 ..Default::default()
             })),
         });
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let output = query(instance, request).await;
         assert!(matches!(output, Output::AffectedRows(0)));
 
-        let query = Request::Ddl(DdlRequest {
+        let request = Request::Ddl(DdlRequest {
             expr: Some(DdlExpr::Alter(AlterExpr {
                 catalog_name: "greptime".to_string(),
                 schema_name: "database_created_through_grpc".to_string(),
@@ -162,28 +166,22 @@ mod test {
                 })),
             })),
         });
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let output = query(instance, request).await;
         assert!(matches!(output, Output::AffectedRows(0)));
 
-        let query = Request::Query(QueryRequest {
+        let request = Request::Query(QueryRequest {
             query: Some(Query::Sql("INSERT INTO database_created_through_grpc.table_created_through_grpc (a, b, ts) VALUES ('s', 1, 1672816466000)".to_string()))
         });
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let output = query(instance, request).await;
         assert!(matches!(output, Output::AffectedRows(1)));
 
-        let query = Request::Query(QueryRequest {
+        let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(
                 "SELECT ts, a, b FROM database_created_through_grpc.table_created_through_grpc"
                     .to_string(),
             )),
         });
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let output = query(instance, request).await;
         let Output::Stream(stream) = output else { unreachable!() };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
@@ -193,6 +191,28 @@ mod test {
 | 2023-01-04T07:14:26 | s | 1 |
 +---------------------+---+---+";
         assert_eq!(recordbatches.pretty_print().unwrap(), expected);
+
+        let request = Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::DropTable(DropTableExpr {
+                catalog_name: "greptime".to_string(),
+                schema_name: "database_created_through_grpc".to_string(),
+                table_name: "table_created_through_grpc".to_string(),
+            })),
+        });
+        let output = query(instance, request).await;
+        assert!(matches!(output, Output::AffectedRows(1)));
+    }
+
+    fn verify_table_is_dropped(instance: &MockDistributedInstance) {
+        assert!(instance.datanodes.iter().all(|(_, x)| x
+            .catalog_manager()
+            .table(
+                "greptime",
+                "database_created_through_grpc",
+                "table_created_through_grpc"
+            )
+            .unwrap()
+            .is_none()))
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -201,7 +221,7 @@ mod test {
 
         let instance =
             tests::create_distributed_instance("test_distributed_insert_and_query").await;
-        let frontend = &instance.frontend;
+        let frontend = instance.frontend.as_ref();
 
         let table_name = "my_dist_table";
         let sql = format!(
@@ -310,17 +330,15 @@ CREATE TABLE {table_name} (
         test_insert_and_query_on_auto_created_table(instance).await
     }
 
-    async fn create_table(frontend: &Arc<Instance>, sql: String) {
-        let query = Request::Query(QueryRequest {
+    async fn create_table(frontend: &Instance, sql: String) {
+        let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(sql)),
         });
-        let output = GrpcQueryHandler::do_query(frontend.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let output = query(frontend, request).await;
         assert!(matches!(output, Output::AffectedRows(0)));
     }
 
-    async fn test_insert_and_query_on_existing_table(instance: &Arc<Instance>, table_name: &str) {
+    async fn test_insert_and_query_on_existing_table(instance: &Instance, table_name: &str) {
         let insert = InsertRequest {
             table_name: table_name.to_string(),
             columns: vec![
@@ -358,20 +376,16 @@ CREATE TABLE {table_name} (
             ..Default::default()
         };
 
-        let query = Request::Insert(insert);
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let request = Request::Insert(insert);
+        let output = query(instance, request).await;
         assert!(matches!(output, Output::AffectedRows(8)));
 
-        let query = Request::Query(QueryRequest {
+        let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(format!(
                 "SELECT ts, a FROM {table_name} ORDER BY ts"
             ))),
         });
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let output = query(instance, request).await;
         let Output::Stream(stream) = output else { unreachable!() };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
@@ -436,7 +450,7 @@ CREATE TABLE {table_name} (
         }
     }
 
-    async fn test_insert_and_query_on_auto_created_table(instance: &Arc<Instance>) {
+    async fn test_insert_and_query_on_auto_created_table(instance: &Instance) {
         let insert = InsertRequest {
             table_name: "auto_created_table".to_string(),
             columns: vec![
@@ -466,10 +480,8 @@ CREATE TABLE {table_name} (
         };
 
         // Test auto create not existed table upon insertion.
-        let query = Request::Insert(insert);
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let request = Request::Insert(insert);
+        let output = query(instance, request).await;
         assert!(matches!(output, Output::AffectedRows(3)));
 
         let insert = InsertRequest {
@@ -501,20 +513,16 @@ CREATE TABLE {table_name} (
         };
 
         // Test auto add not existed column upon insertion.
-        let query = Request::Insert(insert);
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let request = Request::Insert(insert);
+        let output = query(instance, request).await;
         assert!(matches!(output, Output::AffectedRows(3)));
 
-        let query = Request::Query(QueryRequest {
+        let request = Request::Query(QueryRequest {
             query: Some(Query::Sql(
                 "SELECT ts, a, b FROM auto_created_table".to_string(),
             )),
         });
-        let output = GrpcQueryHandler::do_query(instance.as_ref(), query, QueryContext::arc())
-            .await
-            .unwrap();
+        let output = query(instance, request).await;
         let Output::Stream(stream) = output else { unreachable!() };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\

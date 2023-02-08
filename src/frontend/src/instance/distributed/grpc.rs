@@ -16,6 +16,7 @@ use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use async_trait::async_trait;
 use common_query::Output;
+use meta_client::rpc::TableName;
 use servers::query_handler::grpc::GrpcQueryHandler;
 use session::context::QueryContextRef;
 use snafu::OptionExt;
@@ -45,10 +46,10 @@ impl GrpcQueryHandler for DistInstance {
                         self.create_table(&mut expr, None).await
                     }
                     DdlExpr::Alter(expr) => self.handle_alter_table(expr).await,
-                    DdlExpr::DropTable(_) => {
-                        // TODO(LFC): Implement distributed drop table.
-                        // Seems the whole "drop table through GRPC interface" feature is not implemented?
-                        unimplemented!()
+                    DdlExpr::DropTable(expr) => {
+                        let table_name =
+                            TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
+                        self.drop_table(table_name).await
                     }
                 }
             }

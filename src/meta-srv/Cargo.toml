@@ -31,6 +31,7 @@ regex = "1.6"
 serde = "1.0"
 serde_json = "1.0"
 snafu.workspace = true
+table = { path = "../table" }
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic.workspace = true

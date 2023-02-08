@@ -25,16 +25,14 @@ use std::time::Duration;
 use api::v1::alter_expr::Kind;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
-use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, DropTableExpr, InsertRequest};
+use api::v1::{AddColumns, AlterExpr, Column, DdlRequest, InsertRequest};
 use async_trait::async_trait;
 use catalog::remote::MetaKvBackend;
 use catalog::CatalogManagerRef;
-use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{debug, info};
-use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
@@ -372,9 +370,7 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 
 impl Instance {
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
-        // TODO(sunng87): provide a better form to log or track statement
-        let query = &format!("{:?}", &stmt);
-        match stmt.clone() {
+        match stmt {
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
             | Statement::CreateTable(_)
@@ -383,31 +379,13 @@ impl Instance {
             | Statement::Explain(_)
             | Statement::Query(_)
             | Statement::Insert(_)
-            | Statement::Alter(_) => {
-                return self.sql_handler.do_statement_query(stmt, query_ctx).await;
-            }
-            Statement::DropTable(drop_stmt) => {
-                let (catalog_name, schema_name, table_name) =
-                    table_idents_to_full_name(drop_stmt.table_name(), query_ctx.clone())
-                        .map_err(BoxedError::new)
-                        .context(error::ExternalSnafu)?;
-                let expr = DropTableExpr {
-                    catalog_name,
-                    schema_name,
-                    table_name,
-                };
-                return self
-                    .grpc_query_handler
-                    .do_query(
-                        Request::Ddl(DdlRequest {
-                            expr: Some(DdlExpr::DropTable(expr)),
-                        }),
-                        query_ctx,
-                    )
-                    .await;
-            }
-            Statement::ShowCreateTable(_) => error::NotSupportedSnafu { feat: query }.fail(),
+            | Statement::Alter(_)
+            | Statement::DropTable(_) => self.sql_handler.do_statement_query(stmt, query_ctx).await,
             Statement::Use(db) => self.handle_use(db, query_ctx),
+            _ => NotSupportedSnafu {
+                feat: format!("{stmt:?}"),
+            }
+            .fail(),
         }
     }
 }
@@ -546,107 +524,209 @@ impl PromqlHandler for Instance {
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
+    use std::collections::HashMap;
     use std::sync::atomic::AtomicU32;
 
+    use catalog::helper::{TableGlobalKey, TableGlobalValue};
     use session::context::QueryContext;
 
     use super::*;
+    use crate::table::DistTable;
     use crate::tests;
+    use crate::tests::MockDistributedInstance;
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_execute_sql() {
-        let query_ctx = Arc::new(QueryContext::new());
+    async fn test_standalone_exec_sql() {
+        let standalone = tests::create_standalone_instance("test_standalone_exec_sql").await;
+        let instance = standalone.instance.as_ref();
 
-        let standalone = tests::create_standalone_instance("test_execute_sql").await;
-        let instance = standalone.instance;
+        let sql = r#"
+            CREATE TABLE demo(
+                host STRING,
+                ts TIMESTAMP,
+                cpu DOUBLE NULL,
+                memory DOUBLE NULL,
+                disk_util DOUBLE DEFAULT 9.9,
+                TIME INDEX (ts),
+                PRIMARY KEY(host)
+            ) engine=mito"#;
+        create_table(instance, sql).await;
 
-        let sql = r#"CREATE TABLE demo(
-                            host STRING,
-                            ts TIMESTAMP,
-                            cpu DOUBLE NULL,
-                            memory DOUBLE NULL,
-                            disk_util DOUBLE DEFAULT 9.9,
-                            TIME INDEX (ts),
-                            PRIMARY KEY(host)
-                        ) engine=mito with(regions=1);"#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
+        insert_and_query(instance).await;
+
+        drop_table(instance).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_distributed_exec_sql() {
+        let distributed = tests::create_distributed_instance("test_distributed_exec_sql").await;
+        let instance = distributed.frontend.as_ref();
+
+        let sql = r#"
+            CREATE TABLE demo(
+                host STRING,
+                ts TIMESTAMP,
+                cpu DOUBLE NULL,
+                memory DOUBLE NULL,
+                disk_util DOUBLE DEFAULT 9.9,
+                TIME INDEX (ts),
+                PRIMARY KEY(host)
+            )
+            PARTITION BY RANGE COLUMNS (host) (
+                PARTITION r0 VALUES LESS THAN ('550-A'),
+                PARTITION r1 VALUES LESS THAN ('550-W'),
+                PARTITION r2 VALUES LESS THAN ('MOSS'),
+                PARTITION r3 VALUES LESS THAN (MAXVALUE),
+            )
+            engine=mito"#;
+        create_table(instance, sql).await;
+
+        insert_and_query(instance).await;
+
+        verify_data_distribution(
+            &distributed,
+            HashMap::from([
+                (
+                    0u32,
+                    "\
++---------------------+------+
+| ts                  | host |
++---------------------+------+
+| 2013-12-31T16:00:00 | 490  |
++---------------------+------+",
+                ),
+                (
+                    1u32,
+                    "\
++---------------------+-------+
+| ts                  | host  |
++---------------------+-------+
+| 2022-12-31T16:00:00 | 550-A |
++---------------------+-------+",
+                ),
+                (
+                    2u32,
+                    "\
++---------------------+-------+
+| ts                  | host  |
++---------------------+-------+
+| 2023-12-31T16:00:00 | 550-W |
++---------------------+-------+",
+                ),
+                (
+                    3u32,
+                    "\
++---------------------+------+
+| ts                  | host |
++---------------------+------+
+| 2043-12-31T16:00:00 | MOSS |
++---------------------+------+",
+                ),
+            ]),
+        )
+        .await;
+
+        drop_table(instance).await;
+
+        verify_table_is_dropped(&distributed);
+    }
+
+    async fn query(instance: &Instance, sql: &str) -> Output {
+        SqlQueryHandler::do_query(instance, sql, QueryContext::arc())
             .await
             .remove(0)
-            .unwrap();
-        match output {
-            Output::AffectedRows(rows) => assert_eq!(rows, 0),
-            _ => unreachable!(),
-        }
+            .unwrap()
+    }
 
-        let sql = r#"insert into demo(host, cpu, memory, ts) values
-                                ('frontend.host1', 1.1, 100, 1000),
-                                ('frontend.host2', null, null, 2000),
-                                ('frontend.host3', 3.3, 300, 3000)
+    async fn create_table(instance: &Instance, sql: &str) {
+        let output = query(instance, sql).await;
+        let Output::AffectedRows(x) = output else { unreachable!() };
+        assert_eq!(x, 0);
+    }
+
+    async fn insert_and_query(instance: &Instance) {
+        let sql = r#"INSERT INTO demo(host, cpu, memory, ts) VALUES
+                                ('490', 0.1, 1, 1388505600000),
+                                ('550-A', 1, 100, 1672502400000),
+                                ('550-W', 10000, 1000000, 1704038400000),
+                                ('MOSS', 100000000, 10000000000, 2335190400000)
                                 "#;
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0)
+        let output = query(instance, sql).await;
+        let Output::AffectedRows(x) = output else { unreachable!() };
+        assert_eq!(x, 4);
+
+        let sql = "SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY host"; // use nanoseconds as where condition
+        let output = query(instance, sql).await;
+        let Output::Stream(s) = output else { unreachable!() };
+        let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
+        let pretty_print = batches.pretty_print().unwrap();
+        let expected = "\
++-------+---------------------+-----------+-------------+-----------+
+| host  | ts                  | cpu       | memory      | disk_util |
++-------+---------------------+-----------+-------------+-----------+
+| 490   | 2013-12-31T16:00:00 | 0.1       | 1           | 9.9       |
+| 550-A | 2022-12-31T16:00:00 | 1         | 100         | 9.9       |
+| 550-W | 2023-12-31T16:00:00 | 10000     | 1000000     | 9.9       |
+| MOSS  | 2043-12-31T16:00:00 | 100000000 | 10000000000 | 9.9       |
++-------+---------------------+-----------+-------------+-----------+";
+        assert_eq!(pretty_print, expected);
+    }
+
+    async fn verify_data_distribution(
+        instance: &MockDistributedInstance,
+        expected_distribution: HashMap<u32, &str>,
+    ) {
+        let table = instance
+            .frontend
+            .catalog_manager()
+            .table("greptime", "public", "demo")
+            .unwrap()
             .unwrap();
-        match output {
-            Output::AffectedRows(rows) => assert_eq!(rows, 3),
-            _ => unreachable!(),
+        let table = table.as_any().downcast_ref::<DistTable>().unwrap();
+
+        let TableGlobalValue { regions_id_map, .. } = table
+            .table_global_value(&TableGlobalKey {
+                catalog_name: "greptime".to_string(),
+                schema_name: "public".to_string(),
+                table_name: "demo".to_string(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let region_to_dn_map = regions_id_map
+            .iter()
+            .map(|(k, v)| (v[0], *k))
+            .collect::<HashMap<u32, u64>>();
+        assert_eq!(region_to_dn_map.len(), expected_distribution.len());
+
+        for (region, dn) in region_to_dn_map.iter() {
+            let dn = instance.datanodes.get(dn).unwrap();
+            let output = dn
+                .execute_sql("SELECT ts, host FROM demo ORDER BY ts", QueryContext::arc())
+                .await
+                .unwrap();
+            let Output::Stream(stream) = output else { unreachable!() };
+            let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+            let actual = recordbatches.pretty_print().unwrap();
+
+            let expected = expected_distribution.get(region).unwrap();
+            assert_eq!(&actual, expected);
         }
+    }
 
-        let sql = "select * from demo";
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0)
-            .unwrap();
-        match output {
-            Output::RecordBatches(_) => {
-                unreachable!("Output::RecordBatches");
-            }
-            Output::AffectedRows(_) => {
-                unreachable!("Output::AffectedRows");
-            }
-            Output::Stream(s) => {
-                let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
-                let pretty_print = batches.pretty_print().unwrap();
-                let expected = "\
-+----------------+---------------------+-----+--------+-----------+
-| host           | ts                  | cpu | memory | disk_util |
-+----------------+---------------------+-----+--------+-----------+
-| frontend.host1 | 1970-01-01T00:00:01 | 1.1 | 100    | 9.9       |
-| frontend.host2 | 1970-01-01T00:00:02 |     |        | 9.9       |
-| frontend.host3 | 1970-01-01T00:00:03 | 3.3 | 300    | 9.9       |
-+----------------+---------------------+-----+--------+-----------+\
-                ";
-                assert_eq!(pretty_print, expected);
-            }
-        };
+    async fn drop_table(instance: &Instance) {
+        let sql = "DROP TABLE demo";
+        let output = query(instance, sql).await;
+        let Output::AffectedRows(x) = output else { unreachable!() };
+        assert_eq!(x, 1);
+    }
 
-        let sql = "select * from demo where ts>cast(1000000000 as timestamp)"; // use nanoseconds as where condition
-        let output = SqlQueryHandler::do_query(&*instance, sql, query_ctx.clone())
-            .await
-            .remove(0)
-            .unwrap();
-        match output {
-            Output::RecordBatches(_) => {
-                unreachable!("Output::RecordBatches")
-            }
-            Output::AffectedRows(_) => {
-                unreachable!("Output::AffectedRows")
-            }
-            Output::Stream(s) => {
-                let recordbatches = common_recordbatch::util::collect_batches(s).await.unwrap();
-                let pretty = recordbatches.pretty_print().unwrap();
-                let expected = "\
-+----------------+---------------------+-----+--------+-----------+
-| host           | ts                  | cpu | memory | disk_util |
-+----------------+---------------------+-----+--------+-----------+
-| frontend.host2 | 1970-01-01T00:00:02 |     |        | 9.9       |
-| frontend.host3 | 1970-01-01T00:00:03 | 3.3 | 300    | 9.9       |
-+----------------+---------------------+-----+--------+-----------+\
-                    "
-                .to_string();
-                assert_eq!(pretty, expected);
-            }
-        };
+    fn verify_table_is_dropped(instance: &MockDistributedInstance) {
+        assert!(instance.datanodes.iter().all(|(_, x)| x
+            .catalog_manager()
+            .table("greptime", "public", "demo")
+            .unwrap()
+            .is_none()))
     }
 
     #[tokio::test(flavor = "multi_thread")]

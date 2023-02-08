@@ -180,8 +180,11 @@ impl MetaClient {
     /// a list of `datanode` addresses that are generated based on the partition
     /// information contained in the request and using some intelligent policies,
     /// such as load-based.
-    pub async fn create_route(&self, req: CreateRequest) -> Result<RouteResponse> {
-        self.router_client()?.create(req.into()).await?.try_into()
+    pub async fn create_route(&self, req: CreateRequest<'_>) -> Result<RouteResponse> {
+        self.router_client()?
+            .create(req.try_into()?)
+            .await?
+            .try_into()
     }
 
     /// Fetch routing information for tables. The smallest unit is the complete
@@ -291,12 +294,17 @@ impl MetaClient {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use api::v1::meta::{HeartbeatRequest, Peer};
+    use chrono::DateTime;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, RawSchema};
     use meta_srv::metasrv::Context;
     use meta_srv::selector::{Namespace, Selector};
     use meta_srv::Result as MetaResult;
+    use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 
     use super::*;
     use crate::mocks;
@@ -401,6 +409,39 @@ mod tests {
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
 
+    fn new_table_info() -> RawTableInfo {
+        RawTableInfo {
+            ident: TableIdent {
+                table_id: 0,
+                version: 0,
+            },
+            name: "t".to_string(),
+            desc: None,
+            catalog_name: "c".to_string(),
+            schema_name: "s".to_string(),
+            meta: RawTableMeta {
+                schema: RawSchema {
+                    column_schemas: vec![ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    )],
+                    timestamp_index: Some(0),
+                    version: 0,
+                },
+                primary_key_indices: vec![],
+                value_indices: vec![],
+                engine: "mito".to_string(),
+                next_column_id: 0,
+                region_numbers: vec![],
+                engine_options: HashMap::new(),
+                options: HashMap::new(),
+                created_on: DateTime::default(),
+            },
+            table_type: TableType::Base,
+        }
+    }
+
     #[tokio::test]
     async fn test_not_start_router_client() {
         let urls = &["127.0.0.1:3001", "127.0.0.1:3002"];
@@ -409,7 +450,9 @@ mod tests {
             .enable_store()
             .build();
         meta_client.start(urls).await.unwrap();
-        let req = CreateRequest::new(TableName::new("c", "s", "t"));
+
+        let table_info = new_table_info();
+        let req = CreateRequest::new(TableName::new("c", "s", "t"), &table_info);
         let res = meta_client.create_route(req).await;
         assert!(matches!(res.err(), Some(error::Error::NotStarted { .. })));
     }
@@ -504,7 +547,8 @@ mod tests {
             value_list: vec![b"Max1".to_vec(), b"Max2".to_vec()],
         };
         let table_name = TableName::new("test_catalog", "test_schema", "test_table");
-        let req = CreateRequest::new(table_name.clone())
+        let table_info = new_table_info();
+        let req = CreateRequest::new(table_name.clone(), &table_info)
             .add_partition(p1)
             .add_partition(p2);
 
@@ -513,13 +557,11 @@ mod tests {
 
         let req = RouteRequest::new().add_table_name(table_name.clone());
         let res = client.route(req).await.unwrap();
-        // empty table_routes since no TableGlobalValue is stored by datanode
-        assert!(res.table_routes.is_empty());
+        assert!(!res.table_routes.is_empty());
 
         let req = DeleteRequest::new(table_name.clone());
         let res = client.delete_route(req).await;
-        // empty table_routes since no TableGlobalValue is stored by datanode
-        assert!(res.is_err());
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
