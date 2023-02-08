@@ -68,7 +68,11 @@ impl<R> RateLimiter for MaxInflightTaskLimiter<R> {
         if self.inflight_task.fetch_add(1, Ordering::Relaxed) >= self.max_inflight_task {
             self.inflight_task.fetch_sub(1, Ordering::Relaxed);
             return CompactionRateLimitedSnafu {
-                msg: "Max inflight task num exceeds",
+                msg: format!(
+                    "Max inflight task num exceeds, current: {}, max: {}",
+                    self.inflight_task.load(Ordering::Relaxed),
+                    self.max_inflight_task
+                ),
             }
             .fail();
         }
