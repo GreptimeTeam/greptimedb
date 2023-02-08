@@ -148,7 +148,7 @@ impl ExecutionPlan for SeriesDivideExec {
             .map(|tag| {
                 schema
                     .column_with_name(tag)
-                    .unwrap_or_else(|| panic!("tag column not found {}", tag))
+                    .unwrap_or_else(|| panic!("tag column not found {tag}"))
                     .0
             })
             .collect();
