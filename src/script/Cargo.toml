@@ -58,6 +58,7 @@ rustpython-vm = { git = "https://github.com/discord9/RustPython", optional = tru
     "default",
     "codegen",
 ] }
+pyo3 = "0.18.1"
 session = { path = "../session" }
 snafu = { version = "0.7", features = ["backtraces"] }
 sql = { path = "../sql" }

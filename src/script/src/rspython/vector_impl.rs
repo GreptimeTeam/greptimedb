@@ -1,14 +1,19 @@
 use std::sync::Arc;
 
+use common_time::date::Date;
+use common_time::datetime::DateTime;
+use common_time::timestamp::Timestamp;
 use crossbeam_utils::atomic::AtomicCell;
 use datatypes::arrow::array::{Array, ArrayRef, BooleanArray};
 use datatypes::arrow::compute;
 use datatypes::arrow::compute::kernels::{arithmetic, boolean};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::prelude::Value;
+use datatypes::value::{self, OrderedFloat};
 use datatypes::vectors::Helper;
 use once_cell::sync::Lazy;
-use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyNone, PyStr};
+use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr};
 use rustpython_vm::function::{Either, OptionalArg, PyComparisonValue};
 use rustpython_vm::protocol::{PyMappingMethods, PySequenceMethods};
 use rustpython_vm::types::{AsMapping, AsSequence, Comparable, PyComparisonOp};
@@ -17,8 +22,7 @@ use rustpython_vm::{
 };
 
 use crate::ffi_types::vector::{
-    arrow_rfloordiv, arrow_rsub, arrow_rtruediv, is_pyobj_scalar, pyobj_try_to_typed_val,
-    wrap_result, PyVector,
+    arrow_rfloordiv, arrow_rsub, arrow_rtruediv, is_pyobj_scalar, wrap_result, PyVector,
 };
 use crate::python::utils::{is_instance, PyVectorRef};
 /// PyVectors' rustpython specify methods
@@ -334,4 +338,183 @@ fn get_concrete_type(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<Concret
     } else {
         Err(vm.new_type_error(format!("Unsupported pyobject type: {obj:?}")))
     }
+}
+
+/// convert a `PyObjectRef` into a `datatypes::Value`(is that ok?)
+/// if `obj` can be convert to given ConcreteDataType then return inner `Value` else return None
+/// if dtype is None, return types with highest precision
+/// Not used for now but may be use in future
+pub(crate) fn pyobj_try_to_typed_val(
+    obj: PyObjectRef,
+    vm: &VirtualMachine,
+    dtype: Option<ConcreteDataType>,
+) -> Option<value::Value> {
+    if let Some(dtype) = dtype {
+        match dtype {
+            ConcreteDataType::Null(_) => {
+                if is_instance::<PyNone>(&obj, vm) {
+                    Some(value::Value::Null)
+                } else {
+                    None
+                }
+            }
+            ConcreteDataType::Boolean(_) => {
+                if is_instance::<PyBool>(&obj, vm) || is_instance::<PyInt>(&obj, vm) {
+                    Some(value::Value::Boolean(
+                        obj.try_into_value::<bool>(vm).unwrap_or(false),
+                    ))
+                } else {
+                    None
+                }
+            }
+            ConcreteDataType::Int8(_)
+            | ConcreteDataType::Int16(_)
+            | ConcreteDataType::Int32(_)
+            | ConcreteDataType::Int64(_) => {
+                if is_instance::<PyInt>(&obj, vm) {
+                    match dtype {
+                        ConcreteDataType::Int8(_) => {
+                            obj.try_into_value::<i8>(vm).ok().map(value::Value::Int8)
+                        }
+                        ConcreteDataType::Int16(_) => {
+                            obj.try_into_value::<i16>(vm).ok().map(value::Value::Int16)
+                        }
+                        ConcreteDataType::Int32(_) => {
+                            obj.try_into_value::<i32>(vm).ok().map(value::Value::Int32)
+                        }
+                        ConcreteDataType::Int64(_) => {
+                            obj.try_into_value::<i64>(vm).ok().map(value::Value::Int64)
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    None
+                }
+            }
+            ConcreteDataType::UInt8(_)
+            | ConcreteDataType::UInt16(_)
+            | ConcreteDataType::UInt32(_)
+            | ConcreteDataType::UInt64(_) => {
+                if is_instance::<PyInt>(&obj, vm)
+                    && obj.clone().try_into_value::<i64>(vm).unwrap_or(-1) >= 0
+                {
+                    match dtype {
+                        ConcreteDataType::UInt8(_) => {
+                            obj.try_into_value::<u8>(vm).ok().map(value::Value::UInt8)
+                        }
+                        ConcreteDataType::UInt16(_) => {
+                            obj.try_into_value::<u16>(vm).ok().map(value::Value::UInt16)
+                        }
+                        ConcreteDataType::UInt32(_) => {
+                            obj.try_into_value::<u32>(vm).ok().map(value::Value::UInt32)
+                        }
+                        ConcreteDataType::UInt64(_) => {
+                            obj.try_into_value::<u64>(vm).ok().map(value::Value::UInt64)
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    None
+                }
+            }
+            ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
+                if is_instance::<PyFloat>(&obj, vm) {
+                    match dtype {
+                        ConcreteDataType::Float32(_) => obj
+                            .try_into_value::<f32>(vm)
+                            .ok()
+                            .map(|v| value::Value::Float32(OrderedFloat(v))),
+                        ConcreteDataType::Float64(_) => obj
+                            .try_into_value::<f64>(vm)
+                            .ok()
+                            .map(|v| value::Value::Float64(OrderedFloat(v))),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    None
+                }
+            }
+
+            ConcreteDataType::String(_) => {
+                if is_instance::<PyStr>(&obj, vm) {
+                    obj.try_into_value::<String>(vm)
+                        .ok()
+                        .map(|v| value::Value::String(v.into()))
+                } else {
+                    None
+                }
+            }
+            ConcreteDataType::Binary(_) => {
+                if is_instance::<PyBytes>(&obj, vm) {
+                    obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
+                        String::from_utf8(v)
+                            .ok()
+                            .map(|v| value::Value::String(v.into()))
+                    })
+                } else {
+                    None
+                }
+            }
+            ConcreteDataType::List(_) => unreachable!(),
+            ConcreteDataType::Date(_)
+            | ConcreteDataType::DateTime(_)
+            | ConcreteDataType::Timestamp(_) => {
+                if is_instance::<PyInt>(&obj, vm) {
+                    match dtype {
+                        ConcreteDataType::Date(_) => obj
+                            .try_into_value::<i32>(vm)
+                            .ok()
+                            .map(Date::new)
+                            .map(value::Value::Date),
+                        ConcreteDataType::DateTime(_) => obj
+                            .try_into_value::<i64>(vm)
+                            .ok()
+                            .map(DateTime::new)
+                            .map(value::Value::DateTime),
+                        ConcreteDataType::Timestamp(_) => {
+                            // FIXME(dennis): we always consider the timestamp unit is millis, it's not correct if user define timestamp column with other units.
+                            obj.try_into_value::<i64>(vm)
+                                .ok()
+                                .map(Timestamp::new_millisecond)
+                                .map(value::Value::Timestamp)
+                        }
+                        _ => unreachable!(),
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    } else if is_instance::<PyNone>(&obj, vm) {
+        // if Untyped then by default return types with highest precision
+        Some(value::Value::Null)
+    } else if is_instance::<PyBool>(&obj, vm) {
+        Some(value::Value::Boolean(
+            obj.try_into_value::<bool>(vm).unwrap_or(false),
+        ))
+    } else if is_instance::<PyInt>(&obj, vm) {
+        obj.try_into_value::<i64>(vm).ok().map(value::Value::Int64)
+    } else if is_instance::<PyFloat>(&obj, vm) {
+        obj.try_into_value::<f64>(vm)
+            .ok()
+            .map(|v| value::Value::Float64(OrderedFloat(v)))
+    } else if is_instance::<PyStr>(&obj, vm) {
+        obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
+            String::from_utf8(v)
+                .ok()
+                .map(|v| value::Value::String(v.into()))
+        })
+    } else if is_instance::<PyBytes>(&obj, vm) {
+        obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
+            String::from_utf8(v)
+                .ok()
+                .map(|v| value::Value::String(v.into()))
+        })
+    } else {
+        None
+    }
+}
+
+fn to_type_error(vm: &'_ VirtualMachine) -> impl FnOnce(String) -> PyBaseExceptionRef+ '_ {
+    |msg: String| vm.new_type_error(msg)
 }

@@ -15,9 +15,6 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
-use common_time::date::Date;
-use common_time::datetime::DateTime;
-use common_time::timestamp::Timestamp;
 use datatypes::arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int64Array, UInt64Array,
 };
@@ -25,11 +22,12 @@ use datatypes::arrow::compute;
 use datatypes::arrow::compute::kernels::{arithmetic, comparison};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::arrow::error::Result as ArrowResult;
-use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::data_type::DataType;
 use datatypes::prelude::Value;
 use datatypes::value::{self, OrderedFloat};
 use datatypes::vectors::{Helper, NullVector, VectorRef};
-use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyBytes, PyFloat, PyInt, PyNone, PyStr};
+use pyo3::pyclass as pyo3class;
+use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyNone};
 use rustpython_vm::sliceable::{SaturatedSlice, SequenceIndex, SequenceIndexOp};
 use rustpython_vm::types::PyComparisonOp;
 use rustpython_vm::{
@@ -39,6 +37,7 @@ use rustpython_vm::{
 
 use crate::python::utils::is_instance;
 
+#[pyo3class]
 #[rspyclass(module = false, name = "vector")]
 #[derive(PyPayload, Debug)]
 pub struct PyVector {
@@ -51,12 +50,16 @@ impl From<VectorRef> for PyVector {
     }
 }
 
+fn to_type_error(vm: &'_ VirtualMachine) -> impl FnOnce(String) -> PyBaseExceptionRef + '_ {
+    |msg: String| vm.new_type_error(msg)
+}
+
 fn emit_cast_error(
     vm: &VirtualMachine,
     src_ty: &ArrowDataType,
     dst_ty: &ArrowDataType,
 ) -> PyBaseExceptionRef {
-    vm.new_type_error(format!(
+    to_type_error(vm)(format!(
         "Can't cast source operand of type {src_ty:?} into target type of {dst_ty:?}",
     ))
 }
@@ -65,40 +68,38 @@ fn emit_cast_error(
 pub(crate) fn arrow_rsub(
     arr: &dyn Array,
     val: &dyn Array,
-    vm: &VirtualMachine,
-) -> PyResult<ArrayRef> {
-    arithmetic::subtract_dyn(val, arr).map_err(|e| vm.new_type_error(format!("rsub error: {e}")))
+) -> Result<ArrayRef, String> {
+    arithmetic::subtract_dyn(val, arr)
+        .map_err(|e| format!("rsub error: {e}"))
 }
 
 /// Performs `val / arr`
 pub(crate) fn arrow_rtruediv(
     arr: &dyn Array,
     val: &dyn Array,
-    vm: &VirtualMachine,
-) -> PyResult<ArrayRef> {
-    arithmetic::divide_dyn(val, arr).map_err(|e| vm.new_type_error(format!("rtruediv error: {e}")))
+) -> Result<ArrayRef, String> {
+    arithmetic::divide_dyn(val, arr).map_err(|e| format!("rtruediv error: {e}"))
 }
 
 /// Performs `val / arr`, but cast to i64.
 pub(crate) fn arrow_rfloordiv(
     arr: &dyn Array,
     val: &dyn Array,
-    vm: &VirtualMachine,
-) -> PyResult<ArrayRef> {
+) -> Result<ArrayRef, String> {
     let array = arithmetic::divide_dyn(val, arr)
-        .map_err(|e| vm.new_type_error(format!("rtruediv divide error: {e}")))?;
+        .map_err(|e| format!("rtruediv divide error: {e}"))?;
     compute::cast(&array, &ArrowDataType::Int64)
-        .map_err(|e| vm.new_type_error(format!("rtruediv cast error: {e}")))
+        .map_err(|e| format!("rtruediv cast error: {e}"))
 }
 
 pub(crate) fn wrap_result<F>(
     f: F,
-) -> impl Fn(&dyn Array, &dyn Array, &VirtualMachine) -> PyResult<ArrayRef>
+) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>
 where
     F: Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef>,
 {
-    move |left, right, vm| {
-        f(left, right).map_err(|e| vm.new_type_error(format!("arithmetic error {e}")))
+    move |left, right| {
+        f(left, right).map_err(|e| format!("arithmetic error {e}"))
     }
 }
 
@@ -126,8 +127,8 @@ fn is_unsigned(datatype: &ArrowDataType) -> bool {
     )
 }
 
-fn cast(array: ArrayRef, target_type: &ArrowDataType, vm: &VirtualMachine) -> PyResult<ArrayRef> {
-    compute::cast(&array, target_type).map_err(|e| vm.new_type_error(e.to_string()))
+fn cast(array: ArrayRef, target_type: &ArrowDataType) -> Result<ArrayRef, String> {
+    compute::cast(&array, target_type).map_err(|e| e.to_string())
 }
 
 impl AsRef<PyVector> for PyVector {
@@ -156,7 +157,7 @@ impl PyVector {
         vm: &VirtualMachine,
     ) -> PyResult<PyVector>
     where
-        F: Fn(&dyn Array, &dyn Array, &VirtualMachine) -> PyResult<ArrayRef>,
+        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
     {
         // the right operand only support PyInt or PyFloat,
         let (right, right_type) = {
@@ -193,7 +194,7 @@ impl PyVector {
                 ArrowDataType::Float64
             }
         });
-        let left = cast(left, &target_type, vm)?;
+        let left = cast(left, &target_type).map_err(to_type_error(vm))?;
         let left_len = left.len();
 
         // Convert `right` to an array of `target_type`.
@@ -224,7 +225,7 @@ impl PyVector {
             return Err(emit_cast_error(vm, right_type, &target_type));
         };
 
-        let result = op(left.as_ref(), right.as_ref(), vm)?;
+        let result = op(left.as_ref(), right.as_ref()).map_err(to_type_error(vm))?;
 
         Ok(Helper::try_into_vector(result.clone())
             .map_err(|e| {
@@ -267,8 +268,8 @@ impl PyVector {
             }
         });
 
-        let left = cast(left, &target_type, vm)?;
-        let right = cast(right, &target_type, vm)?;
+        let left = cast(left, &target_type).map_err(to_type_error(vm))?;
+        let right = cast(right, &target_type).map_err(to_type_error(vm))?;
 
         let result = op(left.as_ref(), right.as_ref())
             .map_err(|e| vm.new_type_error(format!("Can't compute op, error: {e}")))?;
@@ -405,7 +406,7 @@ fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> ArrowR
 /// TODO(discord9): impl scalar version function
 fn get_arrow_scalar_op(
     op: PyComparisonOp,
-) -> impl Fn(&dyn Array, &dyn Array, &VirtualMachine) -> PyResult<ArrayRef> {
+) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String> {
     let op_bool_arr = match op {
         PyComparisonOp::Eq => comparison::eq_dyn,
         PyComparisonOp::Ne => comparison::neq_dyn,
@@ -415,9 +416,9 @@ fn get_arrow_scalar_op(
         PyComparisonOp::Le => comparison::lt_eq_dyn,
     };
 
-    move |a: &dyn Array, b: &dyn Array, vm| -> PyResult<ArrayRef> {
+    move |a: &dyn Array, b: &dyn Array| -> Result<ArrayRef, String> {
         let array =
-            op_bool_arr(a, b).map_err(|e| vm.new_type_error(format!("scalar op error: {e}")))?;
+            op_bool_arr(a, b).map_err(|e| format!("scalar op error: {e}"))?;
         Ok(Arc::new(array))
     }
 }
@@ -430,181 +431,6 @@ pub(crate) fn is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
         || is_instance::<PyInt>(obj, vm)
         || is_instance::<PyFloat>(obj, vm)
         || is_instance::<PyBool>(obj, vm)
-}
-
-/// convert a `PyObjectRef` into a `datatypes::Value`(is that ok?)
-/// if `obj` can be convert to given ConcreteDataType then return inner `Value` else return None
-/// if dtype is None, return types with highest precision
-/// Not used for now but may be use in future
-pub(crate) fn pyobj_try_to_typed_val(
-    obj: PyObjectRef,
-    vm: &VirtualMachine,
-    dtype: Option<ConcreteDataType>,
-) -> Option<value::Value> {
-    if let Some(dtype) = dtype {
-        match dtype {
-            ConcreteDataType::Null(_) => {
-                if is_instance::<PyNone>(&obj, vm) {
-                    Some(value::Value::Null)
-                } else {
-                    None
-                }
-            }
-            ConcreteDataType::Boolean(_) => {
-                if is_instance::<PyBool>(&obj, vm) || is_instance::<PyInt>(&obj, vm) {
-                    Some(value::Value::Boolean(
-                        obj.try_into_value::<bool>(vm).unwrap_or(false),
-                    ))
-                } else {
-                    None
-                }
-            }
-            ConcreteDataType::Int8(_)
-            | ConcreteDataType::Int16(_)
-            | ConcreteDataType::Int32(_)
-            | ConcreteDataType::Int64(_) => {
-                if is_instance::<PyInt>(&obj, vm) {
-                    match dtype {
-                        ConcreteDataType::Int8(_) => {
-                            obj.try_into_value::<i8>(vm).ok().map(value::Value::Int8)
-                        }
-                        ConcreteDataType::Int16(_) => {
-                            obj.try_into_value::<i16>(vm).ok().map(value::Value::Int16)
-                        }
-                        ConcreteDataType::Int32(_) => {
-                            obj.try_into_value::<i32>(vm).ok().map(value::Value::Int32)
-                        }
-                        ConcreteDataType::Int64(_) => {
-                            obj.try_into_value::<i64>(vm).ok().map(value::Value::Int64)
-                        }
-                        _ => unreachable!(),
-                    }
-                } else {
-                    None
-                }
-            }
-            ConcreteDataType::UInt8(_)
-            | ConcreteDataType::UInt16(_)
-            | ConcreteDataType::UInt32(_)
-            | ConcreteDataType::UInt64(_) => {
-                if is_instance::<PyInt>(&obj, vm)
-                    && obj.clone().try_into_value::<i64>(vm).unwrap_or(-1) >= 0
-                {
-                    match dtype {
-                        ConcreteDataType::UInt8(_) => {
-                            obj.try_into_value::<u8>(vm).ok().map(value::Value::UInt8)
-                        }
-                        ConcreteDataType::UInt16(_) => {
-                            obj.try_into_value::<u16>(vm).ok().map(value::Value::UInt16)
-                        }
-                        ConcreteDataType::UInt32(_) => {
-                            obj.try_into_value::<u32>(vm).ok().map(value::Value::UInt32)
-                        }
-                        ConcreteDataType::UInt64(_) => {
-                            obj.try_into_value::<u64>(vm).ok().map(value::Value::UInt64)
-                        }
-                        _ => unreachable!(),
-                    }
-                } else {
-                    None
-                }
-            }
-            ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
-                if is_instance::<PyFloat>(&obj, vm) {
-                    match dtype {
-                        ConcreteDataType::Float32(_) => obj
-                            .try_into_value::<f32>(vm)
-                            .ok()
-                            .map(|v| value::Value::Float32(OrderedFloat(v))),
-                        ConcreteDataType::Float64(_) => obj
-                            .try_into_value::<f64>(vm)
-                            .ok()
-                            .map(|v| value::Value::Float64(OrderedFloat(v))),
-                        _ => unreachable!(),
-                    }
-                } else {
-                    None
-                }
-            }
-
-            ConcreteDataType::String(_) => {
-                if is_instance::<PyStr>(&obj, vm) {
-                    obj.try_into_value::<String>(vm)
-                        .ok()
-                        .map(|v| value::Value::String(v.into()))
-                } else {
-                    None
-                }
-            }
-            ConcreteDataType::Binary(_) => {
-                if is_instance::<PyBytes>(&obj, vm) {
-                    obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
-                        String::from_utf8(v)
-                            .ok()
-                            .map(|v| value::Value::String(v.into()))
-                    })
-                } else {
-                    None
-                }
-            }
-            ConcreteDataType::List(_) => unreachable!(),
-            ConcreteDataType::Date(_)
-            | ConcreteDataType::DateTime(_)
-            | ConcreteDataType::Timestamp(_) => {
-                if is_instance::<PyInt>(&obj, vm) {
-                    match dtype {
-                        ConcreteDataType::Date(_) => obj
-                            .try_into_value::<i32>(vm)
-                            .ok()
-                            .map(Date::new)
-                            .map(value::Value::Date),
-                        ConcreteDataType::DateTime(_) => obj
-                            .try_into_value::<i64>(vm)
-                            .ok()
-                            .map(DateTime::new)
-                            .map(value::Value::DateTime),
-                        ConcreteDataType::Timestamp(_) => {
-                            // FIXME(dennis): we always consider the timestamp unit is millis, it's not correct if user define timestamp column with other units.
-                            obj.try_into_value::<i64>(vm)
-                                .ok()
-                                .map(Timestamp::new_millisecond)
-                                .map(value::Value::Timestamp)
-                        }
-                        _ => unreachable!(),
-                    }
-                } else {
-                    None
-                }
-            }
-        }
-    } else if is_instance::<PyNone>(&obj, vm) {
-        // if Untyped then by default return types with highest precision
-        Some(value::Value::Null)
-    } else if is_instance::<PyBool>(&obj, vm) {
-        Some(value::Value::Boolean(
-            obj.try_into_value::<bool>(vm).unwrap_or(false),
-        ))
-    } else if is_instance::<PyInt>(&obj, vm) {
-        obj.try_into_value::<i64>(vm).ok().map(value::Value::Int64)
-    } else if is_instance::<PyFloat>(&obj, vm) {
-        obj.try_into_value::<f64>(vm)
-            .ok()
-            .map(|v| value::Value::Float64(OrderedFloat(v)))
-    } else if is_instance::<PyStr>(&obj, vm) {
-        obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
-            String::from_utf8(v)
-                .ok()
-                .map(|v| value::Value::String(v.into()))
-        })
-    } else if is_instance::<PyBytes>(&obj, vm) {
-        obj.try_into_value::<Vec<u8>>(vm).ok().and_then(|v| {
-            String::from_utf8(v)
-                .ok()
-                .map(|v| value::Value::String(v.into()))
-        })
-    } else {
-        None
-    }
 }
 
 /// convert a DataType `Value` into a `PyObjectRef`
