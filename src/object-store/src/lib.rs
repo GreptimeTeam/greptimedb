@@ -17,5 +17,6 @@ pub use opendal::{
     Operator as ObjectStore, Result,
 };
 pub mod backend;
+pub mod cache_policy;
 pub mod test_util;
 pub mod util;

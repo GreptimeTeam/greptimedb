@@ -28,6 +28,7 @@ pub struct InsertRequest {
     pub schema_name: String,
     pub table_name: String,
     pub columns_values: HashMap<String, VectorRef>,
+    pub region_number: RegionNumber,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +59,6 @@ pub struct OpenTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub table_id: TableId,
-    pub region_numbers: Vec<RegionNumber>,
 }
 
 /// Alter table request

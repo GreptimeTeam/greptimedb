@@ -2440,9 +2440,9 @@ checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
-version = "0.8.31"
+version = "0.8.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9852635589dc9f9ea1b6fe9f05b50ef208c85c834a562f0c6abb1c475736ec2b"
+checksum = "071a31f4ee85403370b58aca746f01041ede6f0da2730960ad001edc2b71b394"
 dependencies = [
  "cfg-if 1.0.0",
 ]
@@ -3687,6 +3687,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e7d46de488603ffdd5f30afbc64fbba2378214a2c3a2fb83abf3d33126df17"
+dependencies = [
+ "hashbrown 0.13.2",
+]
+
+[[package]]
 name = "lz4"
 version = "1.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3835,15 +3844,19 @@ version = "0.1.0"
 dependencies = [
  "api",
  "async-trait",
+ "chrono",
  "common-error",
  "common-grpc",
  "common-telemetry",
+ "datatypes",
  "etcd-client",
  "futures",
  "meta-srv",
  "rand 0.8.5",
  "serde",
+ "serde_json",
  "snafu",
+ "table",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -3879,6 +3892,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "table",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -4090,7 +4104,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "lazy_static",
- "lru",
+ "lru 0.8.1",
  "mio",
  "mysql_common",
  "once_cell",
@@ -4404,8 +4418,10 @@ name = "object-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "common-telemetry",
  "futures",
+ "lru 0.9.0",
  "opendal",
  "tempdir",
  "tokio",
@@ -4724,6 +4740,7 @@ dependencies = [
 name = "partition"
 version = "0.1.0"
 dependencies = [
+ "common-catalog",
  "common-error",
  "common-query",
  "datafusion",
@@ -4822,9 +4839,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.8.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6594056c6fc1c40b203ce6647d55bda25f249bc2b06bffaad3a4032a6d110e88"
+checksum = "e340551bf363d84f7f25be77eedf85d1fd40f7894de252647486049a781f9c4e"
 dependencies = [
  "async-trait",
  "base64 0.21.0",

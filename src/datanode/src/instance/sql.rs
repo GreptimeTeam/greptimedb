@@ -18,6 +18,7 @@ use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
+use datatypes::schema::Schema;
 use query::parser::{QueryLanguageParser, QueryStatement};
 use servers::error as server_error;
 use servers::promql::PromqlHandler;
@@ -237,6 +238,17 @@ impl SqlQueryHandler for Instance {
         let _timer = timer!(metric::METRIC_HANDLE_SQL_ELAPSED);
         self.execute_stmt(QueryStatement::Sql(stmt), query_ctx)
             .await
+    }
+
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+        if let Statement::Query(_) = stmt {
+            self.query_engine
+                .describe(QueryStatement::Sql(stmt), query_ctx)
+                .map(Some)
+                .context(error::DescribeStatementSnafu)
+        } else {
+            Ok(None)
+        }
     }
 
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {

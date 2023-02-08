@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, Peer};
+use chrono::DateTime;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, RawSchema};
 use meta_client::client::MetaClientBuilder;
 use meta_client::rpc::{
     BatchPutRequest, CompareAndPutRequest, CreateRequest, DeleteRangeRequest, Partition,
     PutRequest, RangeRequest, TableName,
 };
+use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
 use tracing::{event, subscriber, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -81,8 +86,8 @@ async fn run() {
     };
 
     let table_name = TableName::new("test_catalog", "test_schema", "test_table");
-
-    let create_req = CreateRequest::new(table_name)
+    let table_info = new_table_info();
+    let create_req = CreateRequest::new(table_name, &table_info)
         .add_partition(p1)
         .add_partition(p2);
 
@@ -140,4 +145,41 @@ async fn run() {
     // get none
     let res = meta_client.range(range).await.unwrap();
     event!(Level::INFO, "get range result: {:#?}", res);
+}
+
+fn new_table_info() -> RawTableInfo {
+    RawTableInfo {
+        ident: TableIdent {
+            table_id: 0,
+            version: 0,
+        },
+        name: "test_table".to_string(),
+        desc: None,
+        catalog_name: "test_catalog".to_string(),
+        schema_name: "test_schema".to_string(),
+        meta: RawTableMeta {
+            schema: RawSchema {
+                column_schemas: vec![
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    ColumnSchema::new("col1", ConcreteDataType::string_datatype(), true),
+                    ColumnSchema::new("col2", ConcreteDataType::string_datatype(), true),
+                ],
+                timestamp_index: Some(0),
+                version: 0,
+            },
+            primary_key_indices: vec![],
+            value_indices: vec![],
+            engine: "mito".to_string(),
+            next_column_id: 0,
+            region_numbers: vec![],
+            engine_options: HashMap::new(),
+            options: HashMap::new(),
+            created_on: DateTime::default(),
+        },
+        table_type: TableType::Base,
+    }
 }

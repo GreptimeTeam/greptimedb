@@ -306,6 +306,7 @@ pub fn to_table_insert_request(
         schema_name: schema_name.to_string(),
         table_name: table_name.to_string(),
         columns_values,
+        region_number: request.region_number,
     })
 }
 
@@ -439,6 +440,7 @@ fn is_null(null_mask: &BitVec, idx: usize) -> Option<bool> {
 mod tests {
     use std::any::Any;
     use std::sync::Arc;
+    use std::{assert_eq, unimplemented, vec};
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::column::{self, SemanticType, Values};

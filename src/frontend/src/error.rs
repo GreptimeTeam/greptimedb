@@ -181,10 +181,10 @@ pub enum Error {
         source: partition::error::Error,
     },
 
-    #[snafu(display("Failed to create AlterExpr from Alter statement, source: {}", source))]
-    AlterExprFromStmt {
+    #[snafu(display("Failed to create table info, source: {}", source))]
+    CreateTableInfo {
         #[snafu(backtrace)]
-        source: sql::error::Error,
+        source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to build CreateExpr on insertion: {}", source))]
@@ -222,17 +222,6 @@ pub enum Error {
 
     #[snafu(display("Failed to find region route for table {}", table_name))]
     FindRegionRoute {
-        table_name: String,
-        backtrace: Backtrace,
-    },
-
-    #[snafu(display(
-        "Failed to find leader peer for region {} in table {}",
-        region,
-        table_name
-    ))]
-    FindLeaderPeer {
-        region: u64,
         table_name: String,
         backtrace: Backtrace,
     },
@@ -344,6 +333,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
+
+    #[snafu(display("Failed to describe schema for given statement, source: {}", source))]
+    DescribeStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -364,13 +359,12 @@ impl ErrorExt for Error {
             Error::SqlExecIntercepted { source, .. } => source.status_code(),
             Error::StartServer { source, .. } => source.status_code(),
 
-            Error::ParseSql { source } | Error::AlterExprFromStmt { source } => {
-                source.status_code()
-            }
+            Error::ParseSql { source } => source.status_code(),
 
             Error::Table { source } => source.status_code(),
 
-            Error::ConvertColumnDefaultConstraint { source, .. } => source.status_code(),
+            Error::ConvertColumnDefaultConstraint { source, .. }
+            | Error::CreateTableInfo { source } => source.status_code(),
 
             Error::RequestDatanode { source } => source.status_code(),
 
@@ -381,7 +375,6 @@ impl ErrorExt for Error {
             Error::FindDatanode { .. }
             | Error::CreateTableRoute { .. }
             | Error::FindRegionRoute { .. }
-            | Error::FindLeaderPeer { .. }
             | Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. } => StatusCode::Internal,
 
@@ -407,7 +400,9 @@ impl ErrorExt for Error {
             | Error::FindNewColumnsOnInsertion { source } => source.status_code(),
 
             Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
-            Error::ExecuteStatement { source, .. } => source.status_code(),
+            Error::ExecuteStatement { source, .. } | Error::DescribeStatement { source } => {
+                source.status_code()
+            }
             Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,

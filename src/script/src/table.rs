@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, SCRIPTS_TABLE_ID};
+use common_catalog::format_full_table_name;
 use common_query::Output;
 use common_recordbatch::util as record_util;
 use common_telemetry::logging;
@@ -60,8 +61,8 @@ impl ScriptsTable {
             desc: Some("Scripts table".to_string()),
             schema,
             region_numbers: vec![0],
-            // name as primary key
-            primary_key_indices: vec![0],
+            //schema and name as primary key
+            primary_key_indices: vec![0, 1],
             create_if_not_exists: true,
             table_options: HashMap::default(),
         };
@@ -77,7 +78,7 @@ impl ScriptsTable {
         Ok(Self {
             catalog_manager,
             query_engine,
-            name: catalog::format_full_table_name(
+            name: format_full_table_name(
                 DEFAULT_CATALOG_NAME,
                 DEFAULT_SCHEMA_NAME,
                 SCRIPTS_TABLE_NAME,
@@ -85,8 +86,12 @@ impl ScriptsTable {
         })
     }
 
-    pub async fn insert(&self, name: &str, script: &str) -> Result<()> {
-        let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(7);
+    pub async fn insert(&self, schema: &str, name: &str, script: &str) -> Result<()> {
+        let mut columns_values: HashMap<String, VectorRef> = HashMap::with_capacity(8);
+        columns_values.insert(
+            "schema".to_string(),
+            Arc::new(StringVector::from(vec![schema])) as _,
+        );
         columns_values.insert(
             "name".to_string(),
             Arc::new(StringVector::from(vec![name])) as _,
@@ -114,7 +119,6 @@ impl ScriptsTable {
             "gmt_modified".to_string(),
             Arc::new(TimestampMillisecondVector::from_slice(&[now])) as _,
         );
-
         let table = self
             .catalog_manager
             .table(
@@ -131,6 +135,7 @@ impl ScriptsTable {
                 schema_name: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name: SCRIPTS_TABLE_NAME.to_string(),
                 columns_values,
+                region_number: 0,
             })
             .await
             .context(InsertScriptSnafu { name })?;
@@ -140,12 +145,18 @@ impl ScriptsTable {
         Ok(())
     }
 
-    pub async fn find_script_by_name(&self, name: &str) -> Result<String> {
+    pub async fn find_script_by_name(&self, schema: &str, name: &str) -> Result<String> {
         // FIXME(dennis): SQL injection
         // TODO(dennis): we use sql to find the script, the better way is use a function
         //               such as `find_record_by_primary_key` in table_engine.
-        let sql = format!("select script from {} where name='{}'", self.name(), name);
+        let sql = format!(
+            "select script from {} where schema='{}' and name='{}'",
+            self.name(),
+            schema,
+            name
+        );
         let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
+
         let plan = self
             .query_engine
             .statement_to_plan(stmt, Arc::new(QueryContext::new()))
@@ -193,6 +204,11 @@ impl ScriptsTable {
 /// Build scripts table
 fn build_scripts_schema() -> Schema {
     let cols = vec![
+        ColumnSchema::new(
+            "schema".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
         ColumnSchema::new(
             "name".to_string(),
             ConcreteDataType::string_datatype(),

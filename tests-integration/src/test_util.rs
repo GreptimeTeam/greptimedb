@@ -102,6 +102,8 @@ fn get_test_store_config(
                 access_key_secret: env::var("GT_OSS_ACCESS_KEY").unwrap(),
                 bucket: env::var("GT_OSS_BUCKET").unwrap(),
                 endpoint: env::var("GT_OSS_ENDPOINT").unwrap(),
+                cache_path: None,
+                cache_capacity: None,
             };
 
             let accessor = oss::Builder::default()
@@ -130,6 +132,8 @@ fn get_test_store_config(
                 bucket: env::var("GT_S3_BUCKET").unwrap(),
                 endpoint: None,
                 region: None,
+                cache_path: None,
+                cache_capacity: None,
             };
 
             let accessor = s3::Builder::default()

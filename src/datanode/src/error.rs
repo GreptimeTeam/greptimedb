@@ -325,6 +325,12 @@ pub enum Error {
         column: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to describe schema for given statement, source: {}", source))]
+    DescribeStatement {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -332,7 +338,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ExecuteSql { source } => source.status_code(),
+            Error::ExecuteSql { source } | Error::DescribeStatement { source } => {
+                source.status_code()
+            }
             Error::DecodeLogicalPlan { source } => source.status_code(),
             Error::NewCatalog { source } => source.status_code(),
             Error::FindTable { source, .. } => source.status_code(),

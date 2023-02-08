@@ -324,7 +324,6 @@ impl RemoteCatalogManager {
             schema_name: schema_name.clone(),
             table_name: table_name.clone(),
             table_id,
-            region_numbers: region_numbers.clone(),
         };
         match self
             .engine
@@ -431,11 +430,18 @@ impl CatalogManager for RemoteCatalogManager {
         Ok(true)
     }
 
-    async fn deregister_table(&self, _request: DeregisterTableRequest) -> Result<bool> {
-        UnimplementedSnafu {
-            operation: "deregister table",
-        }
-        .fail()
+    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<bool> {
+        let catalog_name = &request.catalog;
+        let schema_name = &request.schema;
+        let schema = self
+            .schema(catalog_name, schema_name)?
+            .context(SchemaNotFoundSnafu {
+                catalog: catalog_name,
+                schema: schema_name,
+            })?;
+
+        let result = schema.deregister_table(&request.table_name)?;
+        Ok(result.is_none())
     }
 
     async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {

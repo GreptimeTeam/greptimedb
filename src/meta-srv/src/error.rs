@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_error::prelude::*;
+use tonic::codegen::http;
 use tonic::{Code, Status};
 
 #[derive(Debug, Snafu)]
@@ -160,10 +161,56 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("An error occurred in Meta, source: {}", source))]
-    MetaBoxedError {
+    #[snafu(display("Failed to decode table global value, source: {}", source))]
+    DecodeTableGlobalValue {
+        source: prost::DecodeError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Unexpected, violated: {}", violated))]
+    Unexpected {
+        violated: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid KVs length, expected: {}, actual: {}", expected, actual))]
+    InvalidKvsLength {
+        expected: usize,
+        actual: usize,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to create gRPC channel, source: {}", source))]
+    CreateChannel {
         #[snafu(backtrace)]
-        source: BoxedError,
+        source: common_grpc::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to batch get KVs from leader's in_memory kv store, source: {}",
+        source
+    ))]
+    BatchGet {
+        source: tonic::Status,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Response header not found"))]
+    ResponseHeaderNotFound { backtrace: Backtrace },
+
+    #[snafu(display("The requested meta node is not leader, node addr: {}", node_addr))]
+    IsNotLeader {
+        node_addr: String,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("MetaSrv has no meta peer client"))]
+    NoMetaPeerClient { backtrace: Backtrace },
+
+    #[snafu(display("Invalid http body, source: {}", source))]
+    InvalidHttpBody {
+        source: http::Error,
+        backtrace: Backtrace,
     },
 }
 
@@ -193,7 +240,14 @@ impl ErrorExt for Error {
             | Error::SerializeToJson { .. }
             | Error::DeserializeFromJson { .. }
             | Error::DecodeTableRoute { .. }
+            | Error::DecodeTableGlobalValue { .. }
             | Error::NoLeader { .. }
+            | Error::CreateChannel { .. }
+            | Error::BatchGet { .. }
+            | Error::ResponseHeaderNotFound { .. }
+            | Error::IsNotLeader { .. }
+            | Error::NoMetaPeerClient { .. }
+            | Error::InvalidHttpBody { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }
@@ -210,10 +264,11 @@ impl ErrorExt for Error {
             | Error::TableRouteNotFound { .. }
             | Error::NextSequence { .. }
             | Error::MoveValue { .. }
-            | Error::InvalidTxnResult { .. } => StatusCode::Unexpected,
+            | Error::InvalidKvsLength { .. }
+            | Error::InvalidTxnResult { .. }
+            | Error::Unexpected { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidCatalogValue { source, .. } => source.status_code(),
-            Error::MetaBoxedError { source } => source.status_code(),
         }
     }
 }

@@ -75,7 +75,7 @@ impl Table for DistTable {
     }
 
     async fn insert(&self, request: InsertRequest) -> table::Result<usize> {
-        let split = self
+        let splits = self
             .partition_manager
             .split_insert_request(&self.table_name, request)
             .await
@@ -83,7 +83,7 @@ impl Table for DistTable {
             .context(TableOperationSnafu)?;
 
         let output = self
-            .dist_insert(split)
+            .dist_insert(splits)
             .await
             .map_err(BoxedError::new)
             .context(TableOperationSnafu)?;
@@ -123,7 +123,6 @@ impl Table for DistTable {
             let db = Database::new(&table_name.catalog_name, &table_name.schema_name, client);
             let datanode_instance = DatanodeInstance::new(Arc::new(self.clone()) as _, db);
 
-            // TODO(LFC): Pass in "regions" when Datanode supports multi regions for a table.
             partition_execs.push(Arc::new(PartitionExec {
                 table_name: table_name.clone(),
                 datanode_instance,
@@ -411,7 +410,7 @@ mod test {
     use table::TableRef;
 
     use super::*;
-    use crate::expr_factory::{CreateExprFactory, DefaultCreateExprFactory};
+    use crate::expr_factory;
 
     struct DummyKvBackend;
 
@@ -824,10 +823,7 @@ mod test {
                 _ => unreachable!(),
             };
 
-        let mut expr = DefaultCreateExprFactory
-            .create_expr_by_stmt(&create_table)
-            .await
-            .unwrap();
+        let mut expr = expr_factory::create_to_expr(&create_table, QueryContext::arc()).unwrap();
         let _result = dist_instance
             .create_table(&mut expr, create_table.partitions)
             .await
@@ -852,14 +848,21 @@ mod test {
             (2, (30..35).collect::<Vec<i32>>()),
             (3, (100..105).collect::<Vec<i32>>()),
         ];
-        for (region_id, numbers) in regional_numbers {
-            let datanode_id = *region_to_datanode_mapping.get(&region_id).unwrap();
+        for (region_number, numbers) in regional_numbers {
+            let datanode_id = *region_to_datanode_mapping.get(&region_number).unwrap();
             let instance = datanode_instances.get(&datanode_id).unwrap().clone();
 
             let start_ts = global_start_ts;
             global_start_ts += numbers.len() as i64;
 
-            insert_testing_data(&table_name, instance.clone(), numbers, start_ts).await;
+            insert_testing_data(
+                &table_name,
+                instance.clone(),
+                numbers,
+                start_ts,
+                region_number,
+            )
+            .await;
         }
 
         let meta = TableMetaBuilder::default()
@@ -887,6 +890,7 @@ mod test {
         dn_instance: Arc<Instance>,
         data: Vec<i32>,
         start_ts: i64,
+        region_number: RegionNumber,
     ) {
         let row_count = data.len() as u32;
         let columns = vec![
@@ -923,7 +927,7 @@ mod test {
             table_name: table_name.table_name.clone(),
             columns,
             row_count,
-            region_number: 0,
+            region_number,
         };
         dn_instance
             .handle_insert(request, QueryContext::arc())

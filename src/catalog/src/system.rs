@@ -87,7 +87,6 @@ impl SystemCatalogTable {
             schema_name: INFORMATION_SCHEMA_NAME.to_string(),
             table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
             table_id: SYSTEM_CATALOG_TABLE_ID,
-            region_numbers: vec![0],
         };
         let schema = Arc::new(build_system_catalog_schema());
         let ctx = EngineContext::default();
@@ -274,6 +273,7 @@ pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> 
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
         columns_values,
+        region_number: 0, // system catalog table has only one region
     }
 }
 

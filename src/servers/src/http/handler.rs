@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
-use axum::Extension;
+use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
 use common_telemetry::metric;
 use schemars::JsonSchema;
@@ -36,14 +36,18 @@ pub struct SqlQuery {
 #[axum_macros::debug_handler]
 pub async fn sql(
     State(state): State<ApiState>,
-    Query(params): Query<SqlQuery>,
+    Query(query_params): Query<SqlQuery>,
     // TODO(fys): pass _user_info into query context
     _user_info: Extension<UserInfo>,
+    Form(form_params): Form<SqlQuery>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
     let start = Instant::now();
-    let resp = if let Some(sql) = &params.sql {
-        match super::query_context_from_db(sql_handler.clone(), params.db) {
+    let sql = query_params.sql.or(form_params.sql);
+    let db = query_params.db.or(form_params.db);
+
+    let resp = if let Some(sql) = &sql {
+        match super::query_context_from_db(sql_handler.clone(), db) {
             Ok(query_ctx) => {
                 JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
             }
@@ -59,6 +63,7 @@ pub async fn sql(
     Json(resp.with_execution_time(start.elapsed().as_millis()))
 }
 
+// TODO(ruihang): add db param and form data support
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PromqlQuery {
     pub query: String,

@@ -14,6 +14,7 @@
 
 #![feature(btree_drain_filter)]
 pub mod bootstrap;
+pub mod cluster;
 pub mod election;
 pub mod error;
 pub mod handler;

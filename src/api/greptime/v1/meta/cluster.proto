@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package greptime.v1.meta;
+
+import "greptime/v1/meta/common.proto";
+import "greptime/v1/meta/store.proto";
+
+// Cluster service is used for communication between meta nodes.
+service Cluster {
+  // Batch get kvs by input keys from leader's in_memory kv store. 
+  rpc BatchGet(BatchGetRequest) returns (BatchGetResponse);
+
+  // Range get the kvs from leader's in_memory kv store.
+  rpc Range(RangeRequest) returns (RangeResponse);
+}
+
+message BatchGetRequest {
+  RequestHeader header = 1;
+
+  repeated bytes keys = 2;
+}
+
+message BatchGetResponse {
+  ResponseHeader header = 1;
+
+  repeated KeyValue kvs = 2;
+}

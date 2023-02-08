@@ -72,6 +72,12 @@ pub enum Error {
         err_msg: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to serde json, source: {}", source))]
+    SerdeJson {
+        source: serde_json::error::Error,
+        backtrace: Backtrace,
+    },
 }
 
 #[allow(dead_code)]
@@ -97,7 +103,8 @@ impl ErrorExt for Error {
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
             | Error::CreateChannel { .. }
-            | Error::IllegalServerState { .. } => StatusCode::Internal,
+            | Error::IllegalServerState { .. }
+            | Error::SerdeJson { .. } => StatusCode::Internal,
             Error::RouteInfoCorrupted { .. } => StatusCode::Unexpected,
         }
     }

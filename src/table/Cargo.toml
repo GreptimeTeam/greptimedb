@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 anymap = "1.0.0-beta.2"
 async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
+chrono.workspace = true
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-query = { path = "../common/query" }

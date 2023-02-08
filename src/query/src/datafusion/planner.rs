@@ -24,6 +24,7 @@ use datafusion::sql::planner::{ContextProvider, PlannerContext, SqlToRel};
 use datafusion_common::ScalarValue;
 use datafusion_expr::TableSource;
 use datatypes::arrow::datatypes::DataType;
+use datatypes::prelude::DataType as DataTypeTrait;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::statements::explain::Explain;
@@ -51,9 +52,16 @@ impl<'a, S: ContextProvider + Send + Sync> DfPlanner<'a, S> {
     pub fn query_to_plan(&self, query: Box<Query>) -> Result<LogicalPlan> {
         // todo(hl): original SQL should be provided as an argument
         let sql = query.inner.to_string();
+        let mut context = PlannerContext::new_with_prepare_param_data_types(
+            query
+                .param_types()
+                .iter()
+                .map(|v| v.as_arrow_type())
+                .collect(),
+        );
         let result = self
             .sql_to_rel
-            .query_to_plan(query.inner, &mut PlannerContext::default())
+            .query_to_plan(query.inner, &mut context)
             .context(error::PlanSqlSnafu { sql })
             .map_err(BoxedError::new)
             .context(QueryPlanSnafu)?;

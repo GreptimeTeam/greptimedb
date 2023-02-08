@@ -170,11 +170,15 @@ impl<'a> TableRouteKey<'a> {
 
     #[inline]
     pub fn removed_key(&self) -> String {
-        format!("{}-{}", REMOVED_PREFIX, self.key())
+        to_removed_key(&self.key())
     }
 }
 
-#[derive(Eq, PartialEq, Debug, Hash)]
+pub(crate) fn to_removed_key(key: &str) -> String {
+    format!("{REMOVED_PREFIX}-{key}")
+}
+
+#[derive(Eq, PartialEq, Debug, Clone, Hash)]
 pub struct StatKey {
     pub cluster_id: u64,
     pub node_id: u64,
@@ -246,7 +250,7 @@ impl TryFrom<StatValue> for Vec<u8> {
 
     fn try_from(stats: StatValue) -> Result<Self> {
         Ok(serde_json::to_string(&stats)
-            .context(crate::error::SerializeToJsonSnafu {
+            .context(error::SerializeToJsonSnafu {
                 input: format!("{stats:?}"),
             })?
             .into_bytes())

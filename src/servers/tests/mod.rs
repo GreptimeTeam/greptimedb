@@ -20,7 +20,8 @@ use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaPr
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
-use query::parser::QueryLanguageParser;
+use datatypes::schema::Schema;
+use query::parser::{QueryLanguageParser, QueryStatement};
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
@@ -28,6 +29,7 @@ use servers::error::{Error, Result};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 use table::test_util::MemTable;
 
 mod auth;
@@ -84,6 +86,18 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
+    fn do_describe(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Option<Schema>> {
+        if let Statement::Query(_) = stmt {
+            let schema = self
+                .query_engine
+                .describe(QueryStatement::Sql(stmt), query_ctx)
+                .unwrap();
+            Ok(Some(schema))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
     }
@@ -91,7 +105,7 @@ impl SqlQueryHandler for DummyInstance {
 
 #[async_trait]
 impl ScriptHandler for DummyInstance {
-    async fn insert_script(&self, name: &str, script: &str) -> Result<()> {
+    async fn insert_script(&self, schema: &str, name: &str, script: &str) -> Result<()> {
         let script = self
             .py_engine
             .compile(script, CompileContext::default())
@@ -101,13 +115,15 @@ impl ScriptHandler for DummyInstance {
         self.scripts
             .write()
             .unwrap()
-            .insert(name.to_string(), Arc::new(script));
+            .insert(format!("{schema}_{name}"), Arc::new(script));
 
         Ok(())
     }
 
-    async fn execute_script(&self, name: &str) -> Result<Output> {
-        let py_script = self.scripts.read().unwrap().get(name).unwrap().clone();
+    async fn execute_script(&self, schema: &str, name: &str) -> Result<Output> {
+        let key = format!("{schema}_{name}");
+
+        let py_script = self.scripts.read().unwrap().get(&key).unwrap().clone();
 
         Ok(py_script.execute(EvalContext::default()).await.unwrap())
     }

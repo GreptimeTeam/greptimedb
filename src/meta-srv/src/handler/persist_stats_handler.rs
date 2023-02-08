@@ -51,7 +51,7 @@ impl HeartbeatHandler for PersistStatsHandler {
             ..Default::default()
         };
 
-        ctx.kv_store.put(put).await?;
+        ctx.in_memory.put(put).await?;
 
         Ok(())
     }
@@ -112,7 +112,7 @@ mod tests {
             ..Default::default()
         };
 
-        let res = ctx.kv_store.range(req).await.unwrap();
+        let res = ctx.in_memory.range(req).await.unwrap();
 
         assert_eq!(1, res.kvs.len());
 

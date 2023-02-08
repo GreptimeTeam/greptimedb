@@ -23,6 +23,7 @@ use common_telemetry::debug;
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
 
+#[derive(Debug)]
 pub struct QueryContext {
     current_catalog: ArcSwap<String>,
     current_schema: ArcSwap<String>,

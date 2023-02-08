@@ -344,6 +344,7 @@ pub async fn test_execute_create() {
 
 #[tokio::test]
 async fn test_rename_table() {
+    common_telemetry::init_default_ut_logging();
     let instance = MockInstance::new("test_rename_table_local").await;
 
     let output = execute_sql(&instance, "create database db").await;

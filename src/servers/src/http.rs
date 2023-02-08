@@ -598,6 +598,14 @@ mod test {
             unimplemented!()
         }
 
+        fn do_describe(
+            &self,
+            _stmt: sql::statements::statement::Statement,
+            _query_ctx: QueryContextRef,
+        ) -> Result<Option<Schema>> {
+            unimplemented!()
+        }
+
         fn is_valid_schema(&self, _catalog: &str, _schema: &str) -> Result<bool> {
             Ok(true)
         }
