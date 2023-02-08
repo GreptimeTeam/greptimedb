@@ -14,11 +14,11 @@
 
 pub mod engine;
 pub mod error;
+mod ffi_types;
 #[cfg(feature = "python")]
 pub mod manager;
+mod pyo3;
 #[cfg(feature = "python")]
 pub mod python;
-mod table;
-mod ffi_types;
 mod rspython;
-mod pyo3;
+mod table;
