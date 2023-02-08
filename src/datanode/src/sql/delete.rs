@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
+use datafusion::sql::sqlparser::parser::ParserError;
 use datatypes::prelude::LogicalTypeId::TimestampMillisecond;
 use datatypes::prelude::VectorRef;
 use datatypes::vectors::{BooleanVector, Float64Vector, StringVector, TimestampMillisecondVector};
@@ -15,7 +16,7 @@ use sql::statements::delete::Delete;
 use table::engine::TableReference;
 use table::requests::DeleteRequest;
 
-use crate::error::{DeleteSnafu, Result};
+use crate::error::{self, DeleteSnafu, InvalidSqlSnafu, ParseSqlValueSnafu, Result};
 use crate::sql::{SqlHandler, SqlRequest};
 
 impl SqlHandler {
@@ -40,8 +41,9 @@ impl SqlHandler {
         table_ref: TableReference,
         stmt: Delete,
     ) -> Result<SqlRequest> {
+        let key_column_values = parser_selection(stmt.selection())?;
         Ok(SqlRequest::Delete(DeleteRequest {
-            key_column_values: parser_selection(stmt.selection()),
+            key_column_values,
             catalog_name: table_ref.catalog.to_string(),
             schema_name: table_ref.schema.to_string(),
             table_name: table_ref.table.to_string(),
@@ -49,44 +51,49 @@ impl SqlHandler {
     }
 }
 
-fn parser_selection(selection: &Option<Expr>) -> HashMap<String, VectorRef> {
+fn parser_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRef>> {
     let mut key_column_values = HashMap::new();
     match selection {
         Some(expr) => {
-            parser_expr(&expr, &mut key_column_values);
+            parser_expr(&expr, &mut key_column_values)?;
         }
         _ => {}
     }
-    return key_column_values;
+    return Ok(key_column_values);
 }
 
-fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) {
+fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) -> Result<()> {
     if let Expr::BinaryOp { left, op, right } = expr {
         if let BinaryOperator::And = op {
             if let Expr::BinaryOp { .. } = left.deref() {
                 if let Expr::BinaryOp { .. } = right.deref() {
-                    parser_expr(left.deref(), key_column_values);
-                    parser_expr(right.deref(), key_column_values);
+                    parser_expr(left.deref(), key_column_values)?;
+                    parser_expr(right.deref(), key_column_values)?;
+                    return Ok(());
                 }
             }
-        }
-        if let BinaryOperator::Eq = op {
+        } else if let BinaryOperator::Eq = op {
             if let Expr::Identifier(column_name) = left.deref() {
                 if let Expr::Value(value) = right.deref() {
                     key_column_values.insert(
                         column_name.to_string(),
                         value_to_vector(&column_name.to_string(), &value),
                     );
-                }
-                if let Expr::Identifier(value) = right.deref() {
+                    return Ok(());
+                } else if let Expr::Identifier(value) = right.deref() {
                     key_column_values.insert(
                         column_name.to_string(),
                         Arc::new(StringVector::from(vec![value.to_string()])),
                     );
+                    return Ok(());
                 }
             }
         }
     }
+    return InvalidSqlSnafu {
+        msg: format!("Failed to parse expr:{expr}"),
+    }
+    .fail();
 }
 
 fn value_to_vector(column_name: &String, value: &Value) -> VectorRef {
