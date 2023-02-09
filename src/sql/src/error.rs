@@ -73,7 +73,7 @@ pub enum Error {
     InvalidTimeIndex { msg: String, backtrace: Backtrace },
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
-    InvalidSql { msg: String, backtrace: Backtrace },
+    InvalidSql { msg: String },
 
     #[snafu(display("Invalid column option, column name: {}, error: {}", name, msg))]
     InvalidColumnOption {

@@ -168,7 +168,7 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
-    InvalidSql { msg: String, backtrace: Backtrace },
+    InvalidSql { msg: String },
 
     #[snafu(display("Failed to create schema when creating table, source: {}", source))]
     CreateSchema {
