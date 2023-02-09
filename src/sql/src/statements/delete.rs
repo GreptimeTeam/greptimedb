@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datatypes::arrow::compute::nanosecond;
 use sqlparser::ast::{Expr, ObjectName, Statement, TableFactor};
 use sqlparser::parser::ParserError;
 

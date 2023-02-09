@@ -55,7 +55,7 @@ impl SqlHandler {
         query_ctx: QueryContextRef,
     ) -> Result<SqlRequest> {
         let (catalog_name, schema_name, table_name) =
-            table_idents_to_full_name(stmt.table_name(), query_ctx.clone())?;
+            table_idents_to_full_name(stmt.table_name(), query_ctx)?;
         let key_column_values = parser_selection(stmt.selection())?;
         Ok(SqlRequest::Delete(DeleteRequest {
             key_column_values,
@@ -70,13 +70,10 @@ impl SqlHandler {
 /// (only uses =, and in the where clause and provides all columns needed by the key.)
 fn parser_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRef>> {
     let mut key_column_values = HashMap::new();
-    match selection {
-        Some(expr) => {
-            parser_expr(&expr, &mut key_column_values)?;
-        }
-        _ => {}
+    if let Some(expr) = selection {
+        parser_expr(expr, &mut key_column_values)?;
     }
-    return Ok(key_column_values);
+    Ok(key_column_values)
 }
 
 fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) -> Result<()> {
@@ -98,7 +95,7 @@ fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) 
                 if let Expr::Value(value) = right.deref() {
                     key_column_values.insert(
                         column_name.to_string(),
-                        value_to_vector(&column_name.to_string(), &value)?,
+                        value_to_vector(&column_name.to_string(), value)?,
                     );
                     return Ok(());
                 } else if let Expr::Identifier(value) = right.deref() {
@@ -121,7 +118,7 @@ fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) 
 fn value_to_vector(column_name: &String, value: &Value) -> Result<VectorRef> {
     match value {
         Value::Number(n, _) => {
-            return if column_name == "ts" {
+            if column_name == "ts" {
                 Ok(Arc::new(TimestampMillisecondVector::from_vec(vec![
                     i64::from_str(n).unwrap(),
                 ])))
@@ -129,7 +126,7 @@ fn value_to_vector(column_name: &String, value: &Value) -> Result<VectorRef> {
                 Ok(Arc::new(Float64Vector::from_vec(vec![
                     f64::from_str(n).unwrap()
                 ])))
-            };
+            }
         }
         Value::SingleQuotedString(s) | sql::ast::Value::DoubleQuotedString(s) => {
             Ok(Arc::new(StringVector::from(vec![s.to_string()])))
