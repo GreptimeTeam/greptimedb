@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use datatypes::arrow::compute::nanosecond;
 use sqlparser::ast::{Expr, ObjectName, Statement, TableFactor};
 use sqlparser::parser::ParserError;
 
@@ -24,12 +25,10 @@ pub struct Delete {
 impl Delete {
     pub fn table_name(&self) -> &ObjectName {
         match &self.inner {
-            Statement::Delete { table_name, .. } => {
-                match table_name {
-                    TableFactor::Table { name, .. } => name,
-                    _ => unreachable!(),
-                }
-            },
+            Statement::Delete {
+                table_name: TableFactor::Table { name, .. },
+                ..
+            } => name,
             _ => unreachable!(),
         }
     }
