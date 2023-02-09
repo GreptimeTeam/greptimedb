@@ -558,7 +558,7 @@ pub fn check_permission(
 
         Statement::Insert(insert) => {
             let (catalog, schema, _) = insert.full_table_name().context(ParseSqlSnafu)?;
-            validate_param(Some(&catalog), &schema, query_ctx)?;
+            validate_param(&catalog, &schema, query_ctx)?;
         }
         Statement::CreateTable(stmt) => {
             let tab_ref = obj_name_to_tab_ref(&stmt.name)?;
@@ -570,7 +570,7 @@ pub fn check_permission(
         }
         Statement::ShowTables(stmt) => {
             if let Some(database) = &stmt.database {
-                validate_param(None, database, query_ctx)?;
+                validate_param(&query_ctx.current_catalog(), database, query_ctx)?;
             }
         }
         Statement::DescribeTable(stmt) => {
@@ -609,7 +609,7 @@ fn validate_tab_ref(tab_ref: TableReference, query_ctx: &QueryContextRef) -> Res
         .context(SqlExecInterceptedSnafu)
 }
 
-fn validate_param(catalog: Option<&str>, schema: &str, query_ctx: &QueryContextRef) -> Result<()> {
+fn validate_param(catalog: &str, schema: &str, query_ctx: &QueryContextRef) -> Result<()> {
     query::query_engine::options::validate_catalog_and_schema(catalog, schema, query_ctx)
         .map_err(BoxedError::new)
         .context(SqlExecInterceptedSnafu)
