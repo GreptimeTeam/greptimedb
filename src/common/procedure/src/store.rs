@@ -27,7 +27,7 @@ use crate::{BoxedProcedure, ProcedureId};
 mod state_store;
 
 /// Serialized data of a procedure.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcedureMessage {
     /// Type name of the procedure. The procedure framework also use the type name to
     /// find a loader to load the procedure.
@@ -115,7 +115,7 @@ impl ProcedureStore {
     }
 
     /// Load uncommitted procedures from the storage.
-    async fn load_messages(&self) -> Result<HashMap<ProcedureId, ProcedureMessage>> {
+    pub(crate) async fn load_messages(&self) -> Result<HashMap<ProcedureId, ProcedureMessage>> {
         let mut messages = HashMap::new();
         // Track the key-value pair by procedure id.
         let mut procedure_key_values: HashMap<_, (ParsedKey, Vec<u8>)> = HashMap::new();
