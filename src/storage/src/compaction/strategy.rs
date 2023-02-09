@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
@@ -49,7 +48,7 @@ impl Strategy for SimpleTimeWindowStrategy {
         }
 
         let time_bucket = infer_time_bucket(&files);
-        let buckets = calculate_time_buckets(time_bucket.as_secs(), &files);
+        let buckets = calculate_time_buckets(time_bucket, &files);
         debug!("File buckets: {:?}", buckets);
         buckets
             .into_iter()
@@ -126,8 +125,8 @@ fn file_time_bucket_span(start_sec: i64, end_sec: i64, bucket_sec: i64) -> Vec<i
 
 /// Infers the suitable time bucket duration.
 /// Now it simply find the max and min timestamp across all SSTs in level and fit the time span
-/// into `TimeBucket`.
-fn infer_time_bucket(files: &[FileHandle]) -> TimeBucket {
+/// into time bucket.
+fn infer_time_bucket(files: &[FileHandle]) -> i64 {
     let mut max_ts = &Timestamp::new(i64::MIN, TimeUnit::Second);
     let mut min_ts = &Timestamp::new(i64::MAX, TimeUnit::Second);
 
@@ -136,71 +135,41 @@ fn infer_time_bucket(files: &[FileHandle]) -> TimeBucket {
             min_ts = min_ts.min(start);
             max_ts = max_ts.max(end);
         } else {
-            return TimeBucket::MAX;
+            // we don't expect an SST file without time range,
+            // it's either a bug or data corruption.
+            warn!("Found SST file without time range metadata: {f:?}");
         }
     }
 
     // safety: Convert whatever timestamp into seconds will not cause overflow.
     let min_sec = min_ts.convert_to(TimeUnit::Second).unwrap().value();
     let max_sec = max_ts.convert_to(TimeUnit::Second).unwrap().value();
-    TimeBucket::fit(max_sec - min_sec)
+
+    max_sec
+        .checked_sub(min_sec)
+        .map(fit_time_bucket) // return the max bucket on subtraction overflow.
+        .unwrap_or_else(|| *TIME_BUCKETS.last().unwrap()) // // safety: TIME_BUCKETS cannot be empty.
 }
 
-/// A set of predefined time bucket used to align timestamp.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum TimeBucket {
-    OneHour,
-    TwoHours,
-    TwelveHours,
-    OneDay,
-    OneWeek,
-}
+/// A set of predefined time buckets.
+const TIME_BUCKETS: [i64; 5] = [
+    60 * 60,          // one hour
+    2 * 60 * 60,      // two hours
+    12 * 60 * 60,     // twelve hours
+    24 * 60 * 60,     // one day
+    7 * 24 * 60 * 60, // one week
+];
 
-impl TimeBucket {
-    const ONE_HOUR_SECS: i64 = 60 * 60;
-    const TWO_HOUR_SECS: i64 = 2 * Self::ONE_HOUR_SECS;
-    const TWELVE_HOUR_SECS: i64 = 12 * Self::ONE_HOUR_SECS;
-    const ONE_DAY_SECS: i64 = 24 * Self::ONE_HOUR_SECS;
-    const ONE_WEEK_SECS: i64 = 7 * Self::ONE_DAY_SECS;
-
-    const BUCKETS: [TimeBucket; 5] = [
-        Self::OneHour,
-        Self::TwoHours,
-        Self::TwelveHours,
-        Self::OneDay,
-        Self::OneWeek,
-    ];
-
-    pub const MAX: TimeBucket = Self::OneWeek;
-
-    /// Converts time bucket to seconds.
-    pub fn as_secs(&self) -> i64 {
-        match self {
-            Self::OneHour => Self::ONE_HOUR_SECS,
-            Self::TwoHours => Self::TWO_HOUR_SECS,
-            Self::TwelveHours => Self::TWELVE_HOUR_SECS,
-            Self::OneDay => Self::ONE_DAY_SECS,
-            Self::OneWeek => Self::ONE_WEEK_SECS,
+/// Fits a given time span into time bucket by find the minimum bucket that can cover the span.
+/// Returns the max bucket if no such bucket can be found.
+fn fit_time_bucket(span_sec: i64) -> i64 {
+    assert!(span_sec >= 0);
+    for b in TIME_BUCKETS {
+        if b >= span_sec {
+            return b;
         }
     }
-
-    /// Fits a given time span into time bucket by find the minimum bucket that can cover the span.
-    /// Returns `TimeBucket::MAX` if no such bucket can be found.
-    pub fn fit(span_sec: i64) -> Self {
-        assert!(span_sec >= 0);
-        for b in Self::BUCKETS {
-            if b.as_secs() >= span_sec {
-                return b;
-            }
-        }
-        Self::MAX
-    }
-}
-
-impl PartialOrd for TimeBucket {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.as_secs().cmp(&other.as_secs()))
-    }
+    *TIME_BUCKETS.last().unwrap()
 }
 
 #[cfg(test)]
@@ -245,36 +214,22 @@ mod tests {
 
     #[test]
     fn test_time_bucket() {
-        assert_eq!(
-            TimeBucket::MAX,
-            TimeBucket::BUCKETS.last().copied().unwrap()
-        );
+        assert_eq!(TIME_BUCKETS[0], fit_time_bucket(1));
+        assert_eq!(TIME_BUCKETS[0], fit_time_bucket(60 * 60));
+        assert_eq!(TIME_BUCKETS[1], fit_time_bucket(60 * 60 + 1));
 
-        assert_eq!(TimeBucket::OneHour, TimeBucket::fit(1));
-        assert_eq!(TimeBucket::OneHour, TimeBucket::fit(60 * 60));
-        assert_eq!(TimeBucket::TwoHours, TimeBucket::fit(60 * 60 + 1));
-
-        assert_eq!(
-            TimeBucket::TwelveHours,
-            TimeBucket::fit(TimeBucket::TwelveHours.as_secs() - 1)
-        );
-        assert_eq!(
-            TimeBucket::TwelveHours,
-            TimeBucket::fit(TimeBucket::TwelveHours.as_secs())
-        );
-        assert_eq!(
-            TimeBucket::OneDay,
-            TimeBucket::fit(TimeBucket::OneDay.as_secs() - 1)
-        );
-        assert_eq!(TimeBucket::OneWeek, TimeBucket::fit(i64::MAX));
+        assert_eq!(TIME_BUCKETS[2], fit_time_bucket(TIME_BUCKETS[2] - 1));
+        assert_eq!(TIME_BUCKETS[2], fit_time_bucket(TIME_BUCKETS[2]));
+        assert_eq!(TIME_BUCKETS[3], fit_time_bucket(TIME_BUCKETS[3] - 1));
+        assert_eq!(TIME_BUCKETS[4], fit_time_bucket(i64::MAX));
     }
 
     #[test]
     fn test_infer_time_buckets() {
         assert_eq!(
-            TimeBucket::OneHour,
+            TIME_BUCKETS[0],
             infer_time_bucket(&[
-                new_file_handle("a", 0, TimeBucket::OneHour.as_secs() * 1000 - 1),
+                new_file_handle("a", 0, TIME_BUCKETS[0] * 1000 - 1),
                 new_file_handle("b", 1, 10_000)
             ])
         );
@@ -366,13 +321,13 @@ mod tests {
 
         // file with an large time range
 
-        let expected = (0..(TimeBucket::ONE_WEEK_SECS / TimeBucket::ONE_HOUR_SECS))
+        let expected = (0..(TIME_BUCKETS[4] / TIME_BUCKETS[0]))
             .into_iter()
-            .map(|b| (b * TimeBucket::ONE_HOUR_SECS, &["a"] as _))
+            .map(|b| (b * TIME_BUCKETS[0], &["a"] as _))
             .collect::<Vec<_>>();
         check_bucket_calculation(
-            TimeBucket::OneHour.as_secs(),
-            new_file_handles(&[("a", 0, TimeBucket::ONE_WEEK_SECS * 1000)]),
+            TIME_BUCKETS[0],
+            new_file_handles(&[("a", 0, TIME_BUCKETS[4] * 1000)]),
             &expected,
         );
     }

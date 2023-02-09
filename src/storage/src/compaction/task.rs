@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::compaction::strategy::TimeBucket;
 use crate::error::Result;
 use crate::sst::{FileHandle, Level};
 
@@ -46,9 +45,13 @@ pub(crate) struct CompactionInput {
 #[derive(Debug)]
 #[allow(unused)]
 pub struct CompactionOutput {
+    /// Compaction output file level.
     pub(crate) output_level: Level,
+    /// The left bound of time bucket.
     pub(crate) bucket_bound: i64,
-    pub(crate) bucket: TimeBucket,
+    /// Bucket duration in seconds.
+    pub(crate) bucket: i64,
+    /// Compaction input files.
     pub(crate) inputs: Vec<FileHandle>,
 }
 
