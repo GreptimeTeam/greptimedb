@@ -162,6 +162,14 @@ async fn assert_query_result(instance: &MockInstance, sql: &str, ts: i64, host: 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_execute_insert() {
     let instance = setup_test_instance("test_execute_insert").await;
+
+    // create table
+    execute_sql(
+        &instance,
+        "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+    )
+    .await;
+
     let output = execute_sql(
         &instance,
         r#"insert into demo(host, cpu, memory, ts) values
@@ -452,6 +460,13 @@ async fn test_create_table_after_rename_table() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_alter_table() {
     let instance = setup_test_instance("test_alter_table").await;
+
+    // create table
+    execute_sql(
+        &instance,
+        "create table demo(host string, cpu double, memory double, ts timestamp time index);",
+    )
+    .await;
 
     // make sure table insertion is ok before altering table
     execute_sql(

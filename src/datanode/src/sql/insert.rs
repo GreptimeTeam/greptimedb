@@ -43,7 +43,11 @@ impl SqlHandler {
             table: &req.table_name.to_string(),
         };
 
-        let table = self.get_table(&table_ref)?;
+        let table = self
+            .catalog_manager
+            .table(table_ref.catalog, table_ref.schema, table_ref.table)
+            .unwrap()
+            .unwrap();
 
         let affected_rows = table.insert(req).await.with_context(|_| InsertSnafu {
             table_name: table_ref.to_string(),

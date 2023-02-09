@@ -150,16 +150,7 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
 }
 
 pub(crate) async fn setup_test_instance(test_name: &str) -> MockInstance {
-    let instance = MockInstance::new(test_name).await;
-
-    create_test_table(
-        instance.inner(),
-        ConcreteDataType::timestamp_millisecond_datatype(),
-    )
-    .await
-    .unwrap();
-
-    instance
+    MockInstance::new(test_name).await
 }
 
 pub async fn check_output_stream(output: Output, expected: String) {
@@ -169,5 +160,27 @@ pub async fn check_output_stream(output: Output, expected: String) {
         _ => unreachable!(),
     };
     let pretty_print = recordbatches.pretty_print().unwrap();
+    assert_eq!(pretty_print, expected);
+}
+
+pub async fn check_unordered_output_stream(output: Output, expected: String) {
+    let sort_table = |table: String| -> String {
+        let replaced = table.replace("\\n", "\n");
+        let mut lines = replaced.split("\n").collect::<Vec<_>>();
+        lines.sort();
+        lines
+            .into_iter()
+            .map(|s| s.to_string())
+            .reduce(|acc, e| format!("{acc}\\n{e}"))
+            .unwrap()
+    };
+
+    let recordbatches = match output {
+        Output::Stream(stream) => util::collect_batches(stream).await.unwrap(),
+        Output::RecordBatches(recordbatches) => recordbatches,
+        _ => unreachable!(),
+    };
+    let pretty_print = sort_table(recordbatches.pretty_print().unwrap());
+    let expected = sort_table(expected);
     assert_eq!(pretty_print, expected);
 }

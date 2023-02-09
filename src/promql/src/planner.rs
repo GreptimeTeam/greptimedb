@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -361,7 +361,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     .fields()
                     .iter()
                     .map(|f| f.name())
-                    .collect::<HashSet<_>>();
+                    .collect::<BTreeSet<_>>();
                 // remove "without"-ed fields
                 for label in labels {
                     ensure!(
@@ -388,7 +388,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                 let exprs = all_fields
                     .into_iter()
                     .map(|c| DfExpr::Column(Column::from(c)))
-                    .collect();
+                    .collect::<Vec<_>>();
                 Ok(exprs)
             }
         }
