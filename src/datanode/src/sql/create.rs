@@ -139,15 +139,12 @@ impl SqlHandler {
             .columns
             .iter()
             .filter(|col| {
-                col.options
-                    .iter()
-                    .any(|options| match options.option.clone() {
-                        ColumnOption::Unique { is_primary } => is_primary,
-                        _ => false,
-                    })
+                col.options.iter().any(|options| match options.option {
+                    ColumnOption::Unique { is_primary } => is_primary,
+                    _ => false,
+                })
             })
-            .enumerate()
-            .map(|(_, col)| col.name.value.clone())
+            .map(|col| col.name.value.clone())
             .collect::<Vec<_>>();
 
         ensure!(
@@ -157,11 +154,9 @@ impl SqlHandler {
             }
         );
 
-        if pk_map.first().is_some() {
-            let pk = pk_map.first().unwrap();
-            primary_keys.push(*col_map.get(&pk.clone()).context(KeyColumnNotFoundSnafu {
-                name: pk.to_string(),
-            })?);
+        if let Some(pk) = pk_map.first() {
+            // # Safety: Both pk_map and col_map are collected from stmt.columns
+            primary_keys.push(*col_map.get(pk).unwrap());
         }
 
         for c in stmt.constraints {

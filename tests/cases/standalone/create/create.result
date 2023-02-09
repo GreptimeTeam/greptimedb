@@ -110,6 +110,10 @@ CREATE TABLE test_multiple_pk_definitions (timestamp BIGINT TIME INDEX, host STR
 
 Error: 1004(InvalidArguments), Invalid primary key: Multiple definitions of primary key found
 
+CREATE TABLE test_multiple_pk_definitions (timestamp BIGINT TIME INDEX, host STRING PRIMARY KEY, value DOUBLE, PRIMARY KEY(host), PRIMARY KEY(host));
+
+Error: 1004(InvalidArguments), Invalid primary key: Multiple definitions of primary key found
+
 CREATE TABLE test_multiple_inline_pk_definitions (timestamp BIGINT TIME INDEX, host STRING PRIMARY KEY, value DOUBLE PRIMARY KEY);
 
 Error: 1004(InvalidArguments), Invalid primary key: Multiple definitions of primary key found
