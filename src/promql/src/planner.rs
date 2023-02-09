@@ -797,7 +797,7 @@ mod test {
             .await
             .unwrap();
 
-        let query_engine_state = QueryEngineState::new(catalog_list);
+        let query_engine_state = QueryEngineState::new(catalog_list, Default::default());
         let query_context = QueryContext::new();
         DfContextProviderAdapter::new(query_engine_state, query_context.into())
     }

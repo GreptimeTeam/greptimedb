@@ -1356,6 +1356,7 @@ dependencies = [
  "anymap",
  "build-data",
  "clap 3.2.23",
+ "common-base",
  "common-error",
  "common-telemetry",
  "datanode",
@@ -1396,6 +1397,7 @@ dependencies = [
 name = "common-base"
 version = "0.1.0"
 dependencies = [
+ "anymap",
  "bitvec",
  "bytes",
  "common-error",
@@ -2663,7 +2665,6 @@ dependencies = [
 name = "frontend"
 version = "0.1.0"
 dependencies = [
- "anymap",
  "api",
  "async-stream",
  "async-trait",
@@ -2702,6 +2703,7 @@ dependencies = [
  "snafu",
  "sql",
  "store-api",
+ "strfmt",
  "substrait 0.1.0",
  "table",
  "tempdir",
@@ -5454,6 +5456,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "catalog",
+ "common-base",
  "common-catalog",
  "common-error",
  "common-function",
@@ -7115,6 +7118,12 @@ checksum = "b0d670ce4e348a2081843569e0f79b21c99c91bb9028b3b3ecb0f050306de547"
 dependencies = [
  "num-traits",
 ]
+
+[[package]]
+name = "strfmt"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b73de159e5e71c4c7579ea3041d3e765f46790555790c24489195554210f1fb4"
 
 [[package]]
 name = "string_cache"
