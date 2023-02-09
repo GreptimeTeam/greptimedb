@@ -578,6 +578,10 @@ pub fn check_permission(
             let tab_ref = obj_name_to_tab_ref(stmt.name())?;
             validate_tab_ref(tab_ref, query_ctx)?;
         }
+        Statement::Delete(delete) => {
+            let (catalog, schema, _) = delete.full_table_name().context(ParseSqlSnafu)?;
+            validate_param(&catalog, &schema, query_ctx)?;
+        }
     }
     Ok(())
 }
