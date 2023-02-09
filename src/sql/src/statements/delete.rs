@@ -24,9 +24,11 @@ pub struct Delete {
 impl Delete {
     pub fn table_name(&self) -> &ObjectName {
         match &self.inner {
-            Statement::Delete { table_name, .. } => match table_name {
-                TableFactor::Table { name, .. } => name,
-                _ => unreachable!(),
+            Statement::Delete { table_name, .. } => {
+                match table_name {
+                    TableFactor::Table { name, .. } => name,
+                    _ => unreachable!(),
+                }
             },
             _ => unreachable!(),
         }

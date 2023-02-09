@@ -66,7 +66,7 @@ impl SqlHandler {
     }
 }
 
-/// parser selection, currently supported format is `tagkey1 = 'tagvalue1' and tagkey2 = 'tagvalue2'`.
+/// parse selection, currently supported format is `tagkey1 = 'tagvalue1' and tagkey2 = 'tagvalue2'`.
 /// (only uses =, and in the where clause and provides all columns needed by the key.)
 fn parser_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRef>> {
     let mut key_column_values = HashMap::new();

@@ -54,7 +54,6 @@ mod tests {
     pub fn test_parse_insert() {
         let sql = r"delete from my_table where k1 = xxx and k2 = xxx and timestamp = xxx;";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        println!("result is: {:#?}", result);
         assert_eq!(1, result.len());
         assert_matches!(result[0], Statement::Delete { .. })
     }
