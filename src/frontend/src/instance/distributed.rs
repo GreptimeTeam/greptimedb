@@ -294,7 +294,10 @@ impl DistInstance {
                 explain(Box::new(stmt), self.query_engine.clone(), query_ctx).await
             }
             Statement::Insert(insert) => {
-                let (catalog, schema, table) = insert.full_table_name().context(ParseSqlSnafu)?;
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(insert.table_name(), query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
 
                 let table = self
                     .catalog_manager
