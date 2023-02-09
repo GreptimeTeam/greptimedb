@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
+use common_base::Plugins;
 use common_telemetry::info;
 use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig, WalConfig};
 use datanode::instance::InstanceRef;
@@ -27,7 +28,6 @@ use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
 use frontend::prometheus::PrometheusOptions;
 use frontend::promql::PromqlOptions;
-use frontend::Plugins;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};

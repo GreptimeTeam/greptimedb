@@ -20,11 +20,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogListRef;
+use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::physical_plan::PhysicalPlan;
 use common_query::prelude::ScalarUdf;
-use common_query::{Output, Plugins};
+use common_query::Output;
 use datatypes::schema::Schema;
 use session::context::QueryContextRef;
 

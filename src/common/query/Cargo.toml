@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anymap = "1.0.0-beta.2"
 async-trait.workspace = true
 common-error = { path = "../error" }
 common-recordbatch = { path = "../recordbatch" }

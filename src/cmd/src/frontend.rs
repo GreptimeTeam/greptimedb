@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
+use common_base::Plugins;
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::grpc::GrpcOptions;
 use frontend::influxdb::InfluxdbOptions;
@@ -22,7 +23,6 @@ use frontend::instance::Instance;
 use frontend::mysql::MysqlOptions;
 use frontend::opentsdb::OpentsdbOptions;
 use frontend::postgres::PostgresOptions;
-use frontend::Plugins;
 use meta_client::MetaClientOpts;
 use servers::auth::UserProviderRef;
 use servers::http::HttpOptions;

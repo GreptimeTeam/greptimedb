@@ -26,6 +26,7 @@ use catalog::helper::{SchemaKey, SchemaValue};
 use catalog::{CatalogList, CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use client::Database;
+use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_query::Output;
@@ -61,10 +62,10 @@ use crate::error::{
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
     TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
 };
+use crate::expr_factory;
 use crate::instance::parse_stmt;
 use crate::sql::insert_to_request;
 use crate::table::DistTable;
-use crate::{expr_factory, Plugins};
 
 #[derive(Clone)]
 pub(crate) struct DistInstance {

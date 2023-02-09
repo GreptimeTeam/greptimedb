@@ -14,8 +14,6 @@
 
 #![feature(assert_matches)]
 
-pub type Plugins = common_query::Plugins;
-
 mod catalog;
 mod datanode;
 pub mod error;

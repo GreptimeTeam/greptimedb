@@ -1356,6 +1356,7 @@ dependencies = [
  "anymap",
  "build-data",
  "clap 3.2.23",
+ "common-base",
  "common-error",
  "common-telemetry",
  "datanode",
@@ -1396,6 +1397,7 @@ dependencies = [
 name = "common-base"
 version = "0.1.0"
 dependencies = [
+ "anymap",
  "bitvec",
  "bytes",
  "common-error",
@@ -1533,7 +1535,6 @@ dependencies = [
 name = "common-query"
 version = "0.1.0"
 dependencies = [
- "anymap",
  "async-trait",
  "common-base",
  "common-error",
@@ -5455,6 +5456,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "catalog",
+ "common-base",
  "common-catalog",
  "common-error",
  "common-function",
