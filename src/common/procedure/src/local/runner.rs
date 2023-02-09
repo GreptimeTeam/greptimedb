@@ -567,7 +567,7 @@ mod tests {
                         .iter()
                         .all(|id| ctx_in_future.state(*id) == Some(ProcedureState::Done));
                     if all_child_done {
-                        return Ok(Status::Done);
+                        Ok(Status::Done)
                     } else {
                         // Return suspended to wait for notify.
                         Ok(Status::Suspended {
