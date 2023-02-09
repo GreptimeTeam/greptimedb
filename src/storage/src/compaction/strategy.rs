@@ -34,8 +34,7 @@ pub type StrategyRef = Arc<dyn Strategy + Send + Sync>;
 
 /// SimpleTimeWindowStrategy only handles level 0 to level 1 compaction in a time-window tiered
 /// manner. It picks all SSTs in level 0 and writes rows in these SSTs to a new file partitioned
-/// by a predefined time bucket in level 1.
-/// After compaction, level 1 may contains more than one sorted run within the same time bucket.
+/// by a inferred time bucket in level 1.
 pub struct SimpleTimeWindowStrategy {}
 
 impl Strategy for SimpleTimeWindowStrategy {
@@ -50,7 +49,7 @@ impl Strategy for SimpleTimeWindowStrategy {
         }
 
         let time_bucket = infer_time_bucket(&files);
-        let buckets = calculate_time_buckets(time_bucket.to_secs(), &files);
+        let buckets = calculate_time_buckets(time_bucket.as_secs(), &files);
         debug!("File buckets: {:?}", buckets);
         buckets
             .into_iter()
@@ -76,11 +75,14 @@ fn find_compactable_files(level: &LevelMeta) -> Vec<FileHandle> {
         .collect()
 }
 
+/// Calculates buckets for files. If file does not contain a time range in metadata, it will be
+/// assigned to a special bucket `i64::MAX` (normally no timestamp can be aligned to this bucket)
+/// so that all files without timestamp can be compacted together.
 fn calculate_time_buckets(bucket_sec: i64, files: &[FileHandle]) -> HashMap<i64, Vec<FileHandle>> {
     let mut buckets = HashMap::new();
 
     for file in files {
-        if let Some((start, end)) = file.time_range().clone() {
+        if let Some((start, end)) = file.time_range() {
             let bounds = file_time_bucket_span(
                 start.convert_to(TimeUnit::Second).unwrap().value(),
                 end.convert_to(TimeUnit::Second).unwrap().value(),
@@ -172,7 +174,7 @@ impl TimeBucket {
     pub const MAX: TimeBucket = Self::OneWeek;
 
     /// Converts time bucket to seconds.
-    pub fn to_secs(&self) -> i64 {
+    pub fn as_secs(&self) -> i64 {
         match self {
             Self::OneHour => Self::ONE_HOUR_SECS,
             Self::TwoHours => Self::TWO_HOUR_SECS,
@@ -187,17 +189,17 @@ impl TimeBucket {
     pub fn fit(span_sec: i64) -> Self {
         assert!(span_sec >= 0);
         for b in Self::BUCKETS {
-            if b.to_secs() >= span_sec {
+            if b.as_secs() >= span_sec {
                 return b;
             }
         }
-        return Self::MAX;
+        Self::MAX
     }
 }
 
 impl PartialOrd for TimeBucket {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.to_secs().cmp(&other.to_secs()))
+        Some(self.as_secs().cmp(&other.as_secs()))
     }
 }
 
@@ -254,15 +256,15 @@ mod tests {
 
         assert_eq!(
             TimeBucket::TwelveHours,
-            TimeBucket::fit(TimeBucket::TwelveHours.to_secs() - 1)
+            TimeBucket::fit(TimeBucket::TwelveHours.as_secs() - 1)
         );
         assert_eq!(
             TimeBucket::TwelveHours,
-            TimeBucket::fit(TimeBucket::TwelveHours.to_secs())
+            TimeBucket::fit(TimeBucket::TwelveHours.as_secs())
         );
         assert_eq!(
             TimeBucket::OneDay,
-            TimeBucket::fit(TimeBucket::OneDay.to_secs() - 1)
+            TimeBucket::fit(TimeBucket::OneDay.as_secs() - 1)
         );
         assert_eq!(TimeBucket::OneWeek, TimeBucket::fit(i64::MAX));
     }
@@ -272,7 +274,7 @@ mod tests {
         assert_eq!(
             TimeBucket::OneHour,
             infer_time_bucket(&[
-                new_file_handle("a", 0, TimeBucket::OneHour.to_secs() * 1000 - 1),
+                new_file_handle("a", 0, TimeBucket::OneHour.as_secs() * 1000 - 1),
                 new_file_handle("b", 1, 10_000)
             ])
         );
@@ -369,7 +371,7 @@ mod tests {
             .map(|b| (b * TimeBucket::ONE_HOUR_SECS, &["a"] as _))
             .collect::<Vec<_>>();
         check_bucket_calculation(
-            TimeBucket::OneHour.to_secs(),
+            TimeBucket::OneHour.as_secs(),
             new_file_handles(&[("a", 0, TimeBucket::ONE_WEEK_SECS * 1000)]),
             &expected,
         );

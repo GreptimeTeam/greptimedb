@@ -184,7 +184,7 @@ impl ChunkReaderBuilder {
             return true;
         }
         // end_timestamp of sst file is inclusive.
-        let Some((start, end)) = file.time_range().clone() else { return true; };
+        let Some((start, end)) = *file.time_range() else { return true; };
         let file_ts_range = TimestampRange::new_inclusive(Some(start), Some(end));
         file_ts_range.intersects(&predicate)
     }

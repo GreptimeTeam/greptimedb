@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
-
 use common_telemetry::debug;
 
 use crate::compaction::scheduler::CompactionRequestImpl;
@@ -26,9 +24,7 @@ pub trait Picker<R, T: CompactionTask>: Send + 'static {
     fn pick(&self, ctx: &PickerContext, req: &R) -> crate::error::Result<Option<T>>;
 }
 
-pub struct PickerContext {
-    pub time_bucket_duration: Duration,
-}
+pub struct PickerContext {}
 
 /// L0 -> L1 all-to-all compaction based on time windows.
 pub(crate) struct SimplePicker {
@@ -61,7 +57,6 @@ impl Picker<CompactionRequestImpl, CompactionTaskImpl> for SimplePicker {
 
             debug!("Found SST files to compact {:?}", outputs);
             // TODO(hl): build compaction task
-            return Ok(None);
         }
 
         Ok(None)
