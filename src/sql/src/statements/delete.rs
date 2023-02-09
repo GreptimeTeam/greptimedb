@@ -1,8 +1,6 @@
 use sqlparser::ast::{Expr, ObjectName, Statement, TableFactor};
 use sqlparser::parser::ParserError;
 
-use crate::error::{self, Result};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delete {
     // Can only be sqlparser::ast::Statement::Delete variant
@@ -31,7 +29,7 @@ impl Delete {
 impl TryFrom<Statement> for Delete {
     type Error = ParserError;
 
-    fn try_from(stmt: Statement) -> std::result::Result<Self, Self::Error> {
+    fn try_from(stmt: Statement) -> Result<Self, Self::Error> {
         match stmt {
             Statement::Delete { .. } => Ok(Delete { inner: stmt }),
             unexp => Err(ParserError::ParserError(format!(

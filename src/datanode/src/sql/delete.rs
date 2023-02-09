@@ -3,24 +3,18 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use catalog::CatalogManagerRef;
 use common_query::Output;
 use common_telemetry::warn;
-use datafusion::sql::sqlparser::parser::ParserError;
-use datatypes::prelude::LogicalTypeId::TimestampMillisecond;
 use datatypes::prelude::VectorRef;
-use datatypes::vectors::{
-    BooleanVector, Float64Vector, NullVector, StringVector, TimestampMillisecondVector,
-};
+use datatypes::vectors::{BooleanVector, Float64Vector, StringVector, TimestampMillisecondVector};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use sql::ast::ColumnOption::Default;
 use sql::ast::{BinaryOperator, Expr, Value};
 use sql::statements::delete::Delete;
 use table::engine::TableReference;
 use table::requests::DeleteRequest;
 
-use crate::error::{self, DeleteSnafu, InvalidSqlSnafu, ParseSqlValueSnafu, Result};
+use crate::error::{DeleteSnafu, InvalidSqlSnafu, Result};
 use crate::instance::sql::table_idents_to_full_name;
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -111,23 +105,22 @@ fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) 
 
 /// parse value to vector
 fn value_to_vector(column_name: &String, value: &Value) -> Result<VectorRef> {
-    let mut vector_ref: VectorRef = Arc::new(NullVector::new(1));
     match value {
         Value::Number(n, _) => {
-            if column_name == "ts" {
-                vector_ref = Arc::new(TimestampMillisecondVector::from_vec(vec![
-                    i64::from_str(n).unwrap()
-                ]));
+            return if column_name == "ts" {
+                Ok(Arc::new(TimestampMillisecondVector::from_vec(vec![
+                    i64::from_str(n).unwrap(),
+                ])))
             } else {
-                vector_ref = Arc::new(Float64Vector::from_vec(vec![f64::from_str(n).unwrap()]));
-            }
+                Ok(Arc::new(Float64Vector::from_vec(vec![
+                    f64::from_str(n).unwrap()
+                ])))
+            };
         }
         Value::SingleQuotedString(s) | sql::ast::Value::DoubleQuotedString(s) => {
-            vector_ref = Arc::new(StringVector::from(vec![s.to_string()]));
+            Ok(Arc::new(StringVector::from(vec![s.to_string()])))
         }
-        Value::Boolean(b) => {
-            vector_ref = Arc::new(BooleanVector::from(vec![*b]));
-        }
+        Value::Boolean(b) => Ok(Arc::new(BooleanVector::from(vec![*b]))),
         _ => {
             warn!("Current value type is not supported, value:{value}");
             return InvalidSqlSnafu {
@@ -136,5 +129,4 @@ fn value_to_vector(column_name: &String, value: &Value) -> Result<VectorRef> {
             .fail();
         }
     }
-    return Ok(vector_ref);
 }
