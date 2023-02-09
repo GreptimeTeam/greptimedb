@@ -217,17 +217,17 @@ pub(crate) mod data_frame {
         }
 
         #[pymethod]
-        /// collect `DataFrame` results into List[List[Vector]]
+        /// collect `DataFrame` results into `List[List[Vector]]`
         fn collect(&self, vm: &VirtualMachine) -> PyResult<PyListRef> {
             let inner = self.inner.clone();
             let res = block_on_async(async { inner.collect().await });
             let res = res
                 .map_err(|e| vm.new_runtime_error(format!("{e:?}")))?
                 .map_err(|e| vm.new_runtime_error(e.to_string()))?;
-            let outer_lst: Vec<_> = res
+            let outer_list: Vec<_> = res
                 .iter()
                 .map(|elem| -> PyResult<_> {
-                    let inner_lst: Vec<_> = elem
+                    let inner_list: Vec<_> = elem
                         .columns()
                         .iter()
                         .map(|arr| -> PyResult<_> {
@@ -237,11 +237,11 @@ pub(crate) mod data_frame {
                                 .map_err(|e| vm.new_runtime_error(e.to_string()))
                         })
                         .collect::<Result<_, _>>()?;
-                    let inner_lst = PyList::new_ref(inner_lst, vm.as_ref());
-                    Ok(inner_lst.into())
+                    let inner_list = PyList::new_ref(inner_list, vm.as_ref());
+                    Ok(inner_list.into())
                 })
                 .collect::<Result<_, _>>()?;
-            Ok(PyList::new_ref(outer_lst, vm.as_ref()))
+            Ok(PyList::new_ref(outer_list, vm.as_ref()))
         }
     }
 
