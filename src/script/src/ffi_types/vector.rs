@@ -40,7 +40,7 @@ use crate::python::utils::is_instance;
 /// The Main FFI type `PyVector` that is used both in RustPython and PyO3
 #[pyo3class(name = "vector")]
 #[rspyclass(module = false, name = "vector")]
-#[derive(PyPayload, Debug)]
+#[derive(PyPayload, Debug, Clone)]
 pub struct PyVector {
     pub(crate) vector: VectorRef,
 }
@@ -124,6 +124,49 @@ impl AsRef<PyVector> for PyVector {
 }
 
 impl PyVector {
+    pub(crate) fn vector_and(left: &Self, right: &Self) -> Result<Self, String> {
+        let left = left.to_arrow_array();
+        let right = right.to_arrow_array();
+        let left = left
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| format!("Can't cast {left:#?} as a Boolean Array"))?;
+        let right = right
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| format!("Can't cast {left:#?} as a Boolean Array"))?;
+        let res = compute::kernels::boolean::and(left, right).map_err(|err| err.to_string())?;
+        let res = Arc::new(res) as ArrayRef;
+        let ret = Helper::try_into_vector(res.clone()).map_err(|err| err.to_string())?;
+        Ok(ret.into())
+    }
+    pub(crate) fn vector_or(left: &Self, right: &Self) -> Result<Self, String> {
+        let left = left.to_arrow_array();
+        let right = right.to_arrow_array();
+        let left = left
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| format!("Can't cast {left:#?} as a Boolean Array"))?;
+        let right = right
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| format!("Can't cast {left:#?} as a Boolean Array"))?;
+        let res = compute::kernels::boolean::or(left, right).map_err(|err| err.to_string())?;
+        let res = Arc::new(res) as ArrayRef;
+        let ret = Helper::try_into_vector(res.clone()).map_err(|err| err.to_string())?;
+        Ok(ret.into())
+    }
+    pub(crate) fn vector_invert(left: &Self) -> Result<Self, String> {
+        let zelf = left.to_arrow_array();
+        let zelf = zelf
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| format!("Can't cast {left:#?} as a Boolean Array"))?;
+        let res = compute::kernels::boolean::not(zelf).map_err(|err| err.to_string())?;
+        let res = Arc::new(res) as ArrayRef;
+        let ret = Helper::try_into_vector(res.clone()).map_err(|err| err.to_string())?;
+        Ok(ret.into())
+    }
     /// create a ref to inner vector
     #[inline]
     pub fn as_vector_ref(&self) -> VectorRef {
@@ -354,7 +397,7 @@ impl PyVector {
         op: PyComparisonOp,
         vm: &VirtualMachine,
     ) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
+        if rspy_is_pyobj_scalar(&other, vm) {
             let scalar_op = get_arrow_scalar_op(op);
             self.scalar_arith_op(other, None, scalar_op, vm)
         } else {
@@ -410,8 +453,7 @@ fn get_arrow_scalar_op(
 
 /// if this pyobj can be cast to a scalar value(i.e Null/Int/Float/Bool)
 #[inline]
-pub(crate) fn is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
-    //let is_instance = |ty: &PyObject| obj.is_instance(ty, vm).unwrap_or(false);
+pub(crate) fn rspy_is_pyobj_scalar(obj: &PyObjectRef, vm: &VirtualMachine) -> bool {
     is_instance::<PyNone>(obj, vm)
         || is_instance::<PyInt>(obj, vm)
         || is_instance::<PyFloat>(obj, vm)

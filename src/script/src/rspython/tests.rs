@@ -9,7 +9,7 @@ use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::protocol::PySequence;
 use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
 
-use crate::ffi_types::vector::{is_pyobj_scalar, val_to_pyobj, PyVector};
+use crate::ffi_types::vector::{rspy_is_pyobj_scalar, val_to_pyobj, PyVector};
 use crate::rspython::vector_impl::pyobj_try_to_typed_val;
 type PredicateFn = Option<fn(PyResult<PyObjectRef>, &VirtualMachine) -> bool>;
 /// test the paired `val_to_obj` and `pyobj_to_val` func
@@ -20,7 +20,7 @@ fn test_val2pyobj2val() {
         let j = value::Value::Int32(1);
         let dtype = i.data_type();
         let obj = val_to_pyobj(i, vm);
-        assert!(is_pyobj_scalar(&obj, vm));
+        assert!(rspy_is_pyobj_scalar(&obj, vm));
         let obj_1 = obj.clone();
         let obj_2 = obj.clone();
         let ri = pyobj_try_to_typed_val(obj, vm, Some(dtype));

@@ -17,15 +17,21 @@ use rustpython_vm::function::{Either, OptionalArg, PyComparisonValue};
 use rustpython_vm::protocol::{PyMappingMethods, PySequenceMethods};
 use rustpython_vm::types::{AsMapping, AsSequence, Comparable, PyComparisonOp};
 use rustpython_vm::{
-    atomic_func, pyclass as rspyclass, PyObject, PyObjectRef, PyPayload, PyResult, VirtualMachine,
+    atomic_func, pyclass as rspyclass, PyObject, PyObjectRef, PyPayload, PyRef, PyResult,
+    VirtualMachine,
 };
 
 use crate::ffi_types::vector::{
-    arrow_rfloordiv, arrow_rsub, arrow_rtruediv, is_pyobj_scalar, wrap_result, PyVector,
+    arrow_rfloordiv, arrow_rsub, arrow_rtruediv, rspy_is_pyobj_scalar, wrap_result, PyVector,
 };
-use crate::python::utils::{is_instance, PyVectorRef};
+use crate::python::utils::is_instance;
 /// PyVectors' rustpython specify methods
 
+fn to_type_error(vm: &'_ VirtualMachine) -> impl FnOnce(String) -> PyBaseExceptionRef + '_ {
+    |msg: String| vm.new_type_error(msg)
+}
+
+pub(crate) type PyVectorRef = PyRef<PyVector>;
 /// PyVector type wraps a greptime vector, impl multiply/div/add/sub opeerators etc.
 #[rspyclass(with(AsMapping, AsSequence, Comparable))]
 impl PyVector {
@@ -69,7 +75,7 @@ impl PyVector {
     #[pymethod(name = "__radd__")]
     #[pymethod(magic)]
     fn add(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
+        if rspy_is_pyobj_scalar(&other, vm) {
             self.scalar_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
         } else {
             self.arith_op(other, None, arithmetic::add_dyn, vm)
@@ -78,7 +84,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn sub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
+        if rspy_is_pyobj_scalar(&other, vm) {
             self.scalar_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
         } else {
             self.arith_op(other, None, arithmetic::subtract_dyn, vm)
@@ -87,7 +93,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn rsub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
+        if rspy_is_pyobj_scalar(&other, vm) {
             self.scalar_arith_op(other, None, arrow_rsub, vm)
         } else {
             self.arith_op(other, None, |a, b| arithmetic::subtract_dyn(b, a), vm)
@@ -97,7 +103,7 @@ impl PyVector {
     #[pymethod(name = "__rmul__")]
     #[pymethod(magic)]
     fn mul(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
+        if rspy_is_pyobj_scalar(&other, vm) {
             self.scalar_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
         } else {
             self.arith_op(other, None, arithmetic::multiply_dyn, vm)
@@ -106,7 +112,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn truediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
+        if rspy_is_pyobj_scalar(&other, vm) {
             self.scalar_arith_op(
                 other,
                 Some(ArrowDataType::Float64),
@@ -125,7 +131,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn rtruediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
+        if rspy_is_pyobj_scalar(&other, vm) {
             self.scalar_arith_op(other, Some(ArrowDataType::Float64), arrow_rtruediv, vm)
         } else {
             self.arith_op(
@@ -139,7 +145,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn floordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
+        if rspy_is_pyobj_scalar(&other, vm) {
             self.scalar_arith_op(
                 other,
                 Some(ArrowDataType::Int64),
@@ -158,7 +164,7 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn rfloordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        if is_pyobj_scalar(&other, vm) {
+        if rspy_is_pyobj_scalar(&other, vm) {
             // FIXME: DataType convert problem, target_type should be inferred?
             self.scalar_arith_op(other, Some(ArrowDataType::Int64), arrow_rfloordiv, vm)
         } else {
@@ -173,52 +179,17 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn and(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let left = self.to_arrow_array();
-        let left = left
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
-        let right = other.to_arrow_array();
-        let right = right
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
-        let res = boolean::and(left, right).map_err(|err| from_debug_error(err, vm))?;
-        let res = Arc::new(res) as ArrayRef;
-        let ret = Helper::try_into_vector(res.clone()).map_err(|err| from_debug_error(err, vm))?;
-        Ok(ret.into())
+        Self::vector_and(self, &other).map_err(to_type_error(vm))
     }
 
     #[pymethod(magic)]
     fn or(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        let left = self.to_arrow_array();
-        let left = left
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
-        let right = other.to_arrow_array();
-        let right = right
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
-        let res = boolean::or(left, right).map_err(|err| from_debug_error(err, vm))?;
-        let res = Arc::new(res) as ArrayRef;
-        let ret = Helper::try_into_vector(res.clone()).map_err(|err| from_debug_error(err, vm))?;
-        Ok(ret.into())
+        Self::vector_or(self, &other).map_err(to_type_error(vm))
     }
 
     #[pymethod(magic)]
     fn invert(&self, vm: &VirtualMachine) -> PyResult<PyVector> {
-        dbg!();
-        let left = self.to_arrow_array();
-        let left = left
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .ok_or_else(|| vm.new_type_error(format!("Can't cast {left:#?} as a Boolean Array")))?;
-        let res = boolean::not(left).map_err(|err| from_debug_error(err, vm))?;
-        let res = Arc::new(res) as ArrayRef;
-        let ret = Helper::try_into_vector(res.clone()).map_err(|err| from_debug_error(err, vm))?;
-        Ok(ret.into())
+        Self::vector_invert(self).map_err(to_type_error(vm))
     }
 
     #[pymethod(name = "__len__")]
