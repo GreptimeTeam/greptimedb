@@ -201,25 +201,12 @@ impl Runner {
             return;
         }
 
-        // Inherit locks from the parent procedure. This procedure can submit a subprocedure,
-        // which indicates the procedure already owns the locks and is executing now.
-        let parent_locks = self.meta.locks_needed();
-        let mut child_lock = procedure.lock_key();
-        if let Some(lock) = &child_lock {
-            if parent_locks.contains(lock) {
-                // If the parent procedure already holds this lock, we set this lock to None
-                // so the subprocedure don't need to acquire lock again.
-                child_lock = None;
-            }
-        }
-
         let meta = Arc::new(ProcedureMeta {
             id: procedure_id,
             lock_notify: Notify::new(),
             parent_id: Some(self.meta.id),
             child_notify: Notify::new(),
-            parent_locks,
-            lock_key: child_lock,
+            lock_key: procedure.lock_key(),
             exec_meta: Mutex::new(ExecMeta::default()),
         });
         let runner = Runner {
@@ -552,7 +539,10 @@ mod tests {
     async fn test_on_suspend_by_subprocedures() {
         let mut times = 0;
         let children_ids = [ProcedureId::random(), ProcedureId::random()];
-        let keys = ["catalog.schema.table", "catalog.schema.table.region-0"];
+        let keys = [
+            "catalog.schema.table.region-0",
+            "catalog.schema.table.region-1",
+        ];
         let manager_ctx = Arc::new(ManagerContext::new());
 
         let ctx_in_fn = manager_ctx.clone();

@@ -69,30 +69,13 @@ pub(crate) struct ProcedureMeta {
     parent_id: Option<ProcedureId>,
     /// Notify to wait for subprocedures.
     child_notify: Notify,
-    /// Locks inherted from the parent procedure.
-    parent_locks: Vec<LockKey>,
-    /// Lock not in `parent_locks` but required by this procedure.
-    ///
-    /// If the parent procedure already owns the lock that this procedure
-    /// needs, we set this field to `None`.
+    /// Lock required by this procedure.
     lock_key: Option<LockKey>,
     /// Mutable status during execution.
     exec_meta: Mutex<ExecMeta>,
 }
 
 impl ProcedureMeta {
-    /// Return all locks the procedure needs.
-    fn locks_needed(&self) -> Vec<LockKey> {
-        let num_locks = self.parent_locks.len() + if self.lock_key.is_some() { 1 } else { 0 };
-        let mut locks = Vec::with_capacity(num_locks);
-        locks.extend_from_slice(&self.parent_locks);
-        if let Some(key) = &self.lock_key {
-            locks.push(key.clone());
-        }
-
-        locks
-    }
-
     /// Returns current [ProcedureState].
     fn state(&self) -> ProcedureState {
         let meta = self.exec_meta.lock().unwrap();
@@ -297,7 +280,6 @@ impl LocalManager {
             lock_notify: Notify::new(),
             parent_id: None,
             child_notify: Notify::new(),
-            parent_locks: Vec::new(),
             lock_key: procedure.lock_key(),
             exec_meta: Mutex::new(ExecMeta::default()),
         });
@@ -364,7 +346,6 @@ mod test_util {
             lock_notify: Notify::new(),
             parent_id: None,
             child_notify: Notify::new(),
-            parent_locks: Vec::new(),
             lock_key: None,
             exec_meta: Mutex::new(ExecMeta::default()),
         }
@@ -385,25 +366,6 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::{Context, Procedure, Status};
-
-    #[test]
-    fn test_locks_needed() {
-        let mut meta = test_util::procedure_meta_for_test();
-        let locks = meta.locks_needed();
-        assert!(locks.is_empty());
-
-        let parent_locks = vec![LockKey::new("a"), LockKey::new("b")];
-        meta.parent_locks = parent_locks.clone();
-        let locks = meta.locks_needed();
-        assert_eq!(parent_locks, locks);
-
-        meta.lock_key = Some(LockKey::new("c"));
-        let locks = meta.locks_needed();
-        assert_eq!(
-            vec![LockKey::new("a"), LockKey::new("b"), LockKey::new("c")],
-            locks
-        );
-    }
 
     #[test]
     fn test_manager_context() {
