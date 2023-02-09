@@ -6,19 +6,19 @@ insert into monitor(host, cpu, memory, ts) values ('host1', 66.6, 1024, 16552765
 
 Affected Rows: 3
 
-delete from test_table where cpu = 66.6 and ts = 1655276557000;
+delete from monitor where cpu = 66.6 and ts = 1655276557000;
 
 Error: 1004(InvalidArguments), Missing column host in write batch
 
-delete from test_table where host = 'host1' or ts = 1655276557000;
+delete from monitor where host = 'host1' or ts = 1655276557000;
 
 Error: 1004(InvalidArguments), Invalid SQL, error: Failed to parse expr:host = 'host1' OR ts = 1655276557000
 
-delete from test_table where host = 'host1' or ts != 1655276557000;
+delete from monitor where host = 'host1' or ts != 1655276557000;
 
 Error: 1004(InvalidArguments), Invalid SQL, error: Failed to parse expr:host = 'host1' OR ts <> 1655276557000
 
-delete from test_table where  ts != 1655276557000;
+delete from monitor where  ts != 1655276557000;
 
 Error: 1004(InvalidArguments), Invalid SQL, error: Failed to parse expr:ts <> 1655276557000
 
