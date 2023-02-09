@@ -79,33 +79,29 @@ fn parser_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRe
 fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) -> Result<()> {
     // match BinaryOp
     if let Expr::BinaryOp { left, op, right } = expr {
-        // match And operator
-        if let BinaryOperator::And = op {
-            if let Expr::BinaryOp { .. } = left.deref() {
-                if let Expr::BinaryOp { .. } = right.deref() {
-                    parser_expr(left.deref(), key_column_values)?;
-                    parser_expr(right.deref(), key_column_values)?;
-                    return Ok(());
-                }
+        match (left.deref(), op, right.deref()) {
+            // match And operator
+            (Expr::BinaryOp { .. }, BinaryOperator::And, Expr::BinaryOp { .. }) => {
+                parser_expr(left.deref(), key_column_values)?;
+                parser_expr(right.deref(), key_column_values)?;
+                return Ok(());
             }
-        }
-        // match eq operator
-        else if let BinaryOperator::Eq = op {
-            if let Expr::Identifier(column_name) = left.deref() {
-                if let Expr::Value(value) = right.deref() {
-                    key_column_values.insert(
-                        column_name.to_string(),
-                        value_to_vector(&column_name.to_string(), value)?,
-                    );
-                    return Ok(());
-                } else if let Expr::Identifier(value) = right.deref() {
-                    key_column_values.insert(
-                        column_name.to_string(),
-                        Arc::new(StringVector::from(vec![value.to_string()])),
-                    );
-                    return Ok(());
-                }
+            // match Eq operator
+            (Expr::Identifier(column_name), BinaryOperator::Eq, Expr::Value(value)) => {
+                key_column_values.insert(
+                    column_name.to_string(),
+                    value_to_vector(&column_name.to_string(), value)?,
+                );
+                return Ok(());
             }
+            (Expr::Identifier(column_name), BinaryOperator::Eq, Expr::Identifier(value)) => {
+                key_column_values.insert(
+                    column_name.to_string(),
+                    Arc::new(StringVector::from(vec![value.to_string()])),
+                );
+                return Ok(());
+            }
+            _ => {}
         }
     }
     return InvalidSqlSnafu {
