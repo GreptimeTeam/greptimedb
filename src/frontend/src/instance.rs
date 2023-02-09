@@ -383,8 +383,7 @@ fn parse_stmt(sql: &str) -> Result<Vec<Statement>> {
 impl Instance {
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
-
-        match stmt.clone() {
+        match stmt {
             Statement::CreateDatabase(_)
             | Statement::ShowDatabases(_)
             | Statement::CreateTable(_)
