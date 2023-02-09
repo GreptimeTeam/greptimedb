@@ -51,6 +51,6 @@ tonic.workspace = true
 datanode = { path = "../datanode" }
 futures = "0.3"
 meta-srv = { path = "../meta-srv", features = ["mock"] }
-strfmt = "0.2.3"
+strfmt = "0.2"
 tempdir = "0.3"
 tower = "0.4"
