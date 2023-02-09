@@ -47,3 +47,4 @@ CREATE TABLE test_multiple_pk_definitions (timestamp BIGINT TIME INDEX, host STR
 CREATE TABLE test_multiple_pk_definitions (timestamp BIGINT TIME INDEX, host STRING PRIMARY KEY, value DOUBLE, PRIMARY KEY(host), PRIMARY KEY(host));
 
 CREATE TABLE test_multiple_inline_pk_definitions (timestamp BIGINT TIME INDEX, host STRING PRIMARY KEY, value DOUBLE PRIMARY KEY);
+
