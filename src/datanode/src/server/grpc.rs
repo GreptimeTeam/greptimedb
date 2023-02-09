@@ -88,7 +88,7 @@ impl Instance {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::{ColumnDataType, ColumnDef, TableId};
+    use api::v1::{column_def, ColumnDataType, ColumnDef, TableId};
     use common_catalog::consts::MIN_USER_TABLE_ID;
     use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
@@ -146,7 +146,7 @@ mod tests {
             is_nullable: true,
             default_constraint: vec![],
         };
-        let result = column_def.try_as_column_schema();
+        let result = column_def::try_as_column_schema(&column_def);
         assert!(matches!(
             result.unwrap_err(),
             api::error::Error::UnknownColumnDataType { .. }
@@ -158,7 +158,7 @@ mod tests {
             is_nullable: true,
             default_constraint: vec![],
         };
-        let column_schema = column_def.try_as_column_schema().unwrap();
+        let column_schema = column_def::try_as_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
         assert!(column_schema.is_nullable());
@@ -170,7 +170,7 @@ mod tests {
             is_nullable: true,
             default_constraint: default_constraint.clone().try_into().unwrap(),
         };
-        let column_schema = column_def.try_as_column_schema().unwrap();
+        let column_schema = column_def::try_as_column_schema(&column_def).unwrap();
         assert_eq!(column_schema.name, "a");
         assert_eq!(column_schema.data_type, ConcreteDataType::string_datatype());
         assert!(column_schema.is_nullable());

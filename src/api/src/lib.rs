@@ -14,8 +14,13 @@
 
 pub mod error;
 pub mod helper;
-pub mod prometheus;
-pub mod serde;
+
+pub mod prometheus {
+    pub mod remote {
+        pub use greptime_proto::prometheus::remote::*;
+    }
+}
+
 pub mod v1;
 
 pub use prost::DecodeError;
