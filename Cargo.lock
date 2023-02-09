@@ -7075,6 +7075,7 @@ dependencies = [
  "table",
  "tempdir",
  "tokio",
+ "tokio-util",
  "tonic",
  "tonic-build",
  "uuid",

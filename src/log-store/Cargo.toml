@@ -30,7 +30,7 @@ snafu = { version = "0.7", features = ["backtraces"] }
 store-api = { path = "../store-api" }
 tempdir = "0.3"
 tokio.workspace = true
-tokio-util = "0.7"
+tokio-util.workspace = true
 
 [dev-dependencies]
 rand = "0.8"
