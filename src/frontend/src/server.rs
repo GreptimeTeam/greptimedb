@@ -15,6 +15,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
 use servers::auth::UserProviderRef;
@@ -37,7 +38,6 @@ use crate::frontend::FrontendOptions;
 use crate::influxdb::InfluxdbOptions;
 use crate::instance::FrontendInstance;
 use crate::prometheus::PrometheusOptions;
-use crate::Plugins;
 
 pub(crate) struct Services;
 

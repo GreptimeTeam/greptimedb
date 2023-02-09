@@ -19,3 +19,5 @@ pub mod bytes;
 pub mod readable_size;
 
 pub use bit_vec::BitVec;
+
+pub type Plugins = anymap::Map<dyn core::any::Any + Send + Sync>;

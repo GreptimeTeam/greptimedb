@@ -26,6 +26,7 @@ use catalog::helper::{SchemaKey, SchemaValue};
 use catalog::{CatalogList, CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use client::Database;
+use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_query::Output;
@@ -79,8 +80,11 @@ impl DistInstance {
         meta_client: Arc<MetaClient>,
         catalog_manager: Arc<FrontendCatalogManager>,
         datanode_clients: Arc<DatanodeClients>,
+        plugins: Arc<Plugins>,
     ) -> Self {
-        let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
+        let query_engine =
+            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins.clone())
+                .query_engine();
         Self {
             meta_client,
             catalog_manager,
@@ -422,7 +426,7 @@ impl DistInstance {
         self.meta_client
             .create_route(request)
             .await
-            .context(error::RequestMetaSnafu)
+            .context(RequestMetaSnafu)
     }
 
     // TODO(LFC): Refactor insertion implementation for DistTable,
@@ -621,8 +625,7 @@ fn find_partition_entries(
                 let v = match v {
                     SqlValue::Number(n, _) if n == "MAXVALUE" => PartitionBound::MaxValue,
                     _ => PartitionBound::Value(
-                        sql_value_to_value(column_name, data_type, v)
-                            .context(error::ParseSqlSnafu)?,
+                        sql_value_to_value(column_name, data_type, v).context(ParseSqlSnafu)?,
                     ),
                 };
                 values.push(v);

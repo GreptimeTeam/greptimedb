@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_base::Plugins;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
@@ -30,7 +31,6 @@ use crate::postgres::PostgresOptions;
 use crate::prometheus::PrometheusOptions;
 use crate::promql::PromqlOptions;
 use crate::server::Services;
-use crate::Plugins;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]

@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogListRef;
+use common_base::Plugins;
 use common_error::prelude::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
@@ -60,9 +61,9 @@ pub(crate) struct DatafusionQueryEngine {
 }
 
 impl DatafusionQueryEngine {
-    pub fn new(catalog_list: CatalogListRef) -> Self {
+    pub fn new(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
         Self {
-            state: QueryEngineState::new(catalog_list.clone()),
+            state: QueryEngineState::new(catalog_list.clone(), plugins),
         }
     }
 

@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::CatalogListRef;
+use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::{SessionContext, TaskContext};
@@ -39,6 +40,7 @@ use session::context::QueryContextRef;
 
 use crate::datafusion::DfCatalogListAdapter;
 use crate::optimizer::TypeConversionRule;
+use crate::query_engine::options::{validate_table_references, QueryOptions};
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -49,6 +51,7 @@ pub struct QueryEngineState {
     df_context: SessionContext,
     catalog_list: CatalogListRef,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
+    plugins: Arc<Plugins>,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -59,7 +62,7 @@ impl fmt::Debug for QueryEngineState {
 }
 
 impl QueryEngineState {
-    pub fn new(catalog_list: CatalogListRef) -> Self {
+    pub fn new(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new()
             .with_default_catalog_and_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
@@ -78,6 +81,7 @@ impl QueryEngineState {
             df_context,
             catalog_list,
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
+            plugins,
         }
     }
 
@@ -120,6 +124,13 @@ impl QueryEngineState {
         name: TableReference,
     ) -> DfResult<Arc<dyn TableSource>> {
         let state = self.df_context.state();
+
+        if let Some(opts) = self.plugins.get::<QueryOptions>() {
+            if opts.disallow_cross_schema_query {
+                validate_table_references(name, &query_ctx)?;
+            }
+        }
+
         if let TableReference::Bare { table } = name {
             let name = TableReference::Partial {
                 schema: &query_ctx.current_schema(),

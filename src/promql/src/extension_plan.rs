@@ -16,11 +16,13 @@ mod instant_manipulate;
 mod normalize;
 mod planner;
 mod range_manipulate;
+mod series_divide;
 
 use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
 pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantManipulateStream};
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
 pub use planner::PromExtensionPlanner;
 pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulateStream};
+pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 
 pub(crate) type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;

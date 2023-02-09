@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-anymap = "1.0.0-beta.2"
 api = { path = "../api" }
 async-stream.workspace = true
 async-trait = "0.1"
@@ -52,5 +51,6 @@ tonic.workspace = true
 datanode = { path = "../datanode" }
 futures = "0.3"
 meta-srv = { path = "../meta-srv", features = ["mock"] }
+strfmt = "0.2"
 tempdir = "0.3"
 tower = "0.4"
