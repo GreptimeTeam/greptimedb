@@ -211,9 +211,9 @@ pub(crate) fn build_table_deletion_request(
     let table_key = format_table_entry_key(&request.catalog, &request.schema, table_id);
     DeleteRequest {
         key_column_values: build_primary_key_columns(EntryType::Table, table_key.as_bytes()),
-        catalog_name: (&request.catalog).to_string(),
-        schema_name: (&request.schema).to_string(),
-        table_name: (&request.table_name).to_string(),
+        catalog_name: request.catalog.clone(),
+        schema_name: request.schema.clone(),
+        table_name: request.table_name.clone(),
     }
 }
 
