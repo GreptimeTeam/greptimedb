@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
 use table::metadata::TableId;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -93,7 +93,7 @@ where
             request.table_id(),
             self.remaining_requests().await
         );
-        let mut queue = self.request_queue.write().await;
+        let mut queue = self.request_queue.write().unwrap();
         let res = queue.push_back(request.table_id(), request);
         self.task_notifier.notify_one();
         Ok(res)
@@ -147,7 +147,7 @@ where
     }
 
     async fn remaining_requests(&self) -> usize {
-        self.request_queue.read().await.len()
+        self.request_queue.read().unwrap().len()
     }
 }
 
@@ -172,7 +172,7 @@ impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
                 _ = task_notifier.notified() => {
                     // poll requests as many as possible until rate limited, and then wait for
                     // notification (some task's finished).
-                    debug!("Notified, queue size: {:?}", self.req_queue.read().await.len());
+                    debug!("Notified, queue size: {:?}", self.req_queue.read().unwrap().len());
                     while let Some((table_id,  req)) = self.poll_task().await {
                         if let Ok(token) = limiter.acquire_token(&req) {
                             debug!("Executing compaction request: {}", table_id);
@@ -180,7 +180,7 @@ impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
                         } else {
                             // compaction rate limited, put back to req queue to wait for next
                             // schedule
-                            debug!("Put back request {}, queue size: {}", table_id, self.req_queue.read().await.len());
+                            debug!("Put back request {}, queue size: {}", table_id, self.req_queue.read().unwrap().len());
                             self.put_back_req(table_id, req).await;
                             break;
                         }
@@ -196,14 +196,14 @@ impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
 
     #[inline]
     async fn poll_task(&self) -> Option<(TableId, R)> {
-        let mut queue = self.req_queue.write().await;
+        let mut queue = self.req_queue.write().unwrap();
         queue.pop_front()
     }
 
     /// Puts request back to the front of request queue.
     #[inline]
     async fn put_back_req(&self, table_id: TableId, req: R) {
-        let mut queue = self.req_queue.write().await;
+        let mut queue = self.req_queue.write().unwrap();
         queue.push_front(table_id, req);
     }
 
@@ -305,12 +305,12 @@ mod tests {
 
         queue
             .write()
-            .await
+            .unwrap()
             .push_back(1, CompactionRequestImpl::default());
         handler.task_notifier.notify_one();
         queue
             .write()
-            .await
+            .unwrap()
             .push_back(2, CompactionRequestImpl::default());
         handler.task_notifier.notify_one();
 

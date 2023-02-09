@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
@@ -29,8 +30,8 @@ impl<K: Eq + Hash + Clone, V> DedupDeque<K, V> {
     /// returns false.
     pub fn push_back(&mut self, key: K, value: V) -> bool {
         debug_assert_eq!(self.deque.len(), self.existing.len());
-        if !self.existing.contains_key(&key) {
-            self.existing.insert(key.clone(), value);
+        if let Entry::Vacant(entry) = self.existing.entry(key.clone()) {
+            entry.insert(value);
             self.deque.push_back(key);
             return true;
         }
@@ -41,9 +42,8 @@ impl<K: Eq + Hash + Clone, V> DedupDeque<K, V> {
     /// Returns true if the deque does not already contain value with the same key, otherwise
     /// returns false.
     pub fn push_front(&mut self, key: K, value: V) -> bool {
-        debug_assert_eq!(self.deque.len(), self.existing.len());
-        if !self.existing.contains_key(&key) {
-            self.existing.insert(key.clone(), value);
+        if let Entry::Vacant(entry) = self.existing.entry(key.clone()) {
+            entry.insert(value);
             self.deque.push_front(key);
             return true;
         }
