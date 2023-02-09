@@ -42,3 +42,11 @@ INSERT INTO a VALUES (1,2),(3,4,5);
 
 Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 3
 
+DROP TABLE strings;
+
+Affected Rows: 1
+
+DROP TABLE a;
+
+Affected Rows: 1
+
