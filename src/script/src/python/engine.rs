@@ -320,7 +320,34 @@ import greptime as gt
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number)->vector[u32]:
-    return query.sql("select * from numbers")[0][0][1]
+    return query.sql("select * from numbers")[0][0]
+"#;
+        let script = script_engine
+            .compile(script, CompileContext::default())
+            .await
+            .unwrap();
+        let output = script.execute(EvalContext::default()).await.unwrap();
+        let res = common_recordbatch::util::collect_batches(match output {
+            Output::Stream(s) => s,
+            _ => unreachable!(),
+        })
+        .await
+        .unwrap();
+        let rb = res.iter().next().expect("One and only one recordbatch");
+        assert_eq!(rb.column(0).len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_data_frame_in_py() {
+        let script_engine = sample_script_engine();
+
+        let script = r#"
+import greptime as gt
+from data_frame import col
+
+@copr(args=["number"], returns = ["number"], sql = "select * from numbers")
+def test(number)->vector[u32]:
+    return dataframe.filter(col("number")==col("number")).collect()[0][0]
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())

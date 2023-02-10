@@ -20,6 +20,7 @@ use datatypes::prelude::ScalarVector;
 use datatypes::vectors::{
     BooleanVector, Float64Vector, Helper, Int64Vector, NullVector, StringVector, VectorRef,
 };
+use futures::Future;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
 use rustpython_vm::{PyObjectRef, PyPayload, PyRef, VirtualMachine};
 use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
@@ -112,4 +113,17 @@ pub fn py_vec_obj_to_array(
     } else {
         ret_other_error_with(format!("Expect a vector or a constant, found {obj:?}")).fail()
     }
+}
+
+/// a terrible hack to call async from sync by:
+/// TODO(discord9): find a better way
+/// 1. spawn a new thread
+/// 2. create a new runtime in new thread and call `block_on` on it
+pub fn block_on_async<T, F>(f: F) -> std::thread::Result<T>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let rt = tokio::runtime::Runtime::new().map_err(|e| Box::new(e) as _)?;
+    std::thread::spawn(move || rt.block_on(f)).join()
 }
