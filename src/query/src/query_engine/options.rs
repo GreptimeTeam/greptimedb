@@ -18,7 +18,7 @@ use snafu::ensure;
 
 use crate::error::{QueryAccessDeniedSnafu, Result};
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct QueryOptions {
     pub disallow_cross_schema_query: bool,
 }
