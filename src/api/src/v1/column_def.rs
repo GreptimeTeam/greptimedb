@@ -19,21 +19,24 @@ use crate::error::{self, Result};
 use crate::helper::ColumnDataTypeWrapper;
 use crate::v1::ColumnDef;
 
-impl ColumnDef {
-    pub fn try_as_column_schema(&self) -> Result<ColumnSchema> {
-        let data_type = ColumnDataTypeWrapper::try_new(self.datatype)?;
+pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
+    let data_type = ColumnDataTypeWrapper::try_new(column_def.datatype)?;
 
-        let constraint = if self.default_constraint.is_empty() {
-            None
-        } else {
-            Some(
-                ColumnDefaultConstraint::try_from(self.default_constraint.as_slice())
-                    .context(error::ConvertColumnDefaultConstraintSnafu { column: &self.name })?,
-            )
-        };
+    let constraint = if column_def.default_constraint.is_empty() {
+        None
+    } else {
+        Some(
+            ColumnDefaultConstraint::try_from(column_def.default_constraint.as_slice()).context(
+                error::ConvertColumnDefaultConstraintSnafu {
+                    column: &column_def.name,
+                },
+            )?,
+        )
+    };
 
-        ColumnSchema::new(&self.name, data_type.into(), self.is_nullable)
-            .with_default_constraint(constraint)
-            .context(error::InvalidColumnDefaultConstraintSnafu { column: &self.name })
-    }
+    ColumnSchema::new(&column_def.name, data_type.into(), column_def.is_nullable)
+        .with_default_constraint(constraint)
+        .context(error::InvalidColumnDefaultConstraintSnafu {
+            column: &column_def.name,
+        })
 }

@@ -14,7 +14,8 @@
 
 use std::collections::HashMap;
 
-use api::v1::column::{SemanticType, Values};
+use api::helper::values_with_capacity;
+use api::v1::column::SemanticType;
 use api::v1::{Column, ColumnDataType};
 use common_base::BitVec;
 use snafu::ensure;
@@ -212,7 +213,7 @@ impl LinesWriter {
                 batch.0.push(Column {
                     column_name: column_name.to_string(),
                     semantic_type: semantic_type.into(),
-                    values: Some(Values::with_capacity(datatype, to_insert)),
+                    values: Some(values_with_capacity(datatype, to_insert)),
                     datatype: datatype as i32,
                     null_mask: Vec::default(),
                 });

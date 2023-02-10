@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest, TableId,
+    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest,
+    TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
@@ -511,9 +512,8 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
     let mut column_name_to_index_map = HashMap::new();
 
     for (idx, column) in create_table.column_defs.iter().enumerate() {
-        let schema = column
-            .try_as_column_schema()
-            .context(error::InvalidColumnDefSnafu {
+        let schema =
+            column_def::try_as_column_schema(column).context(error::InvalidColumnDefSnafu {
                 column: &column.name,
             })?;
         let schema = schema.with_time_index(column.name == create_table.time_index);
