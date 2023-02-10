@@ -28,7 +28,7 @@ futures-util.workspace = true
 metrics = "0.20"
 once_cell = "1.10"
 promql = { path = "../promql" }
-promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "d027ce428a6a2df5a652b8558608c77d33c31644" }
+promql-parser = { git = "https://github.com/GreptimeTeam/promql-parser.git", rev = "fa186978a1234baf5a3e372da03aa663d859cdd2" }
 serde.workspace = true
 serde_json = "1.0"
 session = { path = "../session" }
