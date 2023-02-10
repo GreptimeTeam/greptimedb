@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::BoxedError;
 use common_error::snafu::ensure;
+use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::data_type::DataType;
 use datatypes::prelude::MutableVector;
 use datatypes::schema::ColumnSchema;
+use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
 use sql::statements;
@@ -23,17 +26,24 @@ use sql::statements::insert::Insert;
 use table::requests::InsertRequest;
 use table::TableRef;
 
-use crate::error::{self, Result};
+use crate::error::{self, ExternalSnafu, Result};
 
 const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
 // TODO(fys): Extract the common logic in datanode and frontend in the future.
 // This function convert insert statement to an `InsertRequest` to region 0.
-pub(crate) fn insert_to_request(table: &TableRef, stmt: Insert) -> Result<InsertRequest> {
+pub(crate) fn insert_to_request(
+    table: &TableRef,
+    stmt: Insert,
+    query_ctx: QueryContextRef,
+) -> Result<InsertRequest> {
     let columns = stmt.columns();
     let values = stmt.values().context(error::ParseSqlSnafu)?;
+
     let (catalog_name, schema_name, table_name) =
-        stmt.full_table_name().context(error::ParseSqlSnafu)?;
+        table_idents_to_full_name(stmt.table_name(), query_ctx)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
 
     let schema = table.schema();
     let columns_num = if columns.is_empty() {

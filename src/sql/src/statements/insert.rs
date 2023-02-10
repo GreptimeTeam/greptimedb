@@ -17,7 +17,6 @@ use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value};
 use crate::error::{self, Result};
-use crate::statements::table_idents_to_full_name;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Insert {
@@ -26,13 +25,6 @@ pub struct Insert {
 }
 
 impl Insert {
-    pub fn full_table_name(&self) -> Result<(String, String, String)> {
-        match &self.inner {
-            Statement::Insert { table_name, .. } => table_idents_to_full_name(table_name),
-            _ => unreachable!(),
-        }
-    }
-
     pub fn table_name(&self) -> &ObjectName {
         match &self.inner {
             Statement::Insert { table_name, .. } => table_name,
