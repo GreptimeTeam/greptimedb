@@ -16,6 +16,7 @@
 
 mod alter;
 mod basic;
+mod close;
 mod flush;
 mod projection;
 
@@ -75,6 +76,13 @@ impl<S: LogStore> TesterBase<S> {
     ///
     /// Format of data: (timestamp, v0), timestamp is key, v0 is value.
     pub async fn put(&self, data: &[(i64, Option<i64>)]) -> WriteResponse {
+        self.try_put(data).await.unwrap()
+    }
+
+    /// Put without version specified, returns [`Result<WriteResponse>`]
+    ///
+    /// Format of data: (timestamp, v0), timestamp is key, v0 is value.
+    pub async fn try_put(&self, data: &[(i64, Option<i64>)]) -> Result<WriteResponse> {
         let data: Vec<(TimestampMillisecond, Option<i64>)> =
             data.iter().map(|(l, r)| ((*l).into(), *r)).collect();
         // Build a batch without version.
@@ -82,7 +90,7 @@ impl<S: LogStore> TesterBase<S> {
         let put_data = new_put_data(&data);
         batch.put(put_data).unwrap();
 
-        self.region.write(&self.write_ctx, batch).await.unwrap()
+        self.region.write(&self.write_ctx, batch).await
     }
 
     /// Put without version specified directly to inner writer.

@@ -192,6 +192,10 @@ impl Region for MockRegion {
 
         Ok(())
     }
+
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl MockRegionInner {
@@ -279,8 +283,8 @@ impl StorageEngine for MockEngine {
         return Ok(None);
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, _region: MockRegion) -> Result<()> {
-        unimplemented!()
+    async fn close_region(&self, _ctx: &EngineContext, region: MockRegion) -> Result<()> {
+        region.close().await
     }
 
     async fn create_region(

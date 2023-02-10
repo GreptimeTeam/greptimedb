@@ -21,7 +21,7 @@ use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::{
-    CreateOptions, EngineContext, OpenOptions, RegionDescriptor, StorageEngine,
+    CreateOptions, EngineContext, OpenOptions, Region, RegionDescriptor, StorageEngine,
 };
 
 use crate::background::JobPoolImpl;
@@ -62,8 +62,8 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
         self.inner.open_region(name, opts).await
     }
 
-    async fn close_region(&self, _ctx: &EngineContext, _region: Self::Region) -> Result<()> {
-        unimplemented!()
+    async fn close_region(&self, _ctx: &EngineContext, region: Self::Region) -> Result<()> {
+        region.close().await
     }
 
     async fn create_region(

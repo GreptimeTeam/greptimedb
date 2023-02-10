@@ -141,6 +141,12 @@ pub enum Error {
     #[snafu(display("Task already cancelled"))]
     Cancelled { backtrace: Backtrace },
 
+    #[snafu(display("Failed to cancel flush, source: {}", source))]
+    CancelFlush {
+        #[snafu(backtrace)]
+        source: BoxedError,
+    },
+
     #[snafu(display(
         "Manifest protocol forbid to read, min_version: {}, supported_version: {}",
         min_version,
@@ -231,6 +237,9 @@ pub enum Error {
         #[snafu(backtrace)]
         source: MetadataError,
     },
+
+    #[snafu(display("Try to write the closed region"))]
+    ClosedRegion { backtrace: Backtrace },
 
     #[snafu(display("Invalid projection, source: {}", source))]
     InvalidProjection {
@@ -443,12 +452,14 @@ impl ErrorExt for Error {
             | DecodeJson { .. }
             | JoinTask { .. }
             | Cancelled { .. }
+            | CancelFlush { .. }
             | DecodeMetaActionList { .. }
             | Readline { .. }
             | WalDataCorrupted { .. }
             | SequenceNotMonotonic { .. }
             | ConvertStoreSchema { .. }
             | InvalidRawRegion { .. }
+            | ClosedRegion { .. }
             | FilterColumn { .. }
             | AlterMetadata { .. }
             | CompatRead { .. }

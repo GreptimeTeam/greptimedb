@@ -14,7 +14,6 @@
 
 //! Region flush tests.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use log_store::raft_engine::log_store::RaftEngineLogStore;
@@ -22,10 +21,11 @@ use store_api::storage::{OpenOptions, WriteResponse};
 use tempdir::TempDir;
 
 use crate::engine;
-use crate::flush::{FlushStrategy, FlushStrategyRef};
+use crate::flush::FlushStrategyRef;
 use crate::region::tests::{self, FileTesterBase};
-use crate::region::{RegionImpl, SharedDataRef};
+use crate::region::RegionImpl;
 use crate::test_util::config_util;
+use crate::test_util::flush_switch::{has_parquet_file, FlushSwitch};
 
 const REGION_NAME: &str = "region-flush-0";
 
@@ -94,41 +94,6 @@ impl FlushTester {
     async fn wait_flush_done(&self) {
         self.base().region.wait_flush_done().await.unwrap();
     }
-}
-
-#[derive(Debug, Default)]
-struct FlushSwitch {
-    should_flush: AtomicBool,
-}
-
-impl FlushSwitch {
-    fn set_should_flush(&self, should_flush: bool) {
-        self.should_flush.store(should_flush, Ordering::Relaxed);
-    }
-}
-
-impl FlushStrategy for FlushSwitch {
-    fn should_flush(
-        &self,
-        _shared: &SharedDataRef,
-        _bytes_mutable: usize,
-        _bytes_total: usize,
-    ) -> bool {
-        self.should_flush.load(Ordering::Relaxed)
-    }
-}
-
-fn has_parquet_file(sst_dir: &str) -> bool {
-    for entry in std::fs::read_dir(sst_dir).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if !path.is_dir() {
-            assert_eq!("parquet", path.extension().unwrap());
-            return true;
-        }
-    }
-
-    false
 }
 
 #[tokio::test]
