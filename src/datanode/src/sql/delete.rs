@@ -56,7 +56,7 @@ impl SqlHandler {
     ) -> Result<SqlRequest> {
         let (catalog_name, schema_name, table_name) =
             table_idents_to_full_name(stmt.table_name(), query_ctx)?;
-        let key_column_values = parser_selection(stmt.selection())?;
+        let key_column_values = parse_selection(stmt.selection())?;
         Ok(SqlRequest::Delete(DeleteRequest {
             key_column_values,
             catalog_name,
@@ -68,7 +68,7 @@ impl SqlHandler {
 
 /// parse selection, currently supported format is `tagkey1 = 'tagvalue1' and 'ts' = 'value'`.
 /// (only uses =, and in the where clause and provides all columns needed by the key.)
-fn parser_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRef>> {
+fn parse_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRef>> {
     let mut key_column_values = HashMap::new();
     if let Some(expr) = selection {
         parser_expr(expr, &mut key_column_values)?;
@@ -104,8 +104,10 @@ fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) 
             _ => {}
         }
     }
-    return NotSupportSqlSnafu{
-        msg: format!("Not support sql expr:{expr},correct format is tagkey1 = tagvalue1 and ts = value"),
+    return NotSupportSqlSnafu {
+        msg: format!(
+            "Not support sql expr:{expr},correct format is tagkey1 = tagvalue1 and ts = value"
+        ),
     }
     .fail();
 }

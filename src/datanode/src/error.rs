@@ -114,7 +114,11 @@ pub enum Error {
         source: TableError,
     },
 
-    #[snafu(display("Failed to delete value to table: {}, source: {}", table_name, source))]
+    #[snafu(display(
+        "Failed to delete value from table: {}, source: {}",
+        table_name,
+        source
+    ))]
     Delete {
         table_name: String,
         #[snafu(backtrace)]
