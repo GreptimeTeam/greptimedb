@@ -74,7 +74,10 @@ impl Runner {
         // its parent.
         let lock_key = self.meta.lock_key.clone();
 
-        // TODO(yingwen): Support multiple lock keys.
+        // TODO(yingwen):
+        // 1. Support multiple lock keys;
+        // 2. Detect recursive locking (and deadlock) if possible. Maybe we could detect
+        // recursive locking by adding a root procedure id to the meta.
         // Acquire lock if necessary.
         if let Some(key) = &lock_key {
             self.manager_ctx
@@ -87,12 +90,12 @@ impl Runner {
         // Execute the procedure. We need to release the lock whenever the the execution
         // is successful or fail.
         if let Err(e) = self.execute_procedure_in_loop().await {
-            logging::error!(
-                e; "Failed to execute procedure {}-{}",
-                self.procedure.type_name(),
-                self.meta.id
-            );
             result = Err(e);
+        }
+
+        // Notify parent procedure.
+        if let Some(parent_id) = self.meta.parent_id {
+            self.manager_ctx.notify_by_subprocedure(parent_id);
         }
 
         if let Some(key) = &lock_key {
@@ -141,6 +144,14 @@ impl Runner {
     async fn execute_once(&mut self, ctx: &Context) -> ExecResult {
         match self.procedure.execute(ctx).await {
             Ok(status) => {
+                logging::debug!(
+                    "Execute procedure {}-{} once, status: {:?}, need_persist: {}",
+                    self.procedure.type_name(),
+                    self.meta.id,
+                    status,
+                    status.need_persist(),
+                );
+
                 if status.need_persist() && self.persist_procedure().await.is_err() {
                     return ExecResult::RetryLater;
                 }
@@ -184,6 +195,11 @@ impl Runner {
 
     /// Submit a subprocedure with specific `procedure_id`.
     fn submit_subprocedure(&self, procedure_id: ProcedureId, mut procedure: BoxedProcedure) {
+        if self.manager_ctx.contains_procedure(procedure_id) {
+            // If the parent has already submitted this procedure, don't submit it again.
+            return;
+        }
+
         let mut step = 0;
         if let Some(loaded_procedure) = self.manager_ctx.load_one_procedure(procedure_id) {
             // Try to load procedure state from the message to avoid re-run the subprocedure
@@ -212,10 +228,17 @@ impl Runner {
             store: self.store.clone(),
         };
 
-        if !self.manager_ctx.try_insert_procedure(meta) {
-            // If the parent has already submitted this procedure, don't submit it again.
-            return;
-        }
+        // Insert the procedure. We already check the procedure existence before inserting
+        // so we add an assertion to ensure the procedure id is unique and no other procedures
+        // using the same procedure id.
+        assert!(
+            self.manager_ctx.try_insert_procedure(meta),
+            "Procedure {}-{} submit an existing procedure {}-{}",
+            self.procedure.type_name(),
+            self.meta.id,
+            runner.procedure.type_name(),
+            procedure_id,
+        );
 
         // Add the id of the subprocedure to the metadata.
         self.meta.push_child(procedure_id);
@@ -325,11 +348,6 @@ impl Runner {
 
         // Mark the state of this procedure to done.
         self.meta.set_state(ProcedureState::Done);
-
-        // Notify parent procedure, remember to update state first.
-        if let Some(parent_id) = self.meta.parent_id {
-            self.manager_ctx.notify_by_subprocedure(parent_id);
-        }
     }
 }
 
@@ -338,6 +356,7 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use common_error::ext::PlainError;
     use common_error::mock::MockError;
     use common_error::prelude::StatusCode;
     use futures_util::future::BoxFuture;
@@ -523,7 +542,6 @@ mod tests {
         };
         let child = ProcedureAdapter {
             data: "child".to_string(),
-            // Chidren acquire the same locks.
             lock_key: Some(LockKey::new(key)),
             exec_fn,
         };
@@ -638,5 +656,78 @@ mod tests {
         assert!(res.is_failed(), "{res:?}");
         assert_eq!(ProcedureState::Failed, meta.state());
         check_files(&object_store, ctx.procedure_id, &["0000000000.rollback"]).await;
+    }
+
+    #[tokio::test]
+    async fn test_child_error() {
+        let mut times = 0;
+        let manager_ctx = Arc::new(ManagerContext::new());
+        let child_id = ProcedureId::random();
+
+        let ctx_in_fn = manager_ctx.clone();
+        let exec_fn = move || {
+            times += 1;
+            let ctx_in_future = ctx_in_fn.clone();
+
+            async move {
+                if times == 1 {
+                    // Submit subprocedures.
+                    let exec_fn = || {
+                        async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }
+                            .boxed()
+                    };
+                    let fail = ProcedureAdapter {
+                        data: "fail".to_string(),
+                        lock_key: Some(LockKey::new("catalog.schema.table.region-0")),
+                        exec_fn,
+                    };
+
+                    Ok(Status::Suspended {
+                        subprocedures: vec![ProcedureWithId {
+                            id: child_id,
+                            procedure: Box::new(fail),
+                        }],
+                        persist: true,
+                    })
+                } else {
+                    // Wait for subprocedures.
+                    logging::info!("child state is {:?}", ctx_in_future.state(child_id));
+                    if ctx_in_future.state(child_id) == Some(ProcedureState::Failed) {
+                        // The parent procedure to abort itself if child procedure is failed.
+                        Err(Error::external(PlainError::new(
+                            "subprocedure failed".to_string(),
+                            StatusCode::Unexpected,
+                        )))
+                    } else {
+                        // Return suspended to wait for notify.
+                        Ok(Status::Suspended {
+                            subprocedures: Vec::new(),
+                            persist: false,
+                        })
+                    }
+                }
+            }
+            .boxed()
+        };
+        let parent = ProcedureAdapter {
+            data: "parent".to_string(),
+            lock_key: Some(LockKey::new("catalog.schema.table")),
+            exec_fn,
+        };
+
+        let dir = TempDir::new("child_err").unwrap();
+        let meta = parent.new_meta(ROOT_ID);
+        // Manually add this procedure to the manager ctx.
+        assert!(manager_ctx.try_insert_procedure(meta.clone()));
+
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = new_procedure_store(object_store.clone());
+        let mut runner = new_runner(meta, Box::new(parent), procedure_store);
+        // Replace the manager ctx.
+        runner.manager_ctx = manager_ctx;
+
+        // Run the runer and execute the procedure.
+        let err = runner.run().await.unwrap_err();
+        assert!(err.to_string().contains("subprocedure failed"), "{err}");
     }
 }
