@@ -502,6 +502,74 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     ),
     (
         // constant column(int)
+        name: "test_data_frame",
+        code: r#"
+from data_frame import col
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
+    vector[f32]):
+    ret = dataframe.select([col("cpu"), col("mem")]).collect()[0]
+    return ret[0], ret[1]
+"#,
+        predicate: ExecIsOk(
+            fields: [
+                (
+                    datatype: Some(Float64(())),
+                    is_nullable: true
+                ),
+                (
+                    datatype: Some(Float32(())),
+                    is_nullable: false
+                ),
+            ],
+            columns: [
+                (
+                    ty: Float64,
+                    len: 4
+                ),
+                (
+                    ty: Float32,
+                    len: 4
+                )
+            ]
+        )
+    ),
+    (
+        // constant column(int)
+        name: "test_data_frame",
+        code: r#"
+from data_frame import col
+@copr(args=["cpu", "mem"], returns=["perf", "what"])
+def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
+    vector[f32]):
+    ret = dataframe.filter(col("cpu")>col("mem")).collect()[0]
+    return ret[0], ret[1]
+"#,
+        predicate: ExecIsOk(
+            fields: [
+                (
+                    datatype: Some(Float64(())),
+                    is_nullable: true
+                ),
+                (
+                    datatype: Some(Float32(())),
+                    is_nullable: false
+                ),
+            ],
+            columns: [
+                (
+                    ty: Float64,
+                    len: 4
+                ),
+                (
+                    ty: Float32,
+                    len: 4
+                )
+            ]
+        )
+    ),
+    (
+        // constant column(int)
         name: "test_neg_import_stdlib",
         code: r#"
 @copr(args=["cpu", "mem"], returns=["perf", "what"])

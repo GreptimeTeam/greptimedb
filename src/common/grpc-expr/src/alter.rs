@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::alter_expr::Kind;
-use api::v1::{AlterExpr, CreateTableExpr, DropColumns, RenameTable};
+use api::v1::{column_def, AlterExpr, CreateTableExpr, DropColumns, RenameTable};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -42,12 +42,11 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
                         field: "column_def",
                     })?;
 
-                    let schema =
-                        column_def
-                            .try_as_column_schema()
-                            .context(InvalidColumnDefSnafu {
-                                column: &column_def.name,
-                            })?;
+                    let schema = column_def::try_as_column_schema(&column_def).context(
+                        InvalidColumnDefSnafu {
+                            column: &column_def.name,
+                        },
+                    )?;
                     Ok(AddColumnRequest {
                         column_schema: schema,
                         is_key: ac.is_key,
@@ -98,8 +97,7 @@ pub fn create_table_schema(expr: &CreateTableExpr) -> Result<SchemaRef> {
         .column_defs
         .iter()
         .map(|x| {
-            x.try_as_column_schema()
-                .context(InvalidColumnDefSnafu { column: &x.name })
+            column_def::try_as_column_schema(x).context(InvalidColumnDefSnafu { column: &x.name })
         })
         .collect::<Result<Vec<ColumnSchema>>>()?;
 

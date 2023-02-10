@@ -66,6 +66,9 @@ pub enum Error {
     #[snafu(display("Failure during query parsing, query: {}, source: {}", query, source))]
     QueryParse { query: String, source: BoxedError },
 
+    #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
+    QueryAccessDenied { catalog: String, schema: String },
+
     #[snafu(display("The SQL string has multiple statements, query: {}", query))]
     MultipleStatements { query: String, backtrace: Backtrace },
 
@@ -83,6 +86,7 @@ impl ErrorExt for Error {
             | CatalogNotFound { .. }
             | SchemaNotFound { .. }
             | TableNotFound { .. } => StatusCode::InvalidArguments,
+            QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Catalog { source } => source.status_code(),
             VectorComputation { source } => source.status_code(),
             CreateRecordBatch { source } => source.status_code(),

@@ -13,12 +13,14 @@
 // limitations under the License.
 
 mod context;
+pub mod options;
 mod state;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogListRef;
+use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::physical_plan::PhysicalPlan;
@@ -63,23 +65,29 @@ pub struct QueryEngineFactory {
 
 impl QueryEngineFactory {
     pub fn new(catalog_list: CatalogListRef) -> Self {
-        let query_engine = Arc::new(DatafusionQueryEngine::new(catalog_list));
-
-        for func in FUNCTION_REGISTRY.functions() {
-            query_engine.register_function(func);
-        }
-
-        for accumulator in FUNCTION_REGISTRY.aggregate_functions() {
-            query_engine.register_aggregate_function(accumulator);
-        }
-
+        let query_engine = Arc::new(DatafusionQueryEngine::new(catalog_list, Default::default()));
+        register_functions(&query_engine);
         Self { query_engine }
+    }
+
+    pub fn new_with_plugins(catalog_list: CatalogListRef, plugins: Arc<Plugins>) -> Self {
+        let query_engine = Arc::new(DatafusionQueryEngine::new(catalog_list, plugins));
+        register_functions(&query_engine);
+        Self { query_engine }
+    }
+
+    pub fn query_engine(&self) -> QueryEngineRef {
+        self.query_engine.clone()
     }
 }
 
-impl QueryEngineFactory {
-    pub fn query_engine(&self) -> QueryEngineRef {
-        self.query_engine.clone()
+fn register_functions(query_engine: &Arc<DatafusionQueryEngine>) {
+    for func in FUNCTION_REGISTRY.functions() {
+        query_engine.register_function(func);
+    }
+
+    for accumulator in FUNCTION_REGISTRY.aggregate_functions() {
+        query_engine.register_aggregate_function(accumulator);
     }
 }
 

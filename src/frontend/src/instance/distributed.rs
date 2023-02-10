@@ -19,13 +19,15 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest, TableId,
+    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest,
+    TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
 use catalog::{CatalogList, CatalogManager, DeregisterTableRequest, RegisterTableRequest};
 use chrono::DateTime;
 use client::Database;
+use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::prelude::BoxedError;
 use common_query::Output;
@@ -79,8 +81,11 @@ impl DistInstance {
         meta_client: Arc<MetaClient>,
         catalog_manager: Arc<FrontendCatalogManager>,
         datanode_clients: Arc<DatanodeClients>,
+        plugins: Arc<Plugins>,
     ) -> Self {
-        let query_engine = QueryEngineFactory::new(catalog_manager.clone()).query_engine();
+        let query_engine =
+            QueryEngineFactory::new_with_plugins(catalog_manager.clone(), plugins.clone())
+                .query_engine();
         Self {
             meta_client,
             catalog_manager,
@@ -290,7 +295,10 @@ impl DistInstance {
                 explain(Box::new(stmt), self.query_engine.clone(), query_ctx).await
             }
             Statement::Insert(insert) => {
-                let (catalog, schema, table) = insert.full_table_name().context(ParseSqlSnafu)?;
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(insert.table_name(), query_ctx.clone())
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
 
                 let table = self
                     .catalog_manager
@@ -298,7 +306,7 @@ impl DistInstance {
                     .context(CatalogSnafu)?
                     .context(TableNotFoundSnafu { table_name: table })?;
 
-                let insert_request = insert_to_request(&table, *insert)?;
+                let insert_request = insert_to_request(&table, *insert, query_ctx)?;
 
                 return Ok(Output::AffectedRows(
                     table.insert(insert_request).await.context(TableSnafu)?,
@@ -422,7 +430,7 @@ impl DistInstance {
         self.meta_client
             .create_route(request)
             .await
-            .context(error::RequestMetaSnafu)
+            .context(RequestMetaSnafu)
     }
 
     // TODO(LFC): Refactor insertion implementation for DistTable,
@@ -504,9 +512,8 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
     let mut column_name_to_index_map = HashMap::new();
 
     for (idx, column) in create_table.column_defs.iter().enumerate() {
-        let schema = column
-            .try_as_column_schema()
-            .context(error::InvalidColumnDefSnafu {
+        let schema =
+            column_def::try_as_column_schema(column).context(error::InvalidColumnDefSnafu {
                 column: &column.name,
             })?;
         let schema = schema.with_time_index(column.name == create_table.time_index);
@@ -621,8 +628,7 @@ fn find_partition_entries(
                 let v = match v {
                     SqlValue::Number(n, _) if n == "MAXVALUE" => PartitionBound::MaxValue,
                     _ => PartitionBound::Value(
-                        sql_value_to_value(column_name, data_type, v)
-                            .context(error::ParseSqlSnafu)?,
+                        sql_value_to_value(column_name, data_type, v).context(ParseSqlSnafu)?,
                     ),
                 };
                 values.push(v);

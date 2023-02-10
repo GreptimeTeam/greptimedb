@@ -22,7 +22,7 @@ use common_telemetry::tracing::info;
 use common_telemetry::tracing::log::error;
 use datatypes::schema::SchemaBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::TableConstraint;
+use sql::ast::{ColumnOption, TableConstraint};
 use sql::statements::column_def_to_schema;
 use sql::statements::create::CreateTable;
 use store_api::storage::consts::TIME_INDEX_NAME;
@@ -135,6 +135,30 @@ impl SqlHandler {
             .map(|(k, v)| (v, k))
             .collect::<HashMap<_, _>>();
 
+        let pk_map = stmt
+            .columns
+            .iter()
+            .filter(|col| {
+                col.options.iter().any(|options| match options.option {
+                    ColumnOption::Unique { is_primary } => is_primary,
+                    _ => false,
+                })
+            })
+            .map(|col| col.name.value.clone())
+            .collect::<Vec<_>>();
+
+        ensure!(
+            pk_map.len() < 2,
+            InvalidPrimaryKeySnafu {
+                msg: "Multiple definitions of primary key found"
+            }
+        );
+
+        if let Some(pk) = pk_map.first() {
+            // # Safety: Both pk_map and col_map are collected from stmt.columns
+            primary_keys.push(*col_map.get(pk).unwrap());
+        }
+
         for c in stmt.constraints {
             match c {
                 TableConstraint::Unique {
@@ -156,6 +180,12 @@ impl SqlHandler {
                             .fail();
                         }
                     } else if is_primary {
+                        if !primary_keys.is_empty() {
+                            return InvalidPrimaryKeySnafu {
+                                msg: "Multiple definitions of primary key found",
+                            }
+                            .fail();
+                        }
                         for col in columns {
                             primary_keys.push(*col_map.get(&col.value).context(
                                 KeyColumnNotFoundSnafu {
@@ -247,6 +277,21 @@ mod tests {
     }
 
     #[tokio::test]
+    pub async fn test_create_with_inline_primary_key() {
+        let handler = create_mock_sql_handler().await;
+        let parsed_stmt = sql_to_statement(
+            r#"CREATE TABLE demo_table (timestamp BIGINT TIME INDEX, value DOUBLE, host STRING PRIMARY KEY) engine=mito with(regions=1);"#,
+        );
+        let c = handler
+            .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
+            .unwrap();
+        assert_eq!("demo_table", c.table_name);
+        assert_eq!(42, c.id);
+        assert!(!c.create_if_not_exists);
+        assert_eq!(vec![2], c.primary_key_indices);
+    }
+
+    #[tokio::test]
     pub async fn test_create_to_request() {
         let handler = create_mock_sql_handler().await;
         let parsed_stmt = sql_to_statement(
@@ -267,6 +312,37 @@ mod tests {
         assert_eq!(vec![0], c.primary_key_indices);
         assert_eq!(1, c.schema.timestamp_index().unwrap());
         assert_eq!(4, c.schema.column_schemas().len());
+    }
+
+    #[tokio::test]
+    pub async fn test_multiple_primary_key_definitions() {
+        let handler = create_mock_sql_handler().await;
+        let parsed_stmt = sql_to_statement(
+            r#"create table demo_table (
+                      timestamp BIGINT TIME INDEX,
+                      value DOUBLE,
+                      host STRING PRIMARY KEY,
+                      PRIMARY KEY(host)) engine=mito with(regions=1);"#,
+        );
+        let error = handler
+            .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidPrimaryKey { .. });
+    }
+
+    #[tokio::test]
+    pub async fn test_multiple_inline_primary_key_definitions() {
+        let handler = create_mock_sql_handler().await;
+        let parsed_stmt = sql_to_statement(
+            r#"create table demo_table (
+                      timestamp BIGINT TIME INDEX,
+                      value DOUBLE PRIMARY KEY,
+                      host STRING PRIMARY KEY) engine=mito with(regions=1);"#,
+        );
+        let error = handler
+            .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
+            .unwrap_err();
+        assert_matches!(error, Error::InvalidPrimaryKey { .. });
     }
 
     #[tokio::test]
