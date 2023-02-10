@@ -17,7 +17,7 @@ use std::sync::Arc;
 use etcd_client::{Client, LockOptions};
 use snafu::ResultExt;
 
-use super::{DistLock, DistLockRef, Opts, DEFAULT_EXPIRE_TIME};
+use super::{DistLock, DistLockRef, Opts, DEFAULT_EXPIRE_TIME_SECS};
 use crate::error;
 use crate::error::Result;
 
@@ -48,7 +48,7 @@ impl EtcdLock {
 #[async_trait::async_trait]
 impl DistLock for EtcdLock {
     async fn lock(&self, name: Vec<u8>, opts: Opts) -> Result<Vec<u8>> {
-        let expire = opts.expire.unwrap_or(DEFAULT_EXPIRE_TIME) as i64;
+        let expire = opts.expire_secs.unwrap_or(DEFAULT_EXPIRE_TIME_SECS) as i64;
 
         let mut client = self.client.clone();
 

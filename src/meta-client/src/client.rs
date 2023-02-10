@@ -99,12 +99,7 @@ impl MetaClientBuilder {
             MetaClient::new(self.id)
         };
 
-        if let (false, false, false, false) = (
-            self.enable_heartbeat,
-            self.enable_router,
-            self.enable_store,
-            self.enable_lock,
-        ) {
+        if !(self.enable_heartbeat || self.enable_router || self.enable_store || self.enable_lock) {
             panic!("At least one client needs to be enabled.")
         }
 

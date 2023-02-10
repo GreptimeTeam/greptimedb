@@ -20,13 +20,12 @@ use crate::error::Result;
 
 pub type Key = Vec<u8>;
 
-// default expire time: 10 seconds
-pub const DEFAULT_EXPIRE_TIME: u64 = 10;
+pub const DEFAULT_EXPIRE_TIME_SECS: u64 = 10;
 
 pub struct Opts {
     // If the expiration time is exceeded and currently holds the lock, the lock is
-    // aytomatically released. The unit is second.
-    pub expire: Option<u64>,
+    // automatically released.
+    pub expire_secs: Option<u64>,
 }
 
 #[async_trait::async_trait]
