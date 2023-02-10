@@ -12,15 +12,15 @@ Error: 1004(InvalidArguments), Missing column host in write batch
 
 delete from monitor where host = 'host1' or ts = 1655276557000;
 
-Error: 1004(InvalidArguments), Invalid SQL, error: Failed to parse expr:host = 'host1' OR ts = 1655276557000
+Error: 1004(InvalidArguments), Not support SQL, error: Not support sql expr:host = 'host1' OR ts = 1655276557000,correct format is tagkey1 = tagvalue1 and ts = value
 
 delete from monitor where host = 'host1' or ts != 1655276557000;
 
-Error: 1004(InvalidArguments), Invalid SQL, error: Failed to parse expr:host = 'host1' OR ts <> 1655276557000
+Error: 1004(InvalidArguments), Not support SQL, error: Not support sql expr:host = 'host1' OR ts <> 1655276557000,correct format is tagkey1 = tagvalue1 and ts = value
 
 delete from monitor where  ts != 1655276557000;
 
-Error: 1004(InvalidArguments), Invalid SQL, error: Failed to parse expr:ts <> 1655276557000
+Error: 1004(InvalidArguments), Not support SQL, error: Not support sql expr:ts <> 1655276557000,correct format is tagkey1 = tagvalue1 and ts = value
 
 drop table monitor;
 

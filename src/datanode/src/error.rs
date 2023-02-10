@@ -170,6 +170,9 @@ pub enum Error {
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
+    #[snafu(display("Not support SQL, error: {}", msg))]
+    NotSupportSql { msg: String },
+
     #[snafu(display("Failed to create schema when creating table, source: {}", source))]
     CreateSchema {
         #[snafu(backtrace)]
@@ -369,6 +372,7 @@ impl ErrorExt for Error {
 
             Error::ColumnValuesNumberMismatch { .. }
             | Error::InvalidSql { .. }
+            | Error::NotSupportSql { .. }
             | Error::KeyColumnNotFound { .. }
             | Error::InvalidPrimaryKey { .. }
             | Error::MissingTimestampColumn { .. }

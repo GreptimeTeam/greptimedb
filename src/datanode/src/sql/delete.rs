@@ -28,7 +28,7 @@ use sql::statements::delete::Delete;
 use table::engine::TableReference;
 use table::requests::DeleteRequest;
 
-use crate::error::{DeleteSnafu, InvalidSqlSnafu, Result};
+use crate::error::{DeleteSnafu, NotSupportSqlSnafu, Result};
 use crate::instance::sql::table_idents_to_full_name;
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -66,7 +66,7 @@ impl SqlHandler {
     }
 }
 
-/// parse selection, currently supported format is `tagkey1 = 'tagvalue1' and tagkey2 = 'tagvalue2'`.
+/// parse selection, currently supported format is `tagkey1 = 'tagvalue1' and 'ts' = 'value'`.
 /// (only uses =, and in the where clause and provides all columns needed by the key.)
 fn parser_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRef>> {
     let mut key_column_values = HashMap::new();
@@ -104,8 +104,8 @@ fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) 
             _ => {}
         }
     }
-    return InvalidSqlSnafu {
-        msg: format!("Failed to parse expr:{expr}"),
+    return NotSupportSqlSnafu{
+        msg: format!("Not support sql expr:{expr},correct format is tagkey1 = tagvalue1 and ts = value"),
     }
     .fail();
 }
@@ -130,8 +130,8 @@ fn value_to_vector(column_name: &String, value: &Value) -> Result<VectorRef> {
         Value::Boolean(b) => Ok(Arc::new(BooleanVector::from(vec![*b]))),
         _ => {
             warn!("Current value type is not supported, value:{value}");
-            return InvalidSqlSnafu {
-                msg: format!("Failed to parse value:{value}"),
+            return NotSupportSqlSnafu {
+                msg: format!("Failed to parse value:{value}, current value type is not supported"),
             }
             .fail();
         }

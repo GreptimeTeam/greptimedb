@@ -31,6 +31,8 @@ impl Delete {
                 table_name: TableFactor::Table { name, .. },
                 ..
             } => table_idents_to_full_name(name),
+            // # Safety
+            // statement type is checked before.
             _ => unreachable!(),
         }
     }
@@ -41,6 +43,8 @@ impl Delete {
                 table_name: TableFactor::Table { name, .. },
                 ..
             } => name,
+            // # Safety
+            // statement type is checked before.
             _ => unreachable!(),
         }
     }
@@ -48,6 +52,8 @@ impl Delete {
     pub fn selection(&self) -> &Option<Expr> {
         match &self.inner {
             Statement::Delete { selection, .. } => selection,
+            // # Safety
+            // statement type is checked before.
             _ => unreachable!(),
         }
     }
