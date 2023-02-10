@@ -53,10 +53,7 @@ pub enum Error {
         expr,
         column_name
     ))]
-    UnsupportedDefaultValue {
-        column_name: String,
-        expr: Expr,
-    },
+    UnsupportedDefaultValue { column_name: String, expr: Expr },
 
     // Syntax error from sql parser.
     #[snafu(display("Syntax error, sql: {}, source: {}", sql, source))]
@@ -75,15 +72,10 @@ pub enum Error {
     InvalidSql { msg: String },
 
     #[snafu(display("Invalid column option, column name: {}, error: {}", name, msg))]
-    InvalidColumnOption {
-        name: String,
-        msg: String,
-    },
+    InvalidColumnOption { name: String, msg: String },
 
     #[snafu(display("SQL data type not supported yet: {:?}", t))]
-    SqlTypeNotSupported {
-        t: crate::ast::DataType,
-    },
+    SqlTypeNotSupported { t: crate::ast::DataType },
 
     #[snafu(display("Failed to parse value: {}", msg))]
     ParseSqlValue { msg: String },
