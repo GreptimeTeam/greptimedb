@@ -144,14 +144,20 @@ impl ManagerContext {
         procedures.contains_key(&procedure_id)
     }
 
-    /// Insert the `procedure` to the context.
+    /// Try to insert the `procedure` to the context if there is no procedure
+    /// with same [ProcedureId].
     ///
-    /// # Panics
-    /// Panics if the procedure already exists.
-    fn insert_procedure(&self, meta: ProcedureMetaRef) {
+    /// Returns `false` if there is already a procedure using the same [ProcedureId].
+    fn try_insert_procedure(&self, meta: ProcedureMetaRef) -> bool {
         let mut procedures = self.procedures.write().unwrap();
+        if procedures.contains_key(&meta.id) {
+            return false;
+        }
+
         let old = procedures.insert(meta.id, meta);
-        assert!(old.is_none());
+        debug_assert!(old.is_none());
+
+        true
     }
 
     /// Returns the [ProcedureState] of specific `procedure_id`.
@@ -274,7 +280,12 @@ impl LocalManager {
     }
 
     /// Submit a root procedure with given `procedure_id`.
-    fn submit_root(&self, procedure_id: ProcedureId, step: u32, procedure: BoxedProcedure) {
+    fn submit_root(
+        &self,
+        procedure_id: ProcedureId,
+        step: u32,
+        procedure: BoxedProcedure,
+    ) -> Result<()> {
         let meta = Arc::new(ProcedureMeta {
             id: procedure_id,
             lock_notify: Notify::new(),
@@ -291,12 +302,18 @@ impl LocalManager {
             store: ProcedureStore::new(self.state_store.clone()),
         };
 
-        self.manager_ctx.insert_procedure(meta);
+        // Inserts meta into the manager before actually spawnd the runner.
+        ensure!(
+            self.manager_ctx.try_insert_procedure(meta),
+            DuplicateProcedureSnafu { procedure_id },
+        );
 
         common_runtime::spawn_bg(async move {
             // Run the root procedure.
             let _ = runner.run().await;
         });
+
+        Ok(())
     }
 }
 
@@ -318,7 +335,7 @@ impl ProcedureManager for LocalManager {
             DuplicateProcedureSnafu { procedure_id }
         );
 
-        self.submit_root(procedure.id, 0, procedure.procedure);
+        self.submit_root(procedure.id, 0, procedure.procedure)?;
 
         Ok(())
     }
@@ -375,7 +392,7 @@ mod tests {
         assert!(!ctx.contains_procedure(meta.id));
         assert!(ctx.state(meta.id).is_none());
 
-        ctx.insert_procedure(meta.clone());
+        assert!(ctx.try_insert_procedure(meta.clone()));
         assert!(ctx.contains_procedure(meta.id));
 
         assert_eq!(ProcedureState::Running, ctx.state(meta.id).unwrap());
@@ -384,20 +401,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_manager_context_insert_duplicate() {
         let ctx = ManagerContext::new();
         let meta = Arc::new(test_util::procedure_meta_for_test());
 
-        ctx.insert_procedure(meta.clone());
-        ctx.insert_procedure(meta);
+        assert!(ctx.try_insert_procedure(meta.clone()));
+        assert!(!ctx.try_insert_procedure(meta));
     }
 
     fn new_child(parent_id: ProcedureId, ctx: &ManagerContext) -> ProcedureMetaRef {
         let mut child = test_util::procedure_meta_for_test();
         child.parent_id = Some(parent_id);
         let child = Arc::new(child);
-        ctx.insert_procedure(child.clone());
+        assert!(ctx.try_insert_procedure(child.clone()));
 
         let mut parent = Vec::new();
         ctx.find_procedures(&[parent_id], &mut parent);
@@ -410,7 +426,7 @@ mod tests {
     fn test_procedures_in_tree() {
         let ctx = ManagerContext::new();
         let root = Arc::new(test_util::procedure_meta_for_test());
-        ctx.insert_procedure(root.clone());
+        assert!(ctx.try_insert_procedure(root.clone()));
 
         assert_eq!(1, ctx.procedures_in_tree(&root).len());
 

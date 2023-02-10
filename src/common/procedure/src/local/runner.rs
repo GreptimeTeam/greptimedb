@@ -196,11 +196,6 @@ impl Runner {
             step = loaded_procedure.step;
         }
 
-        if self.manager_ctx.contains_procedure(procedure_id) {
-            // If the parent has already submitted this procedure, don't submit it again.
-            return;
-        }
-
         let meta = Arc::new(ProcedureMeta {
             id: procedure_id,
             lock_notify: Notify::new(),
@@ -217,7 +212,11 @@ impl Runner {
             store: self.store.clone(),
         };
 
-        self.manager_ctx.insert_procedure(meta);
+        if !self.manager_ctx.try_insert_procedure(meta) {
+            // If the parent has already submitted this procedure, don't submit it again.
+            return;
+        }
+
         // Add the id of the subprocedure to the metadata.
         self.meta.push_child(procedure_id);
 
@@ -589,7 +588,7 @@ mod tests {
         let meta = parent.new_meta(ROOT_ID);
         let procedure_id = meta.id;
         // Manually add this procedure to the manager ctx.
-        manager_ctx.insert_procedure(meta.clone());
+        assert!(manager_ctx.try_insert_procedure(meta.clone()));
 
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = new_procedure_store(object_store.clone());
