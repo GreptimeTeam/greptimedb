@@ -1317,12 +1317,7 @@ mod tests {
         let mut key_column_values = HashMap::with_capacity(2);
         key_column_values.insert("host".to_string(), del_hosts);
         key_column_values.insert("ts".to_string(), del_tss);
-        let del_req = DeleteRequest {
-            key_column_values,
-            catalog_name: "greptime".to_string(),
-            schema_name: "public".to_string(),
-            table_name: TABLE_NAME.to_string(),
-        };
+        let del_req = DeleteRequest { key_column_values };
         table.delete(del_req).await.unwrap();
 
         let session_ctx = SessionContext::new();

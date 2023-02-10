@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -30,39 +29,29 @@ use table::requests::DeleteRequest;
 
 use crate::error::{DeleteSnafu, NotSupportSqlSnafu, Result};
 use crate::instance::sql::table_idents_to_full_name;
-use crate::sql::{SqlHandler, SqlRequest};
+use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn delete(&self, req: DeleteRequest) -> Result<Output> {
+    pub(crate) async fn delete(&self, query_ctx: QueryContextRef, stmt: Delete) -> Result<Output> {
+        let (catalog_name, schema_name, table_name) =
+            table_idents_to_full_name(stmt.table_name(), query_ctx)?;
         let table_ref = TableReference {
-            catalog: &req.catalog_name.to_string(),
-            schema: &req.schema_name.to_string(),
-            table: &req.table_name.to_string(),
+            catalog: &catalog_name.to_string(),
+            schema: &schema_name.to_string(),
+            table: &table_name.to_string(),
         };
 
         let table = self.get_table(&table_ref)?;
+
+        let req = DeleteRequest {
+            key_column_values: parse_selection(stmt.selection())?,
+        };
 
         let affected_rows = table.delete(req).await.with_context(|_| DeleteSnafu {
             table_name: table_ref.to_string(),
         })?;
 
         Ok(Output::AffectedRows(affected_rows))
-    }
-
-    pub(crate) fn delete_to_request(
-        &self,
-        stmt: Delete,
-        query_ctx: QueryContextRef,
-    ) -> Result<SqlRequest> {
-        let (catalog_name, schema_name, table_name) =
-            table_idents_to_full_name(stmt.table_name(), query_ctx)?;
-        let key_column_values = parse_selection(stmt.selection())?;
-        Ok(SqlRequest::Delete(DeleteRequest {
-            key_column_values,
-            catalog_name,
-            schema_name,
-            table_name,
-        }))
     }
 }
 
@@ -71,19 +60,19 @@ impl SqlHandler {
 fn parse_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRef>> {
     let mut key_column_values = HashMap::new();
     if let Some(expr) = selection {
-        parser_expr(expr, &mut key_column_values)?;
+        parse_expr(expr, &mut key_column_values)?;
     }
     Ok(key_column_values)
 }
 
-fn parser_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) -> Result<()> {
+fn parse_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) -> Result<()> {
     // match BinaryOp
     if let Expr::BinaryOp { left, op, right } = expr {
-        match (left.deref(), op, right.deref()) {
+        match (&**left, op, &**right) {
             // match And operator
             (Expr::BinaryOp { .. }, BinaryOperator::And, Expr::BinaryOp { .. }) => {
-                parser_expr(left.deref(), key_column_values)?;
-                parser_expr(right.deref(), key_column_values)?;
+                parse_expr(left, key_column_values)?;
+                parse_expr(right, key_column_values)?;
                 return Ok(());
             }
             // match Eq operator

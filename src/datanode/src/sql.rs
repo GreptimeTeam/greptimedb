@@ -19,6 +19,7 @@ use query::query_engine::QueryEngineRef;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use sql::statements::delete::Delete;
 use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowTables};
@@ -46,7 +47,7 @@ pub enum SqlRequest {
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
     Explain(Box<Explain>),
-    Delete(DeleteRequest),
+    Delete(Delete),
 }
 
 // Handler to execute SQL except query
@@ -80,7 +81,7 @@ impl SqlHandler {
             SqlRequest::CreateDatabase(req) => self.create_database(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
-            SqlRequest::Delete(req) => self.delete(req).await,
+            SqlRequest::Delete(stmt) => self.delete(query_ctx.clone(), stmt).await,
             SqlRequest::ShowDatabases(stmt) => {
                 show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
