@@ -13,24 +13,21 @@
 // limitations under the License.
 
 use sqlparser::ast::{Expr, ObjectName, Statement, TableFactor};
-use sqlparser::parser::ParserError;
 
-use crate::error::Result;
+use crate::error;
+use crate::error::{Error, Result};
 use crate::statements::table_idents_to_full_name;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delete {
-    // Can only be sqlparser::ast::Statement::Delete variant
-    pub inner: Statement,
+    table_name: TableFactor,
+    selection: Option<Expr>,
 }
 
 impl Delete {
     pub fn full_table_name(&self) -> Result<(String, String, String)> {
-        match &self.inner {
-            Statement::Delete {
-                table_name: TableFactor::Table { name, .. },
-                ..
-            } => table_idents_to_full_name(name),
+        match &self.table_name {
+            TableFactor::Table { name, .. } => table_idents_to_full_name(name),
             // # Safety
             // statement type is checked before.
             _ => unreachable!(),
@@ -38,11 +35,8 @@ impl Delete {
     }
 
     pub fn table_name(&self) -> &ObjectName {
-        match &self.inner {
-            Statement::Delete {
-                table_name: TableFactor::Table { name, .. },
-                ..
-            } => name,
+        match &self.table_name {
+            TableFactor::Table { name, .. } => name,
             // # Safety
             // statement type is checked before.
             _ => unreachable!(),
@@ -50,24 +44,38 @@ impl Delete {
     }
 
     pub fn selection(&self) -> &Option<Expr> {
-        match &self.inner {
-            Statement::Delete { selection, .. } => selection,
-            // # Safety
-            // statement type is checked before.
-            _ => unreachable!(),
-        }
+        &self.selection
     }
 }
 
 impl TryFrom<Statement> for Delete {
-    type Error = ParserError;
+    type Error = Error;
 
-    fn try_from(stmt: Statement) -> std::result::Result<Self, Self::Error> {
+    fn try_from(stmt: Statement) -> Result<Self> {
         match stmt {
-            Statement::Delete { .. } => Ok(Delete { inner: stmt }),
-            unexp => Err(ParserError::ParserError(format!(
-                "Not expected to be {unexp}"
-            ))),
+            Statement::Delete {
+                table_name,
+                using,
+                selection,
+                returning,
+            } => {
+                if using.is_some() || returning.is_some() {
+                    return error::InvalidSqlSnafu {
+                        msg: "delete sql isn't support using and returning.".to_string(),
+                    }
+                    .fail();
+                }
+                Ok(Delete {
+                    table_name,
+                    selection,
+                })
+            }
+            unexp => {
+                return error::InvalidSqlSnafu {
+                    msg: format!("Not expected to be {unexp}"),
+                }
+                .fail();
+            }
         }
     }
 }
