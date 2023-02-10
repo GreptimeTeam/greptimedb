@@ -295,7 +295,7 @@ impl DistInstance {
             }
             Statement::Insert(insert) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(insert.table_name(), query_ctx)
+                    table_idents_to_full_name(insert.table_name(), query_ctx.clone())
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
 
@@ -305,7 +305,7 @@ impl DistInstance {
                     .context(CatalogSnafu)?
                     .context(TableNotFoundSnafu { table_name: table })?;
 
-                let insert_request = insert_to_request(&table, *insert)?;
+                let insert_request = insert_to_request(&table, *insert, query_ctx)?;
 
                 return Ok(Output::AffectedRows(
                     table.insert(insert_request).await.context(TableSnafu)?,
