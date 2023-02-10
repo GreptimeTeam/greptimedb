@@ -1,12 +1,24 @@
-use std::sync::Arc;
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
 use crossbeam_utils::atomic::AtomicCell;
-use datatypes::arrow::array::{Array, ArrayRef, BooleanArray};
+use datatypes::arrow::array::{Array, BooleanArray};
 use datatypes::arrow::compute;
-use datatypes::arrow::compute::kernels::{arithmetic, boolean};
+use datatypes::arrow::compute::kernels::arithmetic;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::value::{self, OrderedFloat};
@@ -76,27 +88,32 @@ impl PyVector {
     #[pymethod(magic)]
     fn add(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
+            self.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
         } else {
-            self.arith_op(other, None, arithmetic::add_dyn, vm)
+            self.rspy_vector_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
         }
     }
 
     #[pymethod(magic)]
     fn sub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
+            self.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
         } else {
-            self.arith_op(other, None, arithmetic::subtract_dyn, vm)
+            self.rspy_vector_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
         }
     }
 
     #[pymethod(magic)]
     fn rsub(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, None, arrow_rsub, vm)
+            self.rspy_scalar_arith_op(other, None, arrow_rsub, vm)
         } else {
-            self.arith_op(other, None, |a, b| arithmetic::subtract_dyn(b, a), vm)
+            self.rspy_vector_arith_op(
+                other,
+                None,
+                wrap_result(|a, b| arithmetic::subtract_dyn(b, a)),
+                vm,
+            )
         }
     }
 
@@ -104,26 +121,26 @@ impl PyVector {
     #[pymethod(magic)]
     fn mul(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
+            self.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
         } else {
-            self.arith_op(other, None, arithmetic::multiply_dyn, vm)
+            self.rspy_vector_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
         }
     }
 
     #[pymethod(magic)]
     fn truediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(
+            self.rspy_scalar_arith_op(
                 other,
                 Some(ArrowDataType::Float64),
                 wrap_result(arithmetic::divide_dyn),
                 vm,
             )
         } else {
-            self.arith_op(
+            self.rspy_vector_arith_op(
                 other,
                 Some(ArrowDataType::Float64),
-                arithmetic::divide_dyn,
+                wrap_result(arithmetic::divide_dyn),
                 vm,
             )
         }
@@ -132,12 +149,12 @@ impl PyVector {
     #[pymethod(magic)]
     fn rtruediv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(other, Some(ArrowDataType::Float64), arrow_rtruediv, vm)
+            self.rspy_scalar_arith_op(other, Some(ArrowDataType::Float64), arrow_rtruediv, vm)
         } else {
-            self.arith_op(
+            self.rspy_vector_arith_op(
                 other,
                 Some(ArrowDataType::Float64),
-                |a, b| arithmetic::divide_dyn(b, a),
+                wrap_result(|a, b| arithmetic::divide_dyn(b, a)),
                 vm,
             )
         }
@@ -146,17 +163,17 @@ impl PyVector {
     #[pymethod(magic)]
     fn floordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if rspy_is_pyobj_scalar(&other, vm) {
-            self.scalar_arith_op(
+            self.rspy_scalar_arith_op(
                 other,
                 Some(ArrowDataType::Int64),
                 wrap_result(arithmetic::divide_dyn),
                 vm,
             )
         } else {
-            self.arith_op(
+            self.rspy_vector_arith_op(
                 other,
                 Some(ArrowDataType::Int64),
-                arithmetic::divide_dyn,
+                wrap_result(arithmetic::divide_dyn),
                 vm,
             )
         }
@@ -166,12 +183,12 @@ impl PyVector {
     fn rfloordiv(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         if rspy_is_pyobj_scalar(&other, vm) {
             // FIXME: DataType convert problem, target_type should be inferred?
-            self.scalar_arith_op(other, Some(ArrowDataType::Int64), arrow_rfloordiv, vm)
+            self.rspy_scalar_arith_op(other, Some(ArrowDataType::Int64), arrow_rfloordiv, vm)
         } else {
-            self.arith_op(
+            self.rspy_vector_arith_op(
                 other,
                 Some(ArrowDataType::Int64),
-                |a, b| arithmetic::divide_dyn(b, a),
+                wrap_result(|a, b| arithmetic::divide_dyn(b, a)),
                 vm,
             )
         }
@@ -288,10 +305,6 @@ impl Comparable for PyVector {
     ) -> PyResult<PyComparisonValue> {
         Ok(PyComparisonValue::NotImplemented)
     }
-}
-
-fn from_debug_error(err: impl std::fmt::Debug, vm: &VirtualMachine) -> PyBaseExceptionRef {
-    vm.new_runtime_error(format!("Runtime Error: {err:#?}"))
 }
 
 fn get_concrete_type(obj: &PyObjectRef, vm: &VirtualMachine) -> PyResult<ConcreteDataType> {

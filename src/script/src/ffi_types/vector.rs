@@ -55,16 +55,6 @@ fn to_type_error(vm: &'_ VirtualMachine) -> impl FnOnce(String) -> PyBaseExcepti
     |msg: String| vm.new_type_error(msg)
 }
 
-fn emit_cast_error(
-    vm: &VirtualMachine,
-    src_ty: &ArrowDataType,
-    dst_ty: &ArrowDataType,
-) -> PyBaseExceptionRef {
-    to_type_error(vm)(format!(
-        "Can't cast source operand of type {src_ty:?} into target type of {dst_ty:?}",
-    ))
-}
-
 /// Performs `val - arr`.
 pub(crate) fn arrow_rsub(arr: &dyn Array, val: &dyn Array) -> Result<ArrayRef, String> {
     arithmetic::subtract_dyn(val, arr).map_err(|e| format!("rsub error: {e}"))
@@ -180,34 +170,14 @@ impl PyVector {
 
     pub(crate) fn scalar_arith_op<F>(
         &self,
-        other: PyObjectRef,
+        right: value::Value,
         target_type: Option<ArrowDataType>,
         op: F,
-        vm: &VirtualMachine,
-    ) -> PyResult<PyVector>
+    ) -> Result<Self, String>
     where
         F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
     {
-        // the right operand only support PyInt or PyFloat,
-        let (right, right_type) = {
-            if is_instance::<PyInt>(&other, vm) {
-                other
-                    .try_into_value::<i64>(vm)
-                    .map(|v| (value::Value::Int64(v), ArrowDataType::Int64))?
-            } else if is_instance::<PyFloat>(&other, vm) {
-                other.try_into_value::<f64>(vm).map(|v| {
-                    (
-                        value::Value::Float64(OrderedFloat(v)),
-                        ArrowDataType::Float64,
-                    )
-                })?
-            } else {
-                return Err(vm.new_type_error(format!(
-                    "Can't cast right operand into Scalar of Int or Float, actual: {}",
-                    other.class().name()
-                )));
-            }
-        };
+        let right_type = right.data_type().as_arrow_type();
         // assuming they are all 64 bit type if possible
         let left = self.to_arrow_array();
 
@@ -223,7 +193,7 @@ impl PyVector {
                 ArrowDataType::Float64
             }
         });
-        let left = cast(left, &target_type).map_err(to_type_error(vm))?;
+        let left = cast(left, &target_type)?;
         let left_len = left.len();
 
         // Convert `right` to an array of `target_type`.
@@ -251,21 +221,20 @@ impl PyVector {
                 _ => unreachable!(),
             }
         } else {
-            return Err(emit_cast_error(vm, right_type, &target_type));
+            return Err(format!(
+                "Can't cast source operand of type {:?} into target type of {:?}",
+                right_type, &target_type
+            ));
         };
 
-        let result = op(left.as_ref(), right.as_ref()).map_err(to_type_error(vm))?;
+        let result = op(left.as_ref(), right.as_ref())?;
 
         Ok(Helper::try_into_vector(result.clone())
-            .map_err(|e| {
-                vm.new_type_error(format!(
-                    "Can't cast result into vector, result: {result:?}, err: {e:?}",
-                ))
-            })?
+            .map_err(|e| format!("Can't cast result into vector, result: {result:?}, err: {e:?}",))?
             .into())
     }
 
-    pub(crate) fn arith_op<F>(
+    pub(crate) fn rspy_scalar_arith_op<F>(
         &self,
         other: PyObjectRef,
         target_type: Option<ArrowDataType>,
@@ -273,14 +242,36 @@ impl PyVector {
         vm: &VirtualMachine,
     ) -> PyResult<PyVector>
     where
-        F: Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef>,
+        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
     {
-        let right = other.downcast_ref::<PyVector>().ok_or_else(|| {
-            vm.new_type_error(format!(
-                "Can't cast right operand into PyVector, actual: {}",
-                other.class().name()
-            ))
-        })?;
+        // the right operand only support PyInt or PyFloat,
+        let right = {
+            if is_instance::<PyInt>(&other, vm) {
+                other.try_into_value::<i64>(vm).map(value::Value::Int64)?
+            } else if is_instance::<PyFloat>(&other, vm) {
+                other
+                    .try_into_value::<f64>(vm)
+                    .map(|v| (value::Value::Float64(OrderedFloat(v))))?
+            } else {
+                return Err(vm.new_type_error(format!(
+                    "Can't cast right operand into Scalar of Int or Float, actual: {}",
+                    other.class().name()
+                )));
+            }
+        };
+        self.scalar_arith_op(right, target_type, op)
+            .map_err(to_type_error(vm))
+    }
+
+    pub(crate) fn vector_arith_op<F>(
+        &self,
+        right: &Self,
+        target_type: Option<ArrowDataType>,
+        op: F,
+    ) -> Result<PyVector, String>
+    where
+        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
+    {
         let left = self.to_arrow_array();
         let right = right.to_arrow_array();
 
@@ -297,19 +288,34 @@ impl PyVector {
             }
         });
 
-        let left = cast(left, &target_type).map_err(to_type_error(vm))?;
-        let right = cast(right, &target_type).map_err(to_type_error(vm))?;
+        let left = cast(left, &target_type)?;
+        let right = cast(right, &target_type)?;
 
-        let result = op(left.as_ref(), right.as_ref())
-            .map_err(|e| vm.new_type_error(format!("Can't compute op, error: {e}")))?;
+        let result = op(left.as_ref(), right.as_ref())?;
 
         Ok(Helper::try_into_vector(result.clone())
-            .map_err(|e| {
-                vm.new_type_error(format!(
-                    "Can't cast result into vector, result: {result:?}, err: {e:?}",
-                ))
-            })?
+            .map_err(|e| format!("Can't cast result into vector, result: {result:?}, err: {e:?}",))?
             .into())
+    }
+
+    pub(crate) fn rspy_vector_arith_op<F>(
+        &self,
+        other: PyObjectRef,
+        target_type: Option<ArrowDataType>,
+        op: F,
+        vm: &VirtualMachine,
+    ) -> PyResult<PyVector>
+    where
+        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
+    {
+        let right = other.downcast_ref::<PyVector>().ok_or_else(|| {
+            vm.new_type_error(format!(
+                "Can't cast right operand into PyVector, actual type: {}",
+                other.class().name()
+            ))
+        })?;
+        self.vector_arith_op(right, target_type, op)
+            .map_err(to_type_error(vm))
     }
 
     pub(crate) fn _getitem(&self, needle: &PyObject, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
@@ -399,10 +405,10 @@ impl PyVector {
     ) -> PyResult<PyVector> {
         if rspy_is_pyobj_scalar(&other, vm) {
             let scalar_op = get_arrow_scalar_op(op);
-            self.scalar_arith_op(other, None, scalar_op, vm)
+            self.rspy_scalar_arith_op(other, None, scalar_op, vm)
         } else {
             let arr_op = get_arrow_op(op);
-            self.arith_op(other, None, arr_op, vm)
+            self.rspy_vector_arith_op(other, None, wrap_result(arr_op), vm)
         }
     }
 

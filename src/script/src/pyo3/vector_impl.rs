@@ -1,11 +1,13 @@
-use datafusion::from_slice::FromSlice;
+use datafusion::arrow::compute::kernels::arithmetic;
+use datatypes::arrow::array::{Array, ArrayRef};
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::{self, OrderedFloat};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
 
-use crate::ffi_types::vector::PyVector;
+use crate::ffi_types::vector::{wrap_result, PyVector};
 
 macro_rules! get_con_type {
     ($obj:ident, $($pyty:ident => $con_ty:ident),*$(,)?) => {
@@ -20,6 +22,7 @@ macro_rules! get_con_type {
 }
 
 fn get_py_type(obj: &PyAny) -> PyResult<ConcreteDataType> {
+    // Bool need to precede Int because `PyBool` is also a instance of `PyInt`
     get_con_type!(obj,
         PyBool => boolean_datatype,
         PyInt => int64_datatype,
@@ -28,8 +31,39 @@ fn get_py_type(obj: &PyAny) -> PyResult<ConcreteDataType> {
     )
 }
 
-fn pyo3_is_obj_scalar(obj: &PyAny)->bool{
+fn pyo3_is_obj_scalar(obj: &PyAny) -> bool {
     get_py_type(obj).is_ok()
+}
+
+impl PyVector {
+    fn pyo3_scalar_arith_op<F>(
+        &self,
+        py: Python<'_>,
+        right: PyObject,
+        target_type: Option<ArrowDataType>,
+        op: F,
+    ) -> PyResult<Self>
+    where
+        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
+    {
+        let right = pyo3_obj_try_to_typed_val(right.as_ref(py), None)?;
+        self.scalar_arith_op(right, target_type, op)
+            .map_err(PyValueError::new_err)
+    }
+    fn pyo3_vector_arith_op<F>(
+        &self,
+        py: Python<'_>,
+        right: PyObject,
+        target_type: Option<ArrowDataType>,
+        op: F,
+    ) -> PyResult<Self>
+    where
+        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
+    {
+        let right = right.extract::<PyVector>(py)?;
+        self.vector_arith_op(&right, target_type, op)
+            .map_err(PyValueError::new_err)
+    }
 }
 
 /// TODO(discord9): add similar methods
@@ -49,32 +83,75 @@ impl PyVector {
         }
         Ok(buf.to_vector().into())
     }
-    fn __add__(&self, other: PyObject) -> PyResult<Self> {
-        todo!()
+    fn __add__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
+        if pyo3_is_obj_scalar(other.as_ref(py)) {
+            self.pyo3_scalar_arith_op(py, other, None, wrap_result(arithmetic::add_dyn))
+        } else {
+            self.pyo3_vector_arith_op(py, other, None, wrap_result(arithmetic::add_dyn))
+        }
     }
-    fn __radd__(&self, other: PyObject) -> PyResult<Self> {
-        self.__add__(other)
+    fn __radd__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
+        self.__add__(py, other)
     }
 
-    fn __sub__(&self, other: PyObject) -> PyResult<Self> {
+    fn __sub__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
+        if pyo3_is_obj_scalar(other.as_ref(py)) {
+            self.pyo3_scalar_arith_op(py, other, None, wrap_result(arithmetic::subtract_dyn))
+        } else {
+            self.pyo3_vector_arith_op(py, other, None, wrap_result(arithmetic::subtract_dyn))
+        }
+    }
+    fn __rsub__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
+        if pyo3_is_obj_scalar(other.as_ref(py)) {
+            self.pyo3_scalar_arith_op(
+                py,
+                other,
+                None,
+                wrap_result(|a, b| arithmetic::subtract_dyn(b, a)),
+            )
+        } else {
+            self.pyo3_vector_arith_op(
+                py,
+                other,
+                None,
+                wrap_result(|a, b| arithmetic::subtract_dyn(b, a)),
+            )
+        }
+    }
+    fn __mul__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
+        if pyo3_is_obj_scalar(other.as_ref(py)) {
+            self.pyo3_scalar_arith_op(py, other, None, wrap_result(arithmetic::multiply_dyn))
+        } else {
+            self.pyo3_vector_arith_op(py, other, None, wrap_result(arithmetic::multiply_dyn))
+        }
+    }
+    fn __rmul__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
+        self.__mul__(py, other)
+    }
+    fn __truediv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
+        if pyo3_is_obj_scalar(other.as_ref(py)) {
+            self.pyo3_scalar_arith_op(
+                py,
+                other,
+                Some(ArrowDataType::Float64),
+                wrap_result(arithmetic::divide_dyn),
+            )
+        } else {
+            self.pyo3_vector_arith_op(
+                py,
+                other,
+                Some(ArrowDataType::Float64),
+                wrap_result(arithmetic::divide_dyn),
+            )
+        }
+    }
+    fn __rtruediv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         todo!()
     }
-    fn __rsub__(&self, other: PyObject) -> PyResult<Self> {
+    fn __floordiv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         todo!()
     }
-    fn __mul__(&self, other: PyObject) -> PyResult<Self> {
-        todo!()
-    }
-    fn __truediv__(&self, other: PyObject) -> PyResult<Self> {
-        todo!()
-    }
-    fn __rtruediv__(&self, other: PyObject) -> PyResult<Self> {
-        todo!()
-    }
-    fn __floordiv__(&self, other: PyObject) -> PyResult<Self> {
-        todo!()
-    }
-    fn __rfloordiv__(&self, other: PyObject) -> PyResult<Self> {
+    fn __rfloordiv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         todo!()
     }
     fn __and__(&self, other: &Self) -> PyResult<Self> {
@@ -93,7 +170,7 @@ impl PyVector {
         Ok("PyVector is like a Python array, a compact array of elem of same datatype, but Readonly for now".to_string())
     }
     fn __repr__(&self) -> PyResult<String> {
-        Ok(format!("{:?}", self))
+        Ok(format!("{self:?}"))
     }
 }
 
@@ -109,7 +186,9 @@ macro_rules! to_con_type {
     ($dtype:ident,$obj:ident, $($cty:ident =ord=> $rty:ty),*$(,)?) => {
         match $dtype {
             $(
-                ConcreteDataType::$cty(_) => $obj.extract::<$rty>().map(OrderedFloat).map(value::Value::$cty),
+                ConcreteDataType::$cty(_) => $obj.extract::<$rty>()
+                .map(OrderedFloat)
+                .map(value::Value::$cty),
             )*
             _ => unreachable!(),
         }
@@ -121,7 +200,19 @@ fn pyo3_obj_try_to_typed_val(
     obj: &PyAny,
     dtype: Option<ConcreteDataType>,
 ) -> PyResult<value::Value> {
-    if let Ok(num) = obj.downcast::<PyInt>() {
+    if let Ok(b) = obj.downcast::<PyBool>() {
+        if let Some(ConcreteDataType::Boolean(_)) = dtype {
+            let dtype = ConcreteDataType::boolean_datatype();
+            let ret = to_con_type!(dtype, b,
+                Boolean => bool
+            )?;
+            Ok(ret)
+        } else {
+            Err(PyValueError::new_err(format!(
+                "Can't cast num to {dtype:?}"
+            )))
+        }
+    } else if let Ok(num) = obj.downcast::<PyInt>() {
         if let Some(dtype) = dtype {
             if dtype.is_signed() || dtype.is_unsigned() {
                 let ret = to_con_type!(dtype, num,
@@ -136,7 +227,9 @@ fn pyo3_obj_try_to_typed_val(
                 )?;
                 Ok(ret)
             } else {
-                todo!()
+                Err(PyValueError::new_err(format!(
+                    "Can't cast num to {dtype:?}"
+                )))
             }
         } else {
             num.extract::<i64>().map(value::Value::Int64)
@@ -151,16 +244,18 @@ fn pyo3_obj_try_to_typed_val(
                 Ok(ret)
             } else {
                 // return error
-                todo!()
+                Err(PyValueError::new_err(format!(
+                    "Can't cast num to {dtype:?}"
+                )))
             }
         } else {
             num.extract::<f64>()
                 .map(|v| value::Value::Float64(OrderedFloat(v)))
         }
-    } else if let Ok(b) = obj.downcast::<PyBool>() {
-        todo!()
     } else {
-        todo!()
+        Err(PyValueError::new_err(format!(
+            "Can't cast {obj} to {dtype:?}"
+        )))
     }
 }
 
@@ -171,7 +266,7 @@ mod test {
     use std::sync::Arc;
 
     use datatypes::scalars::ScalarVector;
-    use datatypes::vectors::{BooleanVector, VectorRef};
+    use datatypes::vectors::{BooleanVector, Float64Vector, VectorRef};
     use pyo3::types::{PyDict, PyModule};
     use pyo3::{PyCell, Python};
 
@@ -180,17 +275,21 @@ mod test {
         let mut locals = HashMap::new();
         let b = BooleanVector::from_slice(&[true, false, true, true]);
         let b: PyVector = (Arc::new(b) as VectorRef).into();
-        locals.insert("bool_v1".to_string(), b);
+        locals.insert("bv1".to_string(), b);
         let b = BooleanVector::from_slice(&[false, false, false, true]);
         let b: PyVector = (Arc::new(b) as VectorRef).into();
-        locals.insert("bool_v2".to_string(), b);
+        locals.insert("bv2".to_string(), b);
+
+        let f = Float64Vector::from_slice(&[0.0f64, 1.0, 42.0, 3.0]);
+        let f: PyVector = (Arc::new(f) as VectorRef).into();
+        locals.insert("fv1".to_string(), f);
+        let f = Float64Vector::from_slice(&[1919.810f64, 0.114, 51.4, 3.0]);
+        let f: PyVector = (Arc::new(f) as VectorRef).into();
+        locals.insert("fv2".to_string(), f);
         locals
     }
     #[test]
     fn test_py_vector_api() {
-        let b = BooleanVector::from_slice(&[true, false, true, true]);
-        let b = Arc::new(b) as VectorRef;
-        let b: PyVector = b.into();
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let module = PyModule::new(py, "gt").unwrap();
@@ -211,6 +310,7 @@ mod test {
                 r#"
 from gt import vector
 print(vector([1,2]))
+print(fv1+fv2)
 "#,
                 None,
                 Some(locals),
