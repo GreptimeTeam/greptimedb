@@ -14,6 +14,7 @@
 
 mod parquet;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -29,11 +30,13 @@ use crate::schema::ProjectedSchemaRef;
 use crate::sst::parquet::{ParquetReader, ParquetWriter};
 
 /// Maximum level of SSTs.
-pub const MAX_LEVEL: usize = 1;
+pub const MAX_LEVEL: u8 = 2;
 
-// We only has fixed number of level, so we array to hold elements. This implement
+pub type Level = u8;
+
+// We only has fixed number of level, so we use array to hold elements. This implementation
 // detail of LevelMetaVec should not be exposed to the user of [LevelMetas].
-type LevelMetaVec = [LevelMeta; MAX_LEVEL];
+type LevelMetaVec = [LevelMeta; MAX_LEVEL as usize];
 
 /// Visitor to access file in each level.
 pub trait Visitor {
@@ -57,6 +60,17 @@ impl LevelMetas {
         LevelMetas {
             levels: new_level_meta_vec(),
         }
+    }
+
+    /// Returns total level number.
+    #[inline]
+    pub fn level_num(&self) -> usize {
+        self.levels.len()
+    }
+
+    #[inline]
+    pub fn level(&self, level: Level) -> &LevelMeta {
+        &self.levels[level as usize]
     }
 
     /// Merge `self` with files to add/remove to create a new [LevelMetas].
@@ -103,7 +117,7 @@ impl Default for LevelMetas {
 /// Metadata of files in same SST level.
 #[derive(Debug, Default, Clone)]
 pub struct LevelMeta {
-    level: u8,
+    level: Level,
     /// Handles to the files in this level.
     // TODO(yingwen): Now for simplicity, files are unordered, maybe sort the files by time range
     // or use another structure to hold them.
@@ -111,27 +125,39 @@ pub struct LevelMeta {
 }
 
 impl LevelMeta {
+    pub fn new_empty(level: Level) -> Self {
+        Self {
+            level,
+            files: vec![],
+        }
+    }
+
     fn add_file(&mut self, file: FileHandle) {
         self.files.push(file);
     }
 
-    fn visit_level<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
+    pub fn visit_level<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
         visitor.visit(self.level.into(), &self.files)
     }
 
-    #[cfg(test)]
+    /// Returns the level of level meta.
+    #[inline]
+    pub fn level(&self) -> Level {
+        self.level
+    }
+
     pub fn files(&self) -> &[FileHandle] {
         &self.files
     }
 }
 
 fn new_level_meta_vec() -> LevelMetaVec {
-    let mut levels = [LevelMeta::default(); MAX_LEVEL];
-    for (i, level) in levels.iter_mut().enumerate() {
-        level.level = i as u8;
-    }
-
-    levels
+    (0u8..MAX_LEVEL)
+        .into_iter()
+        .map(LevelMeta::new_empty)
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap() // safety: LevelMetaVec is a fixed length array with length MAX_LEVEL
 }
 
 /// In-memory handle to a file.
@@ -158,16 +184,15 @@ impl FileHandle {
         &self.inner.meta.file_name
     }
 
-    /// Return the start timestamp of current SST file.
     #[inline]
-    pub fn start_timestamp(&self) -> Option<Timestamp> {
-        self.inner.meta.start_timestamp
+    pub fn time_range(&self) -> &Option<(Timestamp, Timestamp)> {
+        &self.inner.meta.time_range
     }
 
-    /// Return the end timestamp of current SST file.
+    /// Returns true if current file is under compaction.
     #[inline]
-    pub fn end_timestamp(&self) -> Option<Timestamp> {
-        self.inner.meta.end_timestamp
+    pub fn compacting(&self) -> bool {
+        self.inner.compacting.load(Ordering::Relaxed)
     }
 }
 
@@ -177,11 +202,15 @@ impl FileHandle {
 #[derive(Debug)]
 struct FileHandleInner {
     meta: FileMeta,
+    compacting: AtomicBool,
 }
 
 impl FileHandleInner {
     fn new(meta: FileMeta) -> FileHandleInner {
-        FileHandleInner { meta }
+        FileHandleInner {
+            meta,
+            compacting: AtomicBool::new(false),
+        }
     }
 }
 
@@ -189,10 +218,9 @@ impl FileHandleInner {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileMeta {
     pub file_name: String,
-    pub start_timestamp: Option<Timestamp>,
-    pub end_timestamp: Option<Timestamp>,
+    pub time_range: Option<(Timestamp, Timestamp)>,
     /// SST level of the file.
-    pub level: u8,
+    pub level: Level,
 }
 
 #[derive(Debug, Default)]
@@ -212,8 +240,7 @@ pub struct ReadOptions {
 
 #[derive(Debug)]
 pub struct SstInfo {
-    pub start_timestamp: Option<Timestamp>,
-    pub end_timestamp: Option<Timestamp>,
+    pub time_range: Option<(Timestamp, Timestamp)>,
 }
 
 /// SST access layer.

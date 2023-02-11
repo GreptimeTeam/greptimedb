@@ -14,6 +14,8 @@
 
 use std::cmp::Ordering;
 
+use crate::Timestamp;
+
 /// Unix timestamp in millisecond resolution.
 ///
 /// Negative timestamp is allowed, which represents timestamp before '1970-01-01T00:00:00'.
@@ -77,22 +79,29 @@ impl PartialOrd<TimestampMillis> for i64 {
     }
 }
 
-pub trait BucketAligned {
-    /// Returns the timestamp aligned by `bucket_duration` in milliseconds or
-    /// `None` if overflow occurred.
+pub trait BucketAligned: Sized {
+    /// Returns the timestamp aligned by `bucket_duration` or `None` if underflow occurred.
     ///
     /// # Panics
     /// Panics if `bucket_duration <= 0`.
-    fn align_by_bucket(self, bucket_duration: i64) -> Option<TimestampMillis>;
+    fn align_by_bucket(self, bucket_duration: i64) -> Option<Self>;
 }
 
-impl<T: Into<i64>> BucketAligned for T {
-    fn align_by_bucket(self, bucket_duration: i64) -> Option<TimestampMillis> {
+impl BucketAligned for i64 {
+    fn align_by_bucket(self, bucket_duration: i64) -> Option<Self> {
         assert!(bucket_duration > 0, "{}", bucket_duration);
-        self.into()
-            .checked_div_euclid(bucket_duration)
+        self.checked_div_euclid(bucket_duration)
             .and_then(|val| val.checked_mul(bucket_duration))
-            .map(TimestampMillis)
+    }
+}
+
+impl BucketAligned for Timestamp {
+    fn align_by_bucket(self, bucket_duration: i64) -> Option<Self> {
+        assert!(bucket_duration > 0, "{}", bucket_duration);
+        let unit = self.unit();
+        self.value()
+            .align_by_bucket(bucket_duration)
+            .map(|val| Timestamp::new(val, unit))
     }
 }
 
@@ -121,24 +130,54 @@ mod tests {
     #[test]
     fn test_align_by_bucket() {
         let bucket = 100;
-        assert_eq!(0, TimestampMillis::new(0).align_by_bucket(bucket).unwrap());
-        assert_eq!(0, TimestampMillis::new(1).align_by_bucket(bucket).unwrap());
-        assert_eq!(0, TimestampMillis::new(99).align_by_bucket(bucket).unwrap());
         assert_eq!(
-            100,
-            TimestampMillis::new(100).align_by_bucket(bucket).unwrap()
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(0)
+                .align_by_bucket(bucket)
+                .unwrap()
         );
         assert_eq!(
-            100,
-            TimestampMillis::new(199).align_by_bucket(bucket).unwrap()
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(1)
+                .align_by_bucket(bucket)
+                .unwrap()
+        );
+        assert_eq!(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(99)
+                .align_by_bucket(bucket)
+                .unwrap()
+        );
+        assert_eq!(
+            Timestamp::new_millisecond(100),
+            Timestamp::new_millisecond(100)
+                .align_by_bucket(bucket)
+                .unwrap()
+        );
+        assert_eq!(
+            Timestamp::new_millisecond(100),
+            Timestamp::new_millisecond(199)
+                .align_by_bucket(bucket)
+                .unwrap()
         );
 
-        assert_eq!(0, TimestampMillis::MAX.align_by_bucket(i64::MAX).unwrap());
         assert_eq!(
-            i64::MAX,
-            TimestampMillis::INF.align_by_bucket(i64::MAX).unwrap()
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(i64::MAX - 1)
+                .align_by_bucket(i64::MAX)
+                .unwrap()
         );
 
-        assert_eq!(None, TimestampMillis::MIN.align_by_bucket(bucket));
+        assert_eq!(
+            Timestamp::new_millisecond(i64::MAX),
+            Timestamp::new_millisecond(i64::MAX)
+                .align_by_bucket(i64::MAX)
+                .unwrap()
+        );
+
+        assert_eq!(
+            None,
+            Timestamp::new_millisecond(i64::MIN).align_by_bucket(bucket)
+        );
     }
 }

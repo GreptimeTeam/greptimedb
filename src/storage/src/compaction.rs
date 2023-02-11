@@ -16,4 +16,5 @@ mod dedup_deque;
 mod picker;
 mod rate_limit;
 mod scheduler;
+mod strategy;
 mod task;
