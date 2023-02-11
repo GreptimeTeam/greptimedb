@@ -148,7 +148,7 @@ fn infer_time_bucket(files: &[FileHandle]) -> i64 {
     max_sec
         .checked_sub(min_sec)
         .map(fit_time_bucket) // return the max bucket on subtraction overflow.
-        .unwrap_or_else(|| *TIME_BUCKETS.last().unwrap()) // // safety: TIME_BUCKETS cannot be empty.
+        .unwrap_or_else(|| *TIME_BUCKETS.last().unwrap()) // safety: TIME_BUCKETS cannot be empty.
 }
 
 /// A set of predefined time buckets.

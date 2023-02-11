@@ -224,7 +224,7 @@ impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler
         let cloned_notify = self.task_notifier.clone();
         let table_id = req.table_id();
         let Some(task) = self.build_compaction_task(req).await? else {
-            info!("No files need to compaction in table: {}", table_id);
+            info!("No file needs compaction in table: {}", table_id);
             return Ok(());
         };
 
