@@ -32,11 +32,13 @@ use datatypes::types::{LogicalPrimitiveType, WrapperType};
 use datatypes::vectors::Helper;
 use datatypes::with_match_primitive_type_id;
 use num_traits::AsPrimitive;
-use query::error::Result;
-use query::parser::QueryLanguageParser;
-use query::QueryEngineFactory;
 use session::context::QueryContext;
 use table::test_util::MemTable;
+
+use crate::QueryEngineFactory;
+use crate::error::Result;
+use crate::parser::{QueryLanguageParser};
+
 
 #[derive(Debug, Default)]
 struct MySumAccumulator<T, SumT> {

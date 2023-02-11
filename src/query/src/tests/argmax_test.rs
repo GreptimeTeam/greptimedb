@@ -12,73 +12,80 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+
+
 use std::sync::Arc;
-mod function;
 
 use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
 use common_recordbatch::{util, RecordBatch};
 use datatypes::for_all_primitive_types;
+use datatypes::prelude::*;
 use datatypes::types::WrapperType;
-use num_traits::AsPrimitive;
-use query::error::Result;
-use query::parser::QueryLanguageParser;
-use query::QueryEngine;
 use session::context::QueryContext;
-use statrs::distribution::{Continuous, Normal};
-use statrs::statistics::Statistics;
+
+use crate::error::Result;
+use crate::parser::QueryLanguageParser;
+use crate::QueryEngine;
+use crate::tests::function;
 
 #[tokio::test]
-async fn test_scipy_stats_norm_pdf_aggregator() -> Result<()> {
+async fn test_argmax_aggregator() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let engine = function::create_query_engine();
 
-    macro_rules! test_scipy_stats_norm_pdf {
+    macro_rules! test_argmax {
         ([], $( { $T:ty } ),*) => {
             $(
                 let column_name = format!("{}_number", std::any::type_name::<$T>());
-                test_scipy_stats_norm_pdf_success::<$T>(&column_name, "numbers", engine.clone()).await?;
+                test_argmax_success::<$T>(&column_name, "numbers", engine.clone()).await?;
             )*
         }
     }
-    for_all_primitive_types! { test_scipy_stats_norm_pdf }
+    for_all_primitive_types! { test_argmax }
     Ok(())
 }
 
-async fn test_scipy_stats_norm_pdf_success<T>(
+async fn test_argmax_success<T>(
     column_name: &str,
     table_name: &str,
     engine: Arc<dyn QueryEngine>,
 ) -> Result<()>
 where
-    T: WrapperType + AsPrimitive<f64>,
+    T: WrapperType + PartialOrd,
 {
-    let result = execute_scipy_stats_norm_pdf(column_name, table_name, engine.clone())
+    let result = execute_argmax(column_name, table_name, engine.clone())
         .await
         .unwrap();
-    let value = function::get_value_from_batches("scipy_stats_norm_pdf", result);
+    let value = function::get_value_from_batches("argmax", result);
 
     let numbers =
         function::get_numbers_from_table::<T>(column_name, table_name, engine.clone()).await;
-    let expected_value = numbers.iter().map(|&n| n.as_()).collect::<Vec<f64>>();
-    let mean = expected_value.clone().mean();
-    let stddev = expected_value.std_dev();
-
-    let n = Normal::new(mean, stddev).unwrap();
-    let expected_value = n.pdf(2.0);
-
-    assert_eq!(value, expected_value.into());
+    let expected_value = match numbers.len() {
+        0 => 0_u64,
+        _ => {
+            let mut index = 0;
+            let mut max = numbers[0];
+            for (i, &number) in numbers.iter().enumerate() {
+                if max < number {
+                    max = number;
+                    index = i;
+                }
+            }
+            index as u64
+        }
+    };
+    let expected_value = Value::from(expected_value);
+    assert_eq!(value, expected_value);
     Ok(())
 }
 
-async fn execute_scipy_stats_norm_pdf<'a>(
+async fn execute_argmax<'a>(
     column_name: &'a str,
     table_name: &'a str,
     engine: Arc<dyn QueryEngine>,
 ) -> RecordResult<Vec<RecordBatch>> {
-    let sql = format!(
-        "select SCIPYSTATSNORMPDF({column_name},2.0) as scipy_stats_norm_pdf from {table_name}"
-    );
+    let sql = format!("select ARGMAX({column_name}) as argmax from {table_name}");
     let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
     let plan = engine
         .statement_to_plan(stmt, Arc::new(QueryContext::new()))

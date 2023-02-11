@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// FIXME(yingwen): Consider move all tests under query/tests to query/src so we could reuse
-// more codes.
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
@@ -26,12 +24,13 @@ use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::types::WrapperType;
 use datatypes::vectors::Helper;
-use query::parser::QueryLanguageParser;
-use query::query_engine::QueryEngineFactory;
-use query::QueryEngine;
 use rand::Rng;
 use session::context::QueryContext;
 use table::test_util::MemTable;
+
+use crate::parser::QueryLanguageParser;
+use crate::{QueryEngineFactory, QueryEngine};
+
 
 pub fn create_query_engine() -> Arc<dyn QueryEngine> {
     let schema_provider = Arc::new(MemorySchemaProvider::new());

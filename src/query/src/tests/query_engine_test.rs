@@ -12,13 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod pow;
-// This is used to suppress the warning: function `create_query_engine` is never used.
-// FIXME(yingwen): We finally need to refactor these tests and move them to `query/src`
-// so tests can share codes with other mods.
-#[allow(unused)]
-mod function;
-
 use std::sync::Arc;
 
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
@@ -34,18 +27,18 @@ use datafusion_expr::logical_plan::builder::LogicalPlanBuilder;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::UInt32Vector;
-use query::error::{QueryExecutionSnafu, Result};
-use query::parser::QueryLanguageParser;
-use query::plan::LogicalPlan;
-use query::query_engine::options::QueryOptions;
-use query::query_engine::QueryEngineFactory;
 use session::context::QueryContext;
 use snafu::ResultExt;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
 use table::test_util::MemTable;
 
-use crate::pow::pow;
+use crate::tests::pow::pow;
+
+use crate::error::{QueryExecutionSnafu, Result};
+use crate::parser::QueryLanguageParser;
+use crate::plan::LogicalPlan;
+use crate::query_engine::{options::QueryOptions, QueryEngineFactory};
 
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {
