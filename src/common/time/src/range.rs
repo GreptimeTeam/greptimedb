@@ -205,7 +205,7 @@ impl TimestampRange {
     pub fn new_inclusive(start: Option<Timestamp>, end: Option<Timestamp>) -> Self {
         // check for emptiness
         if let (Some(start_ts), Some(end_ts)) = (start, end) {
-            if start_ts >= end_ts {
+            if start_ts > end_ts {
                 return Self::empty();
             }
         }

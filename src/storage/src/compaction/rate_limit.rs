@@ -50,7 +50,6 @@ pub struct MaxInflightTaskLimiter<R> {
     _phantom_data: PhantomData<R>,
 }
 
-#[allow(unused)]
 impl<R> MaxInflightTaskLimiter<R> {
     pub fn new(max_inflight_task: usize) -> Self {
         Self {

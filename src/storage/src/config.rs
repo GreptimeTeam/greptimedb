@@ -14,5 +14,15 @@
 
 //! storage engine config
 
-#[derive(Debug, Default, Clone)]
-pub struct EngineConfig {}
+#[derive(Debug, Clone)]
+pub struct EngineConfig {
+    pub compaction_after_flush: bool,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            compaction_after_flush: true,
+        }
+    }
+}

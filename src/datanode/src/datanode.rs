@@ -20,6 +20,8 @@ use common_telemetry::info;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
 use servers::Mode;
+use storage::compaction::CompactionSchedulerConfig;
+use storage::config::EngineConfig as StorageEngineConfig;
 
 use crate::error::Result;
 use crate::instance::{Instance, InstanceRef};
@@ -104,6 +106,40 @@ impl Default for WalConfig {
     }
 }
 
+/// Options for table compaction
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct CompactionConfig {
+    /// Whether to schedule a compaction every time a memtable gets flushed.
+    pub compaction_after_flush: bool,
+    /// Max task number that can concurrently run.
+    pub max_inflight_task: usize,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            compaction_after_flush: true,
+            max_inflight_task: 16,
+        }
+    }
+}
+
+impl From<&DatanodeOptions> for CompactionSchedulerConfig {
+    fn from(value: &DatanodeOptions) -> Self {
+        Self {
+            max_inflight_task: value.compaction.max_inflight_task,
+        }
+    }
+}
+
+impl From<&DatanodeOptions> for StorageEngineConfig {
+    fn from(value: &DatanodeOptions) -> Self {
+        Self {
+            compaction_after_flush: value.compaction.compaction_after_flush,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatanodeOptions {
@@ -117,6 +153,7 @@ pub struct DatanodeOptions {
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
     pub enable_memory_catalog: bool,
+    pub compaction: CompactionConfig,
     pub mode: Mode,
 }
 
@@ -133,6 +170,7 @@ impl Default for DatanodeOptions {
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
             enable_memory_catalog: false,
+            compaction: CompactionConfig::default(),
             mode: Mode::Standalone,
         }
     }

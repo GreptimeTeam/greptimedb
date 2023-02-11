@@ -43,13 +43,14 @@ impl Strategy for SimpleTimeWindowStrategy {
             return vec![];
         }
         let files = find_compactable_files(level);
+        debug!("Compactable files found: {:?}", files);
         if files.is_empty() {
             return vec![];
         }
 
         let time_bucket = infer_time_bucket(&files);
         let buckets = calculate_time_buckets(time_bucket, &files);
-        debug!("File buckets: {:?}", buckets);
+        debug!("File bucket:{}, file groups: {:?}", time_bucket, buckets);
         buckets
             .into_iter()
             .map(|(bound, files)| CompactionOutput {

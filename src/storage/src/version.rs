@@ -243,7 +243,7 @@ impl Version {
         );
 
         info!(
-            "After region compaction, region: {}, SST files: {:?}",
+            "After apply edit, region: {}, SST files: {:?}",
             self.metadata.id(),
             merged_ssts
         );

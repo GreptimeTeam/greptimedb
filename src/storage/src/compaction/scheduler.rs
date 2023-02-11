@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, error, info};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
-use table::metadata::TableId;
+use store_api::storage::RegionId;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -38,11 +39,9 @@ use crate::sst::AccessLayerRef;
 use crate::version::LevelMetasRef;
 use crate::wal::Wal;
 
-/// Table compaction request.
+/// Region compaction request.
 pub struct CompactionRequestImpl<S: LogStore> {
-    table_id: TableId,
-    pub levels: LevelMetasRef,
-    pub schema: RegionSchemaRef,
+    pub region_id: RegionId,
     pub sst_layer: AccessLayerRef,
     pub writer: RegionWriterRef,
     pub shared: SharedDataRef,
@@ -50,20 +49,32 @@ pub struct CompactionRequestImpl<S: LogStore> {
     pub wal: Wal<S>,
 }
 
+impl<S: LogStore> CompactionRequestImpl<S> {
+    #[inline]
+    pub(crate) fn schema(&self) -> RegionSchemaRef {
+        self.shared.version_control.current().schema().clone()
+    }
+
+    #[inline]
+    pub(crate) fn levels(&self) -> LevelMetasRef {
+        self.shared.version_control.current().ssts().clone()
+    }
+}
+
 impl<S: LogStore> CompactionRequest for CompactionRequestImpl<S> {
     #[inline]
-    fn table_id(&self) -> TableId {
-        self.table_id
+    fn region_id(&self) -> RegionId {
+        self.region_id
     }
 }
 
 pub trait CompactionRequest: Send + Sync + 'static {
-    fn table_id(&self) -> TableId;
+    fn region_id(&self) -> RegionId;
 }
 
 #[derive(Debug)]
 pub struct CompactionSchedulerConfig {
-    max_inflight_task: usize,
+    pub max_inflight_task: usize,
 }
 
 impl Default for CompactionSchedulerConfig {
@@ -76,10 +87,10 @@ impl Default for CompactionSchedulerConfig {
 
 /// CompactionScheduler defines a set of API to schedule compaction tasks.
 #[async_trait]
-pub trait CompactionScheduler<R> {
+pub trait CompactionScheduler<R>: Debug {
     /// Schedules a compaction request.
     /// Returns true if request is scheduled. Returns false if task queue already
-    /// contains the request with same table id.
+    /// contains the request with same region id.
     async fn schedule(&self, request: R) -> Result<bool>;
 
     /// Stops compaction scheduler.
@@ -87,12 +98,20 @@ pub trait CompactionScheduler<R> {
 }
 
 /// Compaction task scheduler based on local state.
-#[allow(unused)]
 pub struct LocalCompactionScheduler<R: CompactionRequest> {
-    request_queue: Arc<RwLock<DedupDeque<TableId, R>>>,
+    request_queue: Arc<RwLock<DedupDeque<RegionId, R>>>,
     cancel_token: CancellationToken,
     task_notifier: Arc<Notify>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl<R> Debug for LocalCompactionScheduler<R>
+where
+    R: CompactionRequest + Send + Sync,
+{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalCompactionScheduler<...>").finish()
+    }
 }
 
 #[async_trait]
@@ -103,11 +122,11 @@ where
     async fn schedule(&self, request: R) -> Result<bool> {
         debug!(
             "Schedule request: {}, queue size: {}",
-            request.table_id(),
+            request.region_id(),
             self.remaining_requests().await
         );
         let mut queue = self.request_queue.write().unwrap();
-        let res = queue.push_back(request.table_id(), request);
+        let res = queue.push_back(request.region_id(), request);
         self.task_notifier.notify_one();
         Ok(res)
     }
@@ -122,7 +141,6 @@ where
     }
 }
 
-#[allow(unused)]
 impl<R> LocalCompactionScheduler<R>
 where
     R: CompactionRequest,
@@ -132,7 +150,7 @@ where
         T: CompactionTask,
         P: Picker<R, T> + Send + Sync,
     {
-        let request_queue: Arc<RwLock<DedupDeque<TableId, R>>> =
+        let request_queue: Arc<RwLock<DedupDeque<RegionId, R>>> =
             Arc::new(RwLock::new(DedupDeque::default()));
         let cancel_token = CancellationToken::new();
         let task_notifier = Arc::new(Notify::new());
@@ -164,9 +182,8 @@ where
     }
 }
 
-#[allow(unused)]
 struct CompactionHandler<R, T: CompactionTask, P: Picker<R, T>> {
-    req_queue: Arc<RwLock<DedupDeque<TableId, R>>>,
+    req_queue: Arc<RwLock<DedupDeque<RegionId, R>>>,
     cancel_token: CancellationToken,
     task_notifier: Arc<Notify>,
     limiter: Arc<CascadeRateLimiter<R>>,
@@ -174,9 +191,8 @@ struct CompactionHandler<R, T: CompactionTask, P: Picker<R, T>> {
     _phantom_data: PhantomData<T>,
 }
 
-#[allow(unused)]
 impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
-    /// Runs table compaction requests dispatch loop.
+    /// Runs region compaction requests dispatch loop.
     pub async fn run(&self) {
         let task_notifier = self.task_notifier.clone();
         let limiter = self.limiter.clone();
@@ -186,15 +202,19 @@ impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler
                     // poll requests as many as possible until rate limited, and then wait for
                     // notification (some task's finished).
                     debug!("Notified, queue size: {:?}", self.req_queue.read().unwrap().len());
-                    while let Some((table_id,  req)) = self.poll_task().await {
+                    while let Some((region_id,  req)) = self.poll_task().await {
                         if let Ok(token) = limiter.acquire_token(&req) {
-                            debug!("Executing compaction request: {}", table_id);
-                            self.handle_compaction_request(req, token).await;
+                            debug!("Executing compaction request: {}", region_id);
+                            if let Err(e) = self.handle_compaction_request(req, token).await{
+                                error!(e; "Failed to submit compaction task for region: {}", region_id);
+                            }else{
+                                info!("Submitted region compaction task: {}", region_id);
+                            }
                         } else {
                             // compaction rate limited, put back to req queue to wait for next
                             // schedule
-                            debug!("Put back request {}, queue size: {}", table_id, self.req_queue.read().unwrap().len());
-                            self.put_back_req(table_id, req).await;
+                            debug!("Put back request {}, queue size: {}", region_id, self.req_queue.read().unwrap().len());
+                            self.put_back_req(region_id, req).await;
                             break;
                         }
                     }
@@ -208,35 +228,36 @@ impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler
     }
 
     #[inline]
-    async fn poll_task(&self) -> Option<(TableId, R)> {
+    async fn poll_task(&self) -> Option<(RegionId, R)> {
         let mut queue = self.req_queue.write().unwrap();
         queue.pop_front()
     }
 
     /// Puts request back to the front of request queue.
     #[inline]
-    async fn put_back_req(&self, table_id: TableId, req: R) {
+    async fn put_back_req(&self, region_id: RegionId, req: R) {
         let mut queue = self.req_queue.write().unwrap();
-        queue.push_front(table_id, req);
+        queue.push_front(region_id, req);
     }
 
     // Handles compaction request, submit task to bg runtime.
-    async fn handle_compaction_request(
-        &self,
-        mut req: R,
-        token: BoxedRateLimitToken,
-    ) -> Result<()> {
+    async fn handle_compaction_request(&self, req: R, token: BoxedRateLimitToken) -> Result<()> {
         let cloned_notify = self.task_notifier.clone();
-        let table_id = req.table_id();
+        let region_id = req.region_id();
         let Some(task) = self.build_compaction_task(req).await? else {
-            info!("No file needs compaction in table: {}", table_id);
+            info!("No file needs compaction in region: {}", region_id);
             return Ok(());
         };
 
+        debug!("Compaction task, region: {}, task: {:?}", region_id, task);
         // TODO(hl): we need to keep a track of task handle here to allow task cancellation.
         common_runtime::spawn_bg(async move {
-            task.run().await; // TODO(hl): handle errors
-
+            if let Err(e) = task.run().await {
+                // TODO(hl): maybe resubmit compaction task on failure?
+                error!(e; "Failed to compact region: {}", region_id);
+            } else {
+                info!("Successfully compacted region: {}", region_id);
+            }
             // releases rate limit token
             token.try_release();
             // notify scheduler to schedule next task when current task finishes.
@@ -246,7 +267,6 @@ impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler
         Ok(())
     }
 
-    // TODO(hl): generate compaction task(find SSTs to compact along with the output of compaction)
     async fn build_compaction_task(&self, req: R) -> crate::error::Result<Option<T>> {
         let ctx = PickerContext {};
         self.picker.pick(&ctx, &req)
@@ -333,12 +353,12 @@ mod tests {
 
     #[derive(Default, Debug)]
     struct MockRequest {
-        table_id: TableId,
+        region_id: RegionId,
     }
 
     impl CompactionRequest for MockRequest {
-        fn table_id(&self) -> TableId {
-            self.table_id
+        fn region_id(&self) -> RegionId {
+            self.region_id
         }
     }
 
@@ -356,12 +376,12 @@ mod tests {
         );
 
         scheduler
-            .schedule(MockRequest { table_id: 1 })
+            .schedule(MockRequest { region_id: 1 })
             .await
             .unwrap();
 
         scheduler
-            .schedule(MockRequest { table_id: 2 })
+            .schedule(MockRequest { region_id: 2 })
             .await
             .unwrap();
 
@@ -390,7 +410,7 @@ mod tests {
         for i in 0..task_size {
             scheduler
                 .schedule(MockRequest {
-                    table_id: i as TableId,
+                    region_id: i as RegionId,
                 })
                 .await
                 .unwrap();
@@ -420,7 +440,7 @@ mod tests {
         for i in 0..task_size / 2 {
             scheduler
                 .schedule(MockRequest {
-                    table_id: i as TableId,
+                    region_id: i as RegionId,
                 })
                 .await
                 .unwrap();
@@ -430,7 +450,7 @@ mod tests {
         for i in task_size / 2..task_size {
             scheduler
                 .schedule(MockRequest {
-                    table_id: i as TableId,
+                    region_id: i as RegionId,
                 })
                 .await
                 .unwrap();
@@ -453,7 +473,7 @@ mod tests {
         let mut scheduled_task = 0;
         for _ in 0..10 {
             if scheduler
-                .schedule(MockRequest { table_id: 1 })
+                .schedule(MockRequest { region_id: 1 })
                 .await
                 .unwrap()
             {

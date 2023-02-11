@@ -54,12 +54,11 @@ use crate::error::{
     self, DecodeParquetTimeRangeSnafu, NewRecordBatchSnafu, ReadObjectSnafu, ReadParquetSnafu,
     Result, WriteObjectSnafu, WriteParquetSnafu,
 };
-use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
 use crate::sst;
-use crate::sst::SstInfo;
+use crate::sst::{Source, SstInfo};
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
     file_path: &'a str,

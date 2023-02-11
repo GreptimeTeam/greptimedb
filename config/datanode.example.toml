@@ -24,3 +24,7 @@ metasrv_addrs = ['127.0.0.1:3002']
 timeout_millis = 3000
 connect_timeout_millis = 5000
 tcp_nodelay = false
+
+[compaction]
+compaction_after_flush = true
+max_inflight_task = 32

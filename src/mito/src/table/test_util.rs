@@ -23,6 +23,7 @@ use datatypes::vectors::VectorRef;
 use log_store::NoopLogStore;
 use object_store::services::fs::Builder;
 use object_store::ObjectStore;
+use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::engine::{EngineContext, TableEngine};
@@ -127,11 +128,12 @@ pub struct TestEngineComponents {
 
 pub async fn setup_test_engine_and_table() -> TestEngineComponents {
     let (dir, object_store) = new_test_object_store("setup_test_engine_and_table").await;
-
+    let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
     let storage_engine = EngineImpl::new(
         StorageEngineConfig::default(),
         Arc::new(NoopLogStore::default()),
         object_store.clone(),
+        compaction_scheduler,
     );
     let table_engine = MitoEngine::new(
         EngineConfig::default(),

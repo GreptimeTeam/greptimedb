@@ -14,7 +14,8 @@
 
 use std::sync::Arc;
 
-use common_telemetry::logging;
+use common_telemetry::tracing::log::info;
+use common_telemetry::{error, logging};
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -23,8 +24,9 @@ use store_api::storage::{AlterRequest, SequenceNumber, WriteContext, WriteRespon
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
+use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
 use crate::error::{self, Result};
-use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
+use crate::flush::{FlushCallback, FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
@@ -34,7 +36,7 @@ use crate::proto::wal::WalHeader;
 use crate::region::{RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef};
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
-use crate::version::{VersionControl, VersionControlRef, VersionEdit};
+use crate::version::{VersionControl, VersionControlRef, VersionEdit, VersionRef};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
@@ -241,6 +243,7 @@ pub struct WriterContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub flush_strategy: &'a FlushStrategyRef,
     pub flush_scheduler: &'a FlushSchedulerRef,
+    pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
     pub sst_layer: &'a AccessLayerRef,
     pub wal: &'a Wal<S>,
     pub writer: &'a RegionWriterRef,
@@ -541,6 +544,10 @@ impl WriterInner {
             return Ok(());
         }
 
+        // TODO(hl): we need to pass `compaction_after_flush` config here to determine whether to
+        // trigger a compaction
+        let cb = Self::build_flush_callback(&current_version, ctx);
+
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
@@ -551,6 +558,7 @@ impl WriterInner {
             writer: ctx.writer.clone(),
             wal: ctx.wal.clone(),
             manifest: ctx.manifest.clone(),
+            on_success: Mutex::new(cb),
         };
 
         let flush_handle = ctx
@@ -560,5 +568,48 @@ impl WriterInner {
         self.flush_handle = Some(flush_handle);
 
         Ok(())
+    }
+
+    fn build_flush_callback<S: LogStore>(
+        version: &VersionRef,
+        ctx: &WriterContext<S>,
+    ) -> Option<FlushCallback> {
+        let region_id = version.metadata().id();
+        let compaction_request = CompactionRequestImpl {
+            region_id,
+            sst_layer: ctx.sst_layer.clone(),
+            writer: ctx.writer.clone(),
+            shared: ctx.shared.clone(),
+            manifest: ctx.manifest.clone(),
+            wal: ctx.wal.clone(),
+        };
+        let compaction_scheduler = ctx.compaction_scheduler.clone();
+        let shared_data = ctx.shared.clone();
+        let schedule_compaction_cb = Box::pin(async move {
+            let level0_file_num = shared_data
+                .version_control
+                .current()
+                .ssts()
+                .level(0)
+                .file_num();
+
+            // TODO(hl): Max file num in level 0 should be configurable.
+            if level0_file_num <= 10 {
+                info!("No enough SST files in level 0, skip compaction.");
+                return;
+            }
+            match compaction_scheduler.schedule(compaction_request).await {
+                Ok(scheduled) => {
+                    info!(
+                        "Schedule region {} compaction request result: {}",
+                        region_id, scheduled
+                    )
+                }
+                Err(e) => {
+                    error!(e;"Failed to schedule region compaction request {}", region_id);
+                }
+            }
+        });
+        Some(schedule_compaction_cb)
     }
 }

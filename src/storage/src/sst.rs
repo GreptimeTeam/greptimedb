@@ -23,11 +23,13 @@ use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use object_store::{util, ObjectStore};
 use serde::{Deserialize, Serialize};
+use store_api::storage::ChunkReader;
 use table::predicate::Predicate;
 
+use crate::chunk::ChunkReaderImpl;
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
-use crate::read::BoxedBatchReader;
+use crate::read::{Batch, BoxedBatchReader};
 use crate::schema::ProjectedSchemaRef;
 use crate::sst::parquet::{ParquetReader, ParquetWriter, Source};
 
@@ -111,7 +113,7 @@ pub struct LevelMeta {
 }
 
 impl LevelMeta {
-    pub fn new_empty(level: Level) -> Self {
+    pub fn new(level: Level) -> Self {
         Self {
             level,
             files: HashMap::new(),
@@ -132,6 +134,12 @@ impl LevelMeta {
         self.level
     }
 
+    /// Returns number of SST files in level.
+    #[inline]
+    pub fn file_num(&self) -> usize {
+        self.files.len()
+    }
+
     pub fn files(&self) -> impl Iterator<Item = &FileHandle> {
         self.files.values()
     }
@@ -140,7 +148,7 @@ impl LevelMeta {
 fn new_level_meta_vec() -> LevelMetaVec {
     (0u8..MAX_LEVEL)
         .into_iter()
-        .map(LevelMeta::new_empty)
+        .map(LevelMeta::new)
         .collect::<Vec<_>>()
         .try_into()
         .unwrap() // safety: LevelMetaVec is a fixed length array with length MAX_LEVEL
@@ -243,7 +251,7 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     async fn write_sst(
         &self,
         file_name: &str,
-        iter: BoxedBatchIterator,
+        source: Source,
         opts: &WriteOptions,
     ) -> Result<SstInfo>;
 
@@ -255,6 +263,33 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
+
+/// Parquet writer data source.
+pub enum Source {
+    /// Writes rows from memtable to parquet
+    Iter(BoxedBatchIterator),
+    /// Writes row from ChunkReaderImpl (maybe a set of SSTs) to parquet.
+    Reader(ChunkReaderImpl),
+}
+
+impl Source {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        match self {
+            Source::Iter(iter) => iter.next().transpose(),
+            Source::Reader(reader) => reader
+                .next_chunk()
+                .await
+                .map(|p| p.map(|chunk| Batch::new(chunk.columns))),
+        }
+    }
+
+    fn projected_schema(&self) -> ProjectedSchemaRef {
+        match self {
+            Source::Iter(iter) => iter.schema(),
+            Source::Reader(reader) => reader.projected_schema().clone(),
+        }
+    }
+}
 
 /// Sst access layer based on local file system.
 #[derive(Debug)]
@@ -282,13 +317,13 @@ impl AccessLayer for FsAccessLayer {
     async fn write_sst(
         &self,
         file_name: &str,
-        iter: BoxedBatchIterator,
+        source: Source,
         opts: &WriteOptions,
     ) -> Result<SstInfo> {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(file_name);
-        let writer = ParquetWriter::new(&file_path, Source::Iter(iter), self.object_store.clone());
+        let writer = ParquetWriter::new(&file_path, source, self.object_store.clone());
         writer.write_sst(opts).await
     }
 
@@ -308,6 +343,105 @@ impl AccessLayer for FsAccessLayer {
 
     fn object_store(&self) -> ObjectStore {
         self.object_store.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    fn create_handle(name: &str, level: Level) -> FileHandle {
+        FileHandle::new(FileMeta {
+            file_name: name.to_string(),
+            time_range: None,
+            level,
+        })
+    }
+
+    #[test]
+    fn test_level_metas_add_and_remove() {
+        let metas = LevelMetas::new();
+        let merged = metas.merge(
+            vec![create_handle("a", 0), create_handle("b", 0)].into_iter(),
+            vec![].into_iter(),
+        );
+
+        assert_eq!(
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            merged
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let merged1 = merged.merge(
+            vec![create_handle("c", 1), create_handle("d", 1)].into_iter(),
+            vec![].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            merged1
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::from(["c".to_string(), "d".to_string()]),
+            merged1
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let removed1 = merged1.merge(
+            vec![].into_iter(),
+            vec![create_handle("a", 0), create_handle("c", 0)].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from(["b".to_string()]),
+            removed1
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::from(["c".to_string(), "d".to_string()]),
+            removed1
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let removed2 = removed1.merge(
+            vec![].into_iter(),
+            vec![create_handle("c", 1), create_handle("d", 1)].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from(["b".to_string()]),
+            removed2
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::new(),
+            removed2
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
     }
 }
 
