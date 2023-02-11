@@ -121,14 +121,27 @@ impl ChunkReaderBuilder {
         self
     }
 
-    pub fn pick_ssts(mut self, ssts: &LevelMetas) -> Result<Self> {
+    /// Picks all SSTs in all levels
+    pub fn pick_all_ssts(mut self, ssts: &LevelMetas) -> Result<Self> {
         ssts.visit_levels(&mut self)?;
-
         Ok(self)
+    }
+
+    /// Picks given SSTs to read.
+    pub fn pick_ssts(mut self, ssts: &[FileHandle]) -> Self {
+        for file in ssts {
+            self.files_to_read.push(file.clone());
+        }
+        self
     }
 
     pub async fn build(mut self) -> Result<ChunkReaderImpl> {
         let time_range_predicate = self.build_time_range_predicate();
+        debug!(
+            "Time range predicate for chunk reader: {:?}",
+            time_range_predicate
+        );
+
         let schema = Arc::new(
             ProjectedSchema::new(self.schema, self.projection)
                 .context(error::InvalidProjectionSnafu)?,
@@ -148,6 +161,7 @@ impl ChunkReaderBuilder {
             batch_size: self.iter_ctx.batch_size,
             projected_schema: schema.clone(),
             predicate: Predicate::new(self.filters),
+            time_range: time_range_predicate,
         };
         for file in &self.files_to_read {
             if !Self::file_in_range(file, time_range_predicate) {
@@ -192,8 +206,6 @@ impl ChunkReaderBuilder {
 
 impl Visitor for ChunkReaderBuilder {
     fn visit(&mut self, _level: usize, files: &[FileHandle]) -> Result<()> {
-        // TODO(yingwen): Filter files by time range.
-
         // Now we read all files, so just reserve enough space to hold all files.
         self.files_to_read.reserve(files.len());
         for file in files {

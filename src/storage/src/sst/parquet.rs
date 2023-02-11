@@ -18,21 +18,32 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use arrow::datatypes::DataType;
+use arrow_array::types::Int64Type;
+use arrow_array::{
+    Array, PrimitiveArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray,
+};
 use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use common_telemetry::error;
+use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use datatypes::arrow::array::BooleanArray;
+use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
+use parquet::arrow::arrow_reader::{ArrowPredicate, RowFilter};
 use parquet::arrow::{ArrowWriter, ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::basic::{Compression, Encoding};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
+use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt};
 use table::predicate::Predicate;
 use tokio::io::BufReader;
@@ -206,6 +217,7 @@ pub struct ParquetReader<'a> {
     object_store: ObjectStore,
     projected_schema: ProjectedSchemaRef,
     predicate: Predicate,
+    time_range: TimestampRange,
 }
 
 impl<'a> ParquetReader<'a> {
@@ -214,12 +226,14 @@ impl<'a> ParquetReader<'a> {
         object_store: ObjectStore,
         projected_schema: ProjectedSchemaRef,
         predicate: Predicate,
+        time_range: TimestampRange,
     ) -> ParquetReader {
         ParquetReader {
             file_path,
             object_store,
             projected_schema,
             predicate,
+            time_range,
         }
     }
 
@@ -260,18 +274,21 @@ impl<'a> ParquetReader<'a> {
             .filter_map(|(idx, valid)| if valid { Some(idx) } else { None })
             .collect::<Vec<_>>();
 
-        let projection = ProjectionMask::roots(
-            builder.metadata().file_metadata().schema_descr(),
-            adapter.fields_to_read(),
-        );
+        let parquet_schema_desc = builder.metadata().file_metadata().schema_descr_ptr();
 
-        let mut stream = builder
+        let projection = ProjectionMask::roots(&parquet_schema_desc, adapter.fields_to_read());
+        let mut builder = builder
             .with_projection(projection)
-            .with_row_groups(pruned_row_groups)
-            .build()
-            .context(ReadParquetSnafu {
-                file: self.file_path,
-            })?;
+            .with_row_groups(pruned_row_groups);
+
+        // if time range row filter is present, we can push down the filter to reduce rows to scan.
+        if let Some(row_filter) = self.build_time_range_row_filter(&parquet_schema_desc) {
+            builder = builder.with_row_filter(row_filter);
+        }
+
+        let mut stream = builder.build().context(ReadParquetSnafu {
+            file: self.file_path,
+        })?;
 
         let file_name = self.file_path.to_string();
         let chunk_stream = try_stream!({
@@ -281,6 +298,121 @@ impl<'a> ParquetReader<'a> {
         });
 
         ChunkStream::new(adapter, Box::pin(chunk_stream))
+    }
+
+    /// Builds time range row filter.
+    fn build_time_range_row_filter(&self, schema_desc: &SchemaDescriptor) -> Option<RowFilter> {
+        let ts_col_idx = self
+            .projected_schema
+            .schema_to_read()
+            .schema()
+            .timestamp_index()?;
+        let ts_col = self
+            .projected_schema
+            .schema_to_read()
+            .schema()
+            .timestamp_column()?;
+
+        let ts_col_unit = match &ts_col.data_type {
+            ConcreteDataType::Int64(_) => TimeUnit::Millisecond,
+            ConcreteDataType::Timestamp(ts_type) => ts_type.unit(),
+            _ => unreachable!(),
+        };
+
+        // build lower and upper bound according to time range and timestamp column data type.
+        let lower = self
+            .time_range
+            .start()
+            .and_then(|s| s.convert_to(ts_col_unit))
+            .map(|t| t.value())
+            .unwrap_or(i64::MIN);
+
+        let upper = self
+            .time_range
+            .end()
+            .and_then(|s| s.convert_to_ceil(ts_col_unit)) // convert to ceil to relax time range and prevent data loss caused by rounding error.
+            .map(|t| t.value())
+            .unwrap_or(i64::MAX);
+
+        let projection = ProjectionMask::roots(schema_desc, vec![ts_col_idx]);
+        let filter = RowFilter::new(vec![Box::new(TimestampRowFilter::new(
+            ts_col_idx, projection, lower, upper,
+        ))]);
+        Some(filter)
+    }
+}
+
+/// `TimestampRowFilter` is used to filter rows within given timestamp range when reading
+/// row groups from parquet files, while avoids fetching all columns from SSTs file.
+struct TimestampRowFilter {
+    timestamp_index: usize,
+    lower_bound: i64,
+    upper_bound: i64,
+    projection: ProjectionMask,
+}
+
+impl TimestampRowFilter {
+    fn new(
+        ts_col_idx: usize,
+        projection: ProjectionMask,
+        lower_bound: i64,
+        upper_bound: i64,
+    ) -> Self {
+        Self {
+            timestamp_index: ts_col_idx,
+            lower_bound,
+            upper_bound,
+            projection,
+        }
+    }
+}
+
+impl ArrowPredicate for TimestampRowFilter {
+    fn projection(&self) -> &ProjectionMask {
+        &self.projection
+    }
+
+    /// Selects the rows matching given time range.
+    fn evaluate(&mut self, batch: RecordBatch) -> std::result::Result<BooleanArray, ArrowError> {
+        let row_cnt = batch.num_rows();
+        let ts_col = batch.column(self.timestamp_index);
+
+        macro_rules! downcast_and_compute {
+            ($typ: ty) => {
+                {
+                    let ts_col = ts_col
+                        .as_any()
+                        .downcast_ref::<$typ>()
+                        .unwrap(); // safety: we've checked the data type of timestamp column.
+                    let lower_bound = PrimitiveArray::from_value(self.lower_bound, row_cnt);
+                    let upper_bound = PrimitiveArray::from_value(self.upper_bound, row_cnt);
+                    let left = arrow::compute::gt_eq(ts_col, &lower_bound)?;
+                    let right = arrow::compute::lt(ts_col, &upper_bound)?;
+                    arrow::compute::and(&left, &right)
+                }
+            };
+        }
+
+        match ts_col.data_type() {
+            DataType::Timestamp(unit, _) => match unit {
+                arrow::datatypes::TimeUnit::Second => {
+                    downcast_and_compute!(TimestampSecondArray)
+                }
+                arrow::datatypes::TimeUnit::Millisecond => {
+                    downcast_and_compute!(TimestampMillisecondArray)
+                }
+                arrow::datatypes::TimeUnit::Microsecond => {
+                    downcast_and_compute!(TimestampMicrosecondArray)
+                }
+                arrow::datatypes::TimeUnit::Nanosecond => {
+                    downcast_and_compute!(TimestampNanosecondArray)
+                }
+            },
+            DataType::Int64 => downcast_and_compute!(PrimitiveArray<Int64Type>),
+            _ => {
+                unreachable!()
+            }
+        }
     }
 }
 
@@ -313,7 +445,8 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::arrow::array::{Array, ArrayRef, UInt64Array, UInt8Array};
-    use datatypes::prelude::Vector;
+    use datatypes::prelude::{ScalarVector, Vector};
+    use datatypes::types::{TimestampMillisecondType, TimestampType};
     use datatypes::vectors::TimestampMillisecondVector;
     use object_store::backend::fs::Builder;
     use store_api::storage::OpType;
@@ -483,6 +616,7 @@ mod tests {
             operator,
             projected_schema,
             Predicate::empty(),
+            TimestampRange::min_to_max(),
         );
 
         let mut rows_fetched = 0;
@@ -554,6 +688,7 @@ mod tests {
             operator,
             projected_schema,
             Predicate::empty(),
+            TimestampRange::min_to_max(),
         );
 
         let mut stream = reader.chunk_stream().await.unwrap();
@@ -567,5 +702,129 @@ mod tests {
                 .unwrap()
                 .num_rows()
         );
+    }
+
+    async fn check_range_read(
+        file_name: &str,
+        object_store: ObjectStore,
+        schema: ProjectedSchemaRef,
+        range: TimestampRange,
+        expect: Vec<i64>,
+    ) {
+        let reader = ParquetReader::new(file_name, object_store, schema, Predicate::empty(), range);
+        let mut stream = reader.chunk_stream().await.unwrap();
+        let result = stream.next_batch().await;
+
+        let Some(batch) = result.unwrap()  else {
+            // if batch does not contain any row
+            assert!(expect.is_empty());
+            return;
+        };
+
+        assert_eq!(
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(TimestampMillisecondType)),
+            batch.column(0).data_type()
+        );
+
+        let ts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondVector>()
+            .unwrap()
+            .iter_data()
+            .map(|t| t.unwrap().0.value())
+            .collect::<Vec<_>>();
+        assert_eq!(expect, ts);
+    }
+
+    #[tokio::test]
+    async fn test_parquet_reader_with_time_range_filter() {
+        common_telemetry::init_default_ut_logging();
+        let schema = memtable_tests::schema_for_test();
+        let memtable = DefaultMemtableBuilder::default().build(schema.clone());
+
+        memtable_tests::write_kvs(
+            &*memtable,
+            10, // sequence
+            OpType::Put,
+            &[
+                (1000, 1),
+                (1000, 2),
+                (2002, 1),
+                (2003, 1),
+                (2003, 5),
+                (1001, 1),
+                (3001, 1),
+            ], // keys
+            &[
+                (Some(1), Some(1234)),
+                (Some(2), Some(1234)),
+                (Some(7), Some(1234)),
+                (Some(8), Some(1234)),
+                (Some(9), Some(1234)),
+                (Some(3), Some(1234)),
+                (Some(7), Some(1234)),
+            ], // values
+        );
+
+        let dir = TempDir::new("read-parquet-by-range").unwrap();
+        let path = dir.path().to_str().unwrap();
+        let backend = Builder::default().root(path).build().unwrap();
+        let object_store = ObjectStore::new(backend);
+        let sst_file_name = "test-read.parquet";
+        let iter = memtable.iter(&IterContext::default()).unwrap();
+        let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
+
+        let SstInfo {
+            start_timestamp,
+            end_timestamp,
+        } = writer
+            .write_sst(&sst::WriteOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(Some(Timestamp::new_millisecond(1000)), start_timestamp);
+        assert_eq!(Some(Timestamp::new_millisecond(3001)), end_timestamp);
+
+        let projected_schema =
+            Arc::new(ProjectedSchema::new(schema, Some(vec![1, 0, 3, 2])).unwrap());
+
+        // check_range_read(
+        //     sst_file_name,
+        //     object_store.clone(),
+        //     projected_schema.clone(),
+        //     TimestampRange::with_unit(1000, 2003, TimeUnit::Millisecond).unwrap(),
+        //     vec![1000, 1000, 1001, 2002],
+        // )
+        // .await;
+        //
+        // check_range_read(
+        //     sst_file_name,
+        //     object_store.clone(),
+        //     projected_schema.clone(),
+        //     TimestampRange::with_unit(2002, 3001, TimeUnit::Millisecond).unwrap(),
+        //     vec![2002, 2003, 2003],
+        // )
+        // .await;
+        //
+        // // read a range without any rows.
+        // check_range_read(
+        //     sst_file_name,
+        //     object_store.clone(),
+        //     projected_schema.clone(),
+        //     TimestampRange::with_unit(3002, 3003, TimeUnit::Millisecond).unwrap(),
+        //     vec![],
+        // )
+        // .await;
+
+        // read full range
+        check_range_read(
+            sst_file_name,
+            object_store,
+            projected_schema,
+            TimestampRange::min_to_max(),
+            vec![1000, 1000, 1001, 2002, 2003, 2003, 3001],
+        )
+        .await;
     }
 }

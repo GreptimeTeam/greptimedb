@@ -2222,6 +2222,7 @@ name = "datatypes"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "arrow-array",
  "arrow-schema",
  "common-base",
  "common-error",
@@ -7056,6 +7057,8 @@ name = "storage"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "arrow",
+ "arrow-array",
  "async-compat",
  "async-stream",
  "async-trait",
@@ -7069,6 +7072,8 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "criterion 0.3.6",
+ "datafusion-common",
+ "datafusion-expr",
  "datatypes",
  "futures",
  "futures-util",

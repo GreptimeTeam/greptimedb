@@ -96,7 +96,7 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
         }
     }
 
-    pub(crate) fn as_arrow(&self) -> &PrimitiveArray<T::ArrowPrimitive> {
+    pub fn as_arrow(&self) -> &PrimitiveArray<T::ArrowPrimitive> {
         &self.array
     }
 

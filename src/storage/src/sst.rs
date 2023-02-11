@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod parquet;
+pub(crate) mod parquet;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use object_store::{util, ObjectStore};
 use serde::{Deserialize, Serialize};
@@ -236,6 +237,7 @@ pub struct ReadOptions {
     pub projected_schema: ProjectedSchemaRef,
 
     pub predicate: Predicate,
+    pub time_range: TimestampRange,
 }
 
 #[derive(Debug)]
@@ -303,6 +305,7 @@ impl AccessLayer for FsAccessLayer {
             self.object_store.clone(),
             opts.projected_schema.clone(),
             opts.predicate.clone(),
+            opts.time_range.clone(),
         );
 
         let stream = reader.chunk_stream().await?;

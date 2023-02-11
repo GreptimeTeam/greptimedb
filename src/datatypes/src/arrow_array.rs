@@ -16,3 +16,8 @@ pub type BinaryArray = arrow::array::LargeBinaryArray;
 pub type MutableBinaryArray = arrow::array::LargeBinaryBuilder;
 pub type StringArray = arrow::array::StringArray;
 pub type MutableStringArray = arrow::array::StringBuilder;
+
+pub use arrow_array::types::{
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType,
+};
