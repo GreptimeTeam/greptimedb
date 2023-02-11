@@ -26,9 +26,8 @@ use statrs::statistics::Statistics;
 
 use crate::error::Result;
 use crate::parser::QueryLanguageParser;
-use crate::QueryEngine;
 use crate::tests::function;
-
+use crate::QueryEngine;
 
 #[tokio::test]
 async fn test_scipy_stats_norm_pdf_aggregator() -> Result<()> {

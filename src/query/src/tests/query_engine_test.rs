@@ -33,12 +33,12 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
 use table::test_util::MemTable;
 
-use crate::tests::pow::pow;
-
 use crate::error::{QueryExecutionSnafu, Result};
 use crate::parser::QueryLanguageParser;
 use crate::plan::LogicalPlan;
-use crate::query_engine::{options::QueryOptions, QueryEngineFactory};
+use crate::query_engine::options::QueryOptions;
+use crate::query_engine::QueryEngineFactory;
+use crate::tests::pow::pow;
 
 #[tokio::test]
 async fn test_datafusion_query_engine() -> Result<()> {

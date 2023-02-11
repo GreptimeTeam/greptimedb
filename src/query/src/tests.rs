@@ -1,4 +1,3 @@
-
 mod argmax_test;
 mod argmin_test;
 mod mean_test;
@@ -10,5 +9,5 @@ mod scipy_stats_norm_cdf_test;
 mod scipy_stats_norm_pdf;
 mod time_range_filter_test;
 
-mod pow;
 mod function;
+mod pow;

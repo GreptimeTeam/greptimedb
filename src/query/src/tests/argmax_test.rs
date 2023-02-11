@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
-
 use std::sync::Arc;
 
 use common_query::Output;
@@ -26,8 +24,8 @@ use session::context::QueryContext;
 
 use crate::error::Result;
 use crate::parser::QueryLanguageParser;
-use crate::QueryEngine;
 use crate::tests::function;
+use crate::QueryEngine;
 
 #[tokio::test]
 async fn test_argmax_aggregator() -> Result<()> {

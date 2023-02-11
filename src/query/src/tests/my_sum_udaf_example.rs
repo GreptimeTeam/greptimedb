@@ -35,10 +35,9 @@ use num_traits::AsPrimitive;
 use session::context::QueryContext;
 use table::test_util::MemTable;
 
-use crate::QueryEngineFactory;
 use crate::error::Result;
-use crate::parser::{QueryLanguageParser};
-
+use crate::parser::QueryLanguageParser;
+use crate::QueryEngineFactory;
 
 #[derive(Debug, Default)]
 struct MySumAccumulator<T, SumT> {

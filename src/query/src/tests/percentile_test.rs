@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -25,15 +26,13 @@ use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::Int32Vector;
 use function::{create_query_engine, get_numbers_from_table};
 use num_traits::AsPrimitive;
-
 use session::context::QueryContext;
 use table::test_util::MemTable;
 
 use crate::error::Result;
-use crate::{QueryEngine, QueryEngineFactory};
 use crate::parser::QueryLanguageParser;
 use crate::tests::function;
-
+use crate::{QueryEngine, QueryEngineFactory};
 
 #[tokio::test]
 async fn test_percentile_aggregator() -> Result<()> {

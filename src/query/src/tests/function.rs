@@ -29,8 +29,7 @@ use session::context::QueryContext;
 use table::test_util::MemTable;
 
 use crate::parser::QueryLanguageParser;
-use crate::{QueryEngineFactory, QueryEngine};
-
+use crate::{QueryEngine, QueryEngineFactory};
 
 pub fn create_query_engine() -> Arc<dyn QueryEngine> {
     let schema_provider = Arc::new(MemorySchemaProvider::new());
