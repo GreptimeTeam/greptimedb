@@ -81,9 +81,9 @@ impl LevelMetas {
     pub fn merge(&self, files_to_add: impl Iterator<Item = FileHandle>) -> LevelMetas {
         let mut merged = self.clone();
         for file in files_to_add {
-            let level = file.level_index();
+            let level = file.level();
 
-            merged.levels[level].add_file(file);
+            merged.levels[level as usize].add_file(file);
         }
 
         // TODO(yingwen): Support file removal.
@@ -176,8 +176,8 @@ impl FileHandle {
 
     /// Returns level as usize so it can be used as index.
     #[inline]
-    pub fn level_index(&self) -> usize {
-        self.inner.meta.level.into()
+    pub fn level(&self) -> Level {
+        self.inner.meta.level
     }
 
     #[inline]
@@ -258,6 +258,9 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
 
     /// Read SST file with given `file_name` and schema.
     async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
+
+    /// Returns backend object store.
+    fn object_store(&self) -> ObjectStore;
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
@@ -310,5 +313,9 @@ impl AccessLayer for FsAccessLayer {
 
         let stream = reader.chunk_stream().await?;
         Ok(Box::new(stream))
+    }
+
+    fn object_store(&self) -> ObjectStore {
+        self.object_store.clone()
     }
 }

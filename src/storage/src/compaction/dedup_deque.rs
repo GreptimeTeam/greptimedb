@@ -18,13 +18,18 @@ use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 
 /// Deque with key deduplication.
-#[derive(Default)]
 pub struct DedupDeque<K, V> {
     deque: VecDeque<K>,
     existing: HashMap<K, V>,
 }
 
 impl<K: Eq + Hash + Clone, V> DedupDeque<K, V> {
+    pub fn new_empty() -> Self {
+        Self {
+            deque: VecDeque::new(),
+            existing: HashMap::new(),
+        }
+    }
     /// Pushes a key value to the back of deque.
     /// Returns true if the deque does not already contain value with the same key, otherwise
     /// returns false.
@@ -83,7 +88,7 @@ mod tests {
 
     #[test]
     fn test_dedup_deque() {
-        let mut deque = DedupDeque::default();
+        let mut deque = DedupDeque::new_empty();
         assert!(deque.push_back(1, "hello".to_string()));
         assert_eq!(1, deque.len());
         assert!(deque.push_back(2, "world".to_string()));

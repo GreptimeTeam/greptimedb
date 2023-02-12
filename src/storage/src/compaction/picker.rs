@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::{Arc, Mutex};
+
 use common_telemetry::debug;
+use store_api::logstore::LogStore;
 
 use crate::compaction::scheduler::CompactionRequestImpl;
 use crate::compaction::strategy::StrategyRef;
@@ -26,7 +29,7 @@ pub trait Picker<R, T: CompactionTask>: Send + 'static {
 
 pub struct PickerContext {}
 
-/// L0 -> L1 all-to-all compaction based on time windows.
+/// L0 -> L1 compaction based on time windows.
 pub(crate) struct SimplePicker {
     strategy: StrategyRef,
 }
@@ -55,8 +58,18 @@ impl Picker<CompactionRequestImpl, CompactionTaskImpl> for SimplePicker {
                 return Ok(None);
             }
 
-            debug!("Found SST files to compact {:?}", outputs);
-            // TODO(hl): build compaction task
+            debug!(
+                "Found SST files to compact {:?} on level: {}",
+                outputs, level_num
+            );
+            return Ok(Some(CompactionTaskImpl {
+                schema: req.schema(),
+                sst_layer: req.sst_layer().clone(),
+                outputs,
+                writer: todo!(),
+                version: todo!(),
+                compacted_inputs: Arc::new(Mutex::new(vec![])),
+            }));
         }
 
         Ok(None)

@@ -30,18 +30,45 @@ use crate::compaction::rate_limit::{
 };
 use crate::compaction::task::CompactionTask;
 use crate::error::{Result, StopCompactionSchedulerSnafu};
-use crate::version::LevelMetasRef;
+use crate::region::RegionWriterRef;
+use crate::schema::RegionSchemaRef;
+use crate::sst::AccessLayerRef;
+use crate::version::{LevelMetasRef, VersionControlRef};
 
 /// Table compaction request.
-#[derive(Default)]
 pub struct CompactionRequestImpl {
     table_id: TableId,
     levels: LevelMetasRef,
+    schema: RegionSchemaRef,
+    sst_layer: AccessLayerRef,
+    writer: RegionWriterRef,
+    version: VersionControlRef,
 }
 
 impl CompactionRequestImpl {
+    #[inline]
     pub fn levels(&self) -> &LevelMetasRef {
         &self.levels
+    }
+
+    #[inline]
+    pub fn schema(&self) -> RegionSchemaRef {
+        self.schema.clone()
+    }
+
+    #[inline]
+    pub fn sst_layer(&self) -> &AccessLayerRef {
+        &self.sst_layer
+    }
+
+    #[inline]
+    pub fn writer(&self) -> &RegionWriterRef {
+        &self.writer
+    }
+
+    #[inline]
+    pub fn version(&self) -> &VersionControlRef {
+        &self.version
     }
 }
 
@@ -52,7 +79,7 @@ impl CompactionRequest for CompactionRequestImpl {
     }
 }
 
-pub trait CompactionRequest: Send + Sync + Default + 'static {
+pub trait CompactionRequest: Send + Sync + 'static {
     fn table_id(&self) -> TableId;
 }
 
@@ -128,7 +155,7 @@ where
         P: Picker<R, T> + Send + Sync,
     {
         let request_queue: Arc<RwLock<DedupDeque<TableId, R>>> =
-            Arc::new(RwLock::new(DedupDeque::default()));
+            Arc::new(RwLock::new(DedupDeque::new_empty()));
         let cancel_token = CancellationToken::new();
         let task_notifier = Arc::new(Notify::new());
 
@@ -296,7 +323,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_handler() {
         common_telemetry::init_default_ut_logging();
-        let queue = Arc::new(RwLock::new(DedupDeque::default()));
+        let queue = Arc::new(RwLock::new(DedupDeque::new_empty()));
         let latch = Arc::new(CountdownLatch::new(2));
         let latch_cloned = latch.clone();
         let picker = MockPicker::new(vec![Arc::new(move || {
@@ -316,15 +343,9 @@ mod tests {
         let handler_cloned = handler.clone();
         common_runtime::spawn_bg(async move { handler_cloned.run().await });
 
-        queue
-            .write()
-            .unwrap()
-            .push_back(1, CompactionRequestImpl::default());
+        queue.write().unwrap().push_back(1, MockRequest::default());
         handler.task_notifier.notify_one();
-        queue
-            .write()
-            .unwrap()
-            .push_back(2, CompactionRequestImpl::default());
+        queue.write().unwrap().push_back(2, MockRequest::default());
         handler.task_notifier.notify_one();
 
         tokio::time::timeout(Duration::from_secs(1), latch.wait())
