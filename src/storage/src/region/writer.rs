@@ -112,6 +112,7 @@ impl RegionWriter {
         );
 
         let files_to_add = edit.files_to_add.clone();
+        let files_to_remove = edit.files_to_remove.clone();
         let flushed_sequence = edit.flushed_sequence;
 
         // Persist the meta action.
@@ -121,7 +122,8 @@ impl RegionWriter {
 
         let version_edit = VersionEdit {
             files_to_add,
-            flushed_sequence: Some(flushed_sequence),
+            files_to_remove,
+            flushed_sequence,
             manifest_version,
             max_memtable_id,
         };

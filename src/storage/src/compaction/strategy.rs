@@ -66,12 +66,7 @@ impl Strategy for SimpleTimeWindowStrategy {
 /// Currently they're files that is not currently under compaction.
 #[inline]
 fn find_compactable_files(level: &LevelMeta) -> Vec<FileHandle> {
-    level
-        .files()
-        .iter()
-        .filter(|f| !f.compacting())
-        .cloned()
-        .collect()
+    level.files().filter(|f| !f.compacting()).cloned().collect()
 }
 
 /// Calculates buckets for files. If file does not contain a time range in metadata, it will be

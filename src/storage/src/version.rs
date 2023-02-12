@@ -24,6 +24,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use common_telemetry::info;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
@@ -129,6 +130,7 @@ impl VersionControl {
 #[derive(Debug)]
 pub struct VersionEdit {
     pub files_to_add: Vec<FileMeta>,
+    pub files_to_remove: Vec<FileMeta>,
     pub flushed_sequence: Option<SequenceNumber>,
     pub manifest_version: ManifestVersion,
     pub max_memtable_id: Option<MemtableId>,
@@ -236,8 +238,14 @@ impl Version {
 
         let handles_to_add = edit.files_to_add.into_iter().map(FileHandle::new);
         let merged_ssts = self.ssts.merge(handles_to_add);
+        let removed_ssts = merged_ssts.remove(edit.files_to_remove.into_iter());
 
-        self.ssts = Arc::new(merged_ssts);
+        info!(
+            "After region compaction, region: {}, SST files: {:?}",
+            self.metadata.id(),
+            removed_ssts
+        );
+        self.ssts = Arc::new(removed_ssts);
     }
 
     /// Updates metadata of the version.

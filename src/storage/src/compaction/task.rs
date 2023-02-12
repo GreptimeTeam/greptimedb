@@ -90,12 +90,12 @@ impl<S: LogStore> CompactionTaskImpl<S> {
         input: Vec<FileMeta>,
     ) -> Result<()> {
         let version = &self.shared_data.version_control;
+        // TODO(hl): do we have to update region version?
         let region_version = version.metadata().version();
-        let flushed_sequence = version.current().flushed_sequence();
 
         let edit = RegionEdit {
             region_version,
-            flushed_sequence,
+            flushed_sequence: None,
             files_to_add: output,
             files_to_remove: input,
         };

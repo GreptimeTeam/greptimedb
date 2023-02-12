@@ -212,7 +212,7 @@ impl<S: LogStore> FlushJob<S> {
     async fn write_manifest_and_apply(&self, file_metas: &[FileMeta]) -> Result<()> {
         let edit = RegionEdit {
             region_version: self.shared.version_control.metadata().version(),
-            flushed_sequence: self.flush_sequence,
+            flushed_sequence: Some(self.flush_sequence),
             files_to_add: file_metas.to_vec(),
             files_to_remove: Vec::default(),
         };

@@ -14,6 +14,7 @@
 
 pub(crate) mod parquet;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -44,7 +45,11 @@ pub trait Visitor {
     /// Visit all `files` in `level`.
     ///
     /// Now the input `files` are unordered.
-    fn visit(&mut self, level: usize, files: &[FileHandle]) -> Result<()>;
+    fn visit<'a>(
+        &mut self,
+        level: usize,
+        files: impl Iterator<Item = &'a FileHandle>,
+    ) -> Result<()>;
 }
 
 /// Metadata of all SSTs under a region.
@@ -82,12 +87,21 @@ impl LevelMetas {
         let mut merged = self.clone();
         for file in files_to_add {
             let level = file.level();
-
             merged.levels[level as usize].add_file(file);
         }
+        merged
+    }
 
-        // TODO(yingwen): Support file removal.
-
+    /// Removes files with given file meta and builds a new [LevelMetas].
+    ///
+    /// # Panics
+    /// Panics if level of [FileHandle] is greater than [MAX_LEVEL].
+    pub fn remove(&self, files_to_remove: impl Iterator<Item = FileMeta>) -> LevelMetas {
+        let mut merged = self.clone();
+        for file in files_to_remove {
+            let level = file.level;
+            merged.levels[level as usize].remove_file(file);
+        }
         merged
     }
 
@@ -122,23 +136,27 @@ pub struct LevelMeta {
     /// Handles to the files in this level.
     // TODO(yingwen): Now for simplicity, files are unordered, maybe sort the files by time range
     // or use another structure to hold them.
-    files: Vec<FileHandle>,
+    files: HashMap<String, FileHandle>,
 }
 
 impl LevelMeta {
     pub fn new_empty(level: Level) -> Self {
         Self {
             level,
-            files: vec![],
+            files: HashMap::new(),
         }
     }
 
     fn add_file(&mut self, file: FileHandle) {
-        self.files.push(file);
+        self.files.insert(file.file_name().to_string(), file);
+    }
+
+    fn remove_file(&mut self, file_to_remove: FileMeta) {
+        self.files.remove(&file_to_remove.file_name);
     }
 
     pub fn visit_level<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
-        visitor.visit(self.level.into(), &self.files)
+        visitor.visit(self.level.into(), self.files.values())
     }
 
     /// Returns the level of level meta.
@@ -147,8 +165,8 @@ impl LevelMeta {
         self.level
     }
 
-    pub fn files(&self) -> &[FileHandle] {
-        &self.files
+    pub fn files(&self) -> impl Iterator<Item = &FileHandle> {
+        self.files.values()
     }
 }
 
@@ -317,5 +335,96 @@ impl AccessLayer for FsAccessLayer {
 
     fn object_store(&self) -> ObjectStore {
         self.object_store.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    fn create_meta(name: &str, level: Level) -> FileMeta {
+        FileMeta {
+            file_name: name.to_string(),
+            time_range: None,
+            level,
+        }
+    }
+
+    fn create_handle(name: &str, level: Level) -> FileHandle {
+        FileHandle::new(create_meta(name, level))
+    }
+
+    #[test]
+    fn test_level_metas_add_and_remove() {
+        let metas = LevelMetas::new();
+        let merged = metas.merge(vec![create_handle("a", 0), create_handle("b", 0)].into_iter());
+
+        assert_eq!(
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            merged
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let merged1 = merged.merge(vec![create_handle("c", 1), create_handle("d", 1)].into_iter());
+        assert_eq!(
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            merged1
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::from(["c".to_string(), "d".to_string()]),
+            merged1
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let removed1 = merged1.remove(vec![create_meta("a", 0), create_meta("c", 0)].into_iter());
+        assert_eq!(
+            HashSet::from(["b".to_string()]),
+            removed1
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::from(["c".to_string(), "d".to_string()]),
+            removed1
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let removed2 = removed1.remove(vec![create_meta("c", 1), create_meta("d", 1)].into_iter());
+        assert_eq!(
+            HashSet::from(["b".to_string()]),
+            removed2
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::new(),
+            removed2
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
     }
 }

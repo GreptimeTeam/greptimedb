@@ -214,9 +214,13 @@ impl ChunkReaderBuilder {
 }
 
 impl Visitor for ChunkReaderBuilder {
-    fn visit(&mut self, _level: usize, files: &[FileHandle]) -> Result<()> {
+    fn visit<'a>(
+        &mut self,
+        _level: usize,
+        files: impl Iterator<Item = &'a FileHandle>,
+    ) -> Result<()> {
         // Now we read all files, so just reserve enough space to hold all files.
-        self.files_to_read.reserve(files.len());
+        // self.files_to_read.reserve(files.len);
         for file in files {
             // We can't invoke async functions here, so we collects all files first, and
             // create the batch reader later in `ChunkReaderBuilder`.
