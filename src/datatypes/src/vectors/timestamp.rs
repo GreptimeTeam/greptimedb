@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arrow::array::PrimitiveArray;
-use paste::paste;
-
-use crate::arrow_array;
 use crate::types::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType,
@@ -33,19 +29,3 @@ pub type TimestampMicrosecondVectorBuilder = PrimitiveVectorBuilder<TimestampMic
 
 pub type TimestampNanosecondVector = PrimitiveVector<TimestampNanosecondType>;
 pub type TimestampNanosecondVectorBuilder = PrimitiveVectorBuilder<TimestampNanosecondType>;
-
-macro_rules! impl_as_inner_for_timestamps {
-    ($($unit: ident), *) => {
-        $(
-            paste! {
-                impl [<Timestamp $unit Vector>] {
-                   pub fn as_inner(&self) -> &PrimitiveArray<arrow_array::[<Timestamp $unit Type>]> {
-                        self.as_arrow()
-                    }
-                }
-            }
-        )*
-    };
-}
-
-impl_as_inner_for_timestamps!(Second, Millisecond, Microsecond, Nanosecond);
