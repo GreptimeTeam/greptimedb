@@ -13,6 +13,7 @@
 // limitations under the License.
 
 //! Storage related APIs
+pub mod error;
 pub mod logstore;
 pub mod manifest;
 pub mod storage;

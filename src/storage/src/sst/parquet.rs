@@ -21,6 +21,7 @@ use std::sync::Arc;
 use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use common_telemetry::error;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -34,6 +35,8 @@ use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
 use snafu::{OptionExt, ResultExt};
+use store_api::error::ReadBatchSnafu;
+use store_api::storage::batch::{Batch, BatchReader};
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
@@ -42,7 +45,6 @@ use crate::error::{
     Result, WriteObjectSnafu, WriteParquetSnafu,
 };
 use crate::memtable::BoxedBatchIterator;
-use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
 use crate::sst;
@@ -299,12 +301,16 @@ impl ChunkStream {
 
 #[async_trait]
 impl BatchReader for ChunkStream {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+    async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
         self.stream
             .try_next()
-            .await?
+            .await
+            .map_err(BoxedError::new)
+            .context(ReadBatchSnafu)?
             .map(|rb| self.adapter.arrow_record_batch_to_batch(&rb))
             .transpose()
+            .map_err(BoxedError::new)
+            .context(ReadBatchSnafu)
     }
 }
 

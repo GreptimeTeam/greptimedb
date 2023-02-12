@@ -18,10 +18,10 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::batch::Batch;
 
 use crate::error::{self, Result};
 use crate::metadata::ColumnMetadata;
-use crate::read::Batch;
 use crate::schema::{ProjectedSchemaRef, StoreSchemaRef};
 
 /// Make schema compatible to write to target with another schema.

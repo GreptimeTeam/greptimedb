@@ -14,6 +14,7 @@
 
 //! Storage APIs.
 
+pub mod batch;
 mod chunk;
 pub mod consts;
 mod descriptors;

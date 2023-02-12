@@ -21,11 +21,11 @@ use async_trait::async_trait;
 use common_time::Timestamp;
 use object_store::{util, ObjectStore};
 use serde::{Deserialize, Serialize};
+use store_api::storage::batch::BoxedBatchReader;
 use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
-use crate::read::BoxedBatchReader;
 use crate::schema::ProjectedSchemaRef;
 use crate::sst::parquet::{ParquetReader, ParquetWriter};
 

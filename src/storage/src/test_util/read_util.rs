@@ -18,12 +18,12 @@ use async_trait::async_trait;
 use datatypes::prelude::{ScalarVector, WrapperType};
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
+use store_api::storage::batch::{Batch, BatchReader, BoxedBatchReader};
 use store_api::storage::OpType;
 
 use crate::error::Result;
 use crate::memtable::{BatchIterator, BoxedBatchIterator, RowOrdering};
 use crate::metadata::RegionMetadata;
-use crate::read::{Batch, BatchReader, BoxedBatchReader};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::test_util::descriptor_util::RegionDescBuilder;
 
@@ -145,7 +145,7 @@ impl VecBatchReader {
 
 #[async_trait]
 impl BatchReader for VecBatchReader {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+    async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
         Ok(self.batches.pop())
     }
 }

@@ -22,13 +22,13 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::*;
 use datatypes::value::Value;
 use datatypes::vectors::{UInt64Vector, UInt64VectorBuilder, UInt8Vector, UInt8VectorBuilder};
+use store_api::storage::batch::Batch;
 use store_api::storage::{OpType, SequenceNumber};
 
 use crate::error::Result;
 use crate::memtable::{
     BatchIterator, BoxedBatchIterator, IterContext, KeyValues, Memtable, MemtableId, RowOrdering,
 };
-use crate::read::Batch;
 use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 

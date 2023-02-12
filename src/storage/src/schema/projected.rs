@@ -21,11 +21,11 @@ use common_error::prelude::*;
 use datatypes::prelude::ScalarVector;
 use datatypes::schema::{SchemaBuilder, SchemaRef};
 use datatypes::vectors::{BooleanVector, UInt8Vector};
+use store_api::storage::batch::{Batch, BatchOp};
 use store_api::storage::{Chunk, ColumnId, OpType};
 
 use crate::error;
 use crate::metadata::{self, Result};
-use crate::read::{Batch, BatchOp};
 use crate::schema::{RegionSchema, RegionSchemaRef, StoreSchema, StoreSchemaRef};
 
 /// Metadata about projection.
@@ -277,6 +277,8 @@ impl ProjectedSchema {
 }
 
 impl BatchOp for ProjectedSchema {
+    type Error = error::Error;
+
     fn compare_row(&self, left: &Batch, i: usize, right: &Batch, j: usize) -> Ordering {
         // Ordered by (row_key asc, sequence desc, op_type desc).
         let indices = self.schema_to_read.row_key_indices();
@@ -319,7 +321,11 @@ impl BatchOp for ProjectedSchema {
         }
     }
 
-    fn filter(&self, batch: &Batch, filter: &BooleanVector) -> error::Result<Batch> {
+    fn filter(
+        &self,
+        batch: &Batch,
+        filter: &BooleanVector,
+    ) -> std::result::Result<Batch, Self::Error> {
         let columns = batch
             .columns()
             .iter()

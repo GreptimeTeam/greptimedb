@@ -19,6 +19,7 @@ use datatypes::vectors::{
     TimestampMillisecondVector, TimestampMillisecondVectorBuilder, UInt64Vector,
     UInt64VectorBuilder, UInt8Vector,
 };
+use store_api::storage::batch::Batch;
 
 use super::*;
 use crate::metadata::RegionMetadata;

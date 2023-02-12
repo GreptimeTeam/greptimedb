@@ -14,11 +14,14 @@
 
 use async_trait::async_trait;
 use common_base::BitVec;
+use common_error::ext::BoxedError;
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::BooleanVector;
+use snafu::ResultExt;
+use store_api::error::ReadBatchSnafu;
+use store_api::storage::batch::{Batch, BatchOp, BatchReader};
 
 use crate::error::Result;
-use crate::read::{Batch, BatchOp, BatchReader};
 use crate::schema::ProjectedSchemaRef;
 
 /// A reader that dedup rows from inner reader.
@@ -77,9 +80,12 @@ impl<R> DedupReader<R> {
 
 #[async_trait]
 impl<R: BatchReader> BatchReader for DedupReader<R> {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+    async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
         while let Some(batch) = self.reader.next_batch().await? {
-            let filtered = self.dedup_batch(batch)?;
+            let filtered = self
+                .dedup_batch(batch)
+                .map_err(BoxedError::new)
+                .context(ReadBatchSnafu)?;
             // Skip empty batch.
             if !filtered.is_empty() {
                 return Ok(Some(filtered));

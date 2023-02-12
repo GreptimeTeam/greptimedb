@@ -28,8 +28,7 @@ mod tests {
     use datatypes::vectors::{
         Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector, VectorRef,
     };
-
-    use crate::read::Batch;
+    use store_api::storage::batch::Batch;
 
     pub const REGION_NAME: &str = "test";
 

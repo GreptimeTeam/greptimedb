@@ -19,12 +19,13 @@ use common_query::logical_plan::Expr;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
+use store_api::storage::batch::BoxedBatchReader;
 use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
-use crate::error::{self, Error, Result};
+use crate::error::{self, BatchSnafu, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};
-use crate::read::{BoxedBatchReader, DedupReader, MergeReaderBuilder};
+use crate::read::{DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions, Visitor};
 
@@ -46,7 +47,7 @@ impl ChunkReader for ChunkReaderImpl {
     }
 
     async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
-        let batch = match self.batch_reader.next_batch().await? {
+        let batch = match self.batch_reader.next_batch().await.context(BatchSnafu)? {
             Some(b) => b,
             None => return Ok(None),
         };

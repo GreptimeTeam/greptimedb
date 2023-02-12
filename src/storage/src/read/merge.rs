@@ -59,11 +59,13 @@ use std::collections::BinaryHeap;
 use std::fmt;
 
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
+use snafu::ResultExt;
+use store_api::storage::batch::{Batch, BatchBuilder, BatchOp, BatchReader, BoxedBatchReader};
 use store_api::storage::consts;
 
-use crate::error::Result;
+use crate::error::{BatchSnafu, Result};
 use crate::memtable::BoxedBatchIterator;
-use crate::read::{Batch, BatchBuilder, BatchOp, BatchReader, BoxedBatchReader};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef};
 
 /// Batch data source.
@@ -78,7 +80,7 @@ impl Source {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
         match self {
             Source::Iter(iter) => iter.next().transpose(),
-            Source::Reader(reader) => reader.next_batch().await,
+            Source::Reader(reader) => reader.next_batch().await.context(BatchSnafu),
         }
     }
 
@@ -196,7 +198,9 @@ impl BatchCursor {
     /// Panics if `self` is invalid.
     fn push_rows_to(&mut self, builder: &mut BatchBuilder, length: usize) -> Result<()> {
         let length = length.min(self.batch.num_rows() - self.pos);
-        builder.extend_slice_of(&self.batch, self.pos, length)?;
+        builder
+            .extend_slice_of(&self.batch, self.pos, length)
+            .context(BatchSnafu)?;
         self.pos += length;
 
         Ok(())
@@ -207,7 +211,9 @@ impl BatchCursor {
     /// # Panics
     /// Panics if `self` is invalid.
     fn push_next_row_to(&mut self, builder: &mut BatchBuilder) -> Result<()> {
-        builder.push_row_of(&self.batch, self.pos)?;
+        builder
+            .push_row_of(&self.batch, self.pos)
+            .context(BatchSnafu)?;
         self.pos += 1;
 
         Ok(())
@@ -409,8 +415,11 @@ pub struct MergeReader {
 
 #[async_trait]
 impl BatchReader for MergeReader {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        self.fetch_next_batch().await
+    async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
+        self.fetch_next_batch()
+            .await
+            .map_err(BoxedError::new)
+            .context(store_api::error::ReadBatchSnafu)
     }
 }
 
@@ -517,7 +526,7 @@ impl MergeReader {
         if self.batch_builder.is_empty() {
             Ok(None)
         } else {
-            self.batch_builder.build().map(Some)
+            self.batch_builder.build().map(Some).context(BatchSnafu)
         }
     }
 

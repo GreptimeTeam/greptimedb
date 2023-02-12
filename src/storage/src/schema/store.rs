@@ -19,11 +19,11 @@ use common_error::prelude::*;
 use datatypes::arrow::datatypes::Schema as ArrowSchema;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::{Schema, SchemaBuilder, SchemaRef};
+use store_api::storage::batch::Batch;
 use store_api::storage::consts;
 
 use crate::error::NewRecordBatchSnafu;
 use crate::metadata::{self, ColumnMetadata, ColumnsMetadata, Error, Result};
-use crate::read::Batch;
 
 const ROW_KEY_END_KEY: &str = "greptime:storage:row_key_end";
 const USER_COLUMN_END_KEY: &str = "greptime:storage:user_column_end";
@@ -251,8 +251,9 @@ fn parse_index_from_metadata(metadata: &HashMap<String, String>, key: &str) -> R
 
 #[cfg(test)]
 mod tests {
+    use store_api::storage::batch::Batch;
+
     use super::*;
-    use crate::read::Batch;
     use crate::schema::tests;
     use crate::test_util::schema_util;
 

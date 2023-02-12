@@ -244,15 +244,6 @@ pub enum Error {
         source: MetadataError,
     },
 
-    #[snafu(display("Failed to push data to batch builder, source: {}", source))]
-    PushBatch {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
-    #[snafu(display("Failed to build batch, {}", msg))]
-    BuildBatch { msg: String, backtrace: Backtrace },
-
     #[snafu(display("Failed to filter column {}, source: {}", name, source))]
     FilterColumn {
         name: String,
@@ -422,6 +413,12 @@ pub enum Error {
         source: JoinError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to build batch, source: {:?}", source))]
+    Batch {
+        #[snafu(backtrace)]
+        source: store_api::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -434,7 +431,6 @@ impl ErrorExt for Error {
             InvalidScanIndex { .. }
             | BatchMissingColumn { .. }
             | InvalidProjection { .. }
-            | BuildBatch { .. }
             | NotInSchemaToCompat { .. }
             | WriteToOldVersion { .. }
             | CreateRecordBatch { .. }
@@ -486,13 +482,13 @@ impl ErrorExt for Error {
             InvalidAlterRequest { source, .. } | InvalidRegionDesc { source, .. } => {
                 source.status_code()
             }
-            PushBatch { source, .. } => source.status_code(),
             CreateDefault { source, .. } => source.status_code(),
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
             CompactionRateLimited { .. } => StatusCode::Internal,
             StopCompactionScheduler { .. } => StatusCode::Internal,
+            Batch { source, .. } => source.status_code(),
         }
     }
 
