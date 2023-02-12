@@ -19,7 +19,7 @@ mod basic;
 mod flush;
 mod projection;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common_telemetry::logging;
 use datatypes::prelude::{ScalarVector, WrapperType};
@@ -332,11 +332,15 @@ async fn test_recover_region_manifets() {
     assert_eq!(version.flushed_sequence(), 2);
     assert_eq!(version.manifest_version(), 1);
     let ssts = version.ssts();
-    let files = ssts.levels()[0].files().collect::<Vec<_>>();
+    let files = ssts.levels()[0]
+        .files()
+        .map(|f| f.file_name().to_string())
+        .collect::<HashSet<_>>();
     assert_eq!(3, files.len());
-    for (i, file) in files.iter().enumerate() {
-        assert_eq!(format!("f{}", i + 1), file.file_name());
-    }
+    assert_eq!(
+        HashSet::from(["f1".to_string(), "f2".to_string(), "f3".to_string()]),
+        files
+    );
 
     // check manifest state
     assert_eq!(3, manifest.last_version());
