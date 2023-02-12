@@ -800,16 +800,18 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
-        let SstInfo {
-            start_timestamp,
-            end_timestamp,
-        } = writer
+        let SstInfo { time_range } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
 
-        assert_eq!(Some(Timestamp::new_millisecond(1000)), start_timestamp);
-        assert_eq!(Some(Timestamp::new_millisecond(3001)), end_timestamp);
+        assert_eq!(
+            Some((
+                Timestamp::new_millisecond(1000),
+                Timestamp::new_millisecond(3001)
+            )),
+            time_range
+        );
 
         let projected_schema =
             Arc::new(ProjectedSchema::new(schema, Some(vec![1, 0, 3, 2])).unwrap());

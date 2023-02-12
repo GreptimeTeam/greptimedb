@@ -218,18 +218,14 @@ mod tests {
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
-        let SstInfo {
-            start_timestamp,
-            end_timestamp,
-        } = writer
+        let SstInfo { time_range } = writer
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
         let handle = FileHandle::new(FileMeta {
             file_name: sst_file_name.to_string(),
+            time_range,
             level: 0,
-            start_timestamp,
-            end_timestamp,
         });
         seq.fetch_add(1, Ordering::Relaxed);
         handle
@@ -406,8 +402,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             SstInfo {
-                start_timestamp: Some(Timestamp::new_millisecond(2000)),
-                end_timestamp: Some(Timestamp::new_millisecond(2000)),
+                time_range: Some((
+                    Timestamp::new_millisecond(2000),
+                    Timestamp::new_millisecond(2000)
+                )),
             },
             s1
         );
@@ -422,8 +420,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             SstInfo {
-                start_timestamp: Some(Timestamp::new_millisecond(3000)),
-                end_timestamp: Some(Timestamp::new_millisecond(5002)),
+                time_range: Some((
+                    Timestamp::new_millisecond(3000),
+                    Timestamp::new_millisecond(5002)
+                )),
             },
             s2
         );
@@ -439,8 +439,10 @@ mod tests {
 
         assert_eq!(
             SstInfo {
-                start_timestamp: Some(Timestamp::new_millisecond(6000)),
-                end_timestamp: Some(Timestamp::new_millisecond(8000)),
+                time_range: Some((
+                    Timestamp::new_millisecond(6000),
+                    Timestamp::new_millisecond(8000)
+                )),
             },
             s3
         );
@@ -450,9 +452,8 @@ mod tests {
             .map(|f| {
                 FileHandle::new(FileMeta {
                     file_name: f.to_string(),
-                    start_timestamp: None,
-                    end_timestamp: None,
                     level: 1,
+                    time_range: None,
                 })
             })
             .collect::<Vec<_>>();
