@@ -17,23 +17,26 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Operator};
 
 use crate::chunk::{ChunkReaderBuilder, ChunkReaderImpl};
+use crate::error;
 use crate::schema::RegionSchemaRef;
 use crate::sst::{AccessLayerRef, FileHandle};
 
+/// Builds an SST reader that only reads rows within given time range.
 pub(crate) async fn build_sst_reader(
     schema: RegionSchemaRef,
     sst_layer: AccessLayerRef,
     files: &[FileHandle],
     lower_sec_inclusive: i64,
     upper_sec_exclusive: i64,
-) -> ChunkReaderImpl {
+) -> error::Result<ChunkReaderImpl> {
     let ts_col_name = schema
         .user_schema()
         .timestamp_column()
         .unwrap()
         .name
         .clone();
-    let reader = ChunkReaderBuilder::new(schema, sst_layer)
+
+    ChunkReaderBuilder::new(schema, sst_layer)
         .pick_ssts(files)
         .filters(vec![build_time_range_filter(
             lower_sec_inclusive,
@@ -42,9 +45,6 @@ pub(crate) async fn build_sst_reader(
         )])
         .build()
         .await
-        .unwrap();
-
-    reader
 }
 
 fn build_time_range_filter(low_sec: i64, high_sec: i64, ts_col_name: &str) -> Expr {
@@ -80,8 +80,10 @@ fn build_time_range_filter(low_sec: i64, high_sec: i64, ts_col_name: &str) -> Ex
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
+    use common_time::Timestamp;
     use datatypes::prelude::{LogicalTypeId, ScalarVector, ScalarVectorBuilder};
     use datatypes::timestamp::TimestampMillisecond;
     use datatypes::vectors::{
@@ -90,6 +92,7 @@ mod tests {
     use object_store::backend::fs::Builder;
     use object_store::ObjectStore;
     use store_api::storage::{ChunkReader, OpType, SequenceNumber};
+    use tempdir::TempDir;
 
     use super::*;
     use crate::memtable::{
@@ -98,7 +101,7 @@ mod tests {
     use crate::metadata::RegionMetadata;
     use crate::sst;
     use crate::sst::parquet::{ParquetWriter, Source};
-    use crate::sst::{FileMeta, FsAccessLayer, SstInfo};
+    use crate::sst::{FileMeta, FsAccessLayer, SstInfo, WriteOptions};
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     fn schema_for_test() -> RegionSchemaRef {
@@ -161,20 +164,56 @@ mod tests {
     async fn write_sst(
         sst_file_name: &str,
         schema: RegionSchemaRef,
+        seq: &AtomicU64,
         object_store: ObjectStore,
         ts: &[i64],
+        ops: &[OpType],
     ) -> FileHandle {
         let memtable = DefaultMemtableBuilder::default().build(schema.clone());
+        let mut breaks = ops
+            .iter()
+            .zip(ops.iter().skip(1))
+            .enumerate()
+            .filter_map(
+                |(idx, (prev, next))| {
+                    if prev != next {
+                        Some(idx + 1)
+                    } else {
+                        None
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
 
-        let values = ts.iter().map(|i| (*i) as u64).map(Some).collect::<Vec<_>>();
+        breaks.insert(0, 0);
+        breaks.push(ts.len());
 
-        write_kvs(
-            &*memtable,
-            10, // sequence
-            OpType::Put,
-            ts,      // keys
-            &values, // values
-        );
+        for i in 0..breaks.len() - 1 {
+            let op = ops[i];
+            let seg_len = breaks[i + 1] - breaks[i];
+            let ts_seg = ts
+                .iter()
+                .skip(breaks[i])
+                .take(seg_len)
+                .copied()
+                .collect::<Vec<_>>();
+            let value_seg = ts
+                .iter()
+                .skip(breaks[i])
+                .take(seg_len)
+                .map(|i| (*i) as u64)
+                .map(Some)
+                .collect::<Vec<_>>();
+
+            write_kvs(
+                &*memtable,
+                seq.load(Ordering::Relaxed), // sequence
+                op,
+                &ts_seg,    // keys
+                &value_seg, // values
+            );
+            seq.fetch_add(1, Ordering::Relaxed);
+        }
 
         let iter = memtable.iter(&IterContext::default()).unwrap();
         let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
@@ -186,12 +225,14 @@ mod tests {
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
-        FileHandle::new(FileMeta {
+        let handle = FileHandle::new(FileMeta {
             file_name: sst_file_name.to_string(),
             level: 0,
             start_timestamp,
             end_timestamp,
-        })
+        });
+        seq.fetch_add(1, Ordering::Relaxed);
+        handle
     }
 
     async fn check_reads(
@@ -209,7 +250,8 @@ mod tests {
             lower_sec_inclusive,
             upper_sec_exclusive,
         )
-        .await;
+        .await
+        .unwrap();
 
         let mut res = vec![];
         while let Some(f) = reader.next_chunk().await.unwrap() {
@@ -224,25 +266,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_sst_reader() {
-        // let dir = TempDir::new("write_parquet").unwrap();
-        // let path = dir.path().to_str().unwrap();
-        let path = "/Users/lei/parquet";
+        let dir = TempDir::new("write_parquet").unwrap();
+        let path = dir.path().to_str().unwrap();
         let backend = Builder::default().root(path).build().unwrap();
         let object_store = ObjectStore::new(backend);
 
+        let seq = AtomicU64::new(0);
         let schema = schema_for_test();
         let file1 = write_sst(
             "a.parquet",
             schema.clone(),
+            &seq,
             object_store.clone(),
             &[1000, 2000, 3000, 4001, 5001],
+            &[
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+            ],
         )
         .await;
         let file2 = write_sst(
             "b.parquet",
             schema.clone(),
+            &seq,
             object_store.clone(),
             &[4002, 5002, 6000, 7000, 8000],
+            &[
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+            ],
         )
         .await;
         let sst_layer = Arc::new(FsAccessLayer::new("./", object_store));
@@ -260,5 +318,149 @@ mod tests {
         .await;
 
         check_reads(schema, sst_layer, &files, 1, 2, &[1000]).await;
+    }
+
+    async fn read_file(
+        files: &[FileHandle],
+        schema: RegionSchemaRef,
+        sst_layer: AccessLayerRef,
+    ) -> Vec<i64> {
+        let mut timestamps = vec![];
+        let mut reader = build_sst_reader(schema, sst_layer, files, i64::MIN, i64::MAX)
+            .await
+            .unwrap();
+        while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            let ts = chunk.columns[0]
+                .as_any()
+                .downcast_ref::<TimestampMillisecondVector>()
+                .unwrap();
+            timestamps.extend(ts.iter_data().map(|t| t.unwrap().0.value()));
+        }
+        timestamps
+    }
+
+    /// Writes rows into file i1/i2 and splits these rows into sst file o1/o2/o3,
+    /// and check the output contains the same data as input files.
+    #[tokio::test]
+    async fn test_sst_split() {
+        let dir = TempDir::new("write_parquet").unwrap();
+        let path = dir.path().to_str().unwrap();
+        let backend = Builder::default().root(path).build().unwrap();
+        let object_store = ObjectStore::new(backend);
+
+        let schema = schema_for_test();
+        let seq = AtomicU64::new(0);
+        let file1 = write_sst(
+            "i1.parquet",
+            schema.clone(),
+            &seq,
+            object_store.clone(),
+            &[1000, 2000, 3000, 4001, 5001],
+            &[
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+            ],
+        )
+        .await;
+
+        // in file2 we delete the row with timestamp 1000.
+        let file2 = write_sst(
+            "i2.parquet",
+            schema.clone(),
+            &seq,
+            object_store.clone(),
+            &[1000, 5002, 6000, 7000, 8000],
+            &[
+                OpType::Delete, // a deletion
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+                OpType::Put,
+            ],
+        )
+        .await;
+        let sst_layer = Arc::new(FsAccessLayer::new("./", object_store.clone()));
+        let input_files = vec![file2, file1];
+
+        let reader1 = build_sst_reader(schema.clone(), sst_layer.clone(), &input_files, 0, 3)
+            .await
+            .unwrap();
+        let reader2 = build_sst_reader(schema.clone(), sst_layer.clone(), &input_files, 3, 6)
+            .await
+            .unwrap();
+        let reader3 = build_sst_reader(schema.clone(), sst_layer.clone(), &input_files, 6, 10)
+            .await
+            .unwrap();
+
+        let opts = WriteOptions {};
+        let s1 = ParquetWriter::new(
+            "./o1.parquet",
+            Source::Reader(reader1),
+            object_store.clone(),
+        )
+        .write_sst(&opts)
+        .await
+        .unwrap();
+        assert_eq!(
+            SstInfo {
+                start_timestamp: Some(Timestamp::new_millisecond(2000)),
+                end_timestamp: Some(Timestamp::new_millisecond(2000)),
+            },
+            s1
+        );
+
+        let s2 = ParquetWriter::new(
+            "./o2.parquet",
+            Source::Reader(reader2),
+            object_store.clone(),
+        )
+        .write_sst(&opts)
+        .await
+        .unwrap();
+        assert_eq!(
+            SstInfo {
+                start_timestamp: Some(Timestamp::new_millisecond(3000)),
+                end_timestamp: Some(Timestamp::new_millisecond(5002)),
+            },
+            s2
+        );
+
+        let s3 = ParquetWriter::new(
+            "./o3.parquet",
+            Source::Reader(reader3),
+            object_store.clone(),
+        )
+        .write_sst(&opts)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            SstInfo {
+                start_timestamp: Some(Timestamp::new_millisecond(6000)),
+                end_timestamp: Some(Timestamp::new_millisecond(8000)),
+            },
+            s3
+        );
+
+        let output_files = ["o1.parquet", "o2.parquet", "o3.parquet"]
+            .into_iter()
+            .map(|f| {
+                FileHandle::new(FileMeta {
+                    file_name: f.to_string(),
+                    start_timestamp: None,
+                    end_timestamp: None,
+                    level: 1,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let timestamps_in_inputs = read_file(&input_files, schema.clone(), sst_layer.clone()).await;
+        let timestamps_in_outputs =
+            read_file(&output_files, schema.clone(), sst_layer.clone()).await;
+
+        assert_eq!(timestamps_in_outputs, timestamps_in_inputs);
     }
 }

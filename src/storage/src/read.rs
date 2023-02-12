@@ -38,7 +38,7 @@ pub struct Batch {
     ///
     /// Columns follow the same order convention of region schema:
     /// key, value, internal columns.
-    columns: Vec<VectorRef>,
+    pub columns: Vec<VectorRef>,
 }
 
 impl Batch {

@@ -240,7 +240,7 @@ pub struct ReadOptions {
     pub time_range: TimestampRange,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct SstInfo {
     pub time_range: Option<(Timestamp, Timestamp)>,
 }

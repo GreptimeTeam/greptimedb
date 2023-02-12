@@ -24,7 +24,7 @@ use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};
-use crate::read::{BoxedBatchReader, DedupReader, MergeReaderBuilder};
+use crate::read::{Batch, BoxedBatchReader, DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
 use crate::sst::{AccessLayerRef, FileHandle, LevelMetas, ReadOptions, Visitor};
 
@@ -41,7 +41,7 @@ pub struct ChunkReaderImpl {
 impl ChunkReader for ChunkReaderImpl {
     type Error = Error;
 
-    fn schema(&self) -> &SchemaRef {
+    fn user_schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
     }
 
@@ -50,10 +50,14 @@ impl ChunkReader for ChunkReaderImpl {
             Some(b) => b,
             None => return Ok(None),
         };
+        Ok(Some(Chunk::new(batch.columns)))
+    }
 
-        let chunk = self.schema.batch_to_chunk(&batch);
-
-        Ok(Some(chunk))
+    fn project_chunk(&self, chunk: Chunk) -> Chunk {
+        let batch = Batch {
+            columns: chunk.columns,
+        };
+        self.schema.batch_to_chunk(&batch)
     }
 }
 

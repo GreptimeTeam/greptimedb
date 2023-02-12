@@ -438,8 +438,11 @@ impl BatchReader for ChunkStream {
     }
 }
 
+/// Parquet writer data source.
 pub enum Source {
+    /// Writes rows from memtable to parquet
     Iter(BoxedBatchIterator),
+    /// Writes row from ChunkReaderImpl (maybe a set of SSTs) to parquet.
     Reader(ChunkReaderImpl),
 }
 
