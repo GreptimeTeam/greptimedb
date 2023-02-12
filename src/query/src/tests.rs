@@ -12,24 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod datafusion;
-pub mod error;
-pub mod executor;
-mod function;
-pub mod logical_optimizer;
-mod metric;
-mod optimizer;
-pub mod parser;
-pub mod physical_optimizer;
-pub mod physical_planner;
-pub mod plan;
-pub mod planner;
-pub mod query_engine;
-pub mod sql;
-#[cfg(test)]
-mod tests;
+mod argmax_test;
+mod argmin_test;
+mod mean_test;
+mod my_sum_udaf_example;
+mod percentile_test;
+mod polyval_test;
+mod query_engine_test;
+mod scipy_stats_norm_cdf_test;
+mod scipy_stats_norm_pdf;
+mod time_range_filter_test;
 
-pub use crate::datafusion::DfContextProviderAdapter;
-pub use crate::query_engine::{
-    QueryEngine, QueryEngineContext, QueryEngineFactory, QueryEngineRef,
-};
+mod function;
+mod pow;

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::sync::Arc;
-mod function;
 
 use common_query::Output;
 use common_recordbatch::error::Result as RecordResult;
@@ -22,10 +21,12 @@ use datatypes::for_all_primitive_types;
 use datatypes::prelude::*;
 use datatypes::types::WrapperType;
 use num_traits::AsPrimitive;
-use query::error::Result;
-use query::parser::QueryLanguageParser;
-use query::QueryEngine;
 use session::context::QueryContext;
+
+use crate::error::Result;
+use crate::parser::QueryLanguageParser;
+use crate::tests::function;
+use crate::QueryEngine;
 
 #[tokio::test]
 async fn test_polyval_aggregator() -> Result<()> {

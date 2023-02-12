@@ -26,13 +26,15 @@ use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector};
-use query::QueryEngineRef;
 use session::context::QueryContext;
 use table::metadata::{FilterPushDownType, TableInfoRef};
 use table::predicate::TimeRangePredicateBuilder;
 use table::test_util::MemTable;
 use table::Table;
 use tokio::sync::RwLock;
+
+use crate::parser::QueryLanguageParser;
+use crate::{QueryEngineFactory, QueryEngineRef};
 
 struct MemTableWrapper {
     inner: MemTable,
@@ -115,7 +117,7 @@ fn create_test_engine() -> TimeRangeTester {
         .register_catalog("greptime".to_string(), default_catalog)
         .unwrap();
 
-    let engine = query::QueryEngineFactory::new(catalog_list).query_engine();
+    let engine = QueryEngineFactory::new(catalog_list).query_engine();
     TimeRangeTester { engine, table }
 }
 
@@ -126,7 +128,7 @@ struct TimeRangeTester {
 
 impl TimeRangeTester {
     async fn check(&self, sql: &str, expect: TimestampRange) {
-        let stmt = query::parser::QueryLanguageParser::parse_sql(sql).unwrap();
+        let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
         let _ = self
             .engine
             .execute(
