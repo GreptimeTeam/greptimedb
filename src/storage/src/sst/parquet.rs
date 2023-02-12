@@ -315,6 +315,8 @@ impl ChunkStream {
 
 #[async_trait]
 impl BatchReader for ChunkStream {
+    type Error = error::Error;
+
     fn schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
     }

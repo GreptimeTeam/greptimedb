@@ -22,6 +22,7 @@ use snafu::ResultExt;
 use store_api::error::ReadBatchSnafu;
 use store_api::storage::batch::{Batch, BatchOp, BatchReader};
 
+use crate::error;
 use crate::error::Result;
 use crate::schema::ProjectedSchemaRef;
 
@@ -81,6 +82,8 @@ impl<R> DedupReader<R> {
 
 #[async_trait]
 impl<R: BatchReader> BatchReader for DedupReader<R> {
+    type Error = error::Error;
+
     fn schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
     }

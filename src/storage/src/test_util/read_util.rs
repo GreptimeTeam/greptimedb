@@ -22,7 +22,8 @@ use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, 
 use store_api::storage::batch::{Batch, BatchReader, BoxedBatchReader};
 use store_api::storage::OpType;
 
-use crate::error::Result;
+use crate::error;
+use crate::error::{Error, Result};
 use crate::memtable::{BatchIterator, BoxedBatchIterator, RowOrdering};
 use crate::metadata::RegionMetadata;
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
@@ -93,7 +94,9 @@ fn check_kv_batch(batches: &[Batch], expect: &[&[(i64, Option<i64>)]]) {
     assert_eq!(batches.len(), expect.len());
 }
 
-pub async fn collect_kv_batch(reader: &mut dyn BatchReader) -> Vec<(i64, Option<i64>)> {
+pub async fn collect_kv_batch(
+    reader: &mut dyn BatchReader<Error = Error>,
+) -> Vec<(i64, Option<i64>)> {
     let mut result = Vec::new();
     while let Some(batch) = reader.next_batch().await.unwrap() {
         let key = batch
@@ -116,7 +119,7 @@ pub async fn collect_kv_batch(reader: &mut dyn BatchReader) -> Vec<(i64, Option<
 }
 
 pub async fn check_reader_with_kv_batch(
-    reader: &mut dyn BatchReader,
+    reader: &mut dyn BatchReader<Error = Error>,
     expect: &[&[(i64, Option<i64>)]],
 ) {
     let mut result = Vec::new();
@@ -146,6 +149,8 @@ impl VecBatchReader {
 
 #[async_trait]
 impl BatchReader for VecBatchReader {
+    type Error = error::Error;
+
     fn schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
     }
@@ -192,7 +197,7 @@ pub fn build_full_vec_reader(batches: &[&[(i64, i64, u64, OpType)]]) -> VecBatch
     VecBatchReader::new(batches)
 }
 
-pub fn build_boxed_reader(batches: &[&[(i64, Option<i64>)]]) -> BoxedBatchReader {
+pub fn build_boxed_reader(batches: &[&[(i64, Option<i64>)]]) -> BoxedBatchReader<Error> {
     Box::new(build_vec_reader(batches))
 }
 

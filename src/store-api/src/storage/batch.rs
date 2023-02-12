@@ -244,6 +244,7 @@ impl BatchBuilder {
 /// Async batch reader.
 #[async_trait]
 pub trait BatchReader: Send {
+    type Error: ErrorExt;
     /// Schema of the chunks returned by this reader.
     fn schema(&self) -> &SchemaRef;
 
@@ -258,4 +259,4 @@ pub trait BatchReader: Send {
 }
 
 /// Pointer to [BatchReader].
-pub type BoxedBatchReader = Box<dyn BatchReader>;
+pub type BoxedBatchReader<E> = Box<dyn BatchReader<Error = E>>;

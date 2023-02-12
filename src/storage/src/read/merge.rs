@@ -65,7 +65,8 @@ use snafu::ResultExt;
 use store_api::storage::batch::{Batch, BatchBuilder, BatchOp, BatchReader, BoxedBatchReader};
 use store_api::storage::consts;
 
-use crate::error::{BatchSnafu, Result};
+use crate::error;
+use crate::error::{BatchSnafu, Error, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef};
 
@@ -74,7 +75,7 @@ enum Source {
     // To avoid the overhead of async-trait (typically a heap allocation), wraps the
     // BatchIterator into an enum instead of converting the iterator into a BatchReader.
     Iter(BoxedBatchIterator),
-    Reader(BoxedBatchReader),
+    Reader(BoxedBatchReader<error::Error>),
 }
 
 impl Source {
@@ -416,6 +417,8 @@ pub struct MergeReader {
 
 #[async_trait]
 impl BatchReader for MergeReader {
+    type Error = error::Error;
+
     fn schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
     }
@@ -452,7 +455,7 @@ impl MergeReaderBuilder {
         self
     }
 
-    pub fn push_batch_reader(mut self, reader: BoxedBatchReader) -> Self {
+    pub fn push_batch_reader(mut self, reader: BoxedBatchReader<Error>) -> Self {
         self.sources.push(Source::Reader(reader));
         self
     }

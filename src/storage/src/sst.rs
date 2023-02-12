@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use store_api::storage::batch::BoxedBatchReader;
 use table::predicate::Predicate;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::schema::ProjectedSchemaRef;
 use crate::sst::parquet::{ParquetReader, ParquetWriter};
@@ -255,7 +255,11 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     ) -> Result<SstInfo>;
 
     /// Read SST file with given `file_name` and schema.
-    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
+    async fn read_sst(
+        &self,
+        file_name: &str,
+        opts: &ReadOptions,
+    ) -> Result<BoxedBatchReader<Error>>;
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
@@ -296,7 +300,11 @@ impl AccessLayer for FsAccessLayer {
         writer.write_sst(opts).await
     }
 
-    async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader> {
+    async fn read_sst(
+        &self,
+        file_name: &str,
+        opts: &ReadOptions,
+    ) -> Result<BoxedBatchReader<Error>> {
         let file_path = self.sst_file_path(file_name);
         let reader = ParquetReader::new(
             &file_path,
