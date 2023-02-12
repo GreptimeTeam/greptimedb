@@ -27,6 +27,7 @@ use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::SchemaRef;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use parquet::arrow::{ArrowWriter, ParquetRecordBatchStreamBuilder, ProjectionMask};
@@ -46,7 +47,7 @@ use crate::error::{
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::schema::compat::ReadAdapter;
-use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
+use crate::schema::{ProjectedSchema, ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
 use crate::sst;
 use crate::sst::SstInfo;
 
@@ -282,25 +283,42 @@ impl<'a> ParquetReader<'a> {
             }
         });
 
-        ChunkStream::new(adapter, Box::pin(chunk_stream))
+        ChunkStream::new(
+            self.projected_schema.clone(),
+            adapter,
+            Box::pin(chunk_stream),
+        )
     }
 }
 
 pub type SendableChunkStream = Pin<Box<dyn Stream<Item = Result<RecordBatch>> + Send>>;
 
 pub struct ChunkStream {
+    schema: ProjectedSchemaRef,
     adapter: ReadAdapter,
     stream: SendableChunkStream,
 }
 
 impl ChunkStream {
-    pub fn new(adapter: ReadAdapter, stream: SendableChunkStream) -> Result<Self> {
-        Ok(Self { adapter, stream })
+    pub fn new(
+        schema: ProjectedSchemaRef,
+        adapter: ReadAdapter,
+        stream: SendableChunkStream,
+    ) -> Result<Self> {
+        Ok(Self {
+            schema,
+            adapter,
+            stream,
+        })
     }
 }
 
 #[async_trait]
 impl BatchReader for ChunkStream {
+    fn schema(&self) -> &SchemaRef {
+        self.schema.projected_user_schema()
+    }
+
     async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
         self.stream
             .try_next()

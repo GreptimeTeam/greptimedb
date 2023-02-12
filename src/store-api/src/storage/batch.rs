@@ -19,6 +19,7 @@ use common_base::BitVec;
 use common_error::ext::ErrorExt;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{ConcreteDataType, MutableVector, VectorRef};
+use datatypes::schema::SchemaRef;
 use datatypes::vectors::BooleanVector;
 use snafu::{ensure, ResultExt};
 
@@ -243,7 +244,8 @@ impl BatchBuilder {
 /// Async batch reader.
 #[async_trait]
 pub trait BatchReader: Send {
-    // TODO(yingwen): Schema of batch.
+    /// Schema of the chunks returned by this reader.
+    fn schema(&self) -> &SchemaRef;
 
     /// Fetch next [Batch].
     ///

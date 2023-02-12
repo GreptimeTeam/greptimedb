@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use common_base::BitVec;
 use common_error::ext::BoxedError;
 use datatypes::prelude::ScalarVector;
+use datatypes::schema::SchemaRef;
 use datatypes::vectors::BooleanVector;
 use snafu::ResultExt;
 use store_api::error::ReadBatchSnafu;
@@ -80,6 +81,10 @@ impl<R> DedupReader<R> {
 
 #[async_trait]
 impl<R: BatchReader> BatchReader for DedupReader<R> {
+    fn schema(&self) -> &SchemaRef {
+        self.schema.projected_user_schema()
+    }
+
     async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
         while let Some(batch) = self.reader.next_batch().await? {
             let filtered = self

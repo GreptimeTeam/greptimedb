@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datatypes::prelude::{ScalarVector, WrapperType};
+use datatypes::schema::SchemaRef;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
 use store_api::storage::batch::{Batch, BatchReader, BoxedBatchReader};
@@ -145,6 +146,10 @@ impl VecBatchReader {
 
 #[async_trait]
 impl BatchReader for VecBatchReader {
+    fn schema(&self) -> &SchemaRef {
+        self.schema.projected_user_schema()
+    }
+
     async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
         Ok(self.batches.pop())
     }

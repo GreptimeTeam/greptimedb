@@ -60,6 +60,7 @@ use std::fmt;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 use store_api::storage::batch::{Batch, BatchBuilder, BatchOp, BatchReader, BoxedBatchReader};
 use store_api::storage::consts;
@@ -415,6 +416,10 @@ pub struct MergeReader {
 
 #[async_trait]
 impl BatchReader for MergeReader {
+    fn schema(&self) -> &SchemaRef {
+        self.schema.projected_user_schema()
+    }
+
     async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
         self.fetch_next_batch()
             .await
