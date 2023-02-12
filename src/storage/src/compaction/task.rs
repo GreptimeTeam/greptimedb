@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use common_telemetry::info;
 use object_store::ObjectStore;
 use store_api::logstore::LogStore;
 use uuid::Uuid;
@@ -22,11 +24,10 @@ use crate::compaction::writer::build_sst_reader;
 use crate::error::Result;
 use crate::manifest::action::RegionEdit;
 use crate::manifest::region::RegionManifest;
-use crate::region::RegionWriterRef;
+use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::schema::RegionSchemaRef;
 use crate::sst::parquet::{ParquetWriter, Source};
 use crate::sst::{AccessLayerRef, FileHandle, FileMeta, Level, SstInfo, WriteOptions};
-use crate::version::VersionControlRef;
 use crate::wal::Wal;
 
 #[async_trait::async_trait]
@@ -35,33 +36,38 @@ pub trait CompactionTask: Send + Sync + 'static {
 }
 
 #[allow(unused)]
-pub(crate) struct CompactionTaskImpl {
+pub(crate) struct CompactionTaskImpl<S: LogStore> {
     pub schema: RegionSchemaRef,
     pub sst_layer: AccessLayerRef,
     pub outputs: Vec<CompactionOutput>,
     pub writer: RegionWriterRef,
-    pub version: VersionControlRef,
-    pub compacted_inputs: Arc<Mutex<Vec<FileMeta>>>,
+    pub shared_data: SharedDataRef,
+    pub wal: Wal<S>,
+    pub manifest: RegionManifest,
 }
 
-impl CompactionTaskImpl {
-    async fn merge_ssts(&mut self) -> Result<Vec<FileMeta>> {
+impl<S: LogStore> CompactionTaskImpl<S> {
+    /// Compacts inputs SSTs, returns `(output file, compacted input file)`.
+    async fn merge_ssts(&mut self) -> Result<(Vec<FileMeta>, Vec<FileMeta>)> {
         let mut futs = Vec::with_capacity(self.outputs.len());
+        let compacted_inputs = Arc::new(Mutex::new(HashSet::new()));
+
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
             let sst_layer = self.sst_layer.clone();
             let object_store = self.sst_layer.object_store();
-
-            let compacted = self.compacted_inputs.clone();
+            let compacted = compacted_inputs.clone();
             futs.push(async move {
                 match output.run(schema, sst_layer, object_store).await {
                     Ok(meta) => {
-                        let mut compacted = compacted.lock().unwrap();
-                        compacted.extend(output.inputs.iter().map(|f| FileMeta {
-                            file_name: f.file_name().to_string(),
-                            time_range: f.time_range().clone(),
-                            level: f.level(),
-                        }));
+                        compacted
+                            .lock()
+                            .unwrap()
+                            .extend(output.inputs.iter().map(|f| FileMeta {
+                                file_name: f.file_name().to_string(),
+                                time_range: f.time_range().clone(),
+                                level: f.level(),
+                            }));
                         Ok(meta)
                     }
                     Err(e) => Err(e),
@@ -69,33 +75,46 @@ impl CompactionTaskImpl {
             });
         }
 
-        futures::future::join_all(futs)
+        let outputs = futures::future::join_all(futs)
             .await
             .into_iter()
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<_>>()?;
+        let compacted = compacted_inputs.lock().unwrap().drain().collect();
+        Ok((outputs, compacted))
     }
 
-    async fn write_manifest_and_apply(&self, files: Vec<FileMeta>) -> Result<()> {
-        let region_version = self.version.metadata().version();
-        let flushed_sequence = self.version.current().flushed_sequence();
+    /// Writes updated SST info into manifest.
+    async fn write_manifest_and_apply(
+        &self,
+        output: Vec<FileMeta>,
+        input: Vec<FileMeta>,
+    ) -> Result<()> {
+        let version = &self.shared_data.version_control;
+        let region_version = version.metadata().version();
+        let flushed_sequence = version.current().flushed_sequence();
 
         let edit = RegionEdit {
             region_version,
             flushed_sequence,
-            files_to_add: files,
-            files_to_remove: vec![],
+            files_to_add: output,
+            files_to_remove: input,
         };
-
-        todo!()
-        // self.writer.write_edit_and_apply()
+        info!(
+            "Compacted region: {}, region edit: {:?}",
+            version.metadata().name(),
+            edit
+        );
+        self.writer
+            .write_edit_and_apply(&self.wal, &self.shared_data, &self.manifest, edit, None)
+            .await
     }
 }
 
 #[async_trait::async_trait]
-impl CompactionTask for CompactionTaskImpl {
+impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
     async fn run(mut self) -> Result<()> {
-        let ssts = self.merge_ssts().await?;
-
+        let (output, compacted) = self.merge_ssts().await?;
+        self.write_manifest_and_apply(output, compacted).await?;
         Ok(())
     }
 }

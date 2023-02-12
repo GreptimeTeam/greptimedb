@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use async_trait::async_trait;
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
+use store_api::logstore::LogStore;
 use table::metadata::TableId;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -30,49 +31,26 @@ use crate::compaction::rate_limit::{
 };
 use crate::compaction::task::CompactionTask;
 use crate::error::{Result, StopCompactionSchedulerSnafu};
-use crate::region::RegionWriterRef;
+use crate::manifest::region::RegionManifest;
+use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::schema::RegionSchemaRef;
 use crate::sst::AccessLayerRef;
-use crate::version::{LevelMetasRef, VersionControlRef};
+use crate::version::LevelMetasRef;
+use crate::wal::Wal;
 
 /// Table compaction request.
-pub struct CompactionRequestImpl {
+pub struct CompactionRequestImpl<S: LogStore> {
     table_id: TableId,
-    levels: LevelMetasRef,
-    schema: RegionSchemaRef,
-    sst_layer: AccessLayerRef,
-    writer: RegionWriterRef,
-    version: VersionControlRef,
+    pub levels: LevelMetasRef,
+    pub schema: RegionSchemaRef,
+    pub sst_layer: AccessLayerRef,
+    pub writer: RegionWriterRef,
+    pub shared: SharedDataRef,
+    pub manifest: RegionManifest,
+    pub wal: Wal<S>,
 }
 
-impl CompactionRequestImpl {
-    #[inline]
-    pub fn levels(&self) -> &LevelMetasRef {
-        &self.levels
-    }
-
-    #[inline]
-    pub fn schema(&self) -> RegionSchemaRef {
-        self.schema.clone()
-    }
-
-    #[inline]
-    pub fn sst_layer(&self) -> &AccessLayerRef {
-        &self.sst_layer
-    }
-
-    #[inline]
-    pub fn writer(&self) -> &RegionWriterRef {
-        &self.writer
-    }
-
-    #[inline]
-    pub fn version(&self) -> &VersionControlRef {
-        &self.version
-    }
-}
-
-impl CompactionRequest for CompactionRequestImpl {
+impl<S: LogStore> CompactionRequest for CompactionRequestImpl<S> {
     #[inline]
     fn table_id(&self) -> TableId {
         self.table_id

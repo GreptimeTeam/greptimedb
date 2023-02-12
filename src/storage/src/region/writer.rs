@@ -95,7 +95,7 @@ impl RegionWriter {
         shared: &SharedDataRef,
         manifest: &RegionManifest,
         edit: RegionEdit,
-        max_memtable_id: MemtableId,
+        max_memtable_id: Option<MemtableId>,
     ) -> Result<()> {
         let _lock = self.version_mutex.lock().await;
         // HACK: We won't acquire the write lock here because write stall would hold
@@ -123,7 +123,7 @@ impl RegionWriter {
             files_to_add,
             flushed_sequence: Some(flushed_sequence),
             manifest_version,
-            max_memtable_id: Some(max_memtable_id),
+            max_memtable_id,
         };
 
         // We could tolerate failure during persisting manifest version to the WAL, since it won't

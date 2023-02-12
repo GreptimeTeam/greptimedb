@@ -216,7 +216,7 @@ impl FileHandleInner {
 }
 
 /// Immutable metadata of a sst file.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileMeta {
     pub file_name: String,
     pub time_range: Option<(Timestamp, Timestamp)>,

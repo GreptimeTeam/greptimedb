@@ -223,7 +223,7 @@ impl<S: LogStore> FlushJob<S> {
                 &self.shared,
                 &self.manifest,
                 edit,
-                self.max_memtable_id,
+                Some(self.max_memtable_id),
             )
             .await?;
         self.wal.obsolete(self.flush_sequence).await
