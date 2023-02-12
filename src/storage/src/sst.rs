@@ -213,6 +213,12 @@ impl FileHandle {
     pub fn compacting(&self) -> bool {
         self.inner.compacting.load(Ordering::Relaxed)
     }
+
+    /// Sets the compacting flag.
+    #[inline]
+    pub fn set_compacting(&self, compacting: bool) {
+        self.inner.compacting.store(compacting, Ordering::Relaxed);
+    }
 }
 
 /// Actually data of [FileHandle].

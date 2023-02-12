@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use object_store::ObjectStore;
 use store_api::logstore::LogStore;
 use uuid::Uuid;
@@ -108,13 +108,30 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             .write_edit_and_apply(&self.wal, &self.shared_data, &self.manifest, edit, None)
             .await
     }
+
+    /// Mark files are under compaction.
+    fn mark_files_compacting(&self, compacting: bool) {
+        for o in &self.outputs {
+            for input in &o.inputs {
+                input.set_compacting(compacting);
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
     async fn run(mut self) -> Result<()> {
-        let (output, compacted) = self.merge_ssts().await?;
-        self.write_manifest_and_apply(output, compacted).await?;
+        self.mark_files_compacting(true);
+        match self.merge_ssts().await {
+            Ok((output, compacted)) => {
+                self.write_manifest_and_apply(output, compacted).await?;
+            }
+            Err(e) => {
+                self.mark_files_compacting(false);
+                error!(e; "Failed to compact region: {}", self.shared_data.name());
+            }
+        }
         Ok(())
     }
 }
@@ -155,8 +172,7 @@ impl CompactionOutput {
             self.bucket_bound,
             self.bucket_bound + self.bucket,
         )
-        .await
-        .unwrap();
+        .await?;
         let output_file_name = format!("{}.parquet", Uuid::new_v4().hyphenated());
         let opts = WriteOptions {};
         let SstInfo { time_range } =
