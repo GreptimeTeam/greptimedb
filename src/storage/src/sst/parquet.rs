@@ -45,9 +45,11 @@ use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
 use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::ChunkReader;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
+use crate::chunk::ChunkReaderImpl;
 use crate::error::{
     self, DecodeParquetTimeRangeSnafu, NewRecordBatchSnafu, ReadObjectSnafu, ReadParquetSnafu,
     Result, WriteObjectSnafu, WriteParquetSnafu,
@@ -62,20 +64,16 @@ use crate::sst::SstInfo;
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
     file_path: &'a str,
-    iter: BoxedBatchIterator,
+    source: Source,
     object_store: ObjectStore,
     max_row_group_size: usize,
 }
 
 impl<'a> ParquetWriter<'a> {
-    pub fn new(
-        file_path: &'a str,
-        iter: BoxedBatchIterator,
-        object_store: ObjectStore,
-    ) -> ParquetWriter {
+    pub fn new(file_path: &'a str, source: Source, object_store: ObjectStore) -> ParquetWriter {
         ParquetWriter {
             file_path,
-            iter,
+            source,
             object_store,
             max_row_group_size: 4096, // TODO(hl): make this configurable
         }
@@ -88,8 +86,8 @@ impl<'a> ParquetWriter<'a> {
     /// Iterates memtable and writes rows to Parquet file.
     /// A chunk of records yielded from each iteration with a size given
     /// in config will be written to a single row group.
-    async fn write_rows(self, extra_meta: Option<HashMap<String, String>>) -> Result<SstInfo> {
-        let projected_schema = self.iter.schema();
+    async fn write_rows(mut self, extra_meta: Option<HashMap<String, String>>) -> Result<SstInfo> {
+        let projected_schema = self.source.projected_schema();
         let store_schema = projected_schema.schema_to_read();
         let schema = store_schema.arrow_schema().clone();
         let object = self.object_store.object(self.file_path);
@@ -111,8 +109,8 @@ impl<'a> ParquetWriter<'a> {
         let mut buf = vec![];
         let mut arrow_writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props))
             .context(WriteParquetSnafu)?;
-        for batch in self.iter {
-            let batch = batch?;
+
+        while let Some(batch) = self.source.next_batch().await? {
             let arrow_batch = RecordBatch::try_new(
                 schema.clone(),
                 batch
@@ -440,6 +438,30 @@ impl BatchReader for ChunkStream {
     }
 }
 
+pub enum Source {
+    Iter(BoxedBatchIterator),
+    Reader(ChunkReaderImpl),
+}
+
+impl Source {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        match self {
+            Source::Iter(iter) => iter.next().transpose(),
+            Source::Reader(reader) => reader
+                .next_chunk()
+                .await
+                .map(|p| p.map(|chunk| Batch::new(chunk.columns))),
+        }
+    }
+
+    fn projected_schema(&self) -> ProjectedSchemaRef {
+        match self {
+            Source::Iter(iter) => iter.schema(),
+            Source::Reader(reader) => reader.projected_schema().clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -491,7 +513,7 @@ mod tests {
         let object_store = ObjectStore::new(backend);
         let sst_file_name = "test-flush.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
+        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         writer
             .write_sst(&sst::WriteOptions::default())
@@ -589,7 +611,7 @@ mod tests {
         let object_store = ObjectStore::new(backend);
         let sst_file_name = "test-read-large.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
+        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo { time_range } = writer
             .write_sst(&sst::WriteOptions::default())
@@ -661,7 +683,7 @@ mod tests {
         let object_store = ObjectStore::new(backend);
         let sst_file_name = "test-read.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
+        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo { time_range } = writer
             .write_sst(&sst::WriteOptions::default())
@@ -773,7 +795,7 @@ mod tests {
         let object_store = ObjectStore::new(backend);
         let sst_file_name = "test-read.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
+        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
             start_timestamp,
@@ -789,33 +811,33 @@ mod tests {
         let projected_schema =
             Arc::new(ProjectedSchema::new(schema, Some(vec![1, 0, 3, 2])).unwrap());
 
-        // check_range_read(
-        //     sst_file_name,
-        //     object_store.clone(),
-        //     projected_schema.clone(),
-        //     TimestampRange::with_unit(1000, 2003, TimeUnit::Millisecond).unwrap(),
-        //     vec![1000, 1000, 1001, 2002],
-        // )
-        // .await;
-        //
-        // check_range_read(
-        //     sst_file_name,
-        //     object_store.clone(),
-        //     projected_schema.clone(),
-        //     TimestampRange::with_unit(2002, 3001, TimeUnit::Millisecond).unwrap(),
-        //     vec![2002, 2003, 2003],
-        // )
-        // .await;
-        //
-        // // read a range without any rows.
-        // check_range_read(
-        //     sst_file_name,
-        //     object_store.clone(),
-        //     projected_schema.clone(),
-        //     TimestampRange::with_unit(3002, 3003, TimeUnit::Millisecond).unwrap(),
-        //     vec![],
-        // )
-        // .await;
+        check_range_read(
+            sst_file_name,
+            object_store.clone(),
+            projected_schema.clone(),
+            TimestampRange::with_unit(1000, 2003, TimeUnit::Millisecond).unwrap(),
+            vec![1000, 1000, 1001, 2002],
+        )
+        .await;
+
+        check_range_read(
+            sst_file_name,
+            object_store.clone(),
+            projected_schema.clone(),
+            TimestampRange::with_unit(2002, 3001, TimeUnit::Millisecond).unwrap(),
+            vec![2002, 2003, 2003],
+        )
+        .await;
+
+        // read a range without any rows.
+        check_range_read(
+            sst_file_name,
+            object_store.clone(),
+            projected_schema.clone(),
+            TimestampRange::with_unit(3002, 3003, TimeUnit::Millisecond).unwrap(),
+            vec![],
+        )
+        .await;
 
         // read full range
         check_range_read(

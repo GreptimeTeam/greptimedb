@@ -97,7 +97,7 @@ mod tests {
     };
     use crate::metadata::RegionMetadata;
     use crate::sst;
-    use crate::sst::parquet::ParquetWriter;
+    use crate::sst::parquet::{ParquetWriter, Source};
     use crate::sst::{FileMeta, FsAccessLayer, SstInfo};
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
@@ -177,7 +177,7 @@ mod tests {
         );
 
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, iter, object_store.clone());
+        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
 
         let SstInfo {
             start_timestamp,

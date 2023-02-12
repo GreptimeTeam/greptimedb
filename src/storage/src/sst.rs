@@ -28,7 +28,7 @@ use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
 use crate::read::BoxedBatchReader;
 use crate::schema::ProjectedSchemaRef;
-use crate::sst::parquet::{ParquetReader, ParquetWriter};
+use crate::sst::parquet::{ParquetReader, ParquetWriter, Source};
 
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: u8 = 2;
@@ -294,7 +294,7 @@ impl AccessLayer for FsAccessLayer {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(file_name);
-        let writer = ParquetWriter::new(&file_path, iter, self.object_store.clone());
+        let writer = ParquetWriter::new(&file_path, Source::Iter(iter), self.object_store.clone());
         writer.write_sst(opts).await
     }
 

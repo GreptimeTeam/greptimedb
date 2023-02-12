@@ -64,6 +64,11 @@ impl ChunkReaderImpl {
             batch_reader,
         }
     }
+
+    #[inline]
+    pub fn projected_schema(&self) -> &ProjectedSchemaRef {
+        &self.schema
+    }
 }
 
 /// Builder to create a new [ChunkReaderImpl] from scan request.
