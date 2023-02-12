@@ -21,7 +21,6 @@ use std::sync::Arc;
 use async_compat::CompatExt;
 use async_stream::try_stream;
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
 use common_telemetry::error;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -36,7 +35,6 @@ use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
 use snafu::{OptionExt, ResultExt};
-use store_api::error::ReadBatchSnafu;
 use store_api::storage::batch::{Batch, BatchReader};
 use table::predicate::Predicate;
 use tokio::io::BufReader;
@@ -47,7 +45,7 @@ use crate::error::{
 };
 use crate::memtable::BoxedBatchIterator;
 use crate::schema::compat::ReadAdapter;
-use crate::schema::{ProjectedSchema, ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
+use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
 use crate::sst;
 use crate::sst::SstInfo;
 
@@ -317,20 +315,20 @@ impl ChunkStream {
 impl BatchReader for ChunkStream {
     type Error = error::Error;
 
-    fn schema(&self) -> &SchemaRef {
+    fn projected_schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
     }
 
-    async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
+    async fn next_batch(&mut self) -> std::result::Result<Option<Batch>, Self::Error> {
         self.stream
             .try_next()
-            .await
-            .map_err(BoxedError::new)
-            .context(ReadBatchSnafu)?
+            .await?
             .map(|rb| self.adapter.arrow_record_batch_to_batch(&rb))
             .transpose()
-            .map_err(BoxedError::new)
-            .context(ReadBatchSnafu)
+    }
+
+    fn project_batch(&self, batch: &Batch) -> Batch {
+        self.schema.batch_to_chunk(batch)
     }
 }
 

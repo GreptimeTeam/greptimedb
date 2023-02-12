@@ -21,9 +21,8 @@ use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use store_api::logstore::LogStore;
-use store_api::storage::{
-    Chunk, ChunkReader, ReadContext, Region, ScanRequest, Snapshot, WriteContext, WriteRequest,
-};
+use store_api::storage::batch::{Batch, BatchReader};
+use store_api::storage::{ReadContext, Region, ScanRequest, Snapshot, WriteContext, WriteRequest};
 use tempdir::TempDir;
 
 use crate::region::{RegionImpl, RegionMetadata};
@@ -90,14 +89,14 @@ fn new_put_data(
     put_data
 }
 
-fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<Vec<i64>>) {
-    if chunk.columns.is_empty() {
+fn append_chunk_to(chunk: &Batch, dst: &mut Vec<Vec<i64>>) {
+    if chunk.is_empty() {
         return;
     }
-    let num_rows = chunk.columns[0].len();
+    let num_rows = chunk.column(0).len();
     dst.resize(num_rows, Vec::new());
     for (i, row) in dst.iter_mut().enumerate() {
-        for col in &chunk.columns {
+        for col in chunk.columns() {
             match col.data_type() {
                 ConcreteDataType::Int64(_) => {
                     let val = col
@@ -157,8 +156,8 @@ impl<S: LogStore> ProjectionTester<S> {
         let mut reader = resp.reader;
 
         let mut dst = Vec::new();
-        while let Some(chunk) = reader.next_chunk().await.unwrap() {
-            append_chunk_to(&chunk, &mut dst);
+        while let Some(batch) = reader.next_batch().await.unwrap() {
+            append_chunk_to(&reader.project_batch(&batch), &mut dst);
         }
 
         dst

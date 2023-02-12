@@ -22,7 +22,7 @@ use datatypes::prelude::ScalarVector;
 use datatypes::schema::{SchemaBuilder, SchemaRef};
 use datatypes::vectors::{BooleanVector, UInt8Vector};
 use store_api::storage::batch::{Batch, BatchOp};
-use store_api::storage::{Chunk, ColumnId, OpType};
+use store_api::storage::{ColumnId, OpType};
 
 use crate::error;
 use crate::metadata::{self, Result};
@@ -171,7 +171,7 @@ impl ProjectedSchema {
     /// same schema as [`self.schema_to_read()`](ProjectedSchema::schema_to_read).
     /// The output [Chunk] has the same schema as
     /// [`self.projected_user_schema()`](ProjectedSchema::projected_user_schema).
-    pub fn batch_to_chunk(&self, batch: &Batch) -> Chunk {
+    pub fn batch_to_chunk(&self, batch: &Batch) -> Batch {
         let columns = match &self.projection {
             Some(projection) => projection
                 .projected_idx_to_read_idx
@@ -189,7 +189,7 @@ impl ProjectedSchema {
                     .collect()
             }
         };
-        Chunk::new(columns)
+        Batch::new(columns)
     }
 
     /// Returns true if column with given `column_id` is needed (in projection).

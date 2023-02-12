@@ -19,11 +19,11 @@ use common_query::logical_plan::Expr;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
-use store_api::storage::batch::BoxedBatchReader;
-use store_api::storage::{Chunk, ChunkReader, SchemaRef, SequenceNumber};
+use store_api::storage::batch::{Batch, BatchReader, BoxedBatchReader};
+use store_api::storage::{SchemaRef, SequenceNumber};
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
-use crate::error::{self, BatchSnafu, Error, Result};
+use crate::error::{self, Error, Result};
 use crate::memtable::{IterContext, MemtableRef};
 use crate::read::{DedupReader, MergeReaderBuilder};
 use crate::schema::{ProjectedSchema, ProjectedSchemaRef, RegionSchemaRef};
@@ -39,22 +39,19 @@ pub struct ChunkReaderImpl {
 }
 
 #[async_trait]
-impl ChunkReader for ChunkReaderImpl {
+impl BatchReader for ChunkReaderImpl {
     type Error = Error;
 
-    fn schema(&self) -> &SchemaRef {
+    fn projected_schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
     }
 
-    async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
-        let batch = match self.batch_reader.next_batch().await.context(BatchSnafu)? {
-            Some(b) => b,
-            None => return Ok(None),
-        };
+    async fn next_batch(&mut self) -> std::result::Result<Option<Batch>, Self::Error> {
+        self.batch_reader.next_batch().await
+    }
 
-        let chunk = self.schema.batch_to_chunk(&batch);
-
-        Ok(Some(chunk))
+    fn project_batch(&self, batch: &Batch) -> Batch {
+        self.schema.batch_to_chunk(batch)
     }
 }
 

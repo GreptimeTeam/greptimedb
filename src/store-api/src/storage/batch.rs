@@ -33,7 +33,7 @@ pub struct Batch {
     ///
     /// Columns follow the same order convention of region schema:
     /// key, value, internal columns.
-    columns: Vec<VectorRef>,
+    pub columns: Vec<VectorRef>,
 }
 
 impl Batch {
@@ -244,9 +244,10 @@ impl BatchBuilder {
 /// Async batch reader.
 #[async_trait]
 pub trait BatchReader: Send {
-    type Error: ErrorExt;
+    type Error: ErrorExt + Send + Sync;
+
     /// Schema of the chunks returned by this reader.
-    fn schema(&self) -> &SchemaRef;
+    fn projected_schema(&self) -> &SchemaRef;
 
     /// Fetch next [Batch].
     ///
@@ -255,7 +256,9 @@ pub trait BatchReader: Send {
     ///
     /// If `Err` is returned, caller should not call this method again, the implementor
     /// may or may not panic in such case.
-    async fn next_batch(&mut self) -> Result<Option<Batch>>;
+    async fn next_batch(&mut self) -> std::result::Result<Option<Batch>, Self::Error>;
+
+    fn project_batch(&self, batch: &Batch) -> Batch;
 }
 
 /// Pointer to [BatchReader].

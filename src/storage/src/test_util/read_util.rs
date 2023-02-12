@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datatypes::prelude::{ScalarVector, WrapperType};
+use datatypes::prelude::ScalarVector;
 use datatypes::schema::SchemaRef;
 use datatypes::type_id::LogicalTypeId;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt64Vector, UInt8Vector};
@@ -73,27 +73,6 @@ pub fn new_full_kv_batch(all_values: &[(i64, i64, u64, OpType)]) -> Batch {
     Batch::new(vec![key, value, sequences, op_types])
 }
 
-fn check_kv_batch(batches: &[Batch], expect: &[&[(i64, Option<i64>)]]) {
-    for (batch, key_values) in batches.iter().zip(expect.iter()) {
-        let key = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondVector>()
-            .unwrap();
-        let value = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int64Vector>()
-            .unwrap();
-
-        for (i, (k, v)) in key_values.iter().enumerate() {
-            assert_eq!(key.get_data(i).unwrap().into_native(), *k);
-            assert_eq!(value.get_data(i), *v,);
-        }
-    }
-    assert_eq!(batches.len(), expect.len());
-}
-
 pub async fn collect_kv_batch(
     reader: &mut dyn BatchReader<Error = Error>,
 ) -> Vec<(i64, Option<i64>)> {
@@ -118,18 +97,6 @@ pub async fn collect_kv_batch(
     result
 }
 
-pub async fn check_reader_with_kv_batch(
-    reader: &mut dyn BatchReader<Error = Error>,
-    expect: &[&[(i64, Option<i64>)]],
-) {
-    let mut result = Vec::new();
-    while let Some(batch) = reader.next_batch().await.unwrap() {
-        result.push(batch);
-    }
-
-    check_kv_batch(&result, expect);
-}
-
 /// A reader for test that pop batch from Vec.
 pub struct VecBatchReader {
     schema: ProjectedSchemaRef,
@@ -151,12 +118,16 @@ impl VecBatchReader {
 impl BatchReader for VecBatchReader {
     type Error = error::Error;
 
-    fn schema(&self) -> &SchemaRef {
+    fn projected_schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
     }
 
-    async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
+    async fn next_batch(&mut self) -> std::result::Result<Option<Batch>, Self::Error> {
         Ok(self.batches.pop())
+    }
+
+    fn project_batch(&self, batch: &Batch) -> Batch {
+        self.schema.batch_to_chunk(batch)
     }
 }
 

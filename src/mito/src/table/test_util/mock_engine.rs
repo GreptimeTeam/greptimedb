@@ -25,10 +25,11 @@ use datatypes::prelude::{DataType, Value, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema};
 use storage::metadata::{RegionMetaImpl, RegionMetadata};
 use storage::write_batch::WriteBatch;
+use store_api::storage::batch::{Batch, BatchReader};
 use store_api::storage::{
-    AlterRequest, Chunk, ChunkReader, CreateOptions, EngineContext, GetRequest, GetResponse,
-    OpenOptions, ReadContext, Region, RegionDescriptor, RegionId, ScanRequest, ScanResponse,
-    SchemaRef, Snapshot, StorageEngine, WriteContext, WriteResponse,
+    AlterRequest, CreateOptions, EngineContext, GetRequest, GetResponse, OpenOptions, ReadContext,
+    Region, RegionDescriptor, RegionId, ScanRequest, ScanResponse, SchemaRef, Snapshot,
+    StorageEngine, WriteContext, WriteResponse,
 };
 
 pub type Result<T> = std::result::Result<T, MockError>;
@@ -40,14 +41,18 @@ pub struct MockChunkReader {
 }
 
 #[async_trait]
-impl ChunkReader for MockChunkReader {
+impl BatchReader for MockChunkReader {
     type Error = MockError;
 
-    fn schema(&self) -> &SchemaRef {
+    fn projected_schema(&self) -> &SchemaRef {
         &self.schema
     }
 
-    async fn next_chunk(&mut self) -> Result<Option<Chunk>> {
+    fn project_batch(&self, batch: &Batch) -> Batch {
+        Batch::new(batch.columns.clone())
+    }
+
+    async fn next_batch(&mut self) -> std::result::Result<Option<Batch>, Self::Error> {
         if self.read {
             return Ok(None);
         }
@@ -67,7 +72,7 @@ impl ChunkReader for MockChunkReader {
             .collect::<Vec<VectorRef>>();
         self.read = true;
 
-        Ok(Some(Chunk::new(columns)))
+        Ok(Some(Batch::new(columns)))
     }
 }
 

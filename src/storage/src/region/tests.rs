@@ -30,9 +30,8 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::NoopLogStore;
 use object_store::backend::fs;
 use object_store::ObjectStore;
-use store_api::storage::{
-    consts, Chunk, ChunkReader, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest,
-};
+use store_api::storage::batch::{Batch, BatchReader};
+use store_api::storage::{consts, RegionMeta, ScanRequest, SequenceNumber, Snapshot, WriteRequest};
 use tempdir::TempDir;
 
 use super::*;
@@ -115,11 +114,11 @@ impl<S: LogStore> TesterBase<S> {
         let mut reader = resp.reader;
 
         let metadata = self.region.in_memory_metadata();
-        assert_eq!(metadata.schema(), reader.schema());
+        assert_eq!(metadata.schema(), reader.projected_schema());
 
         let mut dst = Vec::new();
-        while let Some(chunk) = reader.next_chunk().await.unwrap() {
-            append_chunk_to(&chunk, &mut dst);
+        while let Some(batch) = reader.next_batch().await.unwrap() {
+            append_chunk_to(&reader.project_batch(&batch), &mut dst);
         }
 
         dst
@@ -204,14 +203,16 @@ fn new_delete_data(keys: &[TimestampMillisecond]) -> HashMap<String, VectorRef> 
     delete_data
 }
 
-fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<(i64, Option<i64>)>) {
-    assert_eq!(2, chunk.columns.len());
+fn append_chunk_to(chunk: &Batch, dst: &mut Vec<(i64, Option<i64>)>) {
+    assert_eq!(2, chunk.num_columns());
 
-    let timestamps = chunk.columns[0]
+    let timestamps = chunk
+        .column(0)
         .as_any()
         .downcast_ref::<TimestampMillisecondVector>()
         .unwrap();
-    let values = chunk.columns[1]
+    let values = chunk
+        .column(1)
         .as_any()
         .downcast_ref::<Int64Vector>()
         .unwrap();

@@ -15,7 +15,6 @@
 //! Storage APIs.
 
 pub mod batch;
-mod chunk;
 pub mod consts;
 mod descriptors;
 mod engine;
@@ -31,7 +30,6 @@ pub use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, Schema, SchemaBuilder, SchemaRef,
 };
 
-pub use self::chunk::{Chunk, ChunkReader};
 pub use self::descriptors::*;
 pub use self::engine::{CreateOptions, EngineContext, OpenOptions, StorageEngine};
 pub use self::metadata::RegionMeta;

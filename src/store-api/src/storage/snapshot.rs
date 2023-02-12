@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use datatypes::schema::SchemaRef;
 
-use crate::storage::chunk::ChunkReader;
+use crate::storage::batch::BatchReader;
 use crate::storage::consts;
 use crate::storage::requests::{GetRequest, ScanRequest};
 use crate::storage::responses::{GetResponse, ScanResponse};
@@ -25,7 +25,7 @@ use crate::storage::responses::{GetResponse, ScanResponse};
 #[async_trait]
 pub trait Snapshot: Send + Sync {
     type Error: ErrorExt + Send + Sync;
-    type Reader: ChunkReader;
+    type Reader: BatchReader;
 
     fn schema(&self) -> &SchemaRef;
 

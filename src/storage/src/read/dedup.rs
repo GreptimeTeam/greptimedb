@@ -14,16 +14,13 @@
 
 use async_trait::async_trait;
 use common_base::BitVec;
-use common_error::ext::BoxedError;
 use datatypes::prelude::ScalarVector;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::BooleanVector;
-use snafu::ResultExt;
-use store_api::error::ReadBatchSnafu;
 use store_api::storage::batch::{Batch, BatchOp, BatchReader};
 
 use crate::error;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::schema::ProjectedSchemaRef;
 
 /// A reader that dedup rows from inner reader.
@@ -81,19 +78,16 @@ impl<R> DedupReader<R> {
 }
 
 #[async_trait]
-impl<R: BatchReader> BatchReader for DedupReader<R> {
+impl<R: BatchReader<Error = Error>> BatchReader for DedupReader<R> {
     type Error = error::Error;
 
-    fn schema(&self) -> &SchemaRef {
+    fn projected_schema(&self) -> &SchemaRef {
         self.schema.projected_user_schema()
     }
 
-    async fn next_batch(&mut self) -> store_api::error::Result<Option<Batch>> {
+    async fn next_batch(&mut self) -> std::result::Result<Option<Batch>, Self::Error> {
         while let Some(batch) = self.reader.next_batch().await? {
-            let filtered = self
-                .dedup_batch(batch)
-                .map_err(BoxedError::new)
-                .context(ReadBatchSnafu)?;
+            let filtered = self.dedup_batch(batch)?;
             // Skip empty batch.
             if !filtered.is_empty() {
                 return Ok(Some(filtered));
@@ -101,6 +95,10 @@ impl<R: BatchReader> BatchReader for DedupReader<R> {
         }
 
         Ok(None)
+    }
+
+    fn project_batch(&self, batch: &Batch) -> Batch {
+        self.schema.batch_to_chunk(batch)
     }
 }
 

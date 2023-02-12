@@ -19,10 +19,10 @@ use datatypes::prelude::*;
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, VectorRef};
 use log_store::raft_engine::log_store::RaftEngineLogStore;
+use store_api::storage::batch::{Batch, BatchReader};
 use store_api::storage::{
-    AddColumn, AlterOperation, AlterRequest, Chunk, ChunkReader, ColumnDescriptor,
-    ColumnDescriptorBuilder, ColumnId, Region, RegionMeta, ScanRequest, SchemaRef, Snapshot,
-    WriteRequest, WriteResponse,
+    AddColumn, AlterOperation, AlterRequest, ColumnDescriptor, ColumnDescriptorBuilder, ColumnId,
+    Region, RegionMeta, ScanRequest, SchemaRef, Snapshot, WriteRequest, WriteResponse,
 };
 use tempdir::TempDir;
 
@@ -179,33 +179,37 @@ impl AlterTester {
         let mut reader = resp.reader;
 
         let metadata = self.base().region.in_memory_metadata();
-        assert_eq!(metadata.schema(), reader.schema());
+        assert_eq!(metadata.schema(), reader.projected_schema());
 
         let mut dst = Vec::new();
-        while let Some(chunk) = reader.next_chunk().await.unwrap() {
-            append_chunk_to(&chunk, &mut dst);
+        while let Some(batch) = reader.next_batch().await.unwrap() {
+            append_chunk_to(&reader.project_batch(&batch), &mut dst);
         }
 
         dst
     }
 }
 
-fn append_chunk_to(chunk: &Chunk, dst: &mut Vec<DataRow>) {
-    assert_eq!(4, chunk.columns.len());
+fn append_chunk_to(chunk: &Batch, dst: &mut Vec<DataRow>) {
+    assert_eq!(4, chunk.num_columns());
 
-    let k0_vector = chunk.columns[0]
+    let k0_vector = chunk
+        .column(0)
         .as_any()
         .downcast_ref::<Int64Vector>()
         .unwrap();
-    let ts_vector = chunk.columns[1]
+    let ts_vector = chunk
+        .column(1)
         .as_any()
         .downcast_ref::<TimestampMillisecondVector>()
         .unwrap();
-    let v0_vector = chunk.columns[2]
+    let v0_vector = chunk
+        .column(2)
         .as_any()
         .downcast_ref::<Int64Vector>()
         .unwrap();
-    let v1_vector = chunk.columns[3]
+    let v1_vector = chunk
+        .column(3)
         .as_any()
         .downcast_ref::<Int64Vector>()
         .unwrap();
