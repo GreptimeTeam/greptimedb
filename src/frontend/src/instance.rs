@@ -584,7 +584,10 @@ pub fn check_permission(
             validate_tab_ref(tab_ref, query_ctx)?;
         }
         Statement::Delete(delete) => {
-            let (catalog, schema, _) = delete.full_table_name().context(ParseSqlSnafu)?;
+            let (catalog, schema, _) =
+                table_idents_to_full_name(delete.table_name(), query_ctx.clone())
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
             validate_param(&catalog, &schema, query_ctx)?;
         }
     }

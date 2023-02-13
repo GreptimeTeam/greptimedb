@@ -16,7 +16,6 @@ use sqlparser::ast::{Expr, ObjectName, Statement, TableFactor};
 
 use crate::error;
 use crate::error::{Error, Result};
-use crate::statements::table_idents_to_full_name;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delete {
@@ -25,15 +24,6 @@ pub struct Delete {
 }
 
 impl Delete {
-    pub fn full_table_name(&self) -> Result<(String, String, String)> {
-        match &self.table_name {
-            TableFactor::Table { name, .. } => table_idents_to_full_name(name),
-            // # Safety
-            // statement type is checked before.
-            _ => unreachable!(),
-        }
-    }
-
     pub fn table_name(&self) -> &ObjectName {
         match &self.table_name {
             TableFactor::Table { name, .. } => name,
