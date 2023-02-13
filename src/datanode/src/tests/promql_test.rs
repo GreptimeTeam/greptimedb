@@ -19,6 +19,7 @@ use session::context::QueryContext;
 use super::test_util::check_unordered_output_stream;
 use crate::tests::test_util::setup_test_instance;
 
+#[allow(clippy::too_many_arguments)]
 async fn create_insert_query_assert(
     create: &str,
     insert: &str,

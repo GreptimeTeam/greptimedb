@@ -166,7 +166,7 @@ pub async fn check_output_stream(output: Output, expected: String) {
 pub async fn check_unordered_output_stream(output: Output, expected: String) {
     let sort_table = |table: String| -> String {
         let replaced = table.replace("\\n", "\n");
-        let mut lines = replaced.split("\n").collect::<Vec<_>>();
+        let mut lines = replaced.split('\n').collect::<Vec<_>>();
         lines.sort();
         lines
             .into_iter()
