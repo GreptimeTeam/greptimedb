@@ -31,7 +31,6 @@ use futures::Stream;
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
-use tokio::sync::oneshot;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::error;
@@ -98,24 +97,28 @@ impl FlightService for FlightHandler {
         })?;
         let query_ctx = create_query_context(request.header.as_ref());
 
-        let (tx, rx) = oneshot::channel();
         let handler = self.handler.clone();
 
         // Executes requests in another runtime to
         // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
+        //   - Refer to our blog for the rational behind it:
+        //     https://www.greptime.com/blogs/2023-01-12-hidden-control-flow.html
+        //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
+        //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
-        self.runtime.spawn(async move {
-            let result = handler.do_query(query, query_ctx).await;
+        let handle = self
+            .runtime
+            .spawn(async move { handler.do_query(query, query_ctx).await });
 
-            // Ignore the sending result.
-            // Usually an error indicates the rx at Tonic side is dropped (due to request timeout).
-            let _ = tx.send(result);
-        });
-
-        // Safety: An early-dropped tx usually indicates a serious problem (like panic).
-        // This unwrap is used to poison the upper layer.
-        let output = rx.await.unwrap()?;
-
+        let output = handle.await.map_err(|e| {
+            if e.is_cancelled() {
+                Status::cancelled(e.to_string())
+            } else if e.is_panic() {
+                Status::internal(format!("{:?}", e.into_panic()))
+            } else {
+                Status::unknown(e.to_string())
+            }
+        })??;
         let stream = to_flight_data_stream(output);
         Ok(Response::new(stream))
     }
