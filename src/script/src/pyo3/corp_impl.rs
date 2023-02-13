@@ -1,3 +1,4 @@
+#![allow(unused)]
 use common_recordbatch::RecordBatch;
 use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::PyValueError;

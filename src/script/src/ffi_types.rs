@@ -1,5 +1,5 @@
-pub(crate) mod vector;
 mod copr;
 mod dataframe;
-pub(crate) use copr::{Coprocessor, select_from_rb, check_args_anno_real_type};
+pub(crate) mod vector;
+pub(crate) use copr::{check_args_anno_real_type, select_from_rb, Coprocessor};
 pub(crate) use vector::PyVector;

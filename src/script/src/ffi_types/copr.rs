@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(unused)]
 pub mod compile;
 pub mod parse;
 
@@ -27,6 +28,8 @@ use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
+// use crate::python::builtins::greptime_builtin;
+use parse::DecoratorArgs;
 use query::parser::QueryLanguageParser;
 use query::QueryEngine;
 use rustpython_compiler_core::CodeObject;
@@ -41,15 +44,13 @@ use vm::convert::ToPyObject;
 use vm::scope::Scope;
 use vm::{pyclass, Interpreter, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
-// use crate::python::builtins::greptime_builtin;
-use parse::DecoratorArgs;
 use crate::ffi_types::dataframe::data_frame::{self, set_dataframe_in_scope};
+use crate::ffi_types::PyVector;
 use crate::python::error::{
     ensure, ret_other_error_with, ArrowSnafu, NewRecordBatchSnafu, OtherSnafu, Result,
     TypeCastSnafu,
 };
 use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
-use crate::ffi_types::PyVector;
 
 thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::new(None));
 
