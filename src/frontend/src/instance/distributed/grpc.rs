@@ -63,7 +63,10 @@ impl GrpcQueryHandler for DistInstance {
     }
 }
 
-pub(crate) fn to_alter_expr(alter_table: AlterTable, query_ctx: QueryContextRef) -> Result<AlterExpr> {
+pub(crate) fn to_alter_expr(
+    alter_table: AlterTable,
+    query_ctx: QueryContextRef,
+) -> Result<AlterExpr> {
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(alter_table.table_name(), query_ctx)
             .map_err(BoxedError::new)
