@@ -40,18 +40,6 @@ pub type Level = u8;
 // detail of LevelMetaVec should not be exposed to the user of [LevelMetas].
 type LevelMetaVec = [LevelMeta; MAX_LEVEL as usize];
 
-/// Visitor to access file in each level.
-pub trait Visitor {
-    /// Visit all `files` in `level`.
-    ///
-    /// Now the input `files` are unordered.
-    fn visit<'a>(
-        &mut self,
-        level: usize,
-        files: impl Iterator<Item = &'a FileHandle>,
-    ) -> Result<()>;
-}
-
 /// Metadata of all SSTs under a region.
 ///
 /// Files are organized into multiple level, though there may be only one level.
@@ -105,19 +93,6 @@ impl LevelMetas {
         merged
     }
 
-    /// Visit all SST files.
-    ///
-    /// Stop visiting remaining files if the visitor returns `Err`, and the `Err`
-    /// will be returned to caller.
-    pub fn visit_levels<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
-        for level in &self.levels {
-            level.visit_level(visitor)?;
-        }
-
-        Ok(())
-    }
-
-    #[cfg(test)]
     pub fn levels(&self) -> &[LevelMeta] {
         &self.levels
     }
@@ -153,10 +128,6 @@ impl LevelMeta {
 
     fn remove_file(&mut self, file_to_remove: FileMeta) {
         self.files.remove(&file_to_remove.file_name);
-    }
-
-    pub fn visit_level<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
-        visitor.visit(self.level.into(), self.files.values())
     }
 
     /// Returns the level of level meta.

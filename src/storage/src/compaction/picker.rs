@@ -30,13 +30,13 @@ pub trait Picker<R, T: CompactionTask>: Send + 'static {
 pub struct PickerContext {}
 
 /// L0 -> L1 compaction based on time windows.
-pub(crate) struct SimplePicker<S: LogStore> {
+pub(crate) struct SimplePicker<S> {
     strategy: StrategyRef,
     _phantom_data: PhantomData<S>,
 }
 
 #[allow(unused)]
-impl<S: LogStore> SimplePicker<S> {
+impl<S> SimplePicker<S> {
     pub fn new(strategy: StrategyRef) -> Self {
         Self {
             strategy,
