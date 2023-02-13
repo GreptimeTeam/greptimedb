@@ -24,8 +24,10 @@ use crate::metasrv::MetaSrv;
 #[async_trait::async_trait]
 impl lock_server::Lock for MetaSrv {
     async fn lock(&self, request: Request<LockRequest>) -> GrpcResult<LockResponse> {
-        let LockRequest { name, expire, .. } = request.into_inner();
-        let expire_secs = Some(expire as u64);
+        let LockRequest {
+            name, expire_secs, ..
+        } = request.into_inner();
+        let expire_secs = Some(expire_secs as u64);
 
         let lock = self.lock().context(error::LockNotConfigSnafu)?;
         let key = lock.lock(name, Opts { expire_secs }).await?;

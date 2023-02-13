@@ -48,9 +48,9 @@ async fn run() {
 
 async fn run_normal(meta_client: MetaClient) {
     let name = "lock_name".as_bytes().to_vec();
-    let expire = 60;
+    let expire_secs = 60;
 
-    let lock_req = LockRequest { name, expire };
+    let lock_req = LockRequest { name, expire_secs };
 
     let lock_result = meta_client.lock(lock_req).await.unwrap();
     let key = lock_result.key;
@@ -103,9 +103,9 @@ async fn run_multi_thread_with_one_timeout(meta_client: MetaClient) {
 
 async fn run_with_timeout(meta_client: MetaClient) {
     let name = "lock_name".as_bytes().to_vec();
-    let expire = 5;
+    let expire_secs = 5;
 
-    let lock_req = LockRequest { name, expire };
+    let lock_req = LockRequest { name, expire_secs };
 
     let lock_result = meta_client.lock(lock_req).await.unwrap();
     let key = lock_result.key;

@@ -19,7 +19,7 @@ use api::v1::meta::{
 #[derive(Debug)]
 pub struct LockRequest {
     pub name: Vec<u8>,
-    pub expire: i64,
+    pub expire_secs: i64,
 }
 
 impl From<LockRequest> for PbLockRequest {
@@ -27,7 +27,7 @@ impl From<LockRequest> for PbLockRequest {
         Self {
             header: None,
             name: req.name,
-            expire: req.expire,
+            expire_secs: req.expire_secs,
         }
     }
 }
@@ -71,14 +71,14 @@ mod tests {
     fn test_convert_lock_req() {
         let lock_req = LockRequest {
             name: "lock_1".as_bytes().to_vec(),
-            expire: 1,
+            expire_secs: 1,
         };
         let pb_lock_req: PbLockRequest = lock_req.into();
 
         let expected = PbLockRequest {
             header: None,
             name: "lock_1".as_bytes().to_vec(),
-            expire: 1,
+            expire_secs: 1,
         };
 
         assert_eq!(expected, pb_lock_req);
