@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(ts.len(), values.len());
         let mut key_builders = TimestampMillisecondVectorBuilder::with_capacity(ts.len());
         for key in ts {
-            key_builders.push(Some(key.clone()));
+            key_builders.push(Some(*key));
         }
         let row_keys = vec![Arc::new(key_builders.finish()) as _];
 

@@ -332,7 +332,7 @@ impl AccessLayer for FsAccessLayer {
             self.object_store.clone(),
             opts.projected_schema.clone(),
             opts.predicate.clone(),
-            opts.time_range.clone(),
+            opts.time_range,
         );
 
         let stream = reader.chunk_stream().await?;

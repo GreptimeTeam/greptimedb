@@ -65,7 +65,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
                             .unwrap()
                             .extend(output.inputs.iter().map(|f| FileMeta {
                                 file_name: f.file_name().to_string(),
-                                time_range: f.time_range().clone(),
+                                time_range: *f.time_range(),
                                 level: f.level(),
                             }));
                         Ok(meta)

@@ -59,7 +59,7 @@ impl<S: LogStore> Picker<CompactionRequestImpl<S>, CompactionTaskImpl<S>> for Si
 
             if outputs.is_empty() {
                 debug!("No SST file can be compacted at level {}", level_num);
-                return Ok(None);
+                continue;
             }
 
             debug!(
