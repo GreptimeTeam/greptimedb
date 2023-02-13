@@ -162,16 +162,10 @@ fn tables_to_record_batch(
 
     for table_name in table_names {
         // Safety: All these vectors are string type.
-        catalog_vec
-            .push_value_ref(ValueRef::String(catalog_name))
-            .unwrap();
-        schema_vec
-            .push_value_ref(ValueRef::String(schema_name))
-            .unwrap();
-        table_name_vec
-            .push_value_ref(ValueRef::String(&table_name))
-            .unwrap();
-        engine_vec.push_value_ref(ValueRef::String(engine)).unwrap();
+        catalog_vec.push_value_ref(ValueRef::String(catalog_name));
+        schema_vec.push_value_ref(ValueRef::String(schema_name));
+        table_name_vec.push_value_ref(ValueRef::String(&table_name));
+        engine_vec.push_value_ref(ValueRef::String(engine));
     }
 
     vec![

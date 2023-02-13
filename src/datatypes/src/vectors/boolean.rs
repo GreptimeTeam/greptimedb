@@ -189,7 +189,7 @@ impl MutableVector for BooleanVectorBuilder {
         Arc::new(self.finish())
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match value.as_boolean()? {
             Some(v) => self.mutable_array.append_value(v),
             None => self.mutable_array.append_null(),
@@ -357,8 +357,8 @@ mod tests {
         let input = BooleanVector::from_slice(&[true, false, true]);
 
         let mut builder = BooleanType::default().create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::Boolean(true)).unwrap();
-        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.try_push_value_ref(ValueRef::Boolean(true)).unwrap();
+        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder
             .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)
