@@ -85,7 +85,10 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid SQL, error: {}", err_msg))]
-    InvalidSql { err_msg: String },
+    InvalidSql {
+        err_msg: String,
+        backtrace: Backtrace,
+    },
 
     #[snafu(display("Illegal Frontend state: {}", err_msg))]
     IllegalFrontendState {
