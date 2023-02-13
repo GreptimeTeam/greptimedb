@@ -90,7 +90,6 @@ impl<S: LogStore> CompactionTaskImpl<S> {
         input: Vec<FileMeta>,
     ) -> Result<()> {
         let version = &self.shared_data.version_control;
-        // TODO(hl): do we have to update region version?
         let region_version = version.metadata().version();
 
         let edit = RegionEdit {

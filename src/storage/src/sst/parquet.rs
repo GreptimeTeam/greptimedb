@@ -844,6 +844,16 @@ mod tests {
         )
         .await;
 
+        //
+        check_range_read(
+            sst_file_name,
+            object_store.clone(),
+            projected_schema.clone(),
+            TimestampRange::with_unit(1000, 3000, TimeUnit::Millisecond).unwrap(),
+            vec![1000, 1000, 1001, 2002, 2003, 2003],
+        )
+        .await;
+
         // read full range
         check_range_read(
             sst_file_name,

@@ -29,6 +29,8 @@ pub(crate) async fn build_sst_reader(
     lower_sec_inclusive: i64,
     upper_sec_exclusive: i64,
 ) -> error::Result<ChunkReaderImpl> {
+    // TODO(hl): Schemas in different SSTs may differ, thus we should infer
+    // timestamp column name from Parquet metadata.
     let ts_col_name = schema
         .user_schema()
         .timestamp_column()

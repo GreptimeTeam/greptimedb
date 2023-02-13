@@ -220,7 +220,7 @@ impl Visitor for ChunkReaderBuilder {
         files: impl Iterator<Item = &'a FileHandle>,
     ) -> Result<()> {
         // Now we read all files, so just reserve enough space to hold all files.
-        // self.files_to_read.reserve(files.len);
+        self.files_to_read.reserve(files.size_hint().0);
         for file in files {
             // We can't invoke async functions here, so we collects all files first, and
             // create the batch reader later in `ChunkReaderBuilder`.
