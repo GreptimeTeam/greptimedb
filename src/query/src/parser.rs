@@ -93,7 +93,7 @@ impl QueryLanguageParser {
             })?;
 
         let eval_stmt = EvalStmt {
-            expr: expr,
+            expr,
             start,
             end,
             interval: step,
@@ -108,7 +108,7 @@ impl QueryLanguageParser {
         // try rfc3339 format
         let rfc3339_result = DateTime::parse_from_rfc3339(timestamp)
             .context(ParseTimestampSnafu)
-            .map(|datetime| Into::<SystemTime>::into(datetime));
+            .map(Into::<SystemTime>::into);
 
         // try float format
         let float_result = timestamp
@@ -127,7 +127,7 @@ impl QueryLanguageParser {
             (Err(rfc3339), Err(float)) => Err(NeitherError::new(
                 BoxedError::new(rfc3339),
                 BoxedError::new(float),
-                format!("Cannot parse timestamp {} into rfc3339 or float", timestamp),
+                format!("Cannot parse timestamp {timestamp} into rfc3339 or float",),
             )
             .boxed())
             .context(QueryParseSnafu {
