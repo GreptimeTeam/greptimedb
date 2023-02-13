@@ -561,9 +561,7 @@ mod tests {
             .unwrap();
 
         // Prepare data
-        // TODO(yingwen): Impl From<ObjectStore> for ProcedureStore.
-        let procedure_store =
-            ProcedureStore::new(Arc::new(ObjectStateStore::new(object_store.clone())));
+        let procedure_store = ProcedureStore::from(object_store.clone());
         let root: BoxedProcedure = Box::new(ProcedureToLoad::new("test recover manager"));
         let root_id = ProcedureId::random();
         // Prepare data for the root procedure.

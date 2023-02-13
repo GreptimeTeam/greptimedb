@@ -14,9 +14,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use common_telemetry::logging;
 use futures::TryStreamExt;
+use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
@@ -163,6 +165,14 @@ impl ProcedureStore {
     }
 }
 
+impl From<ObjectStore> for ProcedureStore {
+    fn from(store: ObjectStore) -> ProcedureStore {
+        let state_store = ObjectStateStore::new(store);
+
+        ProcedureStore::new(Arc::new(state_store))
+    }
+}
+
 /// Suffix type of the key.
 #[derive(Debug, PartialEq, Eq)]
 enum KeyType {
@@ -235,11 +245,8 @@ impl ParsedKey {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use async_trait::async_trait;
     use object_store::services::fs::Builder;
-    use object_store::ObjectStore;
     use tempdir::TempDir;
 
     use super::*;
@@ -249,9 +256,8 @@ mod tests {
         let store_dir = dir.path().to_str().unwrap();
         let accessor = Builder::default().root(store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor);
-        let state_store = ObjectStateStore::new(object_store);
 
-        ProcedureStore::new(Arc::new(state_store))
+        ProcedureStore::from(object_store)
     }
 
     #[test]
