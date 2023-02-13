@@ -72,7 +72,7 @@ pub(crate) fn to_alter_expr(
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
-    let kind = match alter_table.alter_operation {
+    let kind = match alter_table.alter_operation() {
         AlterTableOperation::AddConstraint(_) => {
             return error::NotSupportedSnafu {
                 feat: "ADD CONSTRAINT",
@@ -90,11 +90,13 @@ pub(crate) fn to_alter_expr(
             }],
         }),
         AlterTableOperation::DropColumn { name } => Kind::DropColumns(DropColumns {
-            drop_columns: vec![DropColumn { name: name.value }],
+            drop_columns: vec![DropColumn {
+                name: name.value.to_string(),
+            }],
         }),
-        AlterTableOperation::RenameTable { new_table_name } => {
-            Kind::RenameTable(RenameTable { new_table_name })
-        }
+        AlterTableOperation::RenameTable { new_table_name } => Kind::RenameTable(RenameTable {
+            new_table_name: new_table_name.to_string(),
+        }),
     };
 
     Ok(AlterExpr {

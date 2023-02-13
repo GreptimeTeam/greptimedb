@@ -17,7 +17,7 @@ use sqlparser::ast::{ColumnDef, Ident, ObjectName, TableConstraint};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTable {
     table_name: ObjectName,
-    pub alter_operation: AlterTableOperation,
+    alter_operation: AlterTableOperation,
 }
 
 impl AlterTable {
@@ -30,6 +30,10 @@ impl AlterTable {
 
     pub fn table_name(&self) -> &ObjectName {
         &self.table_name
+    }
+
+    pub fn alter_operation(&self) -> &AlterTableOperation {
+        &self.alter_operation
     }
 }
 

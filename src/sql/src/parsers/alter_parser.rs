@@ -93,7 +93,7 @@ mod tests {
             Statement::Alter(alter_table) => {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
-                let alter_operation = alter_table.alter_operation;
+                let alter_operation = alter_table.alter_operation();
                 assert_matches!(alter_operation, AlterTableOperation::AddColumn { .. });
                 match alter_operation {
                     AlterTableOperation::AddColumn { column_def } => {
@@ -129,7 +129,7 @@ mod tests {
             Statement::Alter(alter_table) => {
                 assert_eq!("my_metric_1", alter_table.table_name().0[0].value);
 
-                let alter_operation = alter_table.alter_operation;
+                let alter_operation = alter_table.alter_operation();
                 assert_matches!(alter_operation, AlterTableOperation::DropColumn { .. });
                 match alter_operation {
                     AlterTableOperation::DropColumn { name } => {
@@ -160,7 +160,7 @@ mod tests {
             Statement::Alter(alter_table) => {
                 assert_eq!("test_table", alter_table.table_name().0[0].value);
 
-                let alter_operation = alter_table.alter_operation;
+                let alter_operation = alter_table.alter_operation();
                 assert_matches!(alter_operation, AlterTableOperation::RenameTable { .. });
                 match alter_operation {
                     AlterTableOperation::RenameTable { new_table_name } => {
