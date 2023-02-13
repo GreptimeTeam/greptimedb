@@ -27,7 +27,6 @@ use std::str::FromStr;
 
 use api::helper::ColumnDataTypeWrapper;
 use common_base::bytes::Bytes;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
@@ -37,44 +36,13 @@ use datatypes::value::Value;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::ast::{
-    ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, ObjectName,
-    Value as SqlValue,
+    ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, Value as SqlValue,
 };
 use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertToGrpcDataTypeSnafu, InvalidSqlValueSnafu,
     ParseSqlValueSnafu, Result, SerializeColumnDefaultConstraintSnafu, TimestampOverflowSnafu,
     UnsupportedDefaultValueSnafu,
 };
-
-// TODO(LFC): Get rid of this function, use session context aware version of "table_idents_to_full_name" instead.
-// Current obstacles remain in some usage in Frontend, and other SQLs like "describe", "drop" etc.
-/// Converts maybe fully-qualified table name (`<catalog>.<schema>.<table>` or `<table>` when
-/// catalog and schema are default) to tuple.
-pub fn table_idents_to_full_name(obj_name: &ObjectName) -> Result<(String, String, String)> {
-    match &obj_name.0[..] {
-        [table] => Ok((
-            DEFAULT_CATALOG_NAME.to_string(),
-            DEFAULT_SCHEMA_NAME.to_string(),
-            table.value.clone(),
-        )),
-        [schema, table] => Ok((
-            DEFAULT_CATALOG_NAME.to_string(),
-            schema.value.clone(),
-            table.value.clone(),
-        )),
-        [catalog, schema, table] => Ok((
-            catalog.value.clone(),
-            schema.value.clone(),
-            table.value.clone(),
-        )),
-        _ => error::InvalidSqlSnafu {
-            msg: format!(
-                "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
-            ),
-        }
-        .fail(),
-    }
-}
 
 fn parse_string_to_value(
     column_name: &str,
@@ -370,6 +338,7 @@ mod tests {
     use common_time::timestamp::TimeUnit;
     use datatypes::types::BooleanType;
     use datatypes::value::OrderedFloat;
+    use sqlparser::ast::ObjectName;
 
     use super::*;
     use crate::ast::{Ident, TimezoneInfo};

@@ -67,6 +67,9 @@ pub async fn sql(
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PromqlQuery {
     pub query: String,
+    pub start: String,
+    pub end: String,
+    pub step: String,
 }
 
 /// Handler to execute promql

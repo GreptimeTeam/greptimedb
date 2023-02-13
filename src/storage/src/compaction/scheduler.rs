@@ -24,17 +24,25 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::compaction::dedup_deque::DedupDeque;
-use crate::compaction::picker::Picker;
+use crate::compaction::picker::{Picker, PickerContext};
 use crate::compaction::rate_limit::{
     BoxedRateLimitToken, CascadeRateLimiter, MaxInflightTaskLimiter, RateLimitToken, RateLimiter,
 };
 use crate::compaction::task::CompactionTask;
 use crate::error::{Result, StopCompactionSchedulerSnafu};
+use crate::version::LevelMetasRef;
 
 /// Table compaction request.
 #[derive(Default)]
 pub struct CompactionRequestImpl {
     table_id: TableId,
+    levels: LevelMetasRef,
+}
+
+impl CompactionRequestImpl {
+    pub fn levels(&self) -> &LevelMetasRef {
+        &self.levels
+    }
 }
 
 impl CompactionRequest for CompactionRequestImpl {
@@ -162,7 +170,7 @@ struct CompactionHandler<R, T: CompactionTask, P: Picker<R, T>> {
 }
 
 #[allow(unused)]
-impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
+impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
     /// Runs table compaction requests dispatch loop.
     pub async fn run(&self) {
         let task_notifier = self.task_notifier.clone();
@@ -214,7 +222,11 @@ impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
         token: BoxedRateLimitToken,
     ) -> Result<()> {
         let cloned_notify = self.task_notifier.clone();
-        let task = self.build_compaction_task(req).await?;
+        let table_id = req.table_id();
+        let Some(task) = self.build_compaction_task(req).await? else {
+            info!("No file needs compaction in table: {}", table_id);
+            return Ok(());
+        };
 
         // TODO(hl): we need to keep a track of task handle here to allow task cancellation.
         common_runtime::spawn_bg(async move {
@@ -230,8 +242,9 @@ impl<R, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
     }
 
     // TODO(hl): generate compaction task(find SSTs to compact along with the output of compaction)
-    async fn build_compaction_task(&self, req: R) -> crate::error::Result<T> {
-        self.picker.pick(&req)
+    async fn build_compaction_task(&self, req: R) -> crate::error::Result<Option<T>> {
+        let ctx = PickerContext {};
+        self.picker.pick(&ctx, &req)
     }
 }
 

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::helper::ColumnDataTypeWrapper;
+use api::helper::{push_vals, ColumnDataTypeWrapper};
 use api::v1::column::SemanticType;
 use api::v1::{Column, InsertRequest as GrpcInsertRequest};
 use client::Database;
@@ -120,7 +120,7 @@ pub fn insert_request_to_insert_batch(insert: &InsertRequest) -> Result<(Vec<Col
                 ..Default::default()
             };
 
-            column.push_vals(0, vector.clone());
+            push_vals(&mut column, 0, vector.clone());
             Ok(column)
         })
         .collect::<Result<Vec<_>>>()?;

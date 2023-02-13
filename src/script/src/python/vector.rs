@@ -436,48 +436,6 @@ impl PyVector {
         }
     }
 
-    // it seems rustpython's richcompare support is not good
-    // The Comparable Trait only support normal cmp
-    // (yes there is a slot_richcompare function, but it is not used in anywhere)
-    // so use our own function
-    // TODO(discord9): test those function
-
-    #[pymethod(name = "eq")]
-    #[pymethod(magic)]
-    fn eq(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.richcompare(other, PyComparisonOp::Eq, vm)
-    }
-
-    #[pymethod(name = "ne")]
-    #[pymethod(magic)]
-    fn ne(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.richcompare(other, PyComparisonOp::Ne, vm)
-    }
-
-    #[pymethod(name = "gt")]
-    #[pymethod(magic)]
-    fn gt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.richcompare(other, PyComparisonOp::Gt, vm)
-    }
-
-    #[pymethod(name = "lt")]
-    #[pymethod(magic)]
-    fn lt(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.richcompare(other, PyComparisonOp::Lt, vm)
-    }
-
-    #[pymethod(name = "ge")]
-    #[pymethod(magic)]
-    fn ge(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.richcompare(other, PyComparisonOp::Ge, vm)
-    }
-
-    #[pymethod(name = "le")]
-    #[pymethod(magic)]
-    fn le(&self, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
-        self.richcompare(other, PyComparisonOp::Le, vm)
-    }
-
     #[pymethod(magic)]
     fn and(&self, other: PyVectorRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let left = self.to_arrow_array();
@@ -516,7 +474,6 @@ impl PyVector {
 
     #[pymethod(magic)]
     fn invert(&self, vm: &VirtualMachine) -> PyResult<PyVector> {
-        dbg!();
         let left = self.to_arrow_array();
         let left = left
             .as_any()

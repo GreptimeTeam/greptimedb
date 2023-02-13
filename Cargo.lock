@@ -142,6 +142,7 @@ dependencies = [
  "common-error",
  "common-time",
  "datatypes",
+ "greptime-proto",
  "prost 0.11.6",
  "snafu",
  "tonic",
@@ -1522,6 +1523,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "futures",
+ "futures-util",
  "object-store",
  "serde",
  "serde_json",
@@ -2967,6 +2969,16 @@ name = "glob"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
+
+[[package]]
+name = "greptime-proto"
+version = "0.1.0"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=966161508646f575801bcf05f47ed283ec231d68#966161508646f575801bcf05f47ed283ec231d68"
+dependencies = [
+ "prost 0.11.6",
+ "tonic",
+ "tonic-build",
+]
 
 [[package]]
 name = "h2"
@@ -5248,7 +5260,7 @@ dependencies = [
 [[package]]
 name = "promql-parser"
 version = "0.0.1"
-source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=d027ce428a6a2df5a652b8558608c77d33c31644#d027ce428a6a2df5a652b8558608c77d33c31644"
+source = "git+https://github.com/GreptimeTeam/promql-parser.git?rev=fa186978a1234baf5a3e372da03aa663d859cdd2#fa186978a1234baf5a3e372da03aa663d859cdd2"
 dependencies = [
  "cfgrammar",
  "lazy_static",

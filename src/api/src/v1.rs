@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::derive_partial_eq_without_eq)]
-tonic::include_proto!("greptime.v1");
+pub mod column_def;
 
-mod column_def;
-pub mod meta;
+pub mod meta {
+    pub use greptime_proto::v1::meta::*;
+}
+
+pub use greptime_proto::v1::*;

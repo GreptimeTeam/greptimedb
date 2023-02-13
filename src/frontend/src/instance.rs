@@ -37,6 +37,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::logging::{debug, info};
 use datafusion::sql::sqlparser::ast::ObjectName;
 use datafusion_common::TableReference;
+use datanode::instance::sql::table_idents_to_full_name;
 use datanode::instance::InstanceRef as DnInstanceRef;
 use datatypes::schema::Schema;
 use distributed::DistInstance;
@@ -63,8 +64,8 @@ use sql::statements::statement::Statement;
 use crate::catalog::FrontendCatalogManager;
 use crate::datanode::DatanodeClients;
 use crate::error::{
-    self, Error, ExecutePromqlSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu, ParseSqlSnafu,
-    Result, SqlExecInterceptedSnafu,
+    self, Error, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu, NotSupportedSnafu,
+    ParseSqlSnafu, Result, SqlExecInterceptedSnafu,
 };
 use crate::expr_factory::{CreateExprFactoryRef, DefaultCreateExprFactory};
 use crate::frontend::FrontendOptions;
@@ -558,7 +559,11 @@ pub fn check_permission(
         Statement::ShowCreateTable(_) | Statement::Alter(_) => {}
 
         Statement::Insert(insert) => {
-            let (catalog, schema, _) = insert.full_table_name().context(ParseSqlSnafu)?;
+            let (catalog, schema, _) =
+                table_idents_to_full_name(insert.table_name(), query_ctx.clone())
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+
             validate_param(&catalog, &schema, query_ctx)?;
         }
         Statement::CreateTable(stmt) => {

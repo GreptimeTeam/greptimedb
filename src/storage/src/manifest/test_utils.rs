@@ -30,6 +30,7 @@ pub fn build_region_meta() -> RegionMetadata {
     desc.try_into().unwrap()
 }
 
+// TODO(hl): region edit should contain the time range of added files
 pub fn build_region_edit(
     sequence: SequenceNumber,
     files_to_add: &[&str],
@@ -42,8 +43,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 file_name: f.to_string(),
-                start_timestamp: None,
-                end_timestamp: None,
+                time_range: None,
                 level: 0,
             })
             .collect(),
@@ -51,8 +51,7 @@ pub fn build_region_edit(
             .iter()
             .map(|f| FileMeta {
                 file_name: f.to_string(),
-                start_timestamp: None,
-                end_timestamp: None,
+                time_range: None,
                 level: 0,
             })
             .collect(),

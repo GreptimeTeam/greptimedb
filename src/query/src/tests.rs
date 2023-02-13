@@ -12,8 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::derive_partial_eq_without_eq)]
+mod argmax_test;
+mod argmin_test;
+mod mean_test;
+mod my_sum_udaf_example;
+mod percentile_test;
+mod polyval_test;
+mod query_engine_test;
+mod scipy_stats_norm_cdf_test;
+mod scipy_stats_norm_pdf;
+mod time_range_filter_test;
 
-pub mod remote {
-    tonic::include_proto!("prometheus");
-}
+mod function;
+mod pow;

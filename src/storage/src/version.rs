@@ -137,7 +137,7 @@ pub struct VersionEdit {
 pub type VersionControlRef = Arc<VersionControl>;
 pub type VersionRef = Arc<Version>;
 type MemtableVersionRef = Arc<MemtableVersion>;
-type LevelMetasRef = Arc<LevelMetas>;
+pub type LevelMetasRef = Arc<LevelMetas>;
 
 /// Version contains metadata and state of region.
 #[derive(Clone, Debug)]

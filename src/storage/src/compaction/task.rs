@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::error::Result;
-use crate::sst::FileHandle;
+use crate::sst::{FileHandle, Level};
 
 #[async_trait::async_trait]
 pub trait CompactionTask: Send + Sync + 'static {
@@ -38,6 +38,21 @@ pub(crate) struct CompactionInput {
     input_level: u8,
     output_level: u8,
     file: FileHandle,
+}
+
+/// Many-to-many compaction can be decomposed to a many-to-one compaction from level n to level n+1
+/// and a many-to-one compaction from level n+1 to level n+1.
+#[derive(Debug)]
+#[allow(unused)]
+pub struct CompactionOutput {
+    /// Compaction output file level.
+    pub(crate) output_level: Level,
+    /// The left bound of time bucket.
+    pub(crate) bucket_bound: i64,
+    /// Bucket duration in seconds.
+    pub(crate) bucket: i64,
+    /// Compaction input files.
+    pub(crate) inputs: Vec<FileHandle>,
 }
 
 #[cfg(test)]

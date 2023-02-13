@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{
-    AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest, TableId,
+    column_def, AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, InsertRequest,
+    TableId,
 };
 use async_trait::async_trait;
 use catalog::helper::{SchemaKey, SchemaValue};
@@ -294,7 +295,10 @@ impl DistInstance {
                 explain(Box::new(stmt), self.query_engine.clone(), query_ctx).await
             }
             Statement::Insert(insert) => {
-                let (catalog, schema, table) = insert.full_table_name().context(ParseSqlSnafu)?;
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(insert.table_name(), query_ctx.clone())
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
 
                 let table = self
                     .catalog_manager
@@ -302,7 +306,7 @@ impl DistInstance {
                     .context(CatalogSnafu)?
                     .context(TableNotFoundSnafu { table_name: table })?;
 
-                let insert_request = insert_to_request(&table, *insert)?;
+                let insert_request = insert_to_request(&table, *insert, query_ctx)?;
 
                 return Ok(Output::AffectedRows(
                     table.insert(insert_request).await.context(TableSnafu)?,
@@ -508,9 +512,8 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
     let mut column_name_to_index_map = HashMap::new();
 
     for (idx, column) in create_table.column_defs.iter().enumerate() {
-        let schema = column
-            .try_as_column_schema()
-            .context(error::InvalidColumnDefSnafu {
+        let schema =
+            column_def::try_as_column_schema(column).context(error::InvalidColumnDefSnafu {
                 column: &column.name,
             })?;
         let schema = schema.with_time_index(column.name == create_table.time_index);
