@@ -301,7 +301,7 @@ async fn aggregators_empty_without() {
 //   {job="app-server"} 4550
 //   {job="api-server"} 1750
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "binary expr not supported"]
+#[ignore = "binary expr on aggr result is not supported"]
 async fn aggregators_complex_combined_aggrs() {
     create_insert_query_assert(
         AGGREGATORS_CREATE_TABLE,
@@ -312,6 +312,29 @@ async fn aggregators_complex_combined_aggrs() {
         Duration::from_secs(60),
         Duration::from_secs(0),
         "",
+    )
+    .await;
+}
+
+// eval instant at 50m stddev by (instance)(http_requests)
+//   {instance="0"} 223.60679774998
+//   {instance="1"} 223.60679774998
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO(ruihang): fix this case"]
+async fn stddev_by_label() {
+    create_insert_query_assert(
+        AGGREGATORS_CREATE_TABLE,
+        AGGREGATORS_INSERT_DATA,
+        r#"stddev by (instance)(http_requests)"#,
+        UNIX_EPOCH,
+        unix_epoch_plus_50m(),
+        Duration::from_secs(60),
+        Duration::from_secs(0),
+        "+----------+-----------------------------+\
+        \n| instance | STDDEV(http_requests.value) |\
+        \n+----------+-----------------------------+\
+        \n| 0        | 258.19888974716116          |\
+        \n+----------+-----------------------------+",
     )
     .await;
 }
