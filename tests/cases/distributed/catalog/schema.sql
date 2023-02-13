@@ -12,6 +12,10 @@ DROP TABLE hello;
 
 CREATE TABLE hello(i BIGINT TIME INDEX);
 
+SHOW TABLES FROM test_public_schema;
+
+SHOW TABLES FROM public;
+
 INSERT INTO hello VALUES (2), (3), (4);
 
 SELECT * FROM hello;

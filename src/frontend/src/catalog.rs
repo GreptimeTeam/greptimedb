@@ -86,7 +86,7 @@ impl CatalogManager for FrontendCatalogManager {
         let table_name = TableName::new(request.catalog, request.schema, request.table_name);
         self.partition_manager
             .table_routes()
-            .invalid_table_route(&table_name)
+            .invalidate_table_route(&table_name)
             .await;
         Ok(true)
     }

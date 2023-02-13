@@ -74,7 +74,7 @@ impl TableRoutes {
         self.cache.insert(table_name, table_route).await
     }
 
-    pub async fn invalid_table_route(&self, table_name: &TableName) {
+    pub async fn invalidate_table_route(&self, table_name: &TableName) {
         self.cache.invalidate(table_name).await
     }
 }
