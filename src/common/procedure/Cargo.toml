@@ -18,4 +18,5 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
 tempdir = "0.3"

@@ -15,10 +15,11 @@
 mod lock;
 mod runner;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
+use common_telemetry::logging;
 use object_store::ObjectStore;
 use snafu::ensure;
 use tokio::sync::Notify;
@@ -37,6 +38,17 @@ use crate::{
 struct ExecMeta {
     /// Current procedure state.
     state: ProcedureState,
+    /// Id of child procedures.
+    children: Vec<ProcedureId>,
+}
+
+impl Default for ExecMeta {
+    fn default() -> ExecMeta {
+        ExecMeta {
+            state: ProcedureState::Running,
+            children: Vec::new(),
+        }
+    }
 }
 
 /// Shared metadata of a procedure.
@@ -57,30 +69,13 @@ pub(crate) struct ProcedureMeta {
     parent_id: Option<ProcedureId>,
     /// Notify to wait for subprocedures.
     child_notify: Notify,
-    /// Locks inherted from the parent procedure.
-    parent_locks: Vec<LockKey>,
-    /// Lock not in `parent_locks` but required by this procedure.
-    ///
-    /// If the parent procedure already owns the lock that this procedure
-    /// needs, we set this field to `None`.
+    /// Lock required by this procedure.
     lock_key: Option<LockKey>,
     /// Mutable status during execution.
     exec_meta: Mutex<ExecMeta>,
 }
 
 impl ProcedureMeta {
-    /// Return all locks the procedure needs.
-    fn locks_needed(&self) -> Vec<LockKey> {
-        let num_locks = self.parent_locks.len() + if self.lock_key.is_some() { 1 } else { 0 };
-        let mut locks = Vec::with_capacity(num_locks);
-        locks.extend_from_slice(&self.parent_locks);
-        if let Some(key) = &self.lock_key {
-            locks.push(key.clone());
-        }
-
-        locks
-    }
-
     /// Returns current [ProcedureState].
     fn state(&self) -> ProcedureState {
         let meta = self.exec_meta.lock().unwrap();
@@ -92,12 +87,33 @@ impl ProcedureMeta {
         let mut meta = self.exec_meta.lock().unwrap();
         meta.state = state;
     }
+
+    /// Push `procedure_id` of the subprocedure to the metadata.
+    fn push_child(&self, procedure_id: ProcedureId) {
+        let mut meta = self.exec_meta.lock().unwrap();
+        meta.children.push(procedure_id);
+    }
+
+    /// Append subprocedures to given `buffer`.
+    fn list_children(&self, buffer: &mut Vec<ProcedureId>) {
+        let meta = self.exec_meta.lock().unwrap();
+        buffer.extend_from_slice(&meta.children);
+    }
+
+    /// Returns the number of subprocedures.
+    fn num_children(&self) -> usize {
+        self.exec_meta.lock().unwrap().children.len()
+    }
 }
 
 /// Reference counted pointer to [ProcedureMeta].
 type ProcedureMetaRef = Arc<ProcedureMeta>;
-/// Procedure and its parent procedure id.
-struct ProcedureAndParent(BoxedProcedure, Option<ProcedureId>);
+/// Procedure loaded from store.
+struct LoadedProcedure {
+    procedure: BoxedProcedure,
+    parent_id: Option<ProcedureId>,
+    step: u32,
+}
 
 /// Shared context of the manager.
 pub(crate) struct ManagerContext {
@@ -128,20 +144,119 @@ impl ManagerContext {
         procedures.contains_key(&procedure_id)
     }
 
-    /// Insert the `procedure` to the context.
+    /// Try to insert the `procedure` to the context if there is no procedure
+    /// with same [ProcedureId].
     ///
-    /// # Panics
-    /// Panics if the procedure already exists.
-    fn insert_procedure(&self, meta: ProcedureMetaRef) {
+    /// Returns `false` if there is already a procedure using the same [ProcedureId].
+    fn try_insert_procedure(&self, meta: ProcedureMetaRef) -> bool {
         let mut procedures = self.procedures.write().unwrap();
+        if procedures.contains_key(&meta.id) {
+            return false;
+        }
+
         let old = procedures.insert(meta.id, meta);
-        assert!(old.is_none());
+        debug_assert!(old.is_none());
+
+        true
     }
 
     /// Returns the [ProcedureState] of specific `procedure_id`.
     fn state(&self, procedure_id: ProcedureId) -> Option<ProcedureState> {
         let procedures = self.procedures.read().unwrap();
         procedures.get(&procedure_id).map(|meta| meta.state())
+    }
+
+    /// Notify a suspended parent procedure with specific `procedure_id` by its subprocedure.
+    fn notify_by_subprocedure(&self, procedure_id: ProcedureId) {
+        let procedures = self.procedures.read().unwrap();
+        if let Some(meta) = procedures.get(&procedure_id) {
+            meta.child_notify.notify_one();
+        }
+    }
+
+    /// Load procedure with specific `procedure_id` from cached [ProcedureMessage]s.
+    fn load_one_procedure(&self, procedure_id: ProcedureId) -> Option<LoadedProcedure> {
+        let messages = self.messages.lock().unwrap();
+        let message = messages.get(&procedure_id)?;
+
+        let loaders = self.loaders.lock().unwrap();
+        let loader = loaders.get(&message.type_name).or_else(|| {
+            logging::error!(
+                "Loader not found, procedure_id: {}, type_name: {}",
+                procedure_id,
+                message.type_name
+            );
+            None
+        })?;
+
+        let procedure = loader(&message.data)
+            .map_err(|e| {
+                logging::error!(
+                    "Failed to load procedure data, key: {}, source: {}",
+                    procedure_id,
+                    e
+                );
+                e
+            })
+            .ok()?;
+
+        Some(LoadedProcedure {
+            procedure,
+            parent_id: message.parent_id,
+            step: message.step,
+        })
+    }
+
+    /// Returns all procedures in the tree (including given `root` procedure).
+    ///
+    /// If callers need a consistent view of the tree, they must ensure no new
+    /// procedure is added to the tree during using this method.
+    fn procedures_in_tree(&self, root: &ProcedureMetaRef) -> Vec<ProcedureId> {
+        let sub_num = root.num_children();
+        // Reserve capacity for the root procedure and its children.
+        let mut procedures = Vec::with_capacity(1 + sub_num);
+
+        let mut queue = VecDeque::with_capacity(1 + sub_num);
+        // Push the root procedure to the queue.
+        queue.push_back(root.clone());
+
+        let mut children_ids = Vec::with_capacity(sub_num);
+        let mut children = Vec::with_capacity(sub_num);
+        while let Some(meta) = queue.pop_front() {
+            procedures.push(meta.id);
+
+            // Find metadatas of children.
+            children_ids.clear();
+            meta.list_children(&mut children_ids);
+            self.find_procedures(&children_ids, &mut children);
+
+            // Traverse children later.
+            for child in children.drain(..) {
+                queue.push_back(child);
+            }
+        }
+
+        procedures
+    }
+
+    /// Finds procedures by given `procedure_ids`.
+    ///
+    /// Ignores the id if corresponding procedure is not found.
+    fn find_procedures(&self, procedure_ids: &[ProcedureId], metas: &mut Vec<ProcedureMetaRef>) {
+        let procedures = self.procedures.read().unwrap();
+        for procedure_id in procedure_ids {
+            if let Some(meta) = procedures.get(procedure_id) {
+                metas.push(meta.clone());
+            }
+        }
+    }
+
+    /// Remove cached [ProcedureMessage] by ids.
+    fn remove_messages(&self, procedure_ids: &[ProcedureId]) {
+        let mut messages = self.messages.lock().unwrap();
+        for procedure_id in procedure_ids {
+            messages.remove(procedure_id);
+        }
     }
 }
 
@@ -168,17 +283,19 @@ impl LocalManager {
     }
 
     /// Submit a root procedure with given `procedure_id`.
-    fn submit_root(&self, procedure_id: ProcedureId, step: u32, procedure: BoxedProcedure) {
+    fn submit_root(
+        &self,
+        procedure_id: ProcedureId,
+        step: u32,
+        procedure: BoxedProcedure,
+    ) -> Result<()> {
         let meta = Arc::new(ProcedureMeta {
             id: procedure_id,
             lock_notify: Notify::new(),
             parent_id: None,
             child_notify: Notify::new(),
-            parent_locks: Vec::new(),
             lock_key: procedure.lock_key(),
-            exec_meta: Mutex::new(ExecMeta {
-                state: ProcedureState::Running,
-            }),
+            exec_meta: Mutex::new(ExecMeta::default()),
         });
         let runner = Runner {
             meta: meta.clone(),
@@ -188,12 +305,18 @@ impl LocalManager {
             store: ProcedureStore::new(self.state_store.clone()),
         };
 
-        self.manager_ctx.insert_procedure(meta);
+        // Inserts meta into the manager before actually spawnd the runner.
+        ensure!(
+            self.manager_ctx.try_insert_procedure(meta),
+            DuplicateProcedureSnafu { procedure_id },
+        );
 
         common_runtime::spawn_bg(async move {
             // Run the root procedure.
-            runner.run().await
+            let _ = runner.run().await;
         });
+
+        Ok(())
     }
 }
 
@@ -215,13 +338,13 @@ impl ProcedureManager for LocalManager {
             DuplicateProcedureSnafu { procedure_id }
         );
 
-        self.submit_root(procedure.id, 0, procedure.procedure);
+        self.submit_root(procedure.id, 0, procedure.procedure)?;
 
         Ok(())
     }
 
     async fn recover(&self) -> Result<()> {
-        unimplemented!()
+        todo!("Recover procedure and messages")
     }
 
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
@@ -231,23 +354,32 @@ impl ProcedureManager for LocalManager {
 
 /// Create a new [ProcedureMeta] for test purpose.
 #[cfg(test)]
-fn procedure_meta_for_test() -> ProcedureMeta {
-    ProcedureMeta {
-        id: ProcedureId::random(),
-        lock_notify: Notify::new(),
-        parent_id: None,
-        child_notify: Notify::new(),
-        parent_locks: Vec::new(),
-        lock_key: None,
-        exec_meta: Mutex::new(ExecMeta {
-            state: ProcedureState::Running,
-        }),
+mod test_util {
+    use object_store::services::fs::Builder;
+    use tempdir::TempDir;
+
+    use super::*;
+
+    pub(crate) fn procedure_meta_for_test() -> ProcedureMeta {
+        ProcedureMeta {
+            id: ProcedureId::random(),
+            lock_notify: Notify::new(),
+            parent_id: None,
+            child_notify: Notify::new(),
+            lock_key: None,
+            exec_meta: Mutex::new(ExecMeta::default()),
+        }
+    }
+
+    pub(crate) fn new_object_store(dir: &TempDir) -> ObjectStore {
+        let store_dir = dir.path().to_str().unwrap();
+        let accessor = Builder::default().root(store_dir).build().unwrap();
+        ObjectStore::new(accessor)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use object_store::services::fs::Builder;
     use serde::{Deserialize, Serialize};
     use tempdir::TempDir;
 
@@ -256,39 +388,14 @@ mod tests {
     use crate::{Context, Procedure, Status};
 
     #[test]
-    fn test_locks_needed() {
-        let mut meta = procedure_meta_for_test();
-        let locks = meta.locks_needed();
-        assert!(locks.is_empty());
-
-        let parent_locks = vec![LockKey::new("a"), LockKey::new("b")];
-        meta.parent_locks = parent_locks.clone();
-        let locks = meta.locks_needed();
-        assert_eq!(parent_locks, locks);
-
-        meta.lock_key = Some(LockKey::new("c"));
-        let locks = meta.locks_needed();
-        assert_eq!(
-            vec![LockKey::new("a"), LockKey::new("b"), LockKey::new("c")],
-            locks
-        );
-    }
-
-    fn new_object_store(dir: &TempDir) -> ObjectStore {
-        let store_dir = dir.path().to_str().unwrap();
-        let accessor = Builder::default().root(store_dir).build().unwrap();
-        ObjectStore::new(accessor)
-    }
-
-    #[test]
     fn test_manager_context() {
         let ctx = ManagerContext::new();
-        let meta = Arc::new(procedure_meta_for_test());
+        let meta = Arc::new(test_util::procedure_meta_for_test());
 
         assert!(!ctx.contains_procedure(meta.id));
         assert!(ctx.state(meta.id).is_none());
 
-        ctx.insert_procedure(meta.clone());
+        assert!(ctx.try_insert_procedure(meta.clone()));
         assert!(ctx.contains_procedure(meta.id));
 
         assert_eq!(ProcedureState::Running, ctx.state(meta.id).unwrap());
@@ -297,20 +404,54 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_manager_context_insert_duplicate() {
         let ctx = ManagerContext::new();
-        let meta = Arc::new(procedure_meta_for_test());
+        let meta = Arc::new(test_util::procedure_meta_for_test());
 
-        ctx.insert_procedure(meta.clone());
-        ctx.insert_procedure(meta);
+        assert!(ctx.try_insert_procedure(meta.clone()));
+        assert!(!ctx.try_insert_procedure(meta));
+    }
+
+    fn new_child(parent_id: ProcedureId, ctx: &ManagerContext) -> ProcedureMetaRef {
+        let mut child = test_util::procedure_meta_for_test();
+        child.parent_id = Some(parent_id);
+        let child = Arc::new(child);
+        assert!(ctx.try_insert_procedure(child.clone()));
+
+        let mut parent = Vec::new();
+        ctx.find_procedures(&[parent_id], &mut parent);
+        parent[0].push_child(child.id);
+
+        child
+    }
+
+    #[test]
+    fn test_procedures_in_tree() {
+        let ctx = ManagerContext::new();
+        let root = Arc::new(test_util::procedure_meta_for_test());
+        assert!(ctx.try_insert_procedure(root.clone()));
+
+        assert_eq!(1, ctx.procedures_in_tree(&root).len());
+
+        let child1 = new_child(root.id, &ctx);
+        let child2 = new_child(root.id, &ctx);
+
+        let child3 = new_child(child1.id, &ctx);
+        let child4 = new_child(child1.id, &ctx);
+
+        let child5 = new_child(child2.id, &ctx);
+
+        let expect = vec![
+            root.id, child1.id, child2.id, child3.id, child4.id, child5.id,
+        ];
+        assert_eq!(expect, ctx.procedures_in_tree(&root));
     }
 
     #[test]
     fn test_register_loader() {
         let dir = TempDir::new("register").unwrap();
         let config = ManagerConfig {
-            object_store: new_object_store(&dir),
+            object_store: test_util::new_object_store(&dir),
         };
         let manager = LocalManager::new(config);
 
@@ -363,7 +504,7 @@ mod tests {
     async fn test_submit_procedure() {
         let dir = TempDir::new("submit").unwrap();
         let config = ManagerConfig {
-            object_store: new_object_store(&dir),
+            object_store: test_util::new_object_store(&dir),
         };
         let manager = LocalManager::new(config);
 
@@ -417,6 +558,6 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(matches!(err, Error::DuplicateProcedure { .. }), "{err:?}");
+        assert!(matches!(err, Error::DuplicateProcedure { .. }), "{err}");
     }
 }

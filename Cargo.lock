@@ -1523,6 +1523,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "futures",
+ "futures-util",
  "object-store",
  "serde",
  "serde_json",

@@ -140,8 +140,6 @@ Rollback is complicated to implement so some procedures might not support rollba
 ## Locking
 The `ProcedureManager` can provide a locking mechanism that gives a procedure read/write access to a database object such as a table so other procedures are unable to modify the same table while the current one is executing.
 
-Sub-procedures always inherit their parents' locks. The `ProcedureManager` only acquires locks for a procedure if its parent doesn't hold the lock.
-
 # Drawbacks
 The `Procedure` framework introduces additional complexity and overhead to our database.
 - To execute a `Procedure`, we need to write to the `ProcedureStore` multiple times, which may slow down the server

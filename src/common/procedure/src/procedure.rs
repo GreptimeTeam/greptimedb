@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::error::Result;
 
 /// Procedure execution status.
+#[derive(Debug)]
 pub enum Status {
     /// The procedure is still executing.
     Executing {
@@ -118,6 +119,12 @@ impl ProcedureWithId {
             id: ProcedureId::random(),
             procedure,
         }
+    }
+}
+
+impl fmt::Debug for ProcedureWithId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.procedure.type_name(), self.id)
     }
 }
 
