@@ -13,21 +13,22 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use common_query::Output;
-use common_telemetry::warn;
+use datatypes::data_type::DataType;
 use datatypes::prelude::VectorRef;
-use datatypes::vectors::{BooleanVector, Float64Vector, StringVector, TimestampMillisecondVector};
+use datatypes::vectors::StringVector;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::ast::{BinaryOperator, Expr, Value};
 use sql::statements::delete::Delete;
+use sql::statements::sql_value_to_value;
 use table::engine::TableReference;
 use table::requests::DeleteRequest;
+use table::TableRef;
 
-use crate::error::{DeleteSnafu, NotSupportSqlSnafu, Result};
+use crate::error::{ColumnNotFoundSnafu, DeleteSnafu, InvalidSqlSnafu, NotSupportSqlSnafu, Result};
 use crate::instance::sql::table_idents_to_full_name;
 use crate::sql::SqlHandler;
 
@@ -44,7 +45,7 @@ impl SqlHandler {
         let table = self.get_table(&table_ref)?;
 
         let req = DeleteRequest {
-            key_column_values: parse_selection(stmt.selection())?,
+            key_column_values: parse_selection(stmt.selection(), &table)?,
         };
 
         let affected_rows = table.delete(req).await.with_context(|_| DeleteSnafu {
@@ -57,29 +58,36 @@ impl SqlHandler {
 
 /// parse selection, currently supported format is `tagkey1 = 'tagvalue1' and 'ts' = 'value'`.
 /// (only uses =, and in the where clause and provides all columns needed by the key.)
-fn parse_selection(selection: &Option<Expr>) -> Result<HashMap<String, VectorRef>> {
+fn parse_selection(
+    selection: &Option<Expr>,
+    table: &TableRef,
+) -> Result<HashMap<String, VectorRef>> {
     let mut key_column_values = HashMap::new();
     if let Some(expr) = selection {
-        parse_expr(expr, &mut key_column_values)?;
+        parse_expr(expr, &mut key_column_values, table)?;
     }
     Ok(key_column_values)
 }
 
-fn parse_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) -> Result<()> {
+fn parse_expr(
+    expr: &Expr,
+    key_column_values: &mut HashMap<String, VectorRef>,
+    table: &TableRef,
+) -> Result<()> {
     // match BinaryOp
     if let Expr::BinaryOp { left, op, right } = expr {
         match (&**left, op, &**right) {
             // match And operator
             (Expr::BinaryOp { .. }, BinaryOperator::And, Expr::BinaryOp { .. }) => {
-                parse_expr(left, key_column_values)?;
-                parse_expr(right, key_column_values)?;
+                parse_expr(left, key_column_values, table)?;
+                parse_expr(right, key_column_values, table)?;
                 return Ok(());
             }
             // match Eq operator
             (Expr::Identifier(column_name), BinaryOperator::Eq, Expr::Value(value)) => {
                 key_column_values.insert(
                     column_name.to_string(),
-                    value_to_vector(&column_name.to_string(), value)?,
+                    value_to_vector(&column_name.to_string(), value, table)?,
                 );
                 return Ok(());
             }
@@ -102,29 +110,38 @@ fn parse_expr(expr: &Expr, key_column_values: &mut HashMap<String, VectorRef>) -
 }
 
 /// parse value to vector
-fn value_to_vector(column_name: &String, value: &Value) -> Result<VectorRef> {
-    match value {
-        Value::Number(n, _) => {
-            if column_name == "ts" {
-                Ok(Arc::new(TimestampMillisecondVector::from_vec(vec![
-                    i64::from_str(n).unwrap(),
-                ])))
-            } else {
-                Ok(Arc::new(Float64Vector::from_vec(vec![
-                    f64::from_str(n).unwrap()
-                ])))
+fn value_to_vector(column_name: &String, sql_value: &Value, table: &TableRef) -> Result<VectorRef> {
+    let data_type = table.schema().column_type_by_name(column_name);
+    return match data_type {
+        Some(data_type) => {
+            let value = sql_value_to_value(column_name, &data_type, sql_value);
+            match value {
+                Ok(value) => {
+                    let mut vec = data_type.create_mutable_vector(1);
+                    if vec.push_value_ref(value.as_value_ref()).is_err() {
+                        return InvalidSqlSnafu {
+                            msg: format!(
+                                "invalid sql, column name is {column_name}, value is {sql_value}",
+                            ),
+                        }
+                        .fail();
+                    }
+                    Ok(vec.to_vector())
+                }
+                _ => {
+                    InvalidSqlSnafu {
+                        msg: format!(
+                            "invalid sql, column name is {column_name}, value is {sql_value}",
+                        ),
+                    }
+                    .fail()
+                }
             }
         }
-        Value::SingleQuotedString(s) | sql::ast::Value::DoubleQuotedString(s) => {
-            Ok(Arc::new(StringVector::from(vec![s.to_string()])))
+        None => ColumnNotFoundSnafu {
+            column_name,
+            table_name: table.table_info().name.clone(),
         }
-        Value::Boolean(b) => Ok(Arc::new(BooleanVector::from(vec![*b]))),
-        _ => {
-            warn!("Current value type is not supported, value:{value}");
-            return NotSupportSqlSnafu {
-                msg: format!("Failed to parse value:{value}, current value type is not supported"),
-            }
-            .fail();
-        }
-    }
+        .fail(),
+    };
 }

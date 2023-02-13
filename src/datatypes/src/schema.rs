@@ -24,7 +24,7 @@ pub use column_schema::TIME_INDEX_KEY;
 use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
-use crate::data_type::DataType;
+use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, Result};
 pub use crate::schema::column_schema::{ColumnSchema, Metadata};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
@@ -85,6 +85,11 @@ impl Schema {
         self.name_to_index
             .get(name)
             .map(|index| &self.column_schemas[*index])
+    }
+
+    pub fn column_type_by_name(&self, name: &str) -> Option<ConcreteDataType> {
+        self.column_schema_by_name(name)
+            .map(|schema| schema.data_type.clone())
     }
 
     /// Retrieve the column's name by index
