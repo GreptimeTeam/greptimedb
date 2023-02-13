@@ -1,3 +1,4 @@
+#![allow(unused)]
 use datafusion::arrow::compute::kernels::arithmetic;
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
@@ -36,6 +37,7 @@ fn pyo3_is_obj_scalar(obj: &PyAny) -> bool {
 }
 
 impl PyVector {
+    /// TODO(discord9): `allow_thread` it
     fn pyo3_scalar_arith_op<F>(
         &self,
         py: Python<'_>,
@@ -196,7 +198,7 @@ macro_rules! to_con_type {
 }
 
 /// to int/float/boolean, if dtype is None, then convert to highest prec type
-fn pyo3_obj_try_to_typed_val(
+pub(crate) fn pyo3_obj_try_to_typed_val(
     obj: &PyAny,
     dtype: Option<ConcreteDataType>,
 ) -> PyResult<value::Value> {
@@ -243,7 +245,6 @@ fn pyo3_obj_try_to_typed_val(
                 )?;
                 Ok(ret)
             } else {
-                // return error
                 Err(PyValueError::new_err(format!(
                     "Can't cast num to {dtype:?}"
                 )))
