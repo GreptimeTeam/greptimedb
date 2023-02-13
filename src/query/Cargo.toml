@@ -8,6 +8,7 @@ license.workspace = true
 arc-swap = "1.0"
 async-trait = "0.1"
 catalog = { path = "../catalog" }
+chrono.workspace = true
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }

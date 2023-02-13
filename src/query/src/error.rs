@@ -74,6 +74,12 @@ pub enum Error {
 
     #[snafu(display("Failed to convert datatype: {}", source))]
     Datatype { source: datatypes::error::Error },
+
+    #[snafu(display("Failed to parse timestamp: {}", source))]
+    ParseTimestamp { source: chrono::ParseError },
+
+    #[snafu(display("Failed to parse float number: {}", source))]
+    ParseFloat { source: std::num::ParseFloatError },
 }
 
 impl ErrorExt for Error {
@@ -85,7 +91,9 @@ impl ErrorExt for Error {
             UnsupportedExpr { .. }
             | CatalogNotFound { .. }
             | SchemaNotFound { .. }
-            | TableNotFound { .. } => StatusCode::InvalidArguments,
+            | TableNotFound { .. }
+            | ParseTimestamp { .. }
+            | ParseFloat { .. } => StatusCode::InvalidArguments,
             QueryAccessDenied { .. } => StatusCode::AccessDenied,
             Catalog { source } => source.status_code(),
             VectorComputation { source } => source.status_code(),

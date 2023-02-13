@@ -5468,6 +5468,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "catalog",
+ "chrono",
  "common-base",
  "common-catalog",
  "common-error",
