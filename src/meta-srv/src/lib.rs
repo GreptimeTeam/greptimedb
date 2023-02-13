@@ -20,6 +20,7 @@ pub mod error;
 pub mod handler;
 pub mod keys;
 pub mod lease;
+pub mod lock;
 pub mod metasrv;
 #[cfg(feature = "mock")]
 pub mod mocks;

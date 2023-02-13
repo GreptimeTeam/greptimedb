@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::cluster::MetaPeerClient;
 use crate::election::Election;
 use crate::handler::HeartbeatHandlerGroup;
+use crate::lock::DistLockRef;
 use crate::selector::{Selector, SelectorType};
 use crate::sequence::SequenceRef;
 use crate::service::store::kv::{KvStoreRef, ResetableKvStoreRef};
@@ -99,6 +100,7 @@ pub struct MetaSrv {
     handler_group: HeartbeatHandlerGroup,
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClient>,
+    lock: Option<DistLockRef>,
 }
 
 impl MetaSrv {
@@ -172,6 +174,11 @@ impl MetaSrv {
     #[inline]
     pub fn meta_peer_client(&self) -> Option<MetaPeerClient> {
         self.meta_peer_client.clone()
+    }
+
+    #[inline]
+    pub fn lock(&self) -> Option<DistLockRef> {
+        self.lock.clone()
     }
 
     #[inline]
