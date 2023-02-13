@@ -210,7 +210,7 @@ impl BatchBuilder {
         for (builder, column) in self.builders.iter_mut().zip(batch.columns()) {
             let value = column.get_ref(i);
             builder
-                .push_value_ref(value)
+                .try_push_value_ref(value)
                 .context(error::PushBatchSnafu)?;
         }
 

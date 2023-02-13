@@ -70,9 +70,9 @@ mod tests {
 
         let mut builder = DateType::default().create_mutable_vector(3);
         builder
-            .push_value_ref(ValueRef::Date(Date::new(5)))
+            .try_push_value_ref(ValueRef::Date(Date::new(5)))
             .unwrap();
-        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder
             .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)

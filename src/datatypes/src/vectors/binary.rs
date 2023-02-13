@@ -163,7 +163,7 @@ impl MutableVector for BinaryVectorBuilder {
         Arc::new(self.finish())
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match value.as_binary()? {
             Some(v) => self.mutable_array.append_value(v),
             None => self.mutable_array.append_null(),
@@ -338,9 +338,9 @@ mod tests {
 
         let mut builder = BinaryType::default().create_mutable_vector(3);
         builder
-            .push_value_ref(ValueRef::Binary("hello".as_bytes()))
+            .try_push_value_ref(ValueRef::Binary("hello".as_bytes()))
             .unwrap();
-        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder
             .extend_slice_of(&crate::vectors::Int32Vector::from_slice(&[13]), 0, 1)

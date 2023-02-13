@@ -308,7 +308,7 @@ impl<T: LogicalPrimitiveType> MutableVector for PrimitiveVectorBuilder<T> {
         Arc::new(self.finish())
     }
 
-    fn push_value_ref(&mut self, value: ValueRef) -> Result<()> {
+    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         let primitive = T::cast_value_ref(value)?;
         match primitive {
             Some(v) => self.mutable_array.append_value(v.into_native()),
@@ -511,8 +511,8 @@ mod tests {
     #[test]
     fn test_primitive_vector_builder() {
         let mut builder = Int64Type::default().create_mutable_vector(3);
-        builder.push_value_ref(ValueRef::Int64(123)).unwrap();
-        assert!(builder.push_value_ref(ValueRef::Int32(123)).is_err());
+        builder.try_push_value_ref(ValueRef::Int64(123)).unwrap();
+        assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
 
         let input = Int64Vector::from_slice(&[7, 8, 9]);
         builder.extend_slice_of(&input, 1, 2).unwrap();

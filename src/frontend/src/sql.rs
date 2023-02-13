@@ -118,7 +118,7 @@ fn add_row_to_vector(
         statements::sql_value_to_value(&column_schema.name, &column_schema.data_type, sql_val)
             .context(error::ParseSqlSnafu)?
     };
-    builder.push_value_ref(value.as_value_ref()).unwrap();
+    builder.push_value_ref(value.as_value_ref());
     Ok(())
 }
 
