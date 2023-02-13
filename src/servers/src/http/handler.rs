@@ -20,6 +20,7 @@ use axum::extract::{Json, Query, State};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
 use common_telemetry::metric;
+use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::UserInfo;
@@ -81,16 +82,22 @@ pub async fn promql(
     _user_info: Extension<UserInfo>,
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
-    let start = Instant::now();
+    let exec_start = Instant::now();
+    let prom_query = PromQuery {
+        query: params.query,
+        start: params.start,
+        end: params.end,
+        step: params.step,
+    };
     let resp = match super::query_context_from_db(sql_handler.clone(), None) {
         Ok(query_ctx) => {
-            JsonResponse::from_output(sql_handler.do_promql_query(&params.query, query_ctx).await)
+            JsonResponse::from_output(sql_handler.do_promql_query(prom_query, query_ctx).await)
                 .await
         }
         Err(resp) => resp,
     };
 
-    Json(resp.with_execution_time(start.elapsed().as_millis()))
+    Json(resp.with_execution_time(exec_start.elapsed().as_millis()))
 }
 
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {

@@ -36,11 +36,12 @@ pub enum QueryStatement {
     Promql(EvalStmt),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromQuery {
-    query: String,
-    start: String,
-    end: String,
-    step: String,
+    pub query: String,
+    pub start: String,
+    pub end: String,
+    pub step: String,
 }
 
 pub struct QueryLanguageParser {}

@@ -42,7 +42,7 @@ use meta_client::rpc::{
     TableName,
 };
 use partition::partition::{PartitionBound, PartitionDef};
-use query::parser::QueryStatement;
+use query::parser::{PromQuery, QueryStatement};
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use query::{QueryEngineFactory, QueryEngineRef};
 use servers::query_handler::sql::SqlQueryHandler;
@@ -474,7 +474,7 @@ impl SqlQueryHandler for DistInstance {
 
     async fn do_promql_query(
         &self,
-        _: &str,
+        _: PromQuery,
         _: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>> {
         unimplemented!()

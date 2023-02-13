@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_query::Output;
+use query::parser::PromQuery;
 use session::context::QueryContext;
 
 use crate::tests::test_util::{check_output_stream, setup_test_instance};
@@ -44,7 +45,12 @@ async fn sql_insert_promql_query_ceil() {
         .unwrap();
     assert!(matches!(put_output, Output::AffectedRows(12)));
 
-    let promql = "ceil(demo{host=\"host1\"})";
+    let promql = PromQuery {
+        query: String::from("ceil(demo{host=\"host1\"})"),
+        start: String::from("0"),
+        end: String::from("100.000"),
+        step: String::from("5s"),
+    };
     let query_output = instance
         .inner()
         .execute_promql(promql, query_ctx)

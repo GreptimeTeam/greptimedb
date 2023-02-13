@@ -25,6 +25,7 @@ use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::info;
 use futures::FutureExt;
+use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -45,7 +46,7 @@ pub type PromqlHandlerRef = Arc<dyn PromqlHandler + Send + Sync>;
 
 #[async_trait]
 pub trait PromqlHandler {
-    async fn do_query(&self, query: &str) -> Result<Output>;
+    async fn do_query(&self, query: PromQuery) -> Result<Output>;
 }
 
 pub struct PromqlServer {
@@ -250,6 +251,12 @@ pub async fn range_query(
     State(handler): State<PromqlHandlerRef>,
     Query(params): Query<RangeQuery>,
 ) -> Json<PromqlJsonResponse> {
-    let result = handler.do_query(&params.query).await;
+    let prom_query = PromQuery {
+        query: params.query,
+        start: params.start,
+        end: params.end,
+        step: params.step,
+    };
+    let result = handler.do_query(prom_query).await;
     PromqlJsonResponse::from_query_result(result).await
 }

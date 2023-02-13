@@ -19,7 +19,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
 use datatypes::schema::Schema;
-use query::parser::{QueryLanguageParser, QueryStatement};
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use servers::error as server_error;
 use servers::promql::PromqlHandler;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -165,8 +165,12 @@ impl Instance {
         self.execute_stmt(stmt, query_ctx).await
     }
 
-    pub async fn execute_promql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
-        let stmt = QueryLanguageParser::parse_promql(sql).context(ExecuteSqlSnafu)?;
+    pub async fn execute_promql(
+        &self,
+        query: PromQuery,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let stmt = QueryLanguageParser::parse_promql(query).context(ExecuteSqlSnafu)?;
         self.execute_stmt(stmt, query_ctx).await
     }
 }
@@ -215,7 +219,7 @@ impl SqlQueryHandler for Instance {
 
     async fn do_promql_query(
         &self,
-        query: &str,
+        query: PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
         let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
@@ -254,12 +258,16 @@ impl SqlQueryHandler for Instance {
 
 #[async_trait]
 impl PromqlHandler for Instance {
-    async fn do_query(&self, query: &str) -> server_error::Result<Output> {
+    async fn do_query(&self, query: PromQuery) -> server_error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
+
+        let query_literal = format!("{query:?}",);
         self.execute_promql(query, QueryContext::arc())
             .await
             .map_err(BoxedError::new)
-            .with_context(|_| server_error::ExecuteQuerySnafu { query })
+            .with_context(|_| server_error::ExecuteQuerySnafu {
+                query: &query_literal,
+            })
     }
 }
 

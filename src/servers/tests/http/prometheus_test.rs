@@ -23,6 +23,7 @@ use axum_test_helper::TestClient;
 use common_query::Output;
 use datatypes::schema::Schema;
 use prost::Message;
+use query::parser::PromQuery;
 use servers::error::{Error, Result};
 use servers::http::{HttpOptions, HttpServer};
 use servers::prometheus;
@@ -80,7 +81,7 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_promql_query(
         &self,
-        _: &str,
+        _: PromQuery,
         _: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>> {
         unimplemented!()

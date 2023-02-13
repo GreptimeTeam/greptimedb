@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use common_query::Output;
 use datanode::error::Error as DatanodeError;
 use datatypes::schema::Schema;
+use query::parser::PromQuery;
 use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use servers::query_handler::sql::{SqlQueryHandler, SqlQueryHandlerRef};
 use session::context::QueryContextRef;
@@ -50,7 +51,7 @@ impl SqlQueryHandler for StandaloneSqlQueryHandler {
 
     async fn do_promql_query(
         &self,
-        _: &str,
+        _: PromQuery,
         _: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>> {
         unimplemented!()

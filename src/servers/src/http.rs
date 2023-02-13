@@ -563,6 +563,7 @@ mod test {
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
+    use query::parser::PromQuery;
     use session::context::QueryContextRef;
     use tokio::sync::mpsc;
 
@@ -584,7 +585,7 @@ mod test {
 
         async fn do_promql_query(
             &self,
-            _: &str,
+            _: PromQuery,
             _: QueryContextRef,
         ) -> Vec<std::result::Result<Output, Self::Error>> {
             unimplemented!()
