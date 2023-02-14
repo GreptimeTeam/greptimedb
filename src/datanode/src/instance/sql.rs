@@ -267,8 +267,9 @@ impl PromqlHandler for Instance {
             .with_context(|_| {
                 let query_literal = format!("{query:?}");
                 server_error::ExecuteQuerySnafu {
-                query: query_literal,
-            }})
+                    query: query_literal,
+                }
+            })
     }
 }
 
