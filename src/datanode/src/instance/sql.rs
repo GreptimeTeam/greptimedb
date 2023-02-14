@@ -172,7 +172,7 @@ impl Instance {
         self.execute_stmt(stmt, query_ctx).await
     }
 
-    // TODO: merge this and `execute_promql` after #951 landed
+    // TODO(ruihang): merge this and `execute_promql` after #951 landed
     pub async fn execute_promql_statement(
         &self,
         promql: &str,
