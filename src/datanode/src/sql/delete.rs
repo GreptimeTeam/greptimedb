@@ -101,18 +101,18 @@ fn parse_expr(
             _ => {}
         }
     }
-    return NotSupportSqlSnafu {
+    NotSupportSqlSnafu {
         msg: format!(
             "Not support sql expr:{expr},correct format is tagkey1 = tagvalue1 and ts = value"
         ),
     }
-    .fail();
+    .fail()
 }
 
 /// parse value to vector
 fn value_to_vector(column_name: &String, sql_value: &Value, table: &TableRef) -> Result<VectorRef> {
     let data_type = table.schema().column_type_by_name(column_name);
-    return match data_type {
+    match data_type {
         Some(data_type) => {
             let value = sql_value_to_value(column_name, &data_type, sql_value);
             match value {
@@ -143,5 +143,5 @@ fn value_to_vector(column_name: &String, sql_value: &Value, table: &TableRef) ->
             table_name: table.table_info().name.clone(),
         }
         .fail(),
-    };
+    }
 }

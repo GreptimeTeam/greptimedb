@@ -14,23 +14,17 @@
 
 use sqlparser::ast::{Expr, ObjectName, Statement, TableFactor};
 
-use crate::error;
-use crate::error::{Error, Result};
+use crate::error::{Error, InvalidSqlSnafu, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delete {
-    table_name: TableFactor,
+    table_name: ObjectName,
     selection: Option<Expr>,
 }
 
 impl Delete {
     pub fn table_name(&self) -> &ObjectName {
-        match &self.table_name {
-            TableFactor::Table { name, .. } => name,
-            // # Safety
-            // statement type is checked before.
-            _ => unreachable!(),
-        }
+        &self.table_name
     }
 
     pub fn selection(&self) -> &Option<Expr> {
@@ -50,22 +44,26 @@ impl TryFrom<Statement> for Delete {
                 returning,
             } => {
                 if using.is_some() || returning.is_some() {
-                    return error::InvalidSqlSnafu {
+                    return InvalidSqlSnafu {
                         msg: "delete sql isn't support using and returning.".to_string(),
                     }
                     .fail();
                 }
-                Ok(Delete {
-                    table_name,
-                    selection,
-                })
-            }
-            unexp => {
-                return error::InvalidSqlSnafu {
-                    msg: format!("Not expected to be {unexp}"),
+                match table_name {
+                    TableFactor::Table { name, .. } => Ok(Delete {
+                        table_name: name,
+                        selection,
+                    }),
+                    _ => InvalidSqlSnafu {
+                        msg: "can't find table name, tableFactor is not Table type".to_string(),
+                    }
+                    .fail(),
                 }
-                .fail();
             }
+            unexp => InvalidSqlSnafu {
+                msg: format!("Not expected to be {unexp}"),
+            }
+            .fail(),
         }
     }
 }
