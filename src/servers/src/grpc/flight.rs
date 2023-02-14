@@ -45,14 +45,14 @@ type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 
 
 const GRPC_AUTH_HEADER: &str = "authorization";
 
-pub(crate) struct FlightHandler {
+pub struct FlightHandler {
     handler: ServerGrpcQueryHandlerRef,
     user_provider: Option<UserProviderRef>,
     runtime: Arc<Runtime>,
 }
 
 impl FlightHandler {
-    pub(crate) fn new(
+    pub fn new(
         handler: ServerGrpcQueryHandlerRef,
         user_provider: Option<UserProviderRef>,
         runtime: Arc<Runtime>,

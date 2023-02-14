@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use api::v1::greptime_request::{Request as GreptimeRequest, Request};
+use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::local::{MemoryCatalogManager, MemoryCatalogProvider, MemorySchemaProvider};
 use catalog::{CatalogList, CatalogProvider, SchemaProvider};
@@ -25,20 +27,25 @@ use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
-use servers::error::{Error, Result};
+use servers::error::{Error, NotSupportedSnafu, Result};
+use servers::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerRef};
 use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use servers::query_handler::{ScriptHandler, ScriptHandlerRef};
 use session::context::QueryContextRef;
+use snafu::ensure;
 use sql::statements::statement::Statement;
 use table::test_util::MemTable;
 
 mod auth;
+mod grpc;
 mod http;
 mod interceptor;
 mod mysql;
 mod opentsdb;
 mod postgres;
 mod py_script;
+
+const LOCALHOST_WITH_0: &str = "127.0.0.1:0";
 
 struct DummyInstance {
     query_engine: QueryEngineRef,
@@ -80,7 +87,7 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_statement_query(
         &self,
-        _stmt: sql::statements::statement::Statement,
+        _stmt: Statement,
         _query_ctx: QueryContextRef,
     ) -> Result<Output> {
         unimplemented!()
@@ -137,6 +144,39 @@ impl ScriptHandler for DummyInstance {
     }
 }
 
+#[async_trait]
+impl GrpcQueryHandler for DummyInstance {
+    type Error = Error;
+
+    async fn do_query(
+        &self,
+        request: GreptimeRequest,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, Self::Error> {
+        let output = match request {
+            Request::Insert(_) => unimplemented!(),
+            Request::Query(query_request) => {
+                let query = query_request.query.unwrap();
+                match query {
+                    Query::Sql(sql) => {
+                        let mut result = SqlQueryHandler::do_query(self, &sql, ctx).await;
+                        ensure!(
+                            result.len() == 1,
+                            NotSupportedSnafu {
+                                feat: "execute multiple statements in SQL query string through GRPC interface"
+                            }
+                        );
+                        result.remove(0)?
+                    }
+                    Query::LogicalPlan(_) => unimplemented!(),
+                }
+            }
+            Request::Ddl(_) => unimplemented!(),
+        };
+        Ok(output)
+    }
+}
+
 fn create_testing_instance(table: MemTable) -> DummyInstance {
     let table_name = table.table_name().to_string();
     let table = Arc::new(table);
@@ -162,5 +202,9 @@ fn create_testing_script_handler(table: MemTable) -> ScriptHandlerRef {
 }
 
 fn create_testing_sql_query_handler(table: MemTable) -> ServerSqlQueryHandlerRef {
+    Arc::new(create_testing_instance(table)) as _
+}
+
+fn create_testing_grpc_query_handler(table: MemTable) -> ServerGrpcQueryHandlerRef {
     Arc::new(create_testing_instance(table)) as _
 }

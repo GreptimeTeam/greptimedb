@@ -6685,6 +6685,7 @@ dependencies = [
  "bytes",
  "catalog",
  "chrono",
+ "client",
  "common-base",
  "common-catalog",
  "common-error",
