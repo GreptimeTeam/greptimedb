@@ -345,7 +345,10 @@ def test(number)->vector[u32]:
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let output = script.execute(EvalContext::default()).await.unwrap();
+        let output = script
+            .execute(HashMap::default(), EvalContext::default())
+            .await
+            .unwrap();
         let res = common_recordbatch::util::collect_batches(match output {
             Output::Stream(s) => s,
             _ => unreachable!(),

@@ -456,8 +456,9 @@ fn exec_with_cached_vm(
         PyVector::make_class(&vm.ctx);
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
-        set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
-        set_dataframe_in_scope(&scope, vm, "dataframe", rb)?;
+        if let Some(rb) = rb {
+            set_dataframe_in_scope(&scope, vm, "dataframe", rb)?;
+        }
 
         if let Some(arg_names) = &copr.deco_args.arg_names {
             assert_eq!(arg_names.len(), args.len());
