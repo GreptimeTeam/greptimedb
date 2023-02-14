@@ -15,9 +15,9 @@
 pub mod compile;
 pub mod parse;
 
+use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
-use std::result::Result as StdResult;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
@@ -33,12 +33,10 @@ use rustpython_vm as vm;
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
-use vm::builtins::{PyBaseExceptionRef, PyList, PyListRef, PyTuple};
+use vm::builtins::{PyList, PyListRef};
 use vm::convert::ToPyObject;
-use vm::scope::Scope;
-use vm::{pyclass, Interpreter, PyObjectRef, PyPayload, PyResult, VirtualMachine};
+use vm::{pyclass as rspyclass, PyPayload, PyResult, VirtualMachine};
 
-use crate::ffi_types::dataframe::data_frame::{self, set_dataframe_in_scope};
 use crate::ffi_types::PyVector;
 use crate::pyo3::pyo3_exec_parsed;
 use crate::python::error::{
@@ -312,13 +310,13 @@ pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
     exec_parsed(&copr, rb)
 }
 
-#[pyclass(module = false, name = "query_engine")]
+#[rspyclass(module = false, name = "query_engine")]
 #[derive(Debug, PyPayload)]
 pub struct PyQueryEngine {
     inner: QueryEngineWeakRef,
 }
 
-#[pyclass]
+#[rspyclass]
 impl PyQueryEngine {
     pub(crate) fn from_weakref(inner: QueryEngineWeakRef) -> Self {
         Self { inner }

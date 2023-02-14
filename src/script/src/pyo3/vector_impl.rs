@@ -37,7 +37,6 @@ fn pyo3_is_obj_scalar(obj: &PyAny) -> bool {
 }
 
 impl PyVector {
-
     /// TODO(discord9): `allow_thread` it
     fn pyo3_scalar_arith_op<F>(
         &self,
@@ -261,8 +260,7 @@ pub(crate) fn pyo3_obj_try_to_typed_val(
     }
 }
 
-
-pub(crate) fn into_pyo3_cell(py: Python, val: PyVector)-> PyResult<&PyCell<PyVector>>{
+pub(crate) fn into_pyo3_cell(py: Python, val: PyVector) -> PyResult<&PyCell<PyVector>> {
     PyCell::new(py, val)
 }
 

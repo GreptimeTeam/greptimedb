@@ -1,3 +1,17 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::result::Result as StdResult;
@@ -15,11 +29,9 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::ffi_types::copr::PyQueryEngine;
 use crate::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
-use crate::python::error::{
-    ensure, ret_other_error_with, ArrowSnafu, NewRecordBatchSnafu, OtherSnafu, Result,
-    TypeCastSnafu,
-};
+use crate::python::error::{ensure, ret_other_error_with, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
+use crate::rspython::dataframe_impl::data_frame::set_dataframe_in_scope;
 
 thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::new(None));
 
@@ -77,7 +89,7 @@ pub(crate) fn exec_with_cached_vm(
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
-        // set_dataframe_in_scope(&scope, vm, "dataframe", rb)?;
+        set_dataframe_in_scope(&scope, vm, "dataframe", rb)?;
 
         if let Some(engine) = &copr.query_engine {
             let query_engine = PyQueryEngine::from_weakref(engine.clone());

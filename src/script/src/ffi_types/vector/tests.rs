@@ -1,23 +1,35 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 //! Here are pair-tests for vector types in both rustpython and cpython
 //!
 
 // TODO: sample record batch
 
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::sync::Arc;
 
-use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{BooleanVector, Float64Vector, VectorRef};
 use pyo3::types::PyDict;
-use pyo3::{PyCell, Python, ToPyObject};
+use pyo3::Python;
 use rustpython_compiler::Mode;
 use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::{vm, AsObject};
 
 use crate::ffi_types::PyVector;
-use crate::pyo3::into_pyo3_cell;
+use crate::pyo3::vector_impl::into_pyo3_cell;
 
 #[derive(Debug, Clone)]
 struct TestCase {
@@ -32,8 +44,6 @@ fn test_eval_py_vector() {
         .map(|(k, v)| (k, PyVector::from(v)))
         .collect();
 
-    // for test basic operations
-    // this is better than standalone testcases configure file
     let testcases = get_test_cases();
 
     for testcase in testcases {
@@ -55,7 +65,9 @@ fn sample_py_vector() -> HashMap<String, VectorRef> {
     ])
 }
 
-fn get_test_cases()-> Vec<TestCase>{
+/// testcases for test basic operations
+/// this is more powerful&flexible than standalone testcases configure file
+fn get_test_cases() -> Vec<TestCase> {
     let testcases = [
         TestCase {
             eval: "b1 & b2".to_string(),
@@ -79,8 +91,12 @@ fn get_test_cases()-> Vec<TestCase>{
         },
         TestCase {
             eval: "f1*f2".to_string(),
-            result: Arc::new(Float64Vector::from_slice(&[-0.0f64, -84.0, 20., 42.0 * 7.0]))
-                as VectorRef,
+            result: Arc::new(Float64Vector::from_slice(&[
+                -0.0f64,
+                -84.0,
+                20.,
+                42.0 * 7.0,
+            ])) as VectorRef,
         },
         TestCase {
             eval: "f1/f2".to_string(),
@@ -94,7 +110,6 @@ fn get_test_cases()-> Vec<TestCase>{
     ];
     Vec::from(testcases)
 }
-
 
 fn eval_pyo3(testcase: TestCase, locals: HashMap<String, PyVector>) {
     pyo3::prepare_freethreaded_python();
@@ -112,7 +127,7 @@ fn eval_pyo3(testcase: TestCase, locals: HashMap<String, PyVector>) {
         let res_vec = res.extract::<PyVector>().unwrap();
         let raw_arr = res_vec.as_vector_ref().to_arrow_array();
         let expect_arr = testcase.result.to_arrow_array();
-        if *raw_arr != *expect_arr{
+        if *raw_arr != *expect_arr {
             panic!("{raw_arr:?}!={expect_arr:?}")
         }
     })
@@ -122,16 +137,17 @@ fn eval_rspy(testcase: TestCase, locals: HashMap<String, PyVector>) {
     vm::Interpreter::without_stdlib(Default::default()).enter(|vm| {
         PyVector::make_class(&vm.ctx);
         let scope = vm.new_scope_with_builtins();
-        locals.into_iter().for_each(|(k,v)|{
+        locals.into_iter().for_each(|(k, v)| {
             scope
-            .locals
-            .as_object()
-            .set_item(&k, vm.new_pyobj(v), vm).unwrap();
+                .locals
+                .as_object()
+                .set_item(&k, vm.new_pyobj(v), vm)
+                .unwrap();
         });
-        let code_obj = vm.compile(&testcase.eval,
-                Mode::Eval,
-                "<embedded>".to_owned(),
-        ).map_err(|err| vm.new_syntax_error(&err)).unwrap();
+        let code_obj = vm
+            .compile(&testcase.eval, Mode::Eval, "<embedded>".to_owned())
+            .map_err(|err| vm.new_syntax_error(&err))
+            .unwrap();
         vm.run_code_obj(code_obj, scope).unwrap();
     });
 }
