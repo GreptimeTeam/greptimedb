@@ -124,7 +124,7 @@ const AGGREGATORS_INSERT_DATA: &str = r#"insert into http_requests(job, instance
     ('app-server', '0', 'canary', 700, 0),
     ('app-server', '1', 'canary', 800, 0);"#;
 
-fn unix_epoch_plus_50m() -> SystemTime {
+fn unix_epoch_plus_100s() -> SystemTime {
     UNIX_EPOCH.checked_add(Duration::from_secs(100)).unwrap()
 }
 
@@ -139,7 +139,7 @@ async fn aggregators_simple_sum() {
         AGGREGATORS_INSERT_DATA,
         "SUM BY (group) (http_requests{job=\"api-server\"})",
         UNIX_EPOCH,
-        unix_epoch_plus_50m(),
+        unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+--------------------------+\
@@ -164,7 +164,7 @@ async fn aggregators_simple_avg() {
         AGGREGATORS_INSERT_DATA,
         "AVG BY (group) (http_requests{job=\"api-server\"})",
         UNIX_EPOCH,
-        unix_epoch_plus_50m(),
+        unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+--------------------------+\
@@ -189,7 +189,7 @@ async fn aggregators_simple_count() {
         AGGREGATORS_INSERT_DATA,
         "COUNT BY (group) (http_requests{job=\"api-server\"})",
         UNIX_EPOCH,
-        unix_epoch_plus_50m(),
+        unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+----------------------------+\
@@ -214,7 +214,7 @@ async fn aggregators_simple_without() {
         AGGREGATORS_INSERT_DATA,
         "sum without (instance) (http_requests{job=\"api-server\"})",
         UNIX_EPOCH,
-        unix_epoch_plus_50m(),
+        unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+------------+--------------------------+\
@@ -238,7 +238,7 @@ async fn aggregators_empty_by() {
         AGGREGATORS_INSERT_DATA,
         "sum by () (http_requests{job=\"api-server\"})",
         UNIX_EPOCH,
-        unix_epoch_plus_50m(),
+        unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+--------------------------+\
@@ -260,7 +260,7 @@ async fn aggregators_no_by_without() {
         AGGREGATORS_INSERT_DATA,
         r#"sum (http_requests{job="api-server"})"#,
         UNIX_EPOCH,
-        unix_epoch_plus_50m(),
+        unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+--------------------------+\
@@ -283,7 +283,7 @@ async fn aggregators_empty_without() {
         AGGREGATORS_INSERT_DATA,
         r#"sum without () (http_requests{job="api-server",group="production"})"#,
         UNIX_EPOCH,
-        unix_epoch_plus_50m(),
+        unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+------------+----------+------------+--------------------------+\
@@ -309,7 +309,7 @@ async fn aggregators_complex_combined_aggrs() {
         AGGREGATORS_INSERT_DATA,
         "sum(http_requests) by (job) + min(http_requests) by (job) + max(http_requests) by (job) + avg(http_requests) by (job)",
         UNIX_EPOCH,
-        unix_epoch_plus_50m(),
+        unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
         "",
@@ -328,7 +328,7 @@ async fn stddev_by_label() {
         AGGREGATORS_INSERT_DATA,
         r#"stddev by (instance)(http_requests)"#,
         UNIX_EPOCH,
-        unix_epoch_plus_50m(),
+        unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
         "+----------+-----------------------------+\
