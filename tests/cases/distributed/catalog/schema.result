@@ -32,6 +32,21 @@ CREATE TABLE hello(i BIGINT TIME INDEX);
 
 Affected Rows: 0
 
+SHOW TABLES FROM test_public_schema;
+
++--------+
+| Tables |
++--------+
+| hello  |
++--------+
+
+SHOW TABLES FROM public;
+
++--------+
+| Tables |
++--------+
++--------+
+
 INSERT INTO hello VALUES (2), (3), (4);
 
 Affected Rows: 3
@@ -71,12 +86,10 @@ SHOW TABLES FROM test_public_schema;
 
 SHOW TABLES FROM public;
 
-+---------+
-| Tables  |
-+---------+
-| numbers |
-| scripts |
-+---------+
++--------+
+| Tables |
++--------+
++--------+
 
 DROP SCHEMA test_public_schema;
 

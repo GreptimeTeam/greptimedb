@@ -24,6 +24,7 @@ use crate::error::{self, Result};
 
 pub struct TableRoutes {
     meta_client: Arc<MetaClient>,
+    // TODO(LFC): Use table id as cache key, then remove all the manually invoked cache invalidations.
     cache: Cache<TableName, Arc<TableRoute>>,
 }
 
@@ -71,5 +72,9 @@ impl TableRoutes {
 
     pub async fn insert_table_route(&self, table_name: TableName, table_route: Arc<TableRoute>) {
         self.cache.insert(table_name, table_route).await
+    }
+
+    pub async fn invalidate_table_route(&self, table_name: &TableName) {
+        self.cache.invalidate(table_name).await
     }
 }

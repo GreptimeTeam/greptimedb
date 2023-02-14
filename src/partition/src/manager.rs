@@ -46,6 +46,10 @@ impl PartitionRuleManager {
         Self { table_routes }
     }
 
+    pub fn table_routes(&self) -> &TableRoutes {
+        self.table_routes.as_ref()
+    }
+
     /// Find table route of given table name.
     pub async fn find_table_route(&self, table: &TableName) -> Result<Arc<TableRoute>> {
         self.table_routes.get_route(table).await
