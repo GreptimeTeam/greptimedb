@@ -215,7 +215,7 @@ impl<S: LogStore> FlushJob<S> {
         Ok(metas)
     }
 
-    async fn write_manifest_and_apply(&self, file_metas: &[FileMeta]) -> Result<()> {
+    async fn write_manifest_and_apply(&mut self, file_metas: &[FileMeta]) -> Result<()> {
         let edit = RegionEdit {
             region_version: self.shared.version_control.metadata().version(),
             flushed_sequence: Some(self.flush_sequence),
@@ -246,7 +246,7 @@ impl<S: LogStore> Job for FlushJob<S> {
     // TODO(yingwen): [flush] Support in-job parallelism (Flush memtables concurrently)
     async fn run(&mut self, ctx: &Context) -> Result<()> {
         let file_metas = self.write_memtables_to_layer(ctx).await?;
-        Self::write_manifest_and_apply(self, &file_metas).await?;
+        self.write_manifest_and_apply(&file_metas).await?;
 
         if let Some(cb) = self.on_success.lock().await.take() {
             cb.await;

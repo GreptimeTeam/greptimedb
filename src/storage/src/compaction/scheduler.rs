@@ -207,7 +207,7 @@ impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler
                             debug!("Executing compaction request: {}", region_id);
                             if let Err(e) = self.handle_compaction_request(req, token).await {
                                 error!(e; "Failed to submit compaction task for region: {}", region_id);
-                            }else{
+                            } else {
                                 info!("Submitted region compaction task: {}", region_id);
                             }
                         } else {
