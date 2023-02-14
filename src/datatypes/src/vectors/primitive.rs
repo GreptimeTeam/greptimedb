@@ -326,6 +326,10 @@ impl<T: LogicalPrimitiveType> MutableVector for PrimitiveVectorBuilder<T> {
         }
         Ok(())
     }
+
+    fn push_null(&mut self) {
+        self.mutable_array.append_null()
+    }
 }
 
 impl<T> ScalarVectorBuilder for PrimitiveVectorBuilder<T>
@@ -511,7 +515,7 @@ mod tests {
     #[test]
     fn test_primitive_vector_builder() {
         let mut builder = Int64Type::default().create_mutable_vector(3);
-        builder.try_push_value_ref(ValueRef::Int64(123)).unwrap();
+        builder.push_value_ref(ValueRef::Int64(123));
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
 
         let input = Int64Vector::from_slice(&[7, 8, 9]);

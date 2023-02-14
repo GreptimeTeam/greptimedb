@@ -23,10 +23,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::types::{TimestampMillisecondType, TimestampType};
 use datatypes::value::Value;
 use datatypes::vectors::{MutableVector, VectorRef};
-use snafu::ResultExt;
 use table::requests::InsertRequest;
-
-use crate::error::VectorConversionSnafu;
 
 type ColumnLen = usize;
 type ColumnName = String;
@@ -110,11 +107,7 @@ impl LineWriter {
         let or_insert = || {
             let rows = self.current_rows;
             let mut builder = datatype.create_mutable_vector(self.expected_rows);
-            (0..rows)
-                .into_iter()
-                .try_for_each(|_| builder.push_null())
-                .context(VectorConversionSnafu)
-                .unwrap();
+            (0..rows).for_each(|_| builder.push_null());
             (builder, rows)
         };
         let (builder, column_len) = self
@@ -130,15 +123,11 @@ impl LineWriter {
         self.current_rows += 1;
         self.columns_builders
             .values_mut()
-            .try_for_each(|(builder, len)| {
+            .for_each(|(builder, len)| {
                 if self.current_rows > *len {
                     builder.push_null()
-                } else {
-                    Ok(())
                 }
-            })
-            .context(VectorConversionSnafu)
-            .unwrap();
+            });
     }
 
     pub fn finish(self) -> InsertRequest {

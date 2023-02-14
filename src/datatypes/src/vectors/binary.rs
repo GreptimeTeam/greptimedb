@@ -174,6 +174,10 @@ impl MutableVector for BinaryVectorBuilder {
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
         vectors::impl_extend_for_builder!(self, vector, BinaryVector, offset, length)
     }
+
+    fn push_null(&mut self) {
+        self.mutable_array.append_null()
+    }
 }
 
 impl ScalarVectorBuilder for BinaryVectorBuilder {
@@ -337,9 +341,7 @@ mod tests {
         let input = BinaryVector::from_slice(&[b"world", b"one", b"two"]);
 
         let mut builder = BinaryType::default().create_mutable_vector(3);
-        builder
-            .try_push_value_ref(ValueRef::Binary("hello".as_bytes()))
-            .unwrap();
+        builder.push_value_ref(ValueRef::Binary("hello".as_bytes()));
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder

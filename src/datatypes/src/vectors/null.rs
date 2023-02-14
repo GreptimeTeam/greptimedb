@@ -196,6 +196,10 @@ impl MutableVector for NullVectorBuilder {
         self.length += length;
         Ok(())
     }
+
+    fn push_null(&mut self) {
+        self.push_value_ref(ValueRef::Null);
+    }
 }
 
 pub(crate) fn replicate_null(vector: &NullVector, offsets: &[usize]) -> VectorRef {
@@ -266,7 +270,7 @@ mod tests {
     #[test]
     fn test_null_vector_builder() {
         let mut builder = NullType::default().create_mutable_vector(3);
-        builder.try_push_value_ref(ValueRef::Null).unwrap();
+        builder.push_null();
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
 
         let input = NullVector::new(3);

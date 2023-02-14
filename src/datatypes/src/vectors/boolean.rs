@@ -200,6 +200,10 @@ impl MutableVector for BooleanVectorBuilder {
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
         vectors::impl_extend_for_builder!(self, vector, BooleanVector, offset, length)
     }
+
+    fn push_null(&mut self) {
+        self.mutable_array.append_null()
+    }
 }
 
 impl ScalarVectorBuilder for BooleanVectorBuilder {
@@ -357,7 +361,7 @@ mod tests {
         let input = BooleanVector::from_slice(&[true, false, true]);
 
         let mut builder = BooleanType::default().create_mutable_vector(3);
-        builder.try_push_value_ref(ValueRef::Boolean(true)).unwrap();
+        builder.push_value_ref(ValueRef::Boolean(true));
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder

@@ -319,6 +319,10 @@ impl MutableVector for ListVectorBuilder {
 
         Ok(())
     }
+
+    fn push_null(&mut self) {
+        self.push_null();
+    }
 }
 
 impl ScalarVectorBuilder for ListVectorBuilder {
@@ -653,18 +657,16 @@ pub mod tests {
     fn test_list_vector_builder() {
         let mut builder =
             ListType::new(ConcreteDataType::int32_datatype()).create_mutable_vector(3);
-        builder
-            .try_push_value_ref(ValueRef::List(ListValueRef::Ref {
-                val: &ListValue::new(
-                    Some(Box::new(vec![
-                        Value::Int32(4),
-                        Value::Null,
-                        Value::Int32(6),
-                    ])),
-                    ConcreteDataType::int32_datatype(),
-                ),
-            }))
-            .unwrap();
+        builder.push_value_ref(ValueRef::List(ListValueRef::Ref {
+            val: &ListValue::new(
+                Some(Box::new(vec![
+                    Value::Int32(4),
+                    Value::Null,
+                    Value::Int32(6),
+                ])),
+                ConcreteDataType::int32_datatype(),
+            ),
+        }));
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
 
         let data = vec![

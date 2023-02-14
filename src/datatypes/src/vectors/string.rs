@@ -214,6 +214,10 @@ impl MutableVector for StringVectorBuilder {
     fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
         vectors::impl_extend_for_builder!(self, vector, StringVector, offset, length)
     }
+
+    fn push_null(&mut self) {
+        self.mutable_array.append_null()
+    }
 }
 
 impl ScalarVectorBuilder for StringVectorBuilder {
@@ -285,9 +289,7 @@ mod tests {
     #[test]
     fn test_string_vector_builder() {
         let mut builder = StringVectorBuilder::with_capacity(3);
-        builder
-            .try_push_value_ref(ValueRef::String("hello"))
-            .unwrap();
+        builder.push_value_ref(ValueRef::String("hello"));
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
 
         let input = StringVector::from_slice(&["world", "one", "two"]);

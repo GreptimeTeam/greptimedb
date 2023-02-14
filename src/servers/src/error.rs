@@ -45,12 +45,6 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to convert vector, source: {}", source))]
-    VectorConversion {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Failed to collect recordbatch, source: {}", source))]
     CollectRecordbatch {
         #[snafu(backtrace)]
@@ -271,7 +265,6 @@ impl ErrorExt for Error {
             Internal { .. }
             | InternalIo { .. }
             | TokioIo { .. }
-            | VectorConversion { .. }
             | CollectRecordbatch { .. }
             | StartHttp { .. }
             | StartGrpc { .. }

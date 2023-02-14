@@ -88,9 +88,7 @@ mod tests {
         ]);
 
         let mut builder = DateTimeType::default().create_mutable_vector(3);
-        builder
-            .try_push_value_ref(ValueRef::DateTime(DateTime::new(5)))
-            .unwrap();
+        builder.push_value_ref(ValueRef::DateTime(DateTime::new(5)));
         assert!(builder.try_push_value_ref(ValueRef::Int32(123)).is_err());
         builder.extend_slice_of(&input, 1, 2).unwrap();
         assert!(builder
