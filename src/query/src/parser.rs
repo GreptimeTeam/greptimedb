@@ -249,7 +249,7 @@ mod test {
                 start: SystemTime { tv_sec: 1644772440, tv_nsec: 0 }, \
                 end: SystemTime { tv_sec: 1676308440, tv_nsec: 0 }, \
                 interval: 86400s, \
-                lookback_delta: 0ns \
+                lookback_delta: 300s \
             })",
         );
 
