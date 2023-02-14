@@ -195,6 +195,15 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display(
+        "Failed to batch range KVs from leader's in_memory kv store, source: {}",
+        source
+    ))]
+    Range {
+        source: tonic::Status,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Response header not found"))]
     ResponseHeaderNotFound { backtrace: Backtrace },
 
@@ -210,6 +219,15 @@ pub enum Error {
     #[snafu(display("Invalid http body, source: {}", source))]
     InvalidHttpBody {
         source: http::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display(
+        "The number of retries for the grpc call exceeded the limit, {}",
+        retry_num
+    ))]
+    ExceededRetryLimit {
+        retry_num: usize,
         backtrace: Backtrace,
     },
 
@@ -271,6 +289,7 @@ impl ErrorExt for Error {
             | Error::NoLeader { .. }
             | Error::CreateChannel { .. }
             | Error::BatchGet { .. }
+            | Error::Range { .. }
             | Error::ResponseHeaderNotFound { .. }
             | Error::IsNotLeader { .. }
             | Error::NoMetaPeerClient { .. }
@@ -279,6 +298,7 @@ impl ErrorExt for Error {
             | Error::Unlock { .. }
             | Error::LeaseGrant { .. }
             | Error::LockNotConfig { .. }
+            | Error::ExceededRetryLimit { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }
