@@ -1,4 +1,3 @@
-#![allow(unused)]
 use common_recordbatch::RecordBatch;
 use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::PyValueError;
@@ -11,7 +10,7 @@ use crate::pyo3::vector_impl::pyo3_obj_try_to_typed_val;
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 
 /// Execute a `Coprocessor` with given `RecordBatch`
-fn pyo3_exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
+pub(crate) fn pyo3_exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
     let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
     check_args_anno_real_type(&args, copr, rb)?;
     // Just in case python is not inited

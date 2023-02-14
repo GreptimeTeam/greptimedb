@@ -506,6 +506,7 @@ pub fn parse_and_compile_copr(
                     return_types,
                     script: script.to_owned(),
                     query_engine: query_engine.as_ref().map(|e| Arc::downgrade(e).into()),
+                    backend: Default::default()
                 });
             }
         } else if matches!(
