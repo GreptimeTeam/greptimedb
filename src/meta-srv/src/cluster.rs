@@ -20,6 +20,7 @@ use api::v1::meta::{
     BatchGetRequest, BatchGetResponse, KeyValue, RangeRequest, RangeResponse, ResponseHeader,
 };
 use common_grpc::channel_manager::ChannelManager;
+use derive_builder::Builder;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{match_for_io_error, Result};
@@ -29,28 +30,19 @@ use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::ResetableKvStoreRef;
 use crate::{error, util};
 
-#[derive(Clone)]
+#[derive(Builder, Clone)]
 pub struct MetaPeerClient {
     election: Option<ElectionRef>,
     in_memory: ResetableKvStoreRef,
+    #[builder(default = "ChannelManager::default()")]
     channel_manager: ChannelManager,
+    #[builder(default = "3")]
     retry_num: usize,
+    #[builder(default = "1000")]
     interval_mills: u64,
 }
 
 impl MetaPeerClient {
-    pub fn new(in_mem: ResetableKvStoreRef, election: Option<ElectionRef>) -> Self {
-        let channel_manager = ChannelManager::default();
-
-        Self {
-            election,
-            in_memory: in_mem,
-            channel_manager,
-            retry_num: 3,
-            interval_mills: 500,
-        }
-    }
-
     // Get all datanode stat kvs from leader meta.
     pub async fn get_all_dn_stat_kvs(&self) -> Result<HashMap<StatKey, StatValue>> {
         let key = format!("{DN_STAT_PREFIX}-").into_bytes();
