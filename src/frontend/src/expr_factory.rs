@@ -103,7 +103,7 @@ fn find_primary_keys(
     columns: &[ColumnDef],
     constraints: &[TableConstraint],
 ) -> Result<Vec<String>> {
-    let columns_pk = &mut columns
+    let columns_pk = columns
         .iter()
         .filter_map(|x| {
             if x.options
@@ -124,7 +124,7 @@ fn find_primary_keys(
         }
     );
 
-    let constraints_pk = &mut constraints
+    let constraints_pk = constraints
         .iter()
         .filter_map(|constraint| match constraint {
             TableConstraint::Unique {
@@ -145,8 +145,8 @@ fn find_primary_keys(
     );
 
     let mut primary_keys = Vec::with_capacity(columns_pk.len() + constraints_pk.len());
-    primary_keys.append(columns_pk);
-    primary_keys.append(constraints_pk);
+    primary_keys.extend(columns_pk);
+    primary_keys.extend(constraints_pk);
     Ok(primary_keys)
 }
 

@@ -124,4 +124,4 @@ DROP table test8;
 
 DROP TABLE DirectReports;
 
--- TODO(LFC): Seems creating distributed table has some column schema related issues, look into "order_variable_size_payload" test cases.
+-- TODO(LFC): Seems creating distributed table has some column schema related issues, look into "order_variable_size_payload" test case.
