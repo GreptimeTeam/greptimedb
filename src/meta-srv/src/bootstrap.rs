@@ -97,7 +97,7 @@ pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
         .election(election.clone())
         .in_memory(in_memory.clone())
         .build()
-        // Safety: all required fields set at initializatio
+        // Safety: all required fields set at initialization
         .unwrap();
 
     let selector = match opts.selector {

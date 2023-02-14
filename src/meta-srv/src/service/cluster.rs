@@ -33,7 +33,7 @@ impl cluster_server::Cluster for MetaSrv {
                 ..Default::default()
             };
 
-            warn!("The current meta is not leader, but a batch_get request have reached the meta.");
+            warn!("The current meta is not leader, but a batch_get request have reached the meta. Detail: {:?}.", req);
             return Ok(Response::new(resp));
         }
 
@@ -57,7 +57,7 @@ impl cluster_server::Cluster for MetaSrv {
                 ..Default::default()
             };
 
-            warn!("The current meta is not leader, but a range request have reached the meta.");
+            warn!("The current meta is not leader, but a range request have reached the meta. Detail: {:?}.", req);
             return Ok(Response::new(resp));
         }
 

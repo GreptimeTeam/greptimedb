@@ -38,9 +38,9 @@ pub struct MetaPeerClient {
     #[builder(default = "ChannelManager::default()")]
     channel_manager: ChannelManager,
     #[builder(default = "3")]
-    retry_num: usize,
+    max_retry_count: usize,
     #[builder(default = "1000")]
-    interval_ms: u64,
+    retry_interval_ms: u64,
 }
 
 impl MetaPeerClient {
@@ -75,8 +75,8 @@ impl MetaPeerClient {
             return self.in_memory.range(request).await.map(|resp| resp.kvs);
         }
 
-        let retry_num = self.retry_num;
-        let interval_mills = self.interval_ms;
+        let retry_num = self.max_retry_count;
+        let interval_mills = self.retry_interval_ms;
 
         for _ in 0..retry_num {
             match self.remote_range(key.clone(), range_end.clone()).await {
@@ -133,8 +133,8 @@ impl MetaPeerClient {
             return self.in_memory.batch_get(keys).await;
         }
 
-        let retry_num = self.retry_num;
-        let interval_mills = self.interval_ms;
+        let retry_num = self.max_retry_count;
+        let interval_mills = self.retry_interval_ms;
 
         for _ in 0..retry_num {
             match self.remote_batch_get(keys.clone()).await {
