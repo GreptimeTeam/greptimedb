@@ -22,7 +22,7 @@ use api::v1::meta::{
 use common_grpc::channel_manager::ChannelManager;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::Result;
+use crate::error::{match_for_io_error, Result};
 use crate::keys::{StatKey, StatValue, DN_STAT_PREFIX};
 use crate::metasrv::ElectionRef;
 use crate::service::store::ext::KvStoreExt;
@@ -218,8 +218,14 @@ fn check_resp_header(header: &Option<ResponseHeader>, ctx: Context) -> Result<()
     Ok(())
 }
 
-fn need_retry(_error: &error::Error) -> bool {
-    unimplemented!()
+fn need_retry(error: &error::Error) -> bool {
+    match error {
+        error::Error::NoLeader { .. } => true,
+        error::Error::Range { source, .. } | error::Error::BatchGet { source, .. } => {
+            match_for_io_error(source).is_some()
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
