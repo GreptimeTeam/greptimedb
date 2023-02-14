@@ -167,7 +167,7 @@ impl Instance {
 
     pub async fn execute_promql(
         &self,
-        query: PromQuery,
+        query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         let stmt = QueryLanguageParser::parse_promql(query).context(ExecuteSqlSnafu)?;
@@ -219,7 +219,7 @@ impl SqlQueryHandler for Instance {
 
     async fn do_promql_query(
         &self,
-        query: PromQuery,
+        query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
         let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
@@ -258,7 +258,7 @@ impl SqlQueryHandler for Instance {
 
 #[async_trait]
 impl PromqlHandler for Instance {
-    async fn do_query(&self, query: PromQuery) -> server_error::Result<Output> {
+    async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
 
         let query_literal = format!("{query:?}",);

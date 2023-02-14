@@ -474,7 +474,7 @@ impl SqlQueryHandler for DistInstance {
 
     async fn do_promql_query(
         &self,
-        _: PromQuery,
+        _: &PromQuery,
         _: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>> {
         unimplemented!()

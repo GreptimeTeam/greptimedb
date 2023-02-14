@@ -75,11 +75,19 @@ pub enum Error {
     #[snafu(display("Failed to convert datatype: {}", source))]
     Datatype { source: datatypes::error::Error },
 
-    #[snafu(display("Failed to parse timestamp: {}", source))]
-    ParseTimestamp { source: chrono::ParseError },
+    #[snafu(display("Failed to parse timestamp `{}`: {}", raw, source))]
+    ParseTimestamp {
+        raw: String,
+        source: chrono::ParseError,
+        backtrace: Backtrace,
+    },
 
-    #[snafu(display("Failed to parse float number: {}", source))]
-    ParseFloat { source: std::num::ParseFloatError },
+    #[snafu(display("Failed to parse float number `{}`: {}", raw, source))]
+    ParseFloat {
+        raw: String,
+        source: std::num::ParseFloatError,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {

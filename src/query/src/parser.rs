@@ -30,6 +30,8 @@ use crate::error::{
 };
 use crate::metric::{METRIC_PARSE_PROMQL_ELAPSED, METRIC_PARSE_SQL_ELAPSED};
 
+const DEFAULT_LOOKBACK: u64 = 5 * 60; // 5m
+
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
     Sql(Statement),
@@ -65,7 +67,7 @@ impl QueryLanguageParser {
     }
 
     // TODO(ruihang): implement this method when parser is ready.
-    pub fn parse_promql(query: PromQuery) -> Result<QueryStatement> {
+    pub fn parse_promql(query: &PromQuery) -> Result<QueryStatement> {
         let _timer = timer!(METRIC_PARSE_PROMQL_ELAPSED);
 
         let expr = promql_parser::parser::parse(&query.query)
@@ -97,8 +99,8 @@ impl QueryLanguageParser {
             start,
             end,
             interval: step,
-            // TODO(ruihang): set this field to a proper value.
-            lookback_delta: Duration::from_secs(0),
+            // TODO(ruihang): provide a way to adjust this parameter.
+            lookback_delta: Duration::from_secs(DEFAULT_LOOKBACK),
         };
 
         Ok(QueryStatement::Promql(eval_stmt))
@@ -107,13 +109,13 @@ impl QueryLanguageParser {
     fn parse_promql_timestamp(timestamp: &str) -> Result<SystemTime> {
         // try rfc3339 format
         let rfc3339_result = DateTime::parse_from_rfc3339(timestamp)
-            .context(ParseTimestampSnafu)
+            .context(ParseTimestampSnafu { raw: timestamp })
             .map(Into::<SystemTime>::into);
 
         // try float format
         let float_result = timestamp
             .parse::<f64>()
-            .context(ParseFloatSnafu)
+            .context(ParseFloatSnafu { raw: timestamp })
             .map(|float| {
                 let duration = Duration::from_secs_f64(float);
                 SystemTime::UNIX_EPOCH
@@ -251,7 +253,7 @@ mod test {
             })",
         );
 
-        let result = QueryLanguageParser::parse_promql(promql).unwrap();
+        let result = QueryLanguageParser::parse_promql(&promql).unwrap();
         assert_eq!(format!("{result:?}"), expected);
     }
 }

@@ -39,7 +39,7 @@ pub trait SqlQueryHandler {
 
     async fn do_promql_query(
         &self,
-        query: PromQuery,
+        query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>>;
 
@@ -92,7 +92,7 @@ where
 
     async fn do_promql_query(
         &self,
-        query: PromQuery,
+        query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Vec<Result<Output>> {
         let query_literal = format!("{query:?}");

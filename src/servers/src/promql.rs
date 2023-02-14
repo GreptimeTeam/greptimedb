@@ -46,7 +46,7 @@ pub type PromqlHandlerRef = Arc<dyn PromqlHandler + Send + Sync>;
 
 #[async_trait]
 pub trait PromqlHandler {
-    async fn do_query(&self, query: PromQuery) -> Result<Output>;
+    async fn do_query(&self, query: &PromQuery) -> Result<Output>;
 }
 
 pub struct PromqlServer {
@@ -257,6 +257,6 @@ pub async fn range_query(
         end: params.end,
         step: params.step,
     };
-    let result = handler.do_query(prom_query).await;
+    let result = handler.do_query(&prom_query).await;
     PromqlJsonResponse::from_query_result(result).await
 }

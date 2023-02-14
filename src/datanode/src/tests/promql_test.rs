@@ -53,7 +53,7 @@ async fn sql_insert_promql_query_ceil() {
     };
     let query_output = instance
         .inner()
-        .execute_promql(promql, query_ctx)
+        .execute_promql(&promql, query_ctx)
         .await
         .unwrap();
     let expected = String::from(
