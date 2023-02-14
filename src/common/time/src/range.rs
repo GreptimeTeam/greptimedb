@@ -462,4 +462,29 @@ mod tests {
 
         assert!(!full.intersects(&empty));
     }
+
+    #[test]
+    fn test_new_inclusive() {
+        let range = TimestampRange::new_inclusive(
+            Some(Timestamp::new_millisecond(1)),
+            Some(Timestamp::new_millisecond(3)),
+        );
+        assert!(!range.is_empty());
+        assert!(range.contains(&Timestamp::new_millisecond(1)));
+        assert!(range.contains(&Timestamp::new_millisecond(3)));
+
+        let range = TimestampRange::new_inclusive(
+            Some(Timestamp::new_millisecond(1)),
+            Some(Timestamp::new_millisecond(1)),
+        );
+        assert!(!range.is_empty());
+        assert_eq!(1, range.start.unwrap().value());
+        assert!(range.contains(&Timestamp::new_millisecond(1)));
+
+        let range = TimestampRange::new_inclusive(
+            Some(Timestamp::new_millisecond(2)),
+            Some(Timestamp::new_millisecond(1)),
+        );
+        assert!(range.is_empty());
+    }
 }
