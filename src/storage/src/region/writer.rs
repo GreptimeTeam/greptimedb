@@ -25,6 +25,7 @@ use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
 use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
+use crate::config::EngineConfig;
 use crate::error::{self, Result};
 use crate::flush::{FlushCallback, FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
@@ -58,9 +59,9 @@ pub struct RegionWriter {
 }
 
 impl RegionWriter {
-    pub fn new(memtable_builder: MemtableBuilderRef) -> RegionWriter {
+    pub fn new(memtable_builder: MemtableBuilderRef, config: Arc<EngineConfig>) -> RegionWriter {
         RegionWriter {
-            inner: Mutex::new(WriterInner::new(memtable_builder)),
+            inner: Mutex::new(WriterInner::new(memtable_builder, config)),
             version_mutex: Mutex::new(()),
         }
     }
@@ -274,13 +275,15 @@ impl<'a, S: LogStore> AlterContext<'a, S> {
 struct WriterInner {
     memtable_builder: MemtableBuilderRef,
     flush_handle: Option<JobHandle>,
+    engine_config: Arc<EngineConfig>,
 }
 
 impl WriterInner {
-    fn new(memtable_builder: MemtableBuilderRef) -> WriterInner {
+    fn new(memtable_builder: MemtableBuilderRef, engine_config: Arc<EngineConfig>) -> WriterInner {
         WriterInner {
             memtable_builder,
             flush_handle: None,
+            engine_config,
         }
     }
 
@@ -544,9 +547,7 @@ impl WriterInner {
             return Ok(());
         }
 
-        // TODO(hl): we need to pass `compaction_after_flush` config here to determine whether to
-        // trigger a compaction
-        let cb = Self::build_flush_callback(&current_version, ctx);
+        let cb = Self::build_flush_callback(&current_version, ctx, &self.engine_config);
 
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),
@@ -573,6 +574,7 @@ impl WriterInner {
     fn build_flush_callback<S: LogStore>(
         version: &VersionRef,
         ctx: &WriterContext<S>,
+        config: &Arc<EngineConfig>,
     ) -> Option<FlushCallback> {
         let region_id = version.metadata().id();
         let compaction_request = CompactionRequestImpl {
@@ -585,6 +587,7 @@ impl WriterInner {
         };
         let compaction_scheduler = ctx.compaction_scheduler.clone();
         let shared_data = ctx.shared.clone();
+        let max_files_in_l0 = config.max_files_in_l0;
         let schedule_compaction_cb = Box::pin(async move {
             let level0_file_num = shared_data
                 .version_control
@@ -593,9 +596,11 @@ impl WriterInner {
                 .level(0)
                 .file_num();
 
-            // TODO(hl): Max file num in level 0 should be configurable.
-            if level0_file_num <= 10 {
-                info!("No enough SST files in level 0, skip compaction.");
+            if level0_file_num <= max_files_in_l0 {
+                info!(
+                    "No enough SST files in level 0 (threshold: {}), skip compaction",
+                    max_files_in_l0
+                );
                 return;
             }
             match compaction_scheduler.schedule(compaction_request).await {

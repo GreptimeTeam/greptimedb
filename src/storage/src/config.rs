@@ -16,13 +16,11 @@
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    pub compaction_after_flush: bool,
+    pub max_files_in_l0: usize,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self {
-            compaction_after_flush: true,
-        }
+        Self { max_files_in_l0: 8 }
     }
 }

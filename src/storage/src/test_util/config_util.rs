@@ -61,5 +61,6 @@ pub async fn new_store_config(
         flush_scheduler,
         flush_strategy: Arc::new(SizeBasedStrategy::default()),
         compaction_scheduler,
+        engine_config: Arc::new(Default::default()),
     }
 }

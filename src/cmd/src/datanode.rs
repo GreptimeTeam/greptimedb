@@ -184,8 +184,8 @@ mod tests {
 
         assert_eq!(
             CompactionConfig {
-                compaction_after_flush: true,
-                max_inflight_task: 32
+                max_inflight_task: 32,
+                max_file_in_level0: 16,
             },
             options.compaction
         );

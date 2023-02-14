@@ -109,17 +109,17 @@ impl Default for WalConfig {
 /// Options for table compaction
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct CompactionConfig {
-    /// Whether to schedule a compaction every time a memtable gets flushed.
-    pub compaction_after_flush: bool,
     /// Max task number that can concurrently run.
     pub max_inflight_task: usize,
+    /// Max files in level 0 to trigger compaction.
+    pub max_file_in_level0: usize,
 }
 
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
-            compaction_after_flush: true,
             max_inflight_task: 16,
+            max_file_in_level0: 8,
         }
     }
 }
@@ -135,7 +135,7 @@ impl From<&DatanodeOptions> for CompactionSchedulerConfig {
 impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            compaction_after_flush: value.compaction.compaction_after_flush,
+            max_files_in_l0: value.compaction.max_file_in_level0,
         }
     }
 }

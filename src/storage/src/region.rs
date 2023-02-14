@@ -29,6 +29,7 @@ use store_api::storage::{
 };
 
 use crate::compaction::CompactionSchedulerRef;
+use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
@@ -116,6 +117,7 @@ pub struct StoreConfig<S: LogStore> {
     pub flush_scheduler: FlushSchedulerRef,
     pub flush_strategy: FlushStrategyRef,
     pub compaction_scheduler: CompactionSchedulerRef<S>,
+    pub engine_config: Arc<EngineConfig>,
 }
 
 pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
@@ -165,7 +167,10 @@ impl<S: LogStore> RegionImpl<S> {
                 name,
                 version_control: Arc::new(version_control),
             }),
-            writer: Arc::new(RegionWriter::new(store_config.memtable_builder)),
+            writer: Arc::new(RegionWriter::new(
+                store_config.memtable_builder,
+                store_config.engine_config.clone(),
+            )),
             wal,
             flush_strategy: store_config.flush_strategy,
             flush_scheduler: store_config.flush_scheduler,
@@ -239,7 +244,10 @@ impl<S: LogStore> RegionImpl<S> {
             version_control,
         });
 
-        let writer = Arc::new(RegionWriter::new(store_config.memtable_builder));
+        let writer = Arc::new(RegionWriter::new(
+            store_config.memtable_builder,
+            store_config.engine_config.clone(),
+        ));
         let writer_ctx = WriterContext {
             shared: &shared,
             flush_strategy: &store_config.flush_strategy,

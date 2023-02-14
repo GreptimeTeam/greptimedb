@@ -222,11 +222,12 @@ struct EngineInner<S: LogStore> {
     flush_scheduler: FlushSchedulerRef,
     flush_strategy: FlushStrategyRef,
     compaction_scheduler: CompactionSchedulerRef<S>,
+    config: Arc<EngineConfig>,
 }
 
 impl<S: LogStore> EngineInner<S> {
     pub fn new(
-        _config: EngineConfig,
+        config: EngineConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
         compaction_scheduler: CompactionSchedulerRef<S>,
@@ -241,6 +242,7 @@ impl<S: LogStore> EngineInner<S> {
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
             compaction_scheduler,
+            config: Arc::new(config),
         }
     }
 
@@ -338,6 +340,7 @@ impl<S: LogStore> EngineInner<S> {
             flush_scheduler: self.flush_scheduler.clone(),
             flush_strategy: self.flush_strategy.clone(),
             compaction_scheduler: self.compaction_scheduler.clone(),
+            engine_config: self.config.clone(),
         }
     }
 }
