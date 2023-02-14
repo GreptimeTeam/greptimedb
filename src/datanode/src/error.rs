@@ -178,8 +178,8 @@ pub enum Error {
     #[snafu(display("Specified timestamp key or primary key column not found: {}", name))]
     KeyColumnNotFound { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Invalid primary key: {}", msg))]
-    InvalidPrimaryKey { msg: String, backtrace: Backtrace },
+    #[snafu(display("Illegal primary keys definition: {}", msg))]
+    IllegalPrimaryKeysDef { msg: String, backtrace: Backtrace },
 
     #[snafu(display(
         "Constraint in CREATE TABLE statement is not supported yet: {}",
@@ -362,7 +362,7 @@ impl ErrorExt for Error {
             Error::ColumnValuesNumberMismatch { .. }
             | Error::InvalidSql { .. }
             | Error::KeyColumnNotFound { .. }
-            | Error::InvalidPrimaryKey { .. }
+            | Error::IllegalPrimaryKeysDef { .. }
             | Error::MissingTimestampColumn { .. }
             | Error::CatalogNotFound { .. }
             | Error::SchemaNotFound { .. }

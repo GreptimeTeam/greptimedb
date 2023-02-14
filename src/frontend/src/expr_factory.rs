@@ -22,13 +22,14 @@ use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::schema::ColumnSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
-use sql::ast::{ColumnDef, TableConstraint};
+use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
 use sql::statements::column_def_to_schema;
 use sql::statements::create::{CreateTable, TIME_INDEX};
 
 use crate::error::{
     self, BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu,
-    ConvertColumnDefaultConstraintSnafu, InvalidSqlSnafu, ParseSqlSnafu, Result,
+    ConvertColumnDefaultConstraintSnafu, IllegalPrimaryKeysDefSnafu, InvalidSqlSnafu,
+    ParseSqlSnafu, Result,
 };
 
 pub type CreateExprFactoryRef = Arc<dyn CreateExprFactory + Send + Sync>;
@@ -88,7 +89,7 @@ pub(crate) fn create_to_expr(
         desc: "".to_string(),
         column_defs: columns_to_expr(&create.columns, &time_index)?,
         time_index,
-        primary_keys: find_primary_keys(&create.constraints)?,
+        primary_keys: find_primary_keys(&create.columns, &create.constraints)?,
         create_if_not_exists: create.if_not_exists,
         // TODO(LFC): Fill in other table options.
         table_options: HashMap::from([("engine".to_string(), create.engine.clone())]),
@@ -98,8 +99,32 @@ pub(crate) fn create_to_expr(
     Ok(expr)
 }
 
-fn find_primary_keys(constraints: &[TableConstraint]) -> Result<Vec<String>> {
-    let primary_keys = constraints
+fn find_primary_keys(
+    columns: &[ColumnDef],
+    constraints: &[TableConstraint],
+) -> Result<Vec<String>> {
+    let columns_pk = &mut columns
+        .iter()
+        .filter_map(|x| {
+            if x.options
+                .iter()
+                .any(|o| matches!(o.option, ColumnOption::Unique { is_primary: true }))
+            {
+                Some(x.name.value.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<String>>();
+
+    ensure!(
+        columns_pk.len() <= 1,
+        IllegalPrimaryKeysDefSnafu {
+            msg: "not allowed to inline multiple primary keys in columns options"
+        }
+    );
+
+    let constraints_pk = &mut constraints
         .iter()
         .filter_map(|constraint| match constraint {
             TableConstraint::Unique {
@@ -111,6 +136,17 @@ fn find_primary_keys(constraints: &[TableConstraint]) -> Result<Vec<String>> {
         })
         .flatten()
         .collect::<Vec<String>>();
+
+    ensure!(
+        columns_pk.is_empty() || constraints_pk.is_empty(),
+        IllegalPrimaryKeysDefSnafu {
+            msg: "found definitions of primary keys in multiple places"
+        }
+    );
+
+    let mut primary_keys = Vec::with_capacity(columns_pk.len() + constraints_pk.len());
+    primary_keys.append(columns_pk);
+    primary_keys.append(constraints_pk);
     Ok(primary_keys)
 }
 
