@@ -29,8 +29,8 @@ use crate::auth::Error::IllegalParam;
 use crate::auth::{Identity, IllegalParamSnafu, InternalStateSnafu, UserProviderRef};
 use crate::error::Error::Auth;
 use crate::error::{
-    self, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu, Result,
-    UnsupportedAuthSchemeSnafu,
+    self, HttpInvisibleASCIISnafu, InvalidAuthorizationHeaderSnafu, NotFoundInfluxAuthSnafu,
+    Result, UnsupportedAuthSchemeSnafu,
 };
 use crate::http::HTTP_API_PREFIX;
 
@@ -140,7 +140,7 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
         // try v2 first
         let (auth_scheme, credential) = header
             .to_str()
-            .context(InvisibleASCIISnafu)?
+            .context(HttpInvisibleASCIISnafu)?
             .split_once(' ')
             .context(InvalidAuthorizationHeaderSnafu)?;
         ensure!(
@@ -194,9 +194,9 @@ async fn authenticate<B: Send + Sync + 'static>(
         get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
     } else {
         // normal http auth
-        let (scheme, credential) = auth_header(request)?;
+        let scheme = auth_header(request)?;
         match scheme {
-            AuthScheme::Basic => decode_basic(credential)?,
+            AuthScheme::Basic(username, password) => (username, password),
         }
     };
 
@@ -219,15 +219,27 @@ where
 
 #[derive(Debug)]
 pub enum AuthScheme {
-    Basic,
+    Basic(Username, Password),
 }
+
+type Username = String;
+type Password = String;
 
 impl TryFrom<&str> for AuthScheme {
     type Error = error::Error;
 
     fn try_from(value: &str) -> Result<Self> {
-        match value.to_lowercase().as_str() {
-            "basic" => Ok(AuthScheme::Basic),
+        let (scheme, encoded_credentials) = value
+            .split_once(' ')
+            .context(InvalidAuthorizationHeaderSnafu)?;
+        ensure!(
+            !encoded_credentials.contains(' '),
+            InvalidAuthorizationHeaderSnafu
+        );
+
+        match scheme.to_lowercase().as_str() {
+            "basic" => decode_basic(encoded_credentials)
+                .map(|(username, password)| AuthScheme::Basic(username, password)),
             other => UnsupportedAuthSchemeSnafu { name: other }.fail(),
         }
     }
@@ -235,7 +247,7 @@ impl TryFrom<&str> for AuthScheme {
 
 type Credential<'a> = &'a str;
 
-fn auth_header<B>(req: &Request<B>) -> Result<(AuthScheme, Credential)> {
+fn auth_header<B>(req: &Request<B>) -> Result<AuthScheme> {
     let auth_header = req
         .headers()
         .get(http::header::AUTHORIZATION)
@@ -243,19 +255,8 @@ fn auth_header<B>(req: &Request<B>) -> Result<(AuthScheme, Credential)> {
         .to_str()
         .context(error::HttpInvisibleASCIISnafu)?;
 
-    let (auth_scheme, encoded_credentials) = auth_header
-        .split_once(' ')
-        .context(InvalidAuthorizationHeaderSnafu)?;
-
-    if encoded_credentials.contains(' ') {
-        return InvalidAuthorizationHeaderSnafu {}.fail();
-    }
-
-    Ok((auth_scheme.try_into()?, encoded_credentials))
+    auth_header.try_into()
 }
-
-type Username = String;
-type Password = String;
 
 fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
     let decoded = base64::decode(credential).context(error::InvalidBase64ValueSnafu)?;
@@ -324,8 +325,12 @@ mod tests {
     #[test]
     fn test_try_into_auth_scheme() {
         let auth_scheme_str = "basic";
-        let auth_scheme: AuthScheme = auth_scheme_str.try_into().unwrap();
-        matches!(auth_scheme, AuthScheme::Basic);
+        let re: Result<AuthScheme> = auth_scheme_str.try_into();
+        assert!(re.is_err());
+
+        let auth_scheme_str = "basic dGVzdDp0ZXN0";
+        let scheme: AuthScheme = auth_scheme_str.try_into().unwrap();
+        matches!(scheme, AuthScheme::Basic(username, pwd) if username == "test" && pwd == "test");
 
         let unsupported = "digest";
         let auth_scheme: Result<AuthScheme> = unsupported.try_into();
@@ -337,9 +342,8 @@ mod tests {
         // base64encode("username:password") == "dXNlcm5hbWU6cGFzc3dvcmQ="
         let req = mock_http_request(Some("Basic dXNlcm5hbWU6cGFzc3dvcmQ="), None).unwrap();
 
-        let (auth_scheme, credential) = auth_header(&req).unwrap();
-        matches!(auth_scheme, AuthScheme::Basic);
-        assert_eq!("dXNlcm5hbWU6cGFzc3dvcmQ=", credential);
+        let auth_scheme = auth_header(&req).unwrap();
+        matches!(auth_scheme, AuthScheme::Basic(username, pwd) if username == "username" && pwd == "password");
 
         let wrong_req = mock_http_request(Some("Basic dXNlcm5hbWU6 cGFzc3dvcmQ="), None).unwrap();
         let res = auth_header(&wrong_req);

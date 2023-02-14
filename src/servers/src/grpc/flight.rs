@@ -101,9 +101,10 @@ impl FlightService for FlightHandler {
     type DoGetStream = TonicStream<FlightData>;
 
     async fn do_get(&self, request: Request<Ticket>) -> TonicResult<Response<Self::DoGetStream>> {
-        if let Some(user_provider) = &self.user_provider {
+        // TODO(shuiyisong): finish later
+        if let Some(_user_provider) = &self.user_provider {
             // check auth
-            let header = request
+            let _header = request
                 .metadata()
                 .get(GRPC_AUTH_HEADER)
                 .context(NotFoundAuthHeaderSnafu)?
