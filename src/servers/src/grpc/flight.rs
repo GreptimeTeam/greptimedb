@@ -29,14 +29,15 @@ use common_query::Output;
 use common_runtime::Runtime;
 use futures::Stream;
 use prost::Message;
-use session::context::{QueryContext, QueryContextRef};
+use session::context::{QueryContext, QueryContextRef, UserInfo};
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::auth::UserProviderRef;
+use crate::auth::{Identity, UserProviderRef};
 use crate::error;
 use crate::error::{NotFoundAuthHeaderSnafu, TonicInvisibleASCIISnafu};
 use crate::grpc::flight::stream::FlightRecordBatchStream;
+use crate::http::authorize::AuthScheme;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 type TonicResult<T> = Result<T, Status>;
@@ -101,16 +102,7 @@ impl FlightService for FlightHandler {
     type DoGetStream = TonicStream<FlightData>;
 
     async fn do_get(&self, request: Request<Ticket>) -> TonicResult<Response<Self::DoGetStream>> {
-        // TODO(shuiyisong): finish later
-        if let Some(_user_provider) = &self.user_provider {
-            // check auth
-            let _header = request
-                .metadata()
-                .get(GRPC_AUTH_HEADER)
-                .context(NotFoundAuthHeaderSnafu)?
-                .to_str()
-                .context(TonicInvisibleASCIISnafu)?;
-        }
+        let user_info = authenticate(self.user_provider.as_ref(), &request).await?;
 
         let ticket = request.into_inner().ticket;
         let request =
@@ -120,6 +112,7 @@ impl FlightService for FlightHandler {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
         let query_ctx = create_query_context(request.header.as_ref());
+        authorize(self.user_provider.as_ref(), &query_ctx, &user_info).await?;
 
         let handler = self.handler.clone();
 
@@ -212,4 +205,54 @@ fn create_query_context(header: Option<&RequestHeader>) -> QueryContextRef {
         }
     };
     ctx
+}
+
+async fn authenticate(
+    user_provider: Option<&UserProviderRef>,
+    request: &Request<Ticket>,
+) -> TonicResult<UserInfo> {
+    let user_provider = if let Some(user_provider) = user_provider {
+        user_provider
+    } else {
+        return Ok(UserInfo::default());
+    };
+
+    let header = request
+        .metadata()
+        .get(GRPC_AUTH_HEADER)
+        .context(NotFoundAuthHeaderSnafu)?
+        .to_str()
+        .context(TonicInvisibleASCIISnafu)?;
+
+    let auth_scheme: AuthScheme = header.try_into()?;
+    match auth_scheme {
+        AuthScheme::Basic(username, password) => {
+            user_provider
+                .authenticate(
+                    Identity::UserId(&username, None),
+                    crate::auth::Password::PlainText(&password),
+                )
+                .await
+        }
+    }
+    .map_err(|e| Status::unauthenticated(e.to_string()))
+}
+
+async fn authorize(
+    user_provider: Option<&UserProviderRef>,
+    query_ctx: &QueryContextRef,
+    user_info: &UserInfo,
+) -> TonicResult<()> {
+    if let Some(user_provider) = user_provider {
+        user_provider
+            .authorize(
+                &query_ctx.current_catalog(),
+                &query_ctx.current_schema(),
+                user_info,
+            )
+            .await
+            .map_err(|e| Status::permission_denied(e.to_string()))
+    } else {
+        Ok(())
+    }
 }
