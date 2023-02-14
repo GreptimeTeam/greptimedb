@@ -20,6 +20,7 @@ use api::v1::meta::{
     BatchGetRequest, BatchGetResponse, KeyValue, RangeRequest, RangeResponse, ResponseHeader,
 };
 use common_grpc::channel_manager::ChannelManager;
+use common_telemetry::warn;
 use derive_builder::Builder;
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -82,6 +83,7 @@ impl MetaPeerClient {
                 Ok(kvs) => return Ok(kvs),
                 Err(e) => {
                     if need_retry(&e) {
+                        warn!("Encountered an error that need to retry, err: {:?}", e);
                         tokio::time::sleep(Duration::from_millis(interval_mills)).await;
                     } else {
                         return Err(e);
@@ -90,7 +92,11 @@ impl MetaPeerClient {
             }
         }
 
-        error::ExceededRetryLimitSnafu { retry_num }.fail()
+        error::ExceededRetryLimitSnafu {
+            func_name: "range",
+            retry_num,
+        }
+        .fail()
     }
 
     async fn remote_range(&self, key: Vec<u8>, range_end: Vec<u8>) -> Result<Vec<KeyValue>> {
@@ -135,6 +141,7 @@ impl MetaPeerClient {
                 Ok(kvs) => return Ok(kvs),
                 Err(e) => {
                     if need_retry(&e) {
+                        warn!("Encountered an error that need to retry, err: {:?}", e);
                         tokio::time::sleep(Duration::from_millis(interval_mills)).await;
                     } else {
                         return Err(e);
@@ -143,7 +150,11 @@ impl MetaPeerClient {
             }
         }
 
-        error::ExceededRetryLimitSnafu { retry_num }.fail()
+        error::ExceededRetryLimitSnafu {
+            func_name: "batch_get",
+            retry_num,
+        }
+        .fail()
     }
 
     async fn remote_batch_get(&self, keys: Vec<Vec<u8>>) -> Result<Vec<KeyValue>> {

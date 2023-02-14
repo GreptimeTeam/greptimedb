@@ -223,10 +223,12 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "The number of retries for the grpc call exceeded the limit, {}",
+        "The number of retries for the grpc call {} exceeded the limit, {}",
+        func_name,
         retry_num
     ))]
     ExceededRetryLimit {
+        func_name: String,
         retry_num: usize,
         backtrace: Backtrace,
     },
