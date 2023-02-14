@@ -118,7 +118,7 @@ pub struct CompactionConfig {
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
-            max_inflight_task: 16,
+            max_inflight_task: 4,
             max_file_in_level0: 8,
         }
     }

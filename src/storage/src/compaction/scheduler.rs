@@ -80,7 +80,7 @@ pub struct CompactionSchedulerConfig {
 impl Default for CompactionSchedulerConfig {
     fn default() -> Self {
         Self {
-            max_inflight_task: 16,
+            max_inflight_task: 4,
         }
     }
 }
@@ -202,10 +202,10 @@ impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler
                     // poll requests as many as possible until rate limited, and then wait for
                     // notification (some task's finished).
                     debug!("Notified, queue size: {:?}", self.req_queue.read().unwrap().len());
-                    while let Some((region_id,  req)) = self.poll_task().await {
+                    while let Some((region_id,  req)) = self.poll_task().await{
                         if let Ok(token) = limiter.acquire_token(&req) {
                             debug!("Executing compaction request: {}", region_id);
-                            if let Err(e) = self.handle_compaction_request(req, token).await{
+                            if let Err(e) = self.handle_compaction_request(req, token).await {
                                 error!(e; "Failed to submit compaction task for region: {}", region_id);
                             }else{
                                 info!("Submitted region compaction task: {}", region_id);

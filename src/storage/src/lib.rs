@@ -14,8 +14,6 @@
 
 //! Storage engine implementation.
 
-extern crate core;
-
 mod background;
 mod chunk;
 pub mod codec;

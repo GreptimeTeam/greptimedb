@@ -384,6 +384,7 @@ impl ArrowPredicate for FastTimestampRowFilter {
 
     /// Selects the rows matching given time range.
     fn evaluate(&mut self, batch: RecordBatch) -> std::result::Result<BooleanArray, ArrowError> {
+        // the projection has only timestamp column, so we can safely take the first column in batch.
         let ts_col = batch.column(0);
 
         macro_rules! downcast_and_compute {
@@ -445,6 +446,7 @@ impl ArrowPredicate for PlainTimestampRowFilter {
     }
 
     fn evaluate(&mut self, batch: RecordBatch) -> std::result::Result<BooleanArray, ArrowError> {
+        // the projection has only timestamp column, so we can safely take the first column in batch.
         let ts_col = batch.column(0);
 
         macro_rules! downcast_and_compute {
