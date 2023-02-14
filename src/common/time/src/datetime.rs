@@ -23,7 +23,7 @@ use crate::error::{Error, ParseDateStrSnafu, Result};
 
 const DATETIME_FORMAT: &str = "%F %T";
 
-/// [DateTime] represents the **seconds elapsed since "1970-01-01 00:00:00 UTC" (UNIX Epoch)**.  
+/// [DateTime] represents the **seconds elapsed since "1970-01-01 00:00:00 UTC" (UNIX Epoch)**.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
@@ -68,6 +68,10 @@ impl DateTime {
 
     pub fn val(&self) -> i64 {
         self.0
+    }
+
+    pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
+        NaiveDateTime::from_timestamp_millis(self.0)
     }
 }
 

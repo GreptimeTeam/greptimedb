@@ -5091,6 +5091,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73d946ec7d256b04dfadc4e6a3292324e6f417124750fc5c0950f981b703a0f1"
 dependencies = [
  "bytes",
+ "chrono",
  "fallible-iterator",
  "postgres-protocol",
 ]
@@ -6695,6 +6696,7 @@ dependencies = [
  "opensrv-mysql",
  "pgwire",
  "pin-project",
+ "postgres-types",
  "prost 0.11.6",
  "query",
  "rand 0.8.5",

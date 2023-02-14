@@ -71,6 +71,10 @@ impl Date {
     pub fn val(&self) -> i32 {
         self.0
     }
+
+    pub fn to_chrono_date(&self) -> Option<NaiveDate> {
+        NaiveDate::from_num_days_from_ce_opt(UNIX_EPOCH_FROM_CE + self.0)
+    }
 }
 
 #[cfg(test)]
