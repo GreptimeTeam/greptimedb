@@ -23,6 +23,7 @@ pub struct QueryOptions {
     pub disallow_cross_schema_query: bool,
 }
 
+// TODO(shuiyisong): remove one method after #559 is done
 pub fn validate_catalog_and_schema(
     catalog: &str,
     schema: &str,
