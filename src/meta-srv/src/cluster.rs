@@ -39,7 +39,7 @@ pub struct MetaPeerClient {
     #[builder(default = "3")]
     retry_num: usize,
     #[builder(default = "1000")]
-    interval_mills: u64,
+    interval_ms: u64,
 }
 
 impl MetaPeerClient {
@@ -75,7 +75,7 @@ impl MetaPeerClient {
         }
 
         let retry_num = self.retry_num;
-        let interval_mills = self.interval_mills;
+        let interval_mills = self.interval_ms;
 
         for _ in 0..retry_num {
             match self.remote_range(key.clone(), range_end.clone()).await {
@@ -128,7 +128,7 @@ impl MetaPeerClient {
         }
 
         let retry_num = self.retry_num;
-        let interval_mills = self.interval_mills;
+        let interval_mills = self.interval_ms;
 
         for _ in 0..retry_num {
             match self.remote_batch_get(keys.clone()).await {
