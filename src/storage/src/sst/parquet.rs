@@ -340,7 +340,7 @@ impl<'a> ParquetReader<'a> {
                 .map(|t| t.value()),
             self.time_range
                 .end()
-                .and_then(|s| s.convert_to(ts_col_unit)) // convert to ceil to relax time range and prevent data loss caused by rounding error.
+                .and_then(|s| s.convert_to(ts_col_unit))
                 .map(|t| t.value()),
         ) {
             Box::new(FastTimestampRowFilter::new(

@@ -23,13 +23,16 @@ pub struct DedupDeque<K, V> {
     existing: HashMap<K, V>,
 }
 
-impl<K: Eq + Hash + Clone, V> DedupDeque<K, V> {
-    pub fn new_empty() -> Self {
+impl<K, V> Default for DedupDeque<K, V> {
+    fn default() -> Self {
         Self {
             deque: VecDeque::new(),
             existing: HashMap::new(),
         }
     }
+}
+
+impl<K: Eq + Hash + Clone, V> DedupDeque<K, V> {
     /// Pushes a key value to the back of deque.
     /// Returns true if the deque does not already contain value with the same key, otherwise
     /// returns false.
@@ -88,7 +91,7 @@ mod tests {
 
     #[test]
     fn test_dedup_deque() {
-        let mut deque = DedupDeque::new_empty();
+        let mut deque = DedupDeque::default();
         assert!(deque.push_back(1, "hello".to_string()));
         assert_eq!(1, deque.len());
         assert!(deque.push_back(2, "world".to_string()));

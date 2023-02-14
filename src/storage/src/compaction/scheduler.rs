@@ -133,7 +133,7 @@ where
         P: Picker<R, T> + Send + Sync,
     {
         let request_queue: Arc<RwLock<DedupDeque<TableId, R>>> =
-            Arc::new(RwLock::new(DedupDeque::new_empty()));
+            Arc::new(RwLock::new(DedupDeque::default()));
         let cancel_token = CancellationToken::new();
         let task_notifier = Arc::new(Notify::new());
 
@@ -301,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_handler() {
         common_telemetry::init_default_ut_logging();
-        let queue = Arc::new(RwLock::new(DedupDeque::new_empty()));
+        let queue = Arc::new(RwLock::new(DedupDeque::default()));
         let latch = Arc::new(CountdownLatch::new(2));
         let latch_cloned = latch.clone();
         let picker = MockPicker::new(vec![Arc::new(move || {
