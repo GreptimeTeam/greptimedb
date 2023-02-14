@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use rustpython_vm::pymodule as rspymodule;
-
+use rustpython_vm::{pymodule as rspymodule, VirtualMachine, class::PyClassImpl};
+pub(crate) fn init_data_frame(module_name: &str, vm: &mut VirtualMachine){
+    data_frame::PyDataFrame::make_class(&vm.ctx);
+    data_frame::PyExpr::make_class(&vm.ctx);
+    vm.add_native_module(module_name.to_owned(), Box::new(data_frame::make_module));
+}
 /// with `register_batch`, and then wrap DataFrame API in it
 #[rspymodule]
 pub(crate) mod data_frame {

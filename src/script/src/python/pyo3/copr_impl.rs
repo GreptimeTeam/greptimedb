@@ -5,8 +5,8 @@ use pyo3::types::{PyDict, PyModule, PyTuple};
 use pyo3::{PyAny, PyCell, PyResult, Python};
 use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
 
-use crate::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
-use crate::pyo3::vector_impl::pyo3_obj_try_to_typed_val;
+use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
+use crate::python::pyo3::vector_impl::pyo3_obj_try_to_typed_val;
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 
 /// Execute a `Coprocessor` with given `RecordBatch`

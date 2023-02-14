@@ -15,5 +15,5 @@
 pub(crate) mod copr;
 pub(crate) mod vector;
 pub use copr::exec_coprocessor;
-pub(crate) use copr::{check_args_anno_real_type, select_from_rb, Coprocessor};
+pub(crate) use copr::{check_args_anno_real_type, select_from_rb, Coprocessor, exec_parsed};
 pub(crate) use vector::PyVector;

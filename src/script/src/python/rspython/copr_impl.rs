@@ -27,11 +27,12 @@ use rustpython_vm::scope::Scope;
 use rustpython_vm::{vm, AsObject, Interpreter, PyObjectRef, VirtualMachine};
 use snafu::{OptionExt, ResultExt};
 
-use crate::ffi_types::copr::PyQueryEngine;
-use crate::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
+use crate::python::ffi_types::copr::PyQueryEngine;
+use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
 use crate::python::error::{ensure, ret_other_error_with, NewRecordBatchSnafu, OtherSnafu, Result};
+use crate::python::rspython::dataframe_impl::init_data_frame;
 use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
-use crate::rspython::dataframe_impl::data_frame::set_dataframe_in_scope;
+use crate::python::rspython::dataframe_impl::data_frame::{set_dataframe_in_scope, PyDataFrame, PyExpr};
 
 thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::new(None));
 
@@ -86,6 +87,7 @@ pub(crate) fn exec_with_cached_vm(
 ) -> Result<RecordBatch> {
     vm.enter(|vm| -> Result<RecordBatch> {
         PyVector::make_class(&vm.ctx);
+        PyQueryEngine::make_class(&vm.ctx);
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
@@ -95,7 +97,6 @@ pub(crate) fn exec_with_cached_vm(
             let query_engine = PyQueryEngine::from_weakref(engine.clone());
 
             // put a object named with query of class PyQueryEngine in scope
-            PyQueryEngine::make_class(&vm.ctx);
             set_query_engine_in_scope(&scope, vm, query_engine)?;
         }
 
@@ -179,12 +180,10 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     vm.add_frozen(rustpython_pylib::frozen_stdlib());
                     // add our own custom datatype and module
                     PyVector::make_class(&vm.ctx);
+                    PyQueryEngine::make_class(&vm.ctx);
                     // TODO(discord9): refactor
                     // vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
-
-                    // data_frame::PyDataFrame::make_class(&vm.ctx);
-                    // data_frame::PyExpr::make_class(&vm.ctx);
-                    // vm.add_native_module("data_frame", Box::new(data_frame::make_module));
+                    init_data_frame("data_frame", vm);
                 }));
                 info!("Initialized Python interpreter.");
                 interpreter

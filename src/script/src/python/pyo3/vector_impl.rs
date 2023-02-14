@@ -8,7 +8,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
 
-use crate::ffi_types::vector::{wrap_result, PyVector};
+use crate::python::ffi_types::vector::{wrap_result, PyVector};
 
 macro_rules! get_con_type {
     ($obj:ident, $($pyty:ident => $con_ty:ident),*$(,)?) => {
@@ -275,7 +275,7 @@ mod test {
     use pyo3::types::{PyDict, PyModule};
     use pyo3::{PyCell, Python};
 
-    use crate::ffi_types::vector::PyVector;
+    use crate::python::ffi_types::vector::PyVector;
     fn sample_vector() -> HashMap<String, PyVector> {
         let mut locals = HashMap::new();
         let b = BooleanVector::from_slice(&[true, false, true, true]);

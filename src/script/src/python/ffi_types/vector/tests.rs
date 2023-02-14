@@ -28,8 +28,8 @@ use rustpython_compiler::Mode;
 use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::{vm, AsObject};
 
-use crate::ffi_types::PyVector;
-use crate::pyo3::vector_impl::into_pyo3_cell;
+use crate::python::ffi_types::PyVector;
+use crate::python::pyo3::vector_impl::into_pyo3_cell;
 
 #[derive(Debug, Clone)]
 struct TestCase {
@@ -38,7 +38,7 @@ struct TestCase {
 }
 
 #[test]
-fn test_eval_py_vector() {
+fn test_eval_py_vector_in_pairs() {
     let locals: HashMap<_, _> = sample_py_vector()
         .into_iter()
         .map(|(k, v)| (k, PyVector::from(v)))

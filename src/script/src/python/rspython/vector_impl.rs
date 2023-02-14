@@ -33,7 +33,7 @@ use rustpython_vm::{
     VirtualMachine,
 };
 
-use crate::ffi_types::vector::{
+use crate::python::ffi_types::vector::{
     arrow_rfloordiv, arrow_rsub, arrow_rtruediv, rspy_is_pyobj_scalar, wrap_result, PyVector,
 };
 use crate::python::utils::is_instance;

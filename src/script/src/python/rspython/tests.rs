@@ -9,8 +9,8 @@ use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::protocol::PySequence;
 use rustpython_vm::{AsObject, PyObjectRef, PyPayload, PyRef, PyResult, VirtualMachine};
 
-use crate::ffi_types::vector::{rspy_is_pyobj_scalar, val_to_pyobj, PyVector};
-use crate::rspython::vector_impl::pyobj_try_to_typed_val;
+use crate::python::ffi_types::vector::{rspy_is_pyobj_scalar, val_to_pyobj, PyVector};
+use crate::python::rspython::vector_impl::pyobj_try_to_typed_val;
 type PredicateFn = Option<fn(PyResult<PyObjectRef>, &VirtualMachine) -> bool>;
 /// test the paired `val_to_obj` and `pyobj_to_val` func
 #[test]

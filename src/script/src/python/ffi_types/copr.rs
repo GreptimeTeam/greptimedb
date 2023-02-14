@@ -37,14 +37,14 @@ use vm::builtins::{PyList, PyListRef};
 use vm::convert::ToPyObject;
 use vm::{pyclass as rspyclass, PyPayload, PyResult, VirtualMachine};
 
-use crate::ffi_types::PyVector;
-use crate::pyo3::pyo3_exec_parsed;
+use crate::python::ffi_types::PyVector;
+use crate::python::pyo3::pyo3_exec_parsed;
 use crate::python::error::{
     ensure, ret_other_error_with, ArrowSnafu, NewRecordBatchSnafu, OtherSnafu, Result,
     TypeCastSnafu,
 };
 use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
-use crate::rspython::rspy_exec_parsed;
+use crate::python::rspython::rspy_exec_parsed;
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
