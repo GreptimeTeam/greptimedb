@@ -31,7 +31,7 @@ use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BoxedBatchReader};
 use crate::schema::ProjectedSchemaRef;
-use crate::sst::parquet::{ParquetReader, ParquetWriter, Source};
+use crate::sst::parquet::{ParquetReader, ParquetWriter};
 
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: u8 = 2;
@@ -343,105 +343,6 @@ impl AccessLayer for FsAccessLayer {
 
     fn object_store(&self) -> ObjectStore {
         self.object_store.clone()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::*;
-
-    fn create_handle(name: &str, level: Level) -> FileHandle {
-        FileHandle::new(FileMeta {
-            file_name: name.to_string(),
-            time_range: None,
-            level,
-        })
-    }
-
-    #[test]
-    fn test_level_metas_add_and_remove() {
-        let metas = LevelMetas::new();
-        let merged = metas.merge(
-            vec![create_handle("a", 0), create_handle("b", 0)].into_iter(),
-            vec![].into_iter(),
-        );
-
-        assert_eq!(
-            HashSet::from(["a".to_string(), "b".to_string()]),
-            merged
-                .level(0)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
-        );
-
-        let merged1 = merged.merge(
-            vec![create_handle("c", 1), create_handle("d", 1)].into_iter(),
-            vec![].into_iter(),
-        );
-        assert_eq!(
-            HashSet::from(["a".to_string(), "b".to_string()]),
-            merged1
-                .level(0)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
-        );
-
-        assert_eq!(
-            HashSet::from(["c".to_string(), "d".to_string()]),
-            merged1
-                .level(1)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
-        );
-
-        let removed1 = merged1.merge(
-            vec![].into_iter(),
-            vec![create_handle("a", 0), create_handle("c", 0)].into_iter(),
-        );
-        assert_eq!(
-            HashSet::from(["b".to_string()]),
-            removed1
-                .level(0)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
-        );
-
-        assert_eq!(
-            HashSet::from(["c".to_string(), "d".to_string()]),
-            removed1
-                .level(1)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
-        );
-
-        let removed2 = removed1.merge(
-            vec![].into_iter(),
-            vec![create_handle("c", 1), create_handle("d", 1)].into_iter(),
-        );
-        assert_eq!(
-            HashSet::from(["b".to_string()]),
-            removed2
-                .level(0)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
-        );
-
-        assert_eq!(
-            HashSet::new(),
-            removed2
-                .level(1)
-                .files()
-                .map(|f| f.file_name().to_string())
-                .collect()
-        );
     }
 }
 

@@ -57,7 +57,7 @@ impl<S: LogStore> Picker<CompactionRequestImpl<S>, CompactionTaskImpl<S>> for Si
         ctx: &PickerContext,
         req: &CompactionRequestImpl<S>,
     ) -> crate::error::Result<Option<CompactionTaskImpl<S>>> {
-        let levels = &req.levels;
+        let levels = &req.levels();
 
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
