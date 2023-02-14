@@ -31,7 +31,7 @@ use snafu::prelude::*;
 use sql::ast::ObjectName;
 use sql::statements::statement::Statement;
 use table::engine::TableReference;
-use table::requests::{CreateDatabaseRequest, DropTableRequest};
+use table::requests::{CopyTableRequest, CreateDatabaseRequest, DropTableRequest};
 
 use crate::error::{self, BumpTableIdSnafu, ExecuteSqlSnafu, Result, TableIdProviderNotFoundSnafu};
 use crate::instance::Instance;
@@ -182,8 +182,21 @@ impl Instance {
 
                 Ok(Output::RecordBatches(RecordBatches::empty()))
             }
-            QueryStatement::Sql(Statement::Copy(stmt)) => {
-                todo!()
+            QueryStatement::Sql(Statement::Copy(copy_table)) => {
+                let (catalog_name, schema_name, table_name) =
+                    table_idents_to_full_name(copy_table.table_name(), query_ctx.clone())?;
+                let file_name = copy_table.file_name().to_string();
+
+                let req = CopyTableRequest {
+                    catalog_name,
+                    schema_name,
+                    table_name,
+                    file_name,
+                };
+
+                self.sql_handler
+                    .execute(SqlRequest::CopyTable(req), query_ctx)
+                    .await
             }
         }
     }

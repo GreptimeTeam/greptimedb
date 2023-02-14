@@ -31,6 +31,7 @@ use crate::error::{self, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSn
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
+mod copy_table;
 mod create;
 mod delete;
 mod drop_table;
@@ -48,6 +49,7 @@ pub enum SqlRequest {
     DescribeTable(DescribeTable),
     Explain(Box<Explain>),
     Delete(Delete),
+    CopyTable(CopyTableRequest),
 }
 
 // Handler to execute SQL except query
@@ -82,6 +84,7 @@ impl SqlHandler {
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
             SqlRequest::Delete(stmt) => self.delete(query_ctx.clone(), stmt).await,
+            SqlRequest::CopyTable(req) => self.copy_table(req).await,
             SqlRequest::ShowDatabases(stmt) => {
                 show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
