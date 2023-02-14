@@ -73,6 +73,17 @@ pub struct PromqlQuery {
     pub step: String,
 }
 
+impl From<PromqlQuery> for PromQuery {
+    fn from(query: PromqlQuery) -> Self {
+        PromQuery {
+            query: query.query,
+            start: query.start,
+            end: query.end,
+            step: query.step,
+        }
+    }
+}
+
 /// Handler to execute promql
 #[axum_macros::debug_handler]
 pub async fn promql(
@@ -83,12 +94,7 @@ pub async fn promql(
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
-    let prom_query = PromQuery {
-        query: params.query,
-        start: params.start,
-        end: params.end,
-        step: params.step,
-    };
+    let prom_query = params.into();
     let resp = match super::query_context_from_db(sql_handler.clone(), None) {
         Ok(query_ctx) => {
             JsonResponse::from_output(sql_handler.do_promql_query(&prom_query, query_ctx).await)
