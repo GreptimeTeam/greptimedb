@@ -102,7 +102,10 @@ impl<S: ContextProvider> PromPlanner<S> {
                 let input = self.prom_expr_to_plan(*expr.clone())?;
 
                 // calculate columns to group by
-                let group_exprs = self.agg_modifier_to_col(input.schema(), modifier)?;
+                let group_exprs = modifier.as_ref().map_or(Ok(Vec::new()), |m| {
+                    self.agg_modifier_to_col(input.schema(), m)
+                })?;
+
                 // convert op and value columns to aggregate exprs
                 let aggr_exprs = self.create_aggregate_exprs(*op)?;
 
@@ -590,7 +593,7 @@ impl<S: ContextProvider> PromPlanner<S> {
             token::T_STDVAR => AggregateFunctionEnum::Variance,
             token::T_TOPK | token::T_BOTTOMK | token::T_COUNT_VALUES | token::T_QUANTILE => {
                 UnsupportedExprSnafu {
-                    name: op.to_string(),
+                    name: format!("{op:?}"),
                 }
                 .fail()?
             }
@@ -1043,7 +1046,9 @@ mod test {
 
         // test group without
         if let PromExpr::Aggregate(AggregateExpr { modifier, .. }) = &mut eval_stmt.expr {
-            *modifier = AggModifier::Without(vec![String::from("tag_1")].into_iter().collect());
+            *modifier = Some(AggModifier::Without(
+                vec![String::from("tag_1")].into_iter().collect(),
+            ));
         }
         let context_provider = build_test_context_provider("some_metric".to_string(), 2, 2).await;
         let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();

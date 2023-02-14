@@ -25,7 +25,7 @@ pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, backtrace: Backtrace },
 
-    #[snafu(display("Unexpected token: {}", token))]
+    #[snafu(display("Unexpected token: {:?}", token))]
     UnexpectedToken {
         token: TokenType,
         backtrace: Backtrace,
