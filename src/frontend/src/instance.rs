@@ -397,7 +397,7 @@ impl Instance {
             | Statement::Alter(_)
             | Statement::DropTable(_) => self.sql_handler.do_statement_query(stmt, query_ctx).await,
             Statement::Use(db) => self.handle_use(db, query_ctx),
-            _ => NotSupportedSnafu {
+            Statement::ShowCreateTable(_) => NotSupportedSnafu {
                 feat: format!("{stmt:?}"),
             }
             .fail(),

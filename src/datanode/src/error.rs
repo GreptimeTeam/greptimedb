@@ -349,7 +349,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::DecodeLogicalPlan { source } => source.status_code(),
-            Error::NewCatalog { source } => source.status_code(),
+            Error::NewCatalog { source } | Error::RegisterSchema { source } => source.status_code(),
             Error::FindTable { source, .. } => source.status_code(),
             Error::CreateTable { source, .. }
             | Error::GetTable { source, .. }
@@ -395,7 +395,6 @@ impl ErrorExt for Error {
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
             | Error::RenameTable { .. }
-            | Error::RegisterSchema { .. }
             | Error::Catalog { .. }
             | Error::MissingRequiredField { .. }
             | Error::IncorrectInternalState { .. } => StatusCode::Internal,

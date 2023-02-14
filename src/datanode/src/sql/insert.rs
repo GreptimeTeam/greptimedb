@@ -26,8 +26,8 @@ use table::requests::*;
 
 use crate::error::{
     CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
-    ColumnValuesNumberMismatchSnafu, InsertSnafu, ParseSqlSnafu, ParseSqlValueSnafu, Result,
-    TableNotFoundSnafu,
+    ColumnValuesNumberMismatchSnafu, FindTableSnafu, InsertSnafu, ParseSqlSnafu,
+    ParseSqlValueSnafu, Result, TableNotFoundSnafu,
 };
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -43,7 +43,15 @@ impl SqlHandler {
             table: &req.table_name.to_string(),
         };
 
-        let table = self.get_table(&table_ref)?;
+        let table = self
+            .catalog_manager
+            .table(table_ref.catalog, table_ref.schema, table_ref.table)
+            .context(FindTableSnafu {
+                table_name: table_ref.to_string(),
+            })?
+            .context(TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
 
         let affected_rows = table.insert(req).await.with_context(|_| InsertSnafu {
             table_name: table_ref.to_string(),

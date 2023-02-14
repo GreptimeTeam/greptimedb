@@ -366,7 +366,6 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
-    use crate::store::ObjectStateStore;
     use crate::{LockKey, Procedure};
 
     const ROOT_ID: &str = "9f805a1f-05f7-490c-9f91-bd56e3cc54c1";
@@ -383,12 +382,6 @@ mod tests {
             step: 0,
             store,
         }
-    }
-
-    fn new_procedure_store(object_store: ObjectStore) -> ProcedureStore {
-        let state_store = ObjectStateStore::new(object_store);
-
-        ProcedureStore::new(Arc::new(state_store))
     }
 
     async fn check_files(object_store: &ObjectStore, procedure_id: ProcedureId, files: &[&str]) {
@@ -469,7 +462,7 @@ mod tests {
             procedure_id: meta.id,
         };
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = new_procedure_store(object_store.clone());
+        let procedure_store = ProcedureStore::from(object_store.clone());
         let mut runner = new_runner(meta, Box::new(normal), procedure_store);
 
         let res = runner.execute_once(&ctx).await;
@@ -519,7 +512,7 @@ mod tests {
             procedure_id: meta.id,
         };
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = new_procedure_store(object_store.clone());
+        let procedure_store = ProcedureStore::from(object_store.clone());
         let mut runner = new_runner(meta, Box::new(suspend), procedure_store);
 
         let res = runner.execute_once(&ctx).await;
@@ -609,7 +602,7 @@ mod tests {
         assert!(manager_ctx.try_insert_procedure(meta.clone()));
 
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = new_procedure_store(object_store.clone());
+        let procedure_store = ProcedureStore::from(object_store.clone());
         let mut runner = new_runner(meta, Box::new(parent), procedure_store);
         // Replace the manager ctx.
         runner.manager_ctx = manager_ctx;
@@ -649,7 +642,7 @@ mod tests {
             procedure_id: meta.id,
         };
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = new_procedure_store(object_store.clone());
+        let procedure_store = ProcedureStore::from(object_store.clone());
         let mut runner = new_runner(meta.clone(), Box::new(fail), procedure_store);
 
         let res = runner.execute_once(&ctx).await;
@@ -721,7 +714,7 @@ mod tests {
         assert!(manager_ctx.try_insert_procedure(meta.clone()));
 
         let object_store = test_util::new_object_store(&dir);
-        let procedure_store = new_procedure_store(object_store.clone());
+        let procedure_store = ProcedureStore::from(object_store.clone());
         let mut runner = new_runner(meta, Box::new(parent), procedure_store);
         // Replace the manager ctx.
         runner.manager_ctx = manager_ctx;

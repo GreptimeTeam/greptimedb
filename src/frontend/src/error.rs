@@ -114,7 +114,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Table not found: {}", table_name))]
+    #[snafu(display("Table `{}` not exist", table_name))]
     TableNotFound {
         table_name: String,
         backtrace: Backtrace,
@@ -213,6 +213,9 @@ pub enum Error {
         schema_info: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Schema {} already exists", name))]
+    SchemaExists { name: String, backtrace: Backtrace },
 
     #[snafu(display("Table occurs error, source: {}", source))]
     Table {
@@ -392,8 +395,9 @@ impl ErrorExt for Error {
             Error::StartMetaClient { source } | Error::RequestMeta { source } => {
                 source.status_code()
             }
-            Error::SchemaNotFound { .. } => StatusCode::InvalidArguments,
-            Error::CatalogNotFound { .. } => StatusCode::InvalidArguments,
+            Error::CatalogNotFound { .. }
+            | Error::SchemaNotFound { .. }
+            | Error::SchemaExists { .. } => StatusCode::InvalidArguments,
 
             Error::BuildCreateExprOnInsertion { source }
             | Error::ToTableInsertRequest { source }

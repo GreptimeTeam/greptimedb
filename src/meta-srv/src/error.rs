@@ -218,6 +218,27 @@ pub enum Error {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Failed to lock based on etcd, source: {}", source))]
+    Lock {
+        source: etcd_client::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to unlock based on etcd, source: {}", source))]
+    Unlock {
+        source: etcd_client::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to grant lease, source: {}", source))]
+    LeaseGrant {
+        source: etcd_client::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Distributed lock is not configured"))]
+    LockNotConfig { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -254,6 +275,10 @@ impl ErrorExt for Error {
             | Error::IsNotLeader { .. }
             | Error::NoMetaPeerClient { .. }
             | Error::InvalidHttpBody { .. }
+            | Error::Lock { .. }
+            | Error::Unlock { .. }
+            | Error::LeaseGrant { .. }
+            | Error::LockNotConfig { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }

@@ -23,11 +23,10 @@ use sql::statements::delete::Delete;
 use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowTables};
-use table::engine::{EngineContext, TableEngineRef, TableReference};
+use table::engine::TableEngineRef;
 use table::requests::*;
-use table::TableRef;
 
-use crate::error::{self, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSnafu};
+use crate::error::{self, ExecuteSqlSnafu, Result, TableNotFoundSnafu};
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
@@ -113,17 +112,6 @@ impl SqlHandler {
         result
     }
 
-    pub(crate) fn get_table(&self, table_ref: &TableReference) -> Result<TableRef> {
-        self.table_engine
-            .get_table(&EngineContext::default(), table_ref)
-            .with_context(|_| GetTableSnafu {
-                table_name: table_ref.to_string(),
-            })?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: table_ref.to_string(),
-            })
-    }
-
     pub fn table_engine(&self) -> TableEngineRef {
         self.table_engine.clone()
     }
@@ -152,6 +140,7 @@ mod tests {
     use sql::statements::statement::Statement;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
+    use table::engine::TableReference;
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
     use table::Table;
