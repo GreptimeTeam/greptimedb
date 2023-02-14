@@ -71,23 +71,19 @@ impl LevelMetas {
     ///
     /// # Panics
     /// Panics if level of [FileHandle] is greater than [MAX_LEVEL].
-    pub fn merge(&self, files_to_add: impl Iterator<Item = FileHandle>) -> LevelMetas {
+    pub fn merge(
+        &self,
+        files_to_add: impl Iterator<Item = FileHandle>,
+        files_to_remove: impl Iterator<Item = FileHandle>,
+    ) -> LevelMetas {
         let mut merged = self.clone();
         for file in files_to_add {
             let level = file.level();
             merged.levels[level as usize].add_file(file);
         }
-        merged
-    }
 
-    /// Removes files with given file meta and builds a new [LevelMetas].
-    ///
-    /// # Panics
-    /// Panics if level of [FileHandle] is greater than [MAX_LEVEL].
-    pub fn remove(&self, files_to_remove: impl Iterator<Item = FileMeta>) -> LevelMetas {
-        let mut merged = self.clone();
         for file in files_to_remove {
-            let level = file.level;
+            let level = file.level();
             merged.levels[level as usize].remove_file(file);
         }
         merged
@@ -126,8 +122,8 @@ impl LevelMeta {
         self.files.insert(file.file_name().to_string(), file);
     }
 
-    fn remove_file(&mut self, file_to_remove: FileMeta) {
-        self.files.remove(&file_to_remove.file_name);
+    fn remove_file(&mut self, file_to_remove: FileHandle) {
+        self.files.remove(file_to_remove.file_name());
     }
 
     /// Returns the level of level meta.
@@ -321,22 +317,21 @@ mod tests {
 
     use super::*;
 
-    fn create_meta(name: &str, level: Level) -> FileMeta {
-        FileMeta {
+    fn create_handle(name: &str, level: Level) -> FileHandle {
+        FileHandle::new(FileMeta {
             file_name: name.to_string(),
             time_range: None,
             level,
-        }
-    }
-
-    fn create_handle(name: &str, level: Level) -> FileHandle {
-        FileHandle::new(create_meta(name, level))
+        })
     }
 
     #[test]
     fn test_level_metas_add_and_remove() {
         let metas = LevelMetas::new();
-        let merged = metas.merge(vec![create_handle("a", 0), create_handle("b", 0)].into_iter());
+        let merged = metas.merge(
+            vec![create_handle("a", 0), create_handle("b", 0)].into_iter(),
+            vec![].into_iter(),
+        );
 
         assert_eq!(
             HashSet::from(["a".to_string(), "b".to_string()]),
@@ -347,7 +342,10 @@ mod tests {
                 .collect()
         );
 
-        let merged1 = merged.merge(vec![create_handle("c", 1), create_handle("d", 1)].into_iter());
+        let merged1 = merged.merge(
+            vec![create_handle("c", 1), create_handle("d", 1)].into_iter(),
+            vec![].into_iter(),
+        );
         assert_eq!(
             HashSet::from(["a".to_string(), "b".to_string()]),
             merged1
@@ -366,7 +364,10 @@ mod tests {
                 .collect()
         );
 
-        let removed1 = merged1.remove(vec![create_meta("a", 0), create_meta("c", 0)].into_iter());
+        let removed1 = merged1.merge(
+            vec![].into_iter(),
+            vec![create_handle("a", 0), create_handle("c", 0)].into_iter(),
+        );
         assert_eq!(
             HashSet::from(["b".to_string()]),
             removed1
@@ -385,7 +386,10 @@ mod tests {
                 .collect()
         );
 
-        let removed2 = removed1.remove(vec![create_meta("c", 1), create_meta("d", 1)].into_iter());
+        let removed2 = removed1.merge(
+            vec![].into_iter(),
+            vec![create_handle("c", 1), create_handle("d", 1)].into_iter(),
+        );
         assert_eq!(
             HashSet::from(["b".to_string()]),
             removed2

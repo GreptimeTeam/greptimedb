@@ -372,7 +372,6 @@ impl ArrowPredicate for TimestampRowFilter {
 
     /// Selects the rows matching given time range.
     fn evaluate(&mut self, batch: RecordBatch) -> std::result::Result<BooleanArray, ArrowError> {
-        let row_cnt = batch.num_rows();
         let ts_col = batch.column(self.timestamp_index);
 
         macro_rules! downcast_and_compute {
@@ -382,10 +381,8 @@ impl ArrowPredicate for TimestampRowFilter {
                         .as_any()
                         .downcast_ref::<$typ>()
                         .unwrap(); // safety: we've checked the data type of timestamp column.
-                    let lower_bound = PrimitiveArray::from_value(self.lower_bound, row_cnt);
-                    let upper_bound = PrimitiveArray::from_value(self.upper_bound, row_cnt);
-                    let left = arrow::compute::gt_eq(ts_col, &lower_bound)?;
-                    let right = arrow::compute::lt(ts_col, &upper_bound)?;
+                    let left = arrow::compute::gt_eq_scalar(ts_col, self.lower_bound)?;
+                    let right = arrow::compute::lt_scalar(ts_col, self.upper_bound)?;
                     arrow::compute::and(&left, &right)
                 }
             };

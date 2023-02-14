@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 
 use common_telemetry::{error, info};
 use object_store::ObjectStore;
@@ -46,30 +45,32 @@ pub(crate) struct CompactionTaskImpl<S: LogStore> {
     pub manifest: RegionManifest,
 }
 
+impl<S: LogStore> Drop for CompactionTaskImpl<S> {
+    fn drop(&mut self) {
+        self.mark_files_compacting(false);
+    }
+}
+
 impl<S: LogStore> CompactionTaskImpl<S> {
     /// Compacts inputs SSTs, returns `(output file, compacted input file)`.
     async fn merge_ssts(&mut self) -> Result<(Vec<FileMeta>, Vec<FileMeta>)> {
         let mut futs = Vec::with_capacity(self.outputs.len());
-        let compacted_inputs = Arc::new(Mutex::new(HashSet::new()));
+        let mut compacted_inputs = HashSet::new();
 
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
             let sst_layer = self.sst_layer.clone();
             let object_store = self.sst_layer.object_store();
-            let compacted = compacted_inputs.clone();
+            compacted_inputs.extend(output.inputs.iter().map(|f| FileMeta {
+                file_name: f.file_name().to_string(),
+                time_range: *f.time_range(),
+                level: f.level(),
+            }));
+
+            // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
             futs.push(async move {
-                match output.run(schema, sst_layer, object_store).await {
-                    Ok(meta) => {
-                        compacted
-                            .lock()
-                            .unwrap()
-                            .extend(output.inputs.iter().map(|f| FileMeta {
-                                file_name: f.file_name().to_string(),
-                                time_range: *f.time_range(),
-                                level: f.level(),
-                            }));
-                        Ok(meta)
-                    }
+                match output.build(schema, sst_layer, object_store).await {
+                    Ok(meta) => Ok(meta),
                     Err(e) => Err(e),
                 }
             });
@@ -79,8 +80,8 @@ impl<S: LogStore> CompactionTaskImpl<S> {
             .await
             .into_iter()
             .collect::<Result<_>>()?;
-        let compacted = compacted_inputs.lock().unwrap().drain().collect();
-        Ok((outputs, compacted))
+        let inputs = compacted_inputs.into_iter().collect();
+        Ok((outputs, inputs))
     }
 
     /// Writes updated SST info into manifest.
@@ -122,16 +123,17 @@ impl<S: LogStore> CompactionTaskImpl<S> {
 impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
     async fn run(mut self) -> Result<()> {
         self.mark_files_compacting(true);
-        match self.merge_ssts().await {
-            Ok((output, compacted)) => {
-                self.write_manifest_and_apply(output, compacted).await?;
-            }
-            Err(e) => {
-                self.mark_files_compacting(false);
-                error!(e; "Failed to compact region: {}", self.shared_data.name());
-            }
-        }
-        Ok(())
+
+        let (output, compacted) = self.merge_ssts().await.map_err(|e| {
+            error!(e; "Failed to compact region: {}", self.shared_data.name());
+            e
+        })?;
+        self.write_manifest_and_apply(output, compacted)
+            .await
+            .map_err(|e| {
+                error!(e; "Failed to update region manifest: {}", self.shared_data.name());
+                e
+            })
     }
 }
 
@@ -158,7 +160,7 @@ pub struct CompactionOutput {
 }
 
 impl CompactionOutput {
-    async fn run(
+    async fn build(
         &self,
         schema: RegionSchemaRef,
         sst_layer: AccessLayerRef,

@@ -237,15 +237,17 @@ impl Version {
         }
 
         let handles_to_add = edit.files_to_add.into_iter().map(FileHandle::new);
-        let merged_ssts = self.ssts.merge(handles_to_add);
-        let removed_ssts = merged_ssts.remove(edit.files_to_remove.into_iter());
+        let merged_ssts = self.ssts.merge(
+            handles_to_add,
+            edit.files_to_remove.into_iter().map(FileHandle::new),
+        );
 
         info!(
             "After region compaction, region: {}, SST files: {:?}",
             self.metadata.id(),
-            removed_ssts
+            merged_ssts
         );
-        self.ssts = Arc::new(removed_ssts);
+        self.ssts = Arc::new(merged_ssts);
     }
 
     /// Updates metadata of the version.
