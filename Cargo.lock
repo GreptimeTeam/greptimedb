@@ -1491,7 +1491,6 @@ dependencies = [
  "prost 0.11.6",
  "rand 0.8.5",
  "snafu",
- "tempdir",
  "tokio",
  "tonic",
  "tower",
