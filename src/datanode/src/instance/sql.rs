@@ -261,13 +261,14 @@ impl PromqlHandler for Instance {
     async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
         let _timer = timer!(metric::METRIC_HANDLE_PROMQL_ELAPSED);
 
-        let query_literal = format!("{query:?}",);
         self.execute_promql(query, QueryContext::arc())
             .await
             .map_err(BoxedError::new)
-            .with_context(|_| server_error::ExecuteQuerySnafu {
-                query: &query_literal,
-            })
+            .with_context(|_| {
+                let query_literal = format!("{query:?}");
+                server_error::ExecuteQuerySnafu {
+                query: query_literal,
+            }})
     }
 }
 

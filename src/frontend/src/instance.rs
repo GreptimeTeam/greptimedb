@@ -451,9 +451,11 @@ impl SqlQueryHandler for Instance {
 
     async fn do_promql_query(&self, query: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
         if let Some(handler) = &self.promql_handler {
-            let query_literal = format!("{query:?}");
-            let result = handler.do_query(query).await.context(ExecutePromqlSnafu {
-                query: &query_literal,
+            let result = handler.do_query(query).await.with_context(|_| {
+                let query_literal = format!("{query:?}");
+                ExecutePromqlSnafu {
+                    query: query_literal,
+                }
             });
             vec![result]
         } else {
