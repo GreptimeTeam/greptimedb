@@ -9,7 +9,6 @@ default = []
 test = []
 
 [dependencies]
-arrow-array.workspace = true
 arrow.workspace = true
 arrow-schema.workspace = true
 common-base = { path = "../common/base" }

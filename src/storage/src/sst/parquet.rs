@@ -369,7 +369,7 @@ fn time_unit_lossy(range: &TimestampRange, ts_col_unit: TimeUnit) -> bool {
             .unwrap_or(false)
 }
 
-/// `TimestampRowFilter` is used to filter rows within given timestamp range when reading
+/// `FastTimestampRowFilter` is used to filter rows within given timestamp range when reading
 /// row groups from parquet files, while avoids fetching all columns from SSTs file.
 struct FastTimestampRowFilter {
     timestamp_index: usize,
