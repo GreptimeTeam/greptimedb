@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use rustpython_vm::{pymodule as rspymodule, VirtualMachine, class::PyClassImpl};
-pub(crate) fn init_data_frame(module_name: &str, vm: &mut VirtualMachine){
+use rustpython_vm::class::PyClassImpl;
+use rustpython_vm::{pymodule as rspymodule, VirtualMachine};
+pub(crate) fn init_data_frame(module_name: &str, vm: &mut VirtualMachine) {
     data_frame::PyDataFrame::make_class(&vm.ctx);
     data_frame::PyExpr::make_class(&vm.ctx);
     vm.add_native_module(module_name.to_owned(), Box::new(data_frame::make_module));
@@ -33,6 +34,7 @@ pub(crate) mod data_frame {
     use snafu::ResultExt;
 
     use crate::python::error::DataFusionSnafu;
+    use crate::python::ffi_types::PyVector;
     use crate::python::utils::block_on_async;
     #[rspyclass(module = "data_frame", name = "DataFrame")]
     #[derive(PyPayload, Debug)]
@@ -236,7 +238,7 @@ pub(crate) mod data_frame {
                         .iter()
                         .map(|arr| -> PyResult<_> {
                             datatypes::vectors::Helper::try_into_vector(arr)
-                                .map(crate::python::PyVector::from)
+                                .map(PyVector::from)
                                 .map(|v| vm.new_pyobj(v))
                                 .map_err(|e| vm.new_runtime_error(e.to_string()))
                         })

@@ -27,12 +27,13 @@ use rustpython_vm::scope::Scope;
 use rustpython_vm::{vm, AsObject, Interpreter, PyObjectRef, VirtualMachine};
 use snafu::{OptionExt, ResultExt};
 
+use crate::python::error::{ensure, ret_other_error_with, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
-use crate::python::error::{ensure, ret_other_error_with, NewRecordBatchSnafu, OtherSnafu, Result};
+use crate::python::rspython::builtins::init_greptime_builtins;
+use crate::python::rspython::dataframe_impl::data_frame::set_dataframe_in_scope;
 use crate::python::rspython::dataframe_impl::init_data_frame;
-use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
-use crate::python::rspython::dataframe_impl::data_frame::{set_dataframe_in_scope, PyDataFrame, PyExpr};
+use crate::python::rspython::utils::{format_py_error, is_instance, py_vec_obj_to_array};
 
 thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::new(None));
 
@@ -86,8 +87,6 @@ pub(crate) fn exec_with_cached_vm(
     vm: &Arc<Interpreter>,
 ) -> Result<RecordBatch> {
     vm.enter(|vm| -> Result<RecordBatch> {
-        PyVector::make_class(&vm.ctx);
-        PyQueryEngine::make_class(&vm.ctx);
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
         set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
@@ -181,8 +180,7 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     // add our own custom datatype and module
                     PyVector::make_class(&vm.ctx);
                     PyQueryEngine::make_class(&vm.ctx);
-                    // TODO(discord9): refactor
-                    // vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
+                    init_greptime_builtins("greptime", vm);
                     init_data_frame("data_frame", vm);
                 }));
                 info!("Initialized Python interpreter.");
