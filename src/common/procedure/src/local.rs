@@ -30,7 +30,8 @@ use crate::local::runner::Runner;
 use crate::procedure::BoxedProcedureLoader;
 use crate::store::{ObjectStateStore, ProcedureMessage, ProcedureStore, StateStoreRef};
 use crate::{
-    BoxedProcedure, LockKey, ProcedureId, ProcedureManager, ProcedureState, ProcedureWithId,
+    BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
+    ProcedureWithId,
 };
 
 /// Mutable metadata of a procedure during execution.
@@ -126,6 +127,13 @@ pub(crate) struct ManagerContext {
     // should be able to remove the its message and all its child messages.
     /// Messages loaded from the procedure store.
     messages: Mutex<HashMap<ProcedureId, ProcedureMessage>>,
+}
+
+#[async_trait]
+impl ContextProvider for ManagerContext {
+    async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
+        Ok(self.state(procedure_id))
+    }
 }
 
 impl ManagerContext {

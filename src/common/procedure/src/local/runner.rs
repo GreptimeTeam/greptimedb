@@ -127,6 +127,7 @@ impl Runner {
     async fn execute_procedure_in_loop(&mut self) -> Result<()> {
         let ctx = Context {
             procedure_id: self.meta.id,
+            provider: self.manager_ctx.clone(),
         };
 
         loop {
@@ -366,7 +367,7 @@ mod tests {
 
     use super::*;
     use crate::local::test_util;
-    use crate::{LockKey, Procedure};
+    use crate::{ContextProvider, LockKey, Procedure};
 
     const ROOT_ID: &str = "9f805a1f-05f7-490c-9f91-bd56e3cc54c1";
 
@@ -397,6 +398,25 @@ mod tests {
         assert_eq!(files, files_in_dir);
     }
 
+    fn context_without_provider(procedure_id: ProcedureId) -> Context {
+        struct MockProvider;
+
+        #[async_trait]
+        impl ContextProvider for MockProvider {
+            async fn procedure_state(
+                &self,
+                _procedure_id: ProcedureId,
+            ) -> Result<Option<ProcedureState>> {
+                unimplemented!()
+            }
+        }
+
+        Context {
+            procedure_id,
+            provider: Arc::new(MockProvider),
+        }
+    }
+
     #[derive(Debug)]
     struct ProcedureAdapter<F> {
         data: String,
@@ -417,14 +437,14 @@ mod tests {
     #[async_trait]
     impl<F> Procedure for ProcedureAdapter<F>
     where
-        F: FnMut() -> BoxFuture<'static, Result<Status>> + Send + Sync,
+        F: FnMut(Context) -> BoxFuture<'static, Result<Status>> + Send + Sync,
     {
         fn type_name(&self) -> &str {
             "ProcedureAdapter"
         }
 
-        async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
-            let f = (self.exec_fn)();
+        async fn execute(&mut self, ctx: &Context) -> Result<Status> {
+            let f = (self.exec_fn)(ctx.clone());
             f.await
         }
 
@@ -439,7 +459,7 @@ mod tests {
 
     async fn execute_once_normal(persist: bool, first_files: &[&str], second_files: &[&str]) {
         let mut times = 0;
-        let exec_fn = move || {
+        let exec_fn = move |_| {
             times += 1;
             async move {
                 if times == 1 {
@@ -458,9 +478,7 @@ mod tests {
 
         let dir = TempDir::new("normal").unwrap();
         let meta = normal.new_meta(ROOT_ID);
-        let ctx = Context {
-            procedure_id: meta.id,
-        };
+        let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = ProcedureStore::from(object_store.clone());
         let mut runner = new_runner(meta, Box::new(normal), procedure_store);
@@ -491,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_on_suspend_empty() {
-        let exec_fn = move || {
+        let exec_fn = move |_| {
             async move {
                 Ok(Status::Suspended {
                     subprocedures: Vec::new(),
@@ -508,9 +526,7 @@ mod tests {
 
         let dir = TempDir::new("suspend").unwrap();
         let meta = suspend.new_meta(ROOT_ID);
-        let ctx = Context {
-            procedure_id: meta.id,
-        };
+        let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = ProcedureStore::from(object_store.clone());
         let mut runner = new_runner(meta, Box::new(suspend), procedure_store);
@@ -521,7 +537,7 @@ mod tests {
 
     fn new_child_procedure(procedure_id: ProcedureId, key: &str) -> ProcedureWithId {
         let mut times = 0;
-        let exec_fn = move || {
+        let exec_fn = move |_| {
             times += 1;
             async move {
                 if times == 1 {
@@ -553,13 +569,9 @@ mod tests {
             "catalog.schema.table.region-0",
             "catalog.schema.table.region-1",
         ];
-        let manager_ctx = Arc::new(ManagerContext::new());
 
-        let ctx_in_fn = manager_ctx.clone();
-        let exec_fn = move || {
+        let exec_fn = move |ctx: Context| {
             times += 1;
-            let ctx_in_future = ctx_in_fn.clone();
-
             async move {
                 if times == 1 {
                     // Submit subprocedures.
@@ -573,9 +585,14 @@ mod tests {
                     })
                 } else {
                     // Wait for subprocedures.
-                    let all_child_done = children_ids
-                        .iter()
-                        .all(|id| ctx_in_future.state(*id) == Some(ProcedureState::Done));
+                    let mut all_child_done = true;
+                    for id in children_ids {
+                        if ctx.provider.procedure_state(id).await.unwrap()
+                            != Some(ProcedureState::Done)
+                        {
+                            all_child_done = false;
+                        }
+                    }
                     if all_child_done {
                         Ok(Status::Done)
                     } else {
@@ -598,12 +615,13 @@ mod tests {
         let dir = TempDir::new("parent").unwrap();
         let meta = parent.new_meta(ROOT_ID);
         let procedure_id = meta.id;
-        // Manually add this procedure to the manager ctx.
-        assert!(manager_ctx.try_insert_procedure(meta.clone()));
 
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = ProcedureStore::from(object_store.clone());
-        let mut runner = new_runner(meta, Box::new(parent), procedure_store);
+        let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store);
+        let manager_ctx = Arc::new(ManagerContext::new());
+        // Manually add this procedure to the manager ctx.
+        assert!(manager_ctx.try_insert_procedure(meta));
         // Replace the manager ctx.
         runner.manager_ctx = manager_ctx;
 
@@ -629,7 +647,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_on_error() {
         let exec_fn =
-            || async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }.boxed();
+            |_| async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }.boxed();
         let fail = ProcedureAdapter {
             data: "fail".to_string(),
             lock_key: Some(LockKey::new("catalog.schema.table")),
@@ -638,9 +656,7 @@ mod tests {
 
         let dir = TempDir::new("fail").unwrap();
         let meta = fail.new_meta(ROOT_ID);
-        let ctx = Context {
-            procedure_id: meta.id,
-        };
+        let ctx = context_without_provider(meta.id);
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = ProcedureStore::from(object_store.clone());
         let mut runner = new_runner(meta.clone(), Box::new(fail), procedure_store);
@@ -654,18 +670,14 @@ mod tests {
     #[tokio::test]
     async fn test_child_error() {
         let mut times = 0;
-        let manager_ctx = Arc::new(ManagerContext::new());
         let child_id = ProcedureId::random();
 
-        let ctx_in_fn = manager_ctx.clone();
-        let exec_fn = move || {
+        let exec_fn = move |ctx: Context| {
             times += 1;
-            let ctx_in_future = ctx_in_fn.clone();
-
             async move {
                 if times == 1 {
                     // Submit subprocedures.
-                    let exec_fn = || {
+                    let exec_fn = |_| {
                         async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }
                             .boxed()
                     };
@@ -684,8 +696,9 @@ mod tests {
                     })
                 } else {
                     // Wait for subprocedures.
-                    logging::info!("child state is {:?}", ctx_in_future.state(child_id));
-                    if ctx_in_future.state(child_id) == Some(ProcedureState::Failed) {
+                    let state = ctx.provider.procedure_state(child_id).await.unwrap();
+                    logging::info!("child state is {:?}", state);
+                    if state == Some(ProcedureState::Failed) {
                         // The parent procedure to abort itself if child procedure is failed.
                         Err(Error::external(PlainError::new(
                             "subprocedure failed".to_string(),
@@ -710,12 +723,14 @@ mod tests {
 
         let dir = TempDir::new("child_err").unwrap();
         let meta = parent.new_meta(ROOT_ID);
-        // Manually add this procedure to the manager ctx.
-        assert!(manager_ctx.try_insert_procedure(meta.clone()));
 
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = ProcedureStore::from(object_store.clone());
-        let mut runner = new_runner(meta, Box::new(parent), procedure_store);
+        let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store);
+
+        let manager_ctx = Arc::new(ManagerContext::new());
+        // Manually add this procedure to the manager ctx.
+        assert!(manager_ctx.try_insert_procedure(meta));
         // Replace the manager ctx.
         runner.manager_ctx = manager_ctx;
 

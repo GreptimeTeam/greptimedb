@@ -58,11 +58,23 @@ impl Status {
     }
 }
 
+/// [ContextProvider] provides information about procedures in the [ProcedureManager].
+#[async_trait]
+pub trait ContextProvider: Send + Sync {
+    /// Query the procedure state.
+    async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>>;
+}
+
+/// Reference-counted pointer to [ContextProvider].
+pub type ContextProviderRef = Arc<dyn ContextProvider>;
+
 /// Procedure execution context.
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct Context {
     /// Id of the procedure.
     pub procedure_id: ProcedureId,
+    /// [ProcedureManager] context provider.
+    pub provider: ContextProviderRef,
 }
 
 /// A `Procedure` represents an operation or a set of operations to be performed step-by-step.
