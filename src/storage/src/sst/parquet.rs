@@ -60,7 +60,6 @@ use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
 use crate::sst;
 use crate::sst::SstInfo;
-
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
     file_path: &'a str,
@@ -317,39 +316,69 @@ impl<'a> ParquetReader<'a> {
             _ => unreachable!(),
         };
 
-        // build lower and upper bound according to time range and timestamp column data type.
-        let lower = self
-            .time_range
-            .start()
-            .and_then(|s| s.convert_to(ts_col_unit))
-            .map(|t| t.value())
-            .unwrap_or(i64::MIN);
-
-        let upper = self
-            .time_range
-            .end()
-            .and_then(|s| s.convert_to_ceil(ts_col_unit)) // convert to ceil to relax time range and prevent data loss caused by rounding error.
-            .map(|t| t.value())
-            .unwrap_or(i64::MAX);
-
         let projection = ProjectionMask::roots(schema_desc, vec![ts_col_idx]);
-        let filter = RowFilter::new(vec![Box::new(TimestampRowFilter::new(
-            ts_col_idx, projection, lower, upper,
-        ))]);
+
+        // checks if converting time range unit into ts col unit will result into rounding error.
+        if time_unit_lossy(&self.time_range, ts_col_unit) {
+            let filter = RowFilter::new(vec![Box::new(PlainTimestampRowFilter::new(
+                ts_col_idx,
+                self.time_range,
+                projection,
+            ))]);
+            return Some(filter);
+        }
+
+        // If any of the conversion overflows, we cannot use arrow's computation method, instead
+        // we resort to plain filter that compares timestamp with given range, less efficient,
+        // but simpler.
+        // TODO(hl): If the range is gt_eq/lt, we also use PlainTimestampRowFilter, but these cases
+        // can also use arrow's gt_eq_scalar/lt_scalar methods.
+        let row_filter = if let (Some(lower), Some(upper)) = (
+            self.time_range
+                .start()
+                .and_then(|s| s.convert_to(ts_col_unit))
+                .map(|t| t.value()),
+            self.time_range
+                .end()
+                .and_then(|s| s.convert_to(ts_col_unit)) // convert to ceil to relax time range and prevent data loss caused by rounding error.
+                .map(|t| t.value()),
+        ) {
+            Box::new(FastTimestampRowFilter::new(
+                ts_col_idx, projection, lower, upper,
+            )) as _
+        } else {
+            Box::new(PlainTimestampRowFilter::new(
+                ts_col_idx,
+                self.time_range,
+                projection,
+            )) as _
+        };
+        let filter = RowFilter::new(vec![row_filter]);
         Some(filter)
     }
 }
 
+fn time_unit_lossy(range: &TimestampRange, ts_col_unit: TimeUnit) -> bool {
+    range
+        .start()
+        .map(|start| start.unit().factor() < ts_col_unit.factor())
+        .unwrap_or(false)
+        || range
+            .end()
+            .map(|end| end.unit().factor() < ts_col_unit.factor())
+            .unwrap_or(false)
+}
+
 /// `TimestampRowFilter` is used to filter rows within given timestamp range when reading
 /// row groups from parquet files, while avoids fetching all columns from SSTs file.
-struct TimestampRowFilter {
+struct FastTimestampRowFilter {
     timestamp_index: usize,
     lower_bound: i64,
     upper_bound: i64,
     projection: ProjectionMask,
 }
 
-impl TimestampRowFilter {
+impl FastTimestampRowFilter {
     fn new(
         ts_col_idx: usize,
         projection: ProjectionMask,
@@ -365,7 +394,7 @@ impl TimestampRowFilter {
     }
 }
 
-impl ArrowPredicate for TimestampRowFilter {
+impl ArrowPredicate for FastTimestampRowFilter {
     fn projection(&self) -> &ProjectionMask {
         &self.projection
     }
@@ -404,6 +433,74 @@ impl ArrowPredicate for TimestampRowFilter {
                 }
             },
             DataType::Int64 => downcast_and_compute!(PrimitiveArray<Int64Type>),
+            _ => {
+                unreachable!()
+            }
+        }
+    }
+}
+
+/// [PlainTimestampRowFilter] iterates each element in timestamp column, build a [Timestamp] struct
+/// and checks if given time range contains the timestamp.
+struct PlainTimestampRowFilter {
+    timestamp_index: usize,
+    time_range: TimestampRange,
+    projection: ProjectionMask,
+}
+
+impl PlainTimestampRowFilter {
+    fn new(timestamp_index: usize, time_range: TimestampRange, projection: ProjectionMask) -> Self {
+        Self {
+            timestamp_index,
+            time_range,
+            projection,
+        }
+    }
+}
+
+impl ArrowPredicate for PlainTimestampRowFilter {
+    fn projection(&self) -> &ProjectionMask {
+        &self.projection
+    }
+
+    fn evaluate(&mut self, batch: RecordBatch) -> std::result::Result<BooleanArray, ArrowError> {
+        let ts_col = batch.column(self.timestamp_index);
+
+        macro_rules! downcast_and_compute {
+            ($array_ty: ty, $unit: ident) => {{
+                    let ts_col = ts_col
+                    .as_any()
+                    .downcast_ref::<$array_ty>()
+                    .unwrap(); // safety: we've checked the data type of timestamp column.
+                    Ok(BooleanArray::from_iter(ts_col.iter().map(|ts| {
+                        ts.map(|val| {
+                            Timestamp::new(val, TimeUnit::$unit)
+                        }).map(|ts| {
+                            self.time_range.contains(&ts)
+                        })
+                    })))
+
+            }};
+        }
+
+        match ts_col.data_type() {
+            DataType::Timestamp(unit, _) => match unit {
+                arrow::datatypes::TimeUnit::Second => {
+                    downcast_and_compute!(TimestampSecondArray, Second)
+                }
+                arrow::datatypes::TimeUnit::Millisecond => {
+                    downcast_and_compute!(TimestampMillisecondArray, Millisecond)
+                }
+                arrow::datatypes::TimeUnit::Microsecond => {
+                    downcast_and_compute!(TimestampMicrosecondArray, Microsecond)
+                }
+                arrow::datatypes::TimeUnit::Nanosecond => {
+                    downcast_and_compute!(TimestampNanosecondArray, Nanosecond)
+                }
+            },
+            DataType::Int64 => {
+                downcast_and_compute!(PrimitiveArray<Int64Type>, Millisecond)
+            }
             _ => {
                 unreachable!()
             }
@@ -860,5 +957,39 @@ mod tests {
             vec![1000, 1000, 1001, 2002, 2003, 2003, 3001],
         )
         .await;
+    }
+
+    fn check_unit_lossy(range_unit: TimeUnit, col_unit: TimeUnit, expect: bool) {
+        assert_eq!(
+            expect,
+            time_unit_lossy(
+                &TimestampRange::with_unit(0, 1, range_unit).unwrap(),
+                col_unit
+            )
+        )
+    }
+
+    #[test]
+    fn test_time_unit_lossy() {
+        // converting a range with unit second to millisecond will not cause rounding error
+        check_unit_lossy(TimeUnit::Second, TimeUnit::Second, false);
+        check_unit_lossy(TimeUnit::Second, TimeUnit::Millisecond, false);
+        check_unit_lossy(TimeUnit::Second, TimeUnit::Microsecond, false);
+        check_unit_lossy(TimeUnit::Second, TimeUnit::Nanosecond, false);
+
+        check_unit_lossy(TimeUnit::Millisecond, TimeUnit::Second, true);
+        check_unit_lossy(TimeUnit::Millisecond, TimeUnit::Millisecond, false);
+        check_unit_lossy(TimeUnit::Millisecond, TimeUnit::Microsecond, false);
+        check_unit_lossy(TimeUnit::Millisecond, TimeUnit::Nanosecond, false);
+
+        check_unit_lossy(TimeUnit::Microsecond, TimeUnit::Second, true);
+        check_unit_lossy(TimeUnit::Microsecond, TimeUnit::Millisecond, true);
+        check_unit_lossy(TimeUnit::Microsecond, TimeUnit::Microsecond, false);
+        check_unit_lossy(TimeUnit::Microsecond, TimeUnit::Nanosecond, false);
+
+        check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Second, true);
+        check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Millisecond, true);
+        check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Microsecond, true);
+        check_unit_lossy(TimeUnit::Nanosecond, TimeUnit::Nanosecond, false);
     }
 }
