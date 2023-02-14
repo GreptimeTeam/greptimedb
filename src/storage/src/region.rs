@@ -344,7 +344,8 @@ impl<S: LogStore> RegionImpl<S> {
         if let RegionMetaAction::Edit(e) = action {
             let edit = VersionEdit {
                 files_to_add: e.files_to_add,
-                flushed_sequence: Some(e.flushed_sequence),
+                files_to_remove: e.files_to_remove,
+                flushed_sequence: e.flushed_sequence,
                 manifest_version,
                 max_memtable_id: None,
             };

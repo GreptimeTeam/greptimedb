@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::marker::PhantomData;
+
 use common_telemetry::debug;
+use store_api::logstore::LogStore;
 
 use crate::compaction::scheduler::CompactionRequestImpl;
 use crate::compaction::strategy::StrategyRef;
@@ -26,25 +29,29 @@ pub trait Picker<R, T: CompactionTask>: Send + 'static {
 
 pub struct PickerContext {}
 
-/// L0 -> L1 all-to-all compaction based on time windows.
-pub(crate) struct SimplePicker {
+/// L0 -> L1 compaction based on time windows.
+pub(crate) struct SimplePicker<S> {
     strategy: StrategyRef,
+    _phantom_data: PhantomData<S>,
 }
 
 #[allow(unused)]
-impl SimplePicker {
+impl<S> SimplePicker<S> {
     pub fn new(strategy: StrategyRef) -> Self {
-        Self { strategy }
+        Self {
+            strategy,
+            _phantom_data: Default::default(),
+        }
     }
 }
 
-impl Picker<CompactionRequestImpl, CompactionTaskImpl> for SimplePicker {
+impl<S: LogStore> Picker<CompactionRequestImpl<S>, CompactionTaskImpl<S>> for SimplePicker<S> {
     fn pick(
         &self,
         ctx: &PickerContext,
-        req: &CompactionRequestImpl,
-    ) -> crate::error::Result<Option<CompactionTaskImpl>> {
-        let levels = req.levels();
+        req: &CompactionRequestImpl<S>,
+    ) -> crate::error::Result<Option<CompactionTaskImpl<S>>> {
+        let levels = &req.levels;
 
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
@@ -52,11 +59,22 @@ impl Picker<CompactionRequestImpl, CompactionTaskImpl> for SimplePicker {
 
             if outputs.is_empty() {
                 debug!("No SST file can be compacted at level {}", level_num);
-                return Ok(None);
+                continue;
             }
 
-            debug!("Found SST files to compact {:?}", outputs);
-            // TODO(hl): build compaction task
+            debug!(
+                "Found SST files to compact {:?} on level: {}",
+                outputs, level_num
+            );
+            return Ok(Some(CompactionTaskImpl {
+                schema: req.schema.clone(),
+                sst_layer: req.sst_layer.clone(),
+                outputs,
+                writer: req.writer.clone(),
+                shared_data: req.shared.clone(),
+                wal: req.wal.clone(),
+                manifest: req.manifest.clone(),
+            }));
         }
 
         Ok(None)

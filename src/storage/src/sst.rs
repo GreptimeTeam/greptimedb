@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod parquet;
+pub(crate) mod parquet;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use object_store::{util, ObjectStore};
 use serde::{Deserialize, Serialize};
@@ -27,7 +29,7 @@ use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
 use crate::read::BoxedBatchReader;
 use crate::schema::ProjectedSchemaRef;
-use crate::sst::parquet::{ParquetReader, ParquetWriter};
+use crate::sst::parquet::{ParquetReader, ParquetWriter, Source};
 
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: u8 = 2;
@@ -37,14 +39,6 @@ pub type Level = u8;
 // We only has fixed number of level, so we use array to hold elements. This implementation
 // detail of LevelMetaVec should not be exposed to the user of [LevelMetas].
 type LevelMetaVec = [LevelMeta; MAX_LEVEL as usize];
-
-/// Visitor to access file in each level.
-pub trait Visitor {
-    /// Visit all `files` in `level`.
-    ///
-    /// Now the input `files` are unordered.
-    fn visit(&mut self, level: usize, files: &[FileHandle]) -> Result<()>;
-}
 
 /// Metadata of all SSTs under a region.
 ///
@@ -77,32 +71,24 @@ impl LevelMetas {
     ///
     /// # Panics
     /// Panics if level of [FileHandle] is greater than [MAX_LEVEL].
-    pub fn merge(&self, files_to_add: impl Iterator<Item = FileHandle>) -> LevelMetas {
+    pub fn merge(
+        &self,
+        files_to_add: impl Iterator<Item = FileHandle>,
+        files_to_remove: impl Iterator<Item = FileHandle>,
+    ) -> LevelMetas {
         let mut merged = self.clone();
         for file in files_to_add {
-            let level = file.level_index();
-
-            merged.levels[level].add_file(file);
+            let level = file.level();
+            merged.levels[level as usize].add_file(file);
         }
 
-        // TODO(yingwen): Support file removal.
-
+        for file in files_to_remove {
+            let level = file.level();
+            merged.levels[level as usize].remove_file(file);
+        }
         merged
     }
 
-    /// Visit all SST files.
-    ///
-    /// Stop visiting remaining files if the visitor returns `Err`, and the `Err`
-    /// will be returned to caller.
-    pub fn visit_levels<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
-        for level in &self.levels {
-            level.visit_level(visitor)?;
-        }
-
-        Ok(())
-    }
-
-    #[cfg(test)]
     pub fn levels(&self) -> &[LevelMeta] {
         &self.levels
     }
@@ -121,23 +107,23 @@ pub struct LevelMeta {
     /// Handles to the files in this level.
     // TODO(yingwen): Now for simplicity, files are unordered, maybe sort the files by time range
     // or use another structure to hold them.
-    files: Vec<FileHandle>,
+    files: HashMap<String, FileHandle>,
 }
 
 impl LevelMeta {
     pub fn new_empty(level: Level) -> Self {
         Self {
             level,
-            files: vec![],
+            files: HashMap::new(),
         }
     }
 
     fn add_file(&mut self, file: FileHandle) {
-        self.files.push(file);
+        self.files.insert(file.file_name().to_string(), file);
     }
 
-    pub fn visit_level<V: Visitor>(&self, visitor: &mut V) -> Result<()> {
-        visitor.visit(self.level.into(), &self.files)
+    fn remove_file(&mut self, file_to_remove: FileHandle) {
+        self.files.remove(file_to_remove.file_name());
     }
 
     /// Returns the level of level meta.
@@ -146,8 +132,8 @@ impl LevelMeta {
         self.level
     }
 
-    pub fn files(&self) -> &[FileHandle] {
-        &self.files
+    pub fn files(&self) -> impl Iterator<Item = &FileHandle> {
+        self.files.values()
     }
 }
 
@@ -175,8 +161,8 @@ impl FileHandle {
 
     /// Returns level as usize so it can be used as index.
     #[inline]
-    pub fn level_index(&self) -> usize {
-        self.inner.meta.level.into()
+    pub fn level(&self) -> Level {
+        self.inner.meta.level
     }
 
     #[inline]
@@ -193,6 +179,12 @@ impl FileHandle {
     #[inline]
     pub fn compacting(&self) -> bool {
         self.inner.compacting.load(Ordering::Relaxed)
+    }
+
+    /// Sets the compacting flag.
+    #[inline]
+    pub fn set_compacting(&self, compacting: bool) {
+        self.inner.compacting.store(compacting, Ordering::Relaxed);
     }
 }
 
@@ -215,7 +207,7 @@ impl FileHandleInner {
 }
 
 /// Immutable metadata of a sst file.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileMeta {
     pub file_name: String,
     pub time_range: Option<(Timestamp, Timestamp)>,
@@ -236,9 +228,10 @@ pub struct ReadOptions {
     pub projected_schema: ProjectedSchemaRef,
 
     pub predicate: Predicate,
+    pub time_range: TimestampRange,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct SstInfo {
     pub time_range: Option<(Timestamp, Timestamp)>,
 }
@@ -256,6 +249,9 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
 
     /// Read SST file with given `file_name` and schema.
     async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
+
+    /// Returns backend object store.
+    fn object_store(&self) -> ObjectStore;
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
@@ -292,7 +288,7 @@ impl AccessLayer for FsAccessLayer {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(file_name);
-        let writer = ParquetWriter::new(&file_path, iter, self.object_store.clone());
+        let writer = ParquetWriter::new(&file_path, Source::Iter(iter), self.object_store.clone());
         writer.write_sst(opts).await
     }
 
@@ -303,9 +299,113 @@ impl AccessLayer for FsAccessLayer {
             self.object_store.clone(),
             opts.projected_schema.clone(),
             opts.predicate.clone(),
+            opts.time_range,
         );
 
         let stream = reader.chunk_stream().await?;
         Ok(Box::new(stream))
+    }
+
+    fn object_store(&self) -> ObjectStore {
+        self.object_store.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    fn create_handle(name: &str, level: Level) -> FileHandle {
+        FileHandle::new(FileMeta {
+            file_name: name.to_string(),
+            time_range: None,
+            level,
+        })
+    }
+
+    #[test]
+    fn test_level_metas_add_and_remove() {
+        let metas = LevelMetas::new();
+        let merged = metas.merge(
+            vec![create_handle("a", 0), create_handle("b", 0)].into_iter(),
+            vec![].into_iter(),
+        );
+
+        assert_eq!(
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            merged
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let merged1 = merged.merge(
+            vec![create_handle("c", 1), create_handle("d", 1)].into_iter(),
+            vec![].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from(["a".to_string(), "b".to_string()]),
+            merged1
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::from(["c".to_string(), "d".to_string()]),
+            merged1
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let removed1 = merged1.merge(
+            vec![].into_iter(),
+            vec![create_handle("a", 0), create_handle("c", 0)].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from(["b".to_string()]),
+            removed1
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::from(["c".to_string(), "d".to_string()]),
+            removed1
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        let removed2 = removed1.merge(
+            vec![].into_iter(),
+            vec![create_handle("c", 1), create_handle("d", 1)].into_iter(),
+        );
+        assert_eq!(
+            HashSet::from(["b".to_string()]),
+            removed2
+                .level(0)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
+
+        assert_eq!(
+            HashSet::new(),
+            removed2
+                .level(1)
+                .files()
+                .map(|f| f.file_name().to_string())
+                .collect()
+        );
     }
 }

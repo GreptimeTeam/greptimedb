@@ -19,7 +19,7 @@ mod basic;
 mod flush;
 mod projection;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common_telemetry::logging;
 use datatypes::prelude::{ScalarVector, WrapperType};
@@ -115,10 +115,11 @@ impl<S: LogStore> TesterBase<S> {
         let mut reader = resp.reader;
 
         let metadata = self.region.in_memory_metadata();
-        assert_eq!(metadata.schema(), reader.schema());
+        assert_eq!(metadata.schema(), reader.user_schema());
 
         let mut dst = Vec::new();
         while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            let chunk = reader.project_chunk(chunk);
             append_chunk_to(&chunk, &mut dst);
         }
 
@@ -331,11 +332,15 @@ async fn test_recover_region_manifets() {
     assert_eq!(version.flushed_sequence(), 2);
     assert_eq!(version.manifest_version(), 1);
     let ssts = version.ssts();
-    let files = ssts.levels()[0].files();
+    let files = ssts.levels()[0]
+        .files()
+        .map(|f| f.file_name().to_string())
+        .collect::<HashSet<_>>();
     assert_eq!(3, files.len());
-    for (i, file) in files.iter().enumerate() {
-        assert_eq!(format!("f{}", i + 1), file.file_name());
-    }
+    assert_eq!(
+        HashSet::from(["f1".to_string(), "f2".to_string(), "f3".to_string()]),
+        files
+    );
 
     // check manifest state
     assert_eq!(3, manifest.last_version());

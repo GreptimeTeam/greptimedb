@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use async_trait::async_trait;
 use common_telemetry::{debug, info};
 use snafu::ResultExt;
+use store_api::logstore::LogStore;
 use table::metadata::TableId;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -30,29 +31,33 @@ use crate::compaction::rate_limit::{
 };
 use crate::compaction::task::CompactionTask;
 use crate::error::{Result, StopCompactionSchedulerSnafu};
+use crate::manifest::region::RegionManifest;
+use crate::region::{RegionWriterRef, SharedDataRef};
+use crate::schema::RegionSchemaRef;
+use crate::sst::AccessLayerRef;
 use crate::version::LevelMetasRef;
+use crate::wal::Wal;
 
 /// Table compaction request.
-#[derive(Default)]
-pub struct CompactionRequestImpl {
+pub struct CompactionRequestImpl<S: LogStore> {
     table_id: TableId,
-    levels: LevelMetasRef,
+    pub levels: LevelMetasRef,
+    pub schema: RegionSchemaRef,
+    pub sst_layer: AccessLayerRef,
+    pub writer: RegionWriterRef,
+    pub shared: SharedDataRef,
+    pub manifest: RegionManifest,
+    pub wal: Wal<S>,
 }
 
-impl CompactionRequestImpl {
-    pub fn levels(&self) -> &LevelMetasRef {
-        &self.levels
-    }
-}
-
-impl CompactionRequest for CompactionRequestImpl {
+impl<S: LogStore> CompactionRequest for CompactionRequestImpl<S> {
     #[inline]
     fn table_id(&self) -> TableId {
         self.table_id
     }
 }
 
-pub trait CompactionRequest: Send + Sync + Default + 'static {
+pub trait CompactionRequest: Send + Sync + 'static {
     fn table_id(&self) -> TableId;
 }
 
@@ -316,15 +321,9 @@ mod tests {
         let handler_cloned = handler.clone();
         common_runtime::spawn_bg(async move { handler_cloned.run().await });
 
-        queue
-            .write()
-            .unwrap()
-            .push_back(1, CompactionRequestImpl::default());
+        queue.write().unwrap().push_back(1, MockRequest::default());
         handler.task_notifier.notify_one();
-        queue
-            .write()
-            .unwrap()
-            .push_back(2, CompactionRequestImpl::default());
+        queue.write().unwrap().push_back(2, MockRequest::default());
         handler.task_notifier.notify_one();
 
         tokio::time::timeout(Duration::from_secs(1), latch.wait())

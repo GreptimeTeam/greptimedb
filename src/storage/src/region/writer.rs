@@ -95,7 +95,7 @@ impl RegionWriter {
         shared: &SharedDataRef,
         manifest: &RegionManifest,
         edit: RegionEdit,
-        max_memtable_id: MemtableId,
+        max_memtable_id: Option<MemtableId>,
     ) -> Result<()> {
         let _lock = self.version_mutex.lock().await;
         // HACK: We won't acquire the write lock here because write stall would hold
@@ -112,6 +112,7 @@ impl RegionWriter {
         );
 
         let files_to_add = edit.files_to_add.clone();
+        let files_to_remove = edit.files_to_remove.clone();
         let flushed_sequence = edit.flushed_sequence;
 
         // Persist the meta action.
@@ -121,9 +122,10 @@ impl RegionWriter {
 
         let version_edit = VersionEdit {
             files_to_add,
-            flushed_sequence: Some(flushed_sequence),
+            files_to_remove,
+            flushed_sequence,
             manifest_version,
-            max_memtable_id: Some(max_memtable_id),
+            max_memtable_id,
         };
 
         // We could tolerate failure during persisting manifest version to the WAL, since it won't
