@@ -350,6 +350,7 @@ pub async fn setup_grpc_server(
     let fe_instance_ref = Arc::new(fe_instance);
     let fe_grpc_server = Arc::new(GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref),
+        None,
         runtime,
     ));
     let grpc_server_clone = fe_grpc_server.clone();

@@ -89,6 +89,7 @@ impl Services {
         Ok(Self {
             grpc_server: GrpcServer::new(
                 ServerGrpcQueryHandlerAdaptor::arc(instance),
+                None,
                 grpc_runtime,
             ),
             mysql_server,

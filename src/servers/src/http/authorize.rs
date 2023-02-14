@@ -241,7 +241,7 @@ fn auth_header<B>(req: &Request<B>) -> Result<(AuthScheme, Credential)> {
         .get(http::header::AUTHORIZATION)
         .context(error::NotFoundAuthHeaderSnafu)?
         .to_str()
-        .context(InvisibleASCIISnafu)?;
+        .context(error::HttpInvisibleASCIISnafu)?;
 
     let (auth_scheme, encoded_credentials) = auth_header
         .split_once(' ')

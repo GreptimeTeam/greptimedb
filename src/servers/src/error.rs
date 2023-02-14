@@ -22,7 +22,6 @@ use axum::Json;
 use base64::DecodeError;
 use catalog;
 use common_error::prelude::*;
-use hyper::header::ToStrError;
 use serde_json::json;
 use tonic::codegen::http::{HeaderMap, HeaderValue};
 use tonic::metadata::MetadataMap;
@@ -223,8 +222,14 @@ pub enum Error {
     NotFoundInfluxAuth {},
 
     #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
-    InvisibleASCII {
-        source: ToStrError,
+    HttpInvisibleASCII {
+        source: hyper::header::ToStrError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
+    TonicInvisibleASCII {
+        source: tonic::metadata::errors::ToStrError,
         backtrace: Backtrace,
     },
 
@@ -309,7 +314,8 @@ impl ErrorExt for Error {
             DescribeStatement { source } => source.status_code(),
 
             NotFoundAuthHeader { .. } | NotFoundInfluxAuth { .. } => StatusCode::AuthHeaderNotFound,
-            InvisibleASCII { .. }
+            HttpInvisibleASCII { .. }
+            | TonicInvisibleASCII { .. }
             | UnsupportedAuthScheme { .. }
             | InvalidAuthorizationHeader { .. }
             | InvalidBase64Value { .. }

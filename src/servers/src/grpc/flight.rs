@@ -33,21 +33,34 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::auth::UserProviderRef;
 use crate::error;
+use crate::error::{NotFoundAuthHeaderSnafu, TonicInvisibleASCIISnafu};
 use crate::grpc::flight::stream::FlightRecordBatchStream;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 type TonicResult<T> = Result<T, Status>;
 type TonicStream<T> = Pin<Box<dyn Stream<Item = TonicResult<T>> + Send + Sync + 'static>>;
 
+const GRPC_AUTH_HEADER: &str = "authorization";
+
 pub(crate) struct FlightHandler {
     handler: ServerGrpcQueryHandlerRef,
+    user_provider: Option<UserProviderRef>,
     runtime: Arc<Runtime>,
 }
 
 impl FlightHandler {
-    pub(crate) fn new(handler: ServerGrpcQueryHandlerRef, runtime: Arc<Runtime>) -> Self {
-        Self { handler, runtime }
+    pub(crate) fn new(
+        handler: ServerGrpcQueryHandlerRef,
+        user_provider: Option<UserProviderRef>,
+        runtime: Arc<Runtime>,
+    ) -> Self {
+        Self {
+            handler,
+            user_provider,
+            runtime,
+        }
     }
 }
 
@@ -88,6 +101,16 @@ impl FlightService for FlightHandler {
     type DoGetStream = TonicStream<FlightData>;
 
     async fn do_get(&self, request: Request<Ticket>) -> TonicResult<Response<Self::DoGetStream>> {
+        if let Some(user_provider) = &self.user_provider {
+            // check auth
+            let header = request
+                .metadata()
+                .get(GRPC_AUTH_HEADER)
+                .context(NotFoundAuthHeaderSnafu)?
+                .to_str()
+                .context(TonicInvisibleASCIISnafu)?;
+        }
+
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_slice()).context(error::InvalidFlightTicketSnafu)?;
