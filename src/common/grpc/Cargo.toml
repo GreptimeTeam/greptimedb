@@ -27,6 +27,7 @@ tower = "0.4"
 [dev-dependencies]
 criterion = "0.4"
 rand = "0.8"
+tempdir = "0.3"
 
 [[bench]]
 name = "bench_main"

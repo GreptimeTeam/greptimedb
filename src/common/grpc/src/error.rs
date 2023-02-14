@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::io;
 
 use common_error::prelude::{ErrorExt, StatusCode};
 use snafu::{Backtrace, ErrorCompat, Snafu};
@@ -22,6 +23,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Invalid client tls config, {}", msg))]
+    InvalidTlsConfig { msg: String },
+
+    #[snafu(display("Invalid config file path, {}", source))]
+    InvalidConfigFilePath {
+        source: io::Error,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, backtrace: Backtrace },
 
@@ -81,7 +91,9 @@ pub enum Error {
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::MissingField { .. }
+            Error::InvalidTlsConfig { .. }
+            | Error::InvalidConfigFilePath { .. }
+            | Error::MissingField { .. }
             | Error::TypeMismatch { .. }
             | Error::InvalidFlightData { .. } => StatusCode::InvalidArguments,
 
