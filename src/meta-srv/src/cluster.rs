@@ -212,7 +212,7 @@ fn check_resp_header(header: &Option<ResponseHeader>, ctx: Context) -> Result<()
 
 fn need_retry(error: &error::Error) -> bool {
     match error {
-        error::Error::NoLeader { .. } => true,
+        error::Error::IsNotLeader { .. } => true,
         error::Error::Range { source, .. } | error::Error::BatchGet { source, .. } => {
             match_for_io_error(source).is_some()
         }
