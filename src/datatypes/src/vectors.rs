@@ -180,13 +180,17 @@ pub trait MutableVector: Send + Sync {
 
     /// Push value ref to this mutable vector.
     fn push_value_ref(&mut self, value: ValueRef) {
-        self.try_push_value_ref(value).unwrap()
+        self.try_push_value_ref(value).unwrap_or_else(|_| {
+            panic!(
+                "expecting pushing value of datatype {:?}, actual {:?}",
+                self.data_type(),
+                value
+            );
+        });
     }
 
     // Push null value ref to this mutable vector.
-    fn push_null(&mut self) -> Result<()> {
-        self.try_push_value_ref(ValueRef::Null)
-    }
+    fn push_null(&mut self);
 
     /// Extend this mutable vector by slice of `vector`.
     ///

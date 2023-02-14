@@ -96,7 +96,7 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
 
         for i in 0..rows {
             if let Some(true) = nulls_iter.next() {
-                vector.push_null().context(CreateVectorSnafu)?;
+                vector.push_null();
             } else {
                 let value_ref = values_iter
                     .next()
@@ -112,7 +112,7 @@ pub fn column_to_vector(column: &Column, rows: u32) -> Result<VectorRef> {
             }
         }
     } else {
-        (0..rows).try_for_each(|_| vector.push_null().context(CreateVectorSnafu))?;
+        (0..rows).for_each(|_| vector.push_null());
     }
     Ok(vector.to_vector())
 }
@@ -331,11 +331,9 @@ fn add_values_to_builder(
         let mut idx_of_values = 0;
         for idx in 0..row_count {
             match is_null(&null_mask, idx) {
-                Some(true) => builder.push_null().context(CreateVectorSnafu)?,
+                Some(true) => builder.push_null(),
                 _ => {
-                    builder
-                        .try_push_value_ref(values[idx_of_values].as_value_ref())
-                        .context(CreateVectorSnafu)?;
+                    builder.push_value_ref(values[idx_of_values].as_value_ref());
                     idx_of_values += 1
                 }
             }
