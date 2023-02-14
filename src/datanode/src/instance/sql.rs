@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::{Duration, SystemTime};
+
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_query::Output;
@@ -165,8 +167,31 @@ impl Instance {
         self.execute_stmt(stmt, query_ctx).await
     }
 
-    pub async fn execute_promql(&self, sql: &str, query_ctx: QueryContextRef) -> Result<Output> {
-        let stmt = QueryLanguageParser::parse_promql(sql).context(ExecuteSqlSnafu)?;
+    pub async fn execute_promql(&self, promql: &str, query_ctx: QueryContextRef) -> Result<Output> {
+        let stmt = QueryLanguageParser::parse_promql(promql).context(ExecuteSqlSnafu)?;
+        self.execute_stmt(stmt, query_ctx).await
+    }
+
+    // TODO(ruihang): merge this and `execute_promql` after #951 landed
+    pub async fn execute_promql_statement(
+        &self,
+        promql: &str,
+        start: SystemTime,
+        end: SystemTime,
+        interval: Duration,
+        lookback: Duration,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let mut stmt = QueryLanguageParser::parse_promql(promql).context(ExecuteSqlSnafu)?;
+        match &mut stmt {
+            QueryStatement::Sql(_) => unreachable!(),
+            QueryStatement::Promql(eval_stmt) => {
+                eval_stmt.start = start;
+                eval_stmt.end = end;
+                eval_stmt.interval = interval;
+                eval_stmt.lookback_delta = lookback
+            }
+        }
         self.execute_stmt(stmt, query_ctx).await
     }
 }
