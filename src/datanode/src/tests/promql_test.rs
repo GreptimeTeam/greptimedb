@@ -307,12 +307,38 @@ async fn aggregators_complex_combined_aggrs() {
     create_insert_query_assert(
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
-        "sum(http_requests) by (job) + min(http_requests) by (job) + max(http_requests) by (job) + avg(http_requests) by (job)",
+        "sum(http_requests) by (job) + min(http_requests) by (job) ",
         UNIX_EPOCH,
         unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
-        "",
+        "+------------+---------------------------------------------------------+\
+        \n| job        | lhs.SUM(http_requests.value) + MIN(http_requests.value) |\
+        \n+------------+---------------------------------------------------------+\
+        \n| api-server | 1100                                                    |\
+        \n| app-server | 3100                                                    |\
+        \n+------------+---------------------------------------------------------+",
+    )
+    .await;
+}
+
+// This is not from promethues test set. It's derived from `aggregators_complex_combined_aggrs()`
+#[tokio::test(flavor = "multi_thread")]
+async fn two_aggregators_combined_aggrs() {
+    create_insert_query_assert(
+        AGGREGATORS_CREATE_TABLE,
+        AGGREGATORS_INSERT_DATA,
+        "sum(http_requests) by (job) + min(http_requests) by (job) ",
+        UNIX_EPOCH,
+        unix_epoch_plus_100s(),
+        Duration::from_secs(60),
+        Duration::from_secs(0),
+        "+------------+---------------------------------------------------------+\
+        \n| job        | lhs.SUM(http_requests.value) + MIN(http_requests.value) |\
+        \n+------------+---------------------------------------------------------+\
+        \n| api-server | 1100                                                    |\
+        \n| app-server | 3100                                                    |\
+        \n+------------+---------------------------------------------------------+",
     )
     .await;
 }
@@ -336,6 +362,33 @@ async fn stddev_by_label() {
         \n+----------+-----------------------------+\
         \n| 0        | 258.19888974716116          |\
         \n+----------+-----------------------------+",
+    )
+    .await;
+}
+
+// This is not derived from prometheus
+#[tokio::test(flavor = "multi_thread")]
+async fn binary_op_plain_columns() {
+    create_insert_query_assert(
+        AGGREGATORS_CREATE_TABLE,
+        AGGREGATORS_INSERT_DATA,
+        r#"http_requests - http_requests"#,
+        UNIX_EPOCH,
+        unix_epoch_plus_100s(),
+        Duration::from_secs(60),
+        Duration::from_secs(0),
+        "+------------+----------+------------+---------------------+-------------------------------------------+\
+        \n| job        | instance | group      | ts                  | http_requests.value - http_requests.value |\
+        \n+------------+----------+------------+---------------------+-------------------------------------------+\
+        \n| api-server | 0        | canary     | 1970-01-01T00:00:00 | 0                                         |\
+        \n| api-server | 0        | production | 1970-01-01T00:00:00 | 0                                         |\
+        \n| api-server | 1        | canary     | 1970-01-01T00:00:00 | 0                                         |\
+        \n| api-server | 1        | production | 1970-01-01T00:00:00 | 0                                         |\
+        \n| app-server | 0        | canary     | 1970-01-01T00:00:00 | 0                                         |\
+        \n| app-server | 0        | production | 1970-01-01T00:00:00 | 0                                         |\
+        \n| app-server | 1        | canary     | 1970-01-01T00:00:00 | 0                                         |\
+        \n| app-server | 1        | production | 1970-01-01T00:00:00 | 0                                         |\
+        \n+------------+----------+------------+---------------------+-------------------------------------------+",
     )
     .await;
 }
