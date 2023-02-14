@@ -303,6 +303,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_recordbatch::util;
     use datatypes::prelude::ScalarVector;
+    use datatypes::value::Value;
     use datatypes::vectors::{Float64Vector, Int64Vector};
     use query::QueryEngineFactory;
     use table::table::numbers::NumbersTable;
@@ -357,6 +358,36 @@ def test(number)->vector[u32]:
         .unwrap();
         let rb = res.iter().next().expect("One and only one recordbatch");
         assert_eq!(rb.column(0).len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_user_params_in_py() {
+        let script_engine = sample_script_engine();
+
+        let script = r#"
+@copr(returns = ["number"])
+def test(**params)->vector[i64]:
+    return int(params['a']) + int(params['b'])
+"#;
+        let script = script_engine
+            .compile(script, CompileContext::default())
+            .await
+            .unwrap();
+        let mut params = HashMap::new();
+        params.insert("a".to_string(), "30".to_string());
+        params.insert("b".to_string(), "12".to_string());
+        let _output = script
+            .execute(params, EvalContext::default())
+            .await
+            .unwrap();
+        let res = match _output {
+            Output::RecordBatches(s) => s,
+            _ => todo!(),
+        };
+        let rb = res.iter().next().expect("One and only one recordbatch");
+        assert_eq!(rb.column(0).len(), 1);
+        let result = rb.column(0).get(0);
+        assert!(matches!(result, Value::Int64(42)));
     }
 
     #[tokio::test]

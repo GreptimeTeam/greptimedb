@@ -68,6 +68,25 @@ async fn test_sql_output_rows() {
     match &json.output().expect("assertion failed")[0] {
         JsonOutput::Records(records) => {
             assert_eq!(1, records.num_rows());
+            let json = serde_json::to_string_pretty(&records).unwrap();
+            assert_eq!(
+                json,
+                r#"{
+  "schema": {
+    "column_schemas": [
+      {
+        "name": "SUM(numbers.uint32s)",
+        "data_type": "UInt64"
+      }
+    ]
+  },
+  "rows": [
+    [
+      4950
+    ]
+  ]
+}"#
+            );
         }
         _ => unreachable!(),
     }
@@ -95,6 +114,25 @@ async fn test_sql_form() {
     match &json.output().expect("assertion failed")[0] {
         JsonOutput::Records(records) => {
             assert_eq!(1, records.num_rows());
+            let json = serde_json::to_string_pretty(&records).unwrap();
+            assert_eq!(
+                json,
+                r#"{
+  "schema": {
+    "column_schemas": [
+      {
+        "name": "SUM(numbers.uint32s)",
+        "data_type": "UInt64"
+      }
+    ]
+  },
+  "rows": [
+    [
+      4950
+    ]
+  ]
+}"#
+            );
         }
         _ => unreachable!(),
     }
@@ -115,7 +153,7 @@ async fn test_scripts() {
     common_telemetry::init_default_ut_logging();
 
     let script = r#"
-@copr(sql='select uint32s as number from numbers', args=['number'], returns=['n'])
+@copr(sql='select uint32s as number from numbers limit 10', args=['number'], returns=['n'])
 def test(n):
     return n;
 "#
@@ -138,10 +176,11 @@ def test(n):
 
     let body = RawBody(Body::from(script));
     let exec = create_script_query();
+    // Insert the script
     let Json(json) = script_handler::scripts(
         State(ApiState {
-            sql_handler,
-            script_handler: Some(script_handler),
+            sql_handler: sql_handler.clone(),
+            script_handler: Some(script_handler.clone()),
         }),
         exec,
         body,
@@ -150,6 +189,72 @@ def test(n):
     assert!(json.success(), "{json:?}");
     assert!(json.error().is_none());
     assert!(json.output().is_none());
+
+    // Run the script
+    let exec = create_script_query();
+    let Json(json) = script_handler::run_script(
+        State(ApiState {
+            sql_handler,
+            script_handler: Some(script_handler),
+        }),
+        exec,
+    )
+    .await;
+    assert!(json.success(), "{json:?}");
+    assert!(json.error().is_none());
+
+    match &json.output().unwrap()[0] {
+        JsonOutput::Records(records) => {
+            let json = serde_json::to_string_pretty(&records).unwrap();
+            assert_eq!(10, records.num_rows());
+            assert_eq!(
+                json,
+                r#"{
+  "schema": {
+    "column_schemas": [
+      {
+        "name": "n",
+        "data_type": "UInt32"
+      }
+    ]
+  },
+  "rows": [
+    [
+      0
+    ],
+    [
+      1
+    ],
+    [
+      2
+    ],
+    [
+      3
+    ],
+    [
+      4
+    ],
+    [
+      5
+    ],
+    [
+      6
+    ],
+    [
+      7
+    ],
+    [
+      8
+    ],
+    [
+      9
+    ]
+  ]
+}"#
+            );
+        }
+        _ => unreachable!(),
+    }
 }
 
 fn create_script_query() -> Query<script_handler::ScriptQuery> {
