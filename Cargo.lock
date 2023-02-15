@@ -1527,6 +1527,7 @@ dependencies = [
  "object-store",
  "serde",
  "serde_json",
+ "smallvec",
  "snafu",
  "tempdir",
  "tokio",

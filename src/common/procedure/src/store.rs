@@ -365,8 +365,8 @@ mod tests {
             Ok(self.data.clone())
         }
 
-        fn lock_key(&self) -> Option<LockKey> {
-            None
+        fn lock_key(&self) -> LockKey {
+            LockKey::default()
         }
     }
 

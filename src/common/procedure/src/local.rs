@@ -30,7 +30,8 @@ use crate::local::runner::Runner;
 use crate::procedure::BoxedProcedureLoader;
 use crate::store::{ObjectStateStore, ProcedureMessage, ProcedureStore, StateStoreRef};
 use crate::{
-    BoxedProcedure, LockKey, ProcedureId, ProcedureManager, ProcedureState, ProcedureWithId,
+    BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
+    ProcedureWithId,
 };
 
 /// Mutable metadata of a procedure during execution.
@@ -70,7 +71,7 @@ pub(crate) struct ProcedureMeta {
     /// Notify to wait for subprocedures.
     child_notify: Notify,
     /// Lock required by this procedure.
-    lock_key: Option<LockKey>,
+    lock_key: LockKey,
     /// Mutable status during execution.
     exec_meta: Mutex<ExecMeta>,
 }
@@ -126,6 +127,13 @@ pub(crate) struct ManagerContext {
     // should be able to remove the its message and all its child messages.
     /// Messages loaded from the procedure store.
     messages: Mutex<HashMap<ProcedureId, ProcedureMessage>>,
+}
+
+#[async_trait]
+impl ContextProvider for ManagerContext {
+    async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
+        Ok(self.state(procedure_id))
+    }
 }
 
 impl ManagerContext {
@@ -409,7 +417,7 @@ mod test_util {
             lock_notify: Notify::new(),
             parent_id: None,
             child_notify: Notify::new(),
-            lock_key: None,
+            lock_key: LockKey::default(),
             exec_meta: Mutex::new(ExecMeta::default()),
         }
     }
@@ -508,8 +516,8 @@ mod tests {
             Ok(self.content.clone())
         }
 
-        fn lock_key(&self) -> Option<LockKey> {
-            None
+        fn lock_key(&self) -> LockKey {
+            LockKey::default()
         }
     }
 
@@ -617,8 +625,8 @@ mod tests {
                 unimplemented!()
             }
 
-            fn lock_key(&self) -> Option<LockKey> {
-                Some(LockKey::new("test.submit"))
+            fn lock_key(&self) -> LockKey {
+                LockKey::single("test.submit")
             }
         }
 
