@@ -32,7 +32,7 @@ use table::requests::*;
 
 use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateSchemaSnafu,
-    CreateTableSnafu, InsertSystemCatalogSnafu, InvalidPrimaryKeySnafu, KeyColumnNotFoundSnafu,
+    CreateTableSnafu, IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
     RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
 };
 use crate::sql::SqlHandler;
@@ -159,8 +159,8 @@ impl SqlHandler {
 
         ensure!(
             pk_map.len() < 2,
-            InvalidPrimaryKeySnafu {
-                msg: "Multiple definitions of primary key found"
+            IllegalPrimaryKeysDefSnafu {
+                msg: "not allowed to inline multiple primary keys in columns options"
             }
         );
 
@@ -191,8 +191,8 @@ impl SqlHandler {
                         }
                     } else if is_primary {
                         if !primary_keys.is_empty() {
-                            return InvalidPrimaryKeySnafu {
-                                msg: "Multiple definitions of primary key found",
+                            return IllegalPrimaryKeysDefSnafu {
+                                msg: "found definitions of primary keys in multiple places",
                             }
                             .fail();
                         }
@@ -223,7 +223,7 @@ impl SqlHandler {
 
         ensure!(
             !primary_keys.iter().any(|index| *index == ts_index),
-            InvalidPrimaryKeySnafu {
+            IllegalPrimaryKeysDefSnafu {
                 msg: "time index column can't be included in primary key"
             }
         );
@@ -337,7 +337,7 @@ mod tests {
         let error = handler
             .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap_err();
-        assert_matches!(error, Error::InvalidPrimaryKey { .. });
+        assert_matches!(error, Error::IllegalPrimaryKeysDef { .. });
     }
 
     #[tokio::test]
@@ -352,7 +352,7 @@ mod tests {
         let error = handler
             .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap_err();
-        assert_matches!(error, Error::InvalidPrimaryKey { .. });
+        assert_matches!(error, Error::IllegalPrimaryKeysDef { .. });
     }
 
     #[tokio::test]
@@ -410,7 +410,7 @@ mod tests {
         let error = handler
             .create_to_request(42, create_table, &TableReference::full("c", "s", "demo"))
             .unwrap_err();
-        assert_matches!(error, Error::InvalidPrimaryKey { .. });
+        assert_matches!(error, Error::IllegalPrimaryKeysDef { .. });
     }
 
     #[tokio::test]
