@@ -13,22 +13,26 @@
 // limitations under the License.
 use catalog::CatalogManagerRef;
 use common_query::Output;
+use common_recordbatch::RecordBatches;
 use datatypes::data_type::DataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::vectors::MutableVector;
+use query::parser::QueryStatement;
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
 use sql::statements::insert::Insert;
+use sql::statements::statement::Statement;
 use sql::statements::{self};
 use table::engine::TableReference;
 use table::requests::*;
 
 use crate::error::{
     CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
-    ColumnValuesNumberMismatchSnafu, InsertSnafu, MissingInsertValuesSnafu, ParseSqlSnafu,
-    ParseSqlValueSnafu, Result, TableNotFoundSnafu,
+    ColumnValuesNumberMismatchSnafu, ExecuteSqlSnafu, InsertSnafu, MissingInsertBodySnafu,
+    ParseSqlSnafu, ParseSqlValueSnafu, Result, TableNotFoundSnafu,
 };
-use crate::sql::{SqlHandler, SqlRequest};
+use crate::sql::{table_idents_to_full_name, SqlHandler, SqlRequest};
 
 const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
@@ -51,22 +55,17 @@ impl SqlHandler {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    // FIXME(dennis): move it to frontend when refactor is done.
-    fn insert_to_columns_values<'a>(
-        &self,
-        table_ref: &'a TableReference,
+    fn build_columns_from_values<'a>(
+        table_ref: &'a TableReference<'a>,
         schema: &'a SchemaRef,
-        stmt: &'a Insert,
+        values: Vec<Vec<SqlValue>>,
         columns: &Vec<&String>,
-        columns_num: usize,
         columns_builders: &mut Vec<(&'a ColumnSchema, Box<dyn MutableVector>)>,
     ) -> Result<()> {
-        let values = stmt
-            .values_body()
-            .context(ParseSqlValueSnafu)?
-            .context(MissingInsertValuesSnafu)?;
+        let columns_num = Self::columns_num(schema, columns);
         let rows_num = values.len();
 
+        // Initialize vectors
         if columns.is_empty() {
             for column_schema in schema.column_schemas() {
                 let data_type = &column_schema.data_type;
@@ -104,37 +103,93 @@ impl SqlHandler {
         Ok(())
     }
 
-    pub(crate) fn insert_to_request(
+    // FIXME(dennis): move it to frontend when refactor is done.
+    async fn build_columns_from_stmt<'a>(
+        &self,
+        table_ref: &'a TableReference<'a>,
+        schema: &'a SchemaRef,
+        stmt: &'a Insert,
+        columns: &Vec<&String>,
+        columns_builders: &mut Vec<(&'a ColumnSchema, Box<dyn MutableVector>)>,
+        query_ctx: QueryContextRef,
+    ) -> Result<()> {
+        if stmt.is_insert_select() {
+            let query = stmt
+                .query_body()
+                .context(ParseSqlValueSnafu)?
+                .context(MissingInsertBodySnafu)?;
+
+            let logical_plan = self
+                .query_engine
+                .statement_to_plan(
+                    QueryStatement::Sql(Statement::Query(Box::new(query))),
+                    query_ctx,
+                )
+                .context(ExecuteSqlSnafu)?;
+
+            let output = self
+                .query_engine
+                .execute(&logical_plan)
+                .await
+                .context(ExecuteSqlSnafu)?;
+
+            // TODO(dennis): streaming insert to avoid too much memroy consumption.
+            let _batches = match output {
+                Output::Stream(s) => RecordBatches::try_collect(s).await.unwrap(),
+                Output::RecordBatches(bs) => bs,
+                _ => unreachable!(),
+            };
+
+            Ok(())
+        } else {
+            let values = stmt
+                .values_body()
+                .context(ParseSqlValueSnafu)?
+                .context(MissingInsertBodySnafu)?;
+
+            Self::build_columns_from_values(table_ref, schema, values, columns, columns_builders)
+        }
+    }
+
+    fn columns_num(schema: &SchemaRef, columns: &Vec<&String>) -> usize {
+        if columns.is_empty() {
+            schema.column_schemas().len()
+        } else {
+            columns.len()
+        }
+    }
+
+    pub(crate) async fn insert_to_request(
         &self,
         catalog_manager: CatalogManagerRef,
         stmt: Insert,
-        table_ref: TableReference,
+        query_ctx: QueryContextRef,
     ) -> Result<SqlRequest> {
+        let (catalog_name, schema_name, table_name) =
+            table_idents_to_full_name(stmt.table_name(), query_ctx.clone())?;
+        let table_ref = TableReference::full(&catalog_name, &schema_name, &table_name);
+
         let columns = stmt.columns();
 
         let table = catalog_manager
-            .table(table_ref.catalog, table_ref.schema, table_ref.table)
+            .table(&catalog_name, &schema_name, &table_name)
             .context(CatalogSnafu)?
             .context(TableNotFoundSnafu {
                 table_name: table_ref.table,
             })?;
         let schema = table.schema();
-        let columns_num = if columns.is_empty() {
-            schema.column_schemas().len()
-        } else {
-            columns.len()
-        };
 
         let mut columns_builders: Vec<(&ColumnSchema, Box<dyn MutableVector>)> =
-            Vec::with_capacity(columns_num);
-        self.insert_to_columns_values(
+            Vec::with_capacity(Self::columns_num(&schema, &columns));
+        self.build_columns_from_stmt(
             &table_ref,
             &schema,
             &stmt,
             &columns,
-            columns_num,
             &mut columns_builders,
-        )?;
+            query_ctx,
+        )
+        .await?;
 
         Ok(SqlRequest::Insert(InsertRequest {
             catalog_name: table_ref.catalog.to_string(),

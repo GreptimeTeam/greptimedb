@@ -107,8 +107,8 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Missing insert values"))]
-    MissingInsertValues { backtrace: Backtrace },
+    #[snafu(display("Missing insert body"))]
+    MissingInsertBody { backtrace: Backtrace },
 
     #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
     Insert {
@@ -382,7 +382,7 @@ impl ErrorExt for Error {
             | Error::ConstraintNotSupported { .. }
             | Error::SchemaExists { .. }
             | Error::ParseTimestamp { .. }
-            | Error::MissingInsertValues { .. }
+            | Error::MissingInsertBody { .. }
             | Error::DatabaseNotFound { .. }
             | Error::MissingNodeId { .. }
             | Error::MissingMetasrvOpts { .. }

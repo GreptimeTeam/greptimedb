@@ -56,14 +56,10 @@ impl Instance {
                     .context(ExecuteSqlSnafu)
             }
             QueryStatement::Sql(Statement::Insert(i)) => {
-                let (catalog, schema, table) =
-                    table_idents_to_full_name(i.table_name(), query_ctx.clone())?;
-                let table_ref = TableReference::full(&catalog, &schema, &table);
-                let request = self.sql_handler.insert_to_request(
-                    self.catalog_manager.clone(),
-                    *i,
-                    table_ref,
-                )?;
+                let request = self
+                    .sql_handler
+                    .insert_to_request(self.catalog_manager.clone(), *i, query_ctx.clone())
+                    .await?;
                 self.sql_handler.execute(request, query_ctx).await
             }
             QueryStatement::Sql(Statement::Delete(d)) => {

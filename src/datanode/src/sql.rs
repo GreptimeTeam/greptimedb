@@ -149,11 +149,11 @@ mod tests {
     use object_store::ObjectStore;
     use query::parser::{QueryLanguageParser, QueryStatement};
     use query::QueryEngineFactory;
+    use session::context::QueryContext;
     use sql::statements::statement::Statement;
     use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
-    use table::engine::TableReference;
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
     use table::Table;
@@ -255,7 +255,8 @@ mod tests {
             }
         };
         let request = sql_handler
-            .insert_to_request(catalog_list.clone(), *stmt, TableReference::bare("demo"))
+            .insert_to_request(catalog_list.clone(), *stmt, QueryContext::arc())
+            .await
             .unwrap();
 
         match request {
