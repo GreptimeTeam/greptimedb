@@ -302,7 +302,6 @@ async fn aggregators_empty_without() {
 //   {job="app-server"} 4550
 //   {job="api-server"} 1750
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "binary expr on aggr result is not supported"]
 async fn aggregators_complex_combined_aggrs() {
     create_insert_query_assert(
         AGGREGATORS_CREATE_TABLE,
