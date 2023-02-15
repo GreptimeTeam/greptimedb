@@ -1,4 +1,4 @@
-name: Create Issue in docs repo on doc related changes
+name: Create Issue in downstream repos
 
 on:
   issues:
@@ -22,4 +22,18 @@ jobs:
           title: Update docs for ${{ github.event.issue.title || github.event.pull_request.title }}
           body: |
             A document change request is generated from
+            ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
+  cloud_issue:
+    if: github.event.label.name == 'cloud followup required'
+    runs-on: ubuntu-latest
+    steps:
+      - name: create an issue in cloud repo
+        uses: dacbd/create-issue-action@main
+        with:
+          owner: GreptimeTeam
+          repo: greptimedb-cloud
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          title: Followup changes in ${{ github.event.issue.title || github.event.pull_request.title }}
+          body: |
+            A followup request is generated from
             ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
