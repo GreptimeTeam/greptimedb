@@ -25,10 +25,10 @@ use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList
 use rustpython_vm::{PyObjectRef, PyPayload, PyRef, VirtualMachine};
 use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
 
-use crate::python::rspython::builtins::try_into_columnar_value;
 use crate::python::error;
 use crate::python::error::ret_other_error_with;
 use crate::python::ffi_types::PyVector;
+use crate::python::rspython::builtins::try_into_columnar_value;
 
 pub(crate) type PyVectorRef = PyRef<PyVector>;
 
@@ -120,6 +120,7 @@ pub fn py_vec_obj_to_array(
 /// TODO(discord9): find a better way
 /// 1. spawn a new thread
 /// 2. create a new runtime in new thread and call `block_on` on it
+#[allow(unused)]
 pub fn block_on_async<T, F>(f: F) -> std::thread::Result<T>
 where
     F: Future<Output = T> + Send + 'static,

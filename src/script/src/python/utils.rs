@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use futures::Future;
-use rustpython_vm::builtins::{PyBaseExceptionRef};
+use rustpython_vm::builtins::PyBaseExceptionRef;
 use rustpython_vm::{PyObjectRef, PyPayload, VirtualMachine};
 use snafu::{Backtrace, GenerateImplicitData};
 

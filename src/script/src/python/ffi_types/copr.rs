@@ -15,9 +15,9 @@
 pub mod compile;
 pub mod parse;
 
-use std::sync::{Arc, Weak};
 #[cfg(test)]
 use std::result::Result as StdResult;
+use std::sync::{Arc, Weak};
 
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::arrow::array::Array;
@@ -38,10 +38,7 @@ use vm::builtins::{PyList, PyListRef};
 use vm::convert::ToPyObject;
 use vm::{pyclass as rspyclass, PyPayload, PyResult, VirtualMachine};
 
-use crate::python::error::{
-    ensure, ArrowSnafu, OtherSnafu, Result,
-    TypeCastSnafu,
-};
+use crate::python::error::{ensure, ArrowSnafu, OtherSnafu, Result, TypeCastSnafu};
 use crate::python::ffi_types::PyVector;
 use crate::python::pyo3::pyo3_exec_parsed;
 use crate::python::rspython::rspy_exec_parsed;
