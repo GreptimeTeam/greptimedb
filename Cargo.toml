@@ -48,6 +48,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 arrow = "29.0"
+arrow-array = "29.0"
 arrow-flight = "29.0"
 arrow-schema = { version = "29.0", features = ["serde"] }
 async-stream = "0.3"

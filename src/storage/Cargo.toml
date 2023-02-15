@@ -9,6 +9,8 @@ arc-swap = "1.0"
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
+arrow.workspace = true
+arrow-array.workspace = true
 bytes = "1.1"
 common-base = { path = "../common/base" }
 common-error = { path = "../common/error" }
@@ -18,6 +20,8 @@ common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 datatypes = { path = "../datatypes" }
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 lazy_static = "1.4"

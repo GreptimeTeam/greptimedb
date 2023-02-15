@@ -38,8 +38,8 @@ use datatypes::schema::{RawSchema, Schema};
 use meta_client::client::MetaClient;
 use meta_client::rpc::router::DeleteRequest as MetaDeleteRequest;
 use meta_client::rpc::{
-    CreateRequest as MetaCreateRequest, Partition as MetaPartition, PutRequest, RouteResponse,
-    TableName,
+    CompareAndPutRequest, CreateRequest as MetaCreateRequest, Partition as MetaPartition,
+    RouteResponse, TableName,
 };
 use partition::partition::{PartitionBound, PartitionDef};
 use query::parser::{PromQuery, QueryStatement};
@@ -60,8 +60,9 @@ use crate::datanode::DatanodeClients;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogEntrySerdeSnafu, CatalogNotFoundSnafu, CatalogSnafu,
     ColumnDataTypeSnafu, DeserializePartitionSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
-    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaNotFoundSnafu, StartMetaClientSnafu,
-    TableNotFoundSnafu, TableSnafu, ToTableInsertRequestSnafu,
+    RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    StartMetaClientSnafu, TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu,
+    ToTableInsertRequestSnafu,
 };
 use crate::expr_factory;
 use crate::instance::parse_stmt;
@@ -104,6 +105,26 @@ impl DistInstance {
             &create_table.schema_name,
             &create_table.table_name,
         );
+
+        if self
+            .catalog_manager
+            .table(
+                &table_name.catalog_name,
+                &table_name.schema_name,
+                &table_name.table_name,
+            )
+            .context(CatalogSnafu)?
+            .is_some()
+        {
+            return if create_table.create_if_not_exists {
+                Ok(Output::AffectedRows(0))
+            } else {
+                TableAlreadyExistSnafu {
+                    table: table_name.to_string(),
+                }
+                .fail()
+            };
+        }
 
         let mut table_info = create_table_info(create_table)?;
 
@@ -157,7 +178,7 @@ impl DistInstance {
                 .register_table(request)
                 .await
                 .context(CatalogSnafu)?,
-            error::TableAlreadyExistSnafu {
+            TableAlreadyExistSnafu {
                 table: table_name.to_string()
             }
         );
@@ -266,6 +287,10 @@ impl DistInstance {
                 let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
                 Ok(self.create_table(create_expr, stmt.partitions).await?)
             }
+            Statement::Alter(alter_table) => {
+                let expr = grpc::to_alter_expr(alter_table, query_ctx)?;
+                return self.handle_alter_table(expr).await;
+            }
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(stmt.table_name(), query_ctx)
@@ -358,10 +383,19 @@ impl DistInstance {
             .store_client()
             .context(StartMetaClientSnafu)?;
 
-        let request = PutRequest::default()
+        let request = CompareAndPutRequest::new()
             .with_key(key.to_string())
             .with_value(value.as_bytes().context(CatalogEntrySerdeSnafu)?);
-        client.put(request.into()).await.context(RequestMetaSnafu)?;
+        let response = client
+            .compare_and_put(request.into())
+            .await
+            .context(RequestMetaSnafu)?;
+        ensure!(
+            response.success,
+            SchemaExistsSnafu {
+                name: key.schema_name
+            }
+        );
 
         Ok(Output::AffectedRows(1))
     }

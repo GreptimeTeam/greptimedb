@@ -143,7 +143,7 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::time::Duration;
 
-    use datanode::datanode::ObjectStoreConfig;
+    use datanode::datanode::{CompactionConfig, ObjectStoreConfig};
     use servers::Mode;
 
     use super::*;
@@ -181,6 +181,14 @@ mod tests {
             ObjectStoreConfig::S3 { .. } => unreachable!(),
             ObjectStoreConfig::Oss { .. } => unreachable!(),
         };
+
+        assert_eq!(
+            CompactionConfig {
+                max_inflight_task: 4,
+                max_file_in_level0: 16,
+            },
+            options.compaction
+        );
     }
 
     #[test]

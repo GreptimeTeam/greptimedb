@@ -108,6 +108,7 @@ impl ProcedureMeta {
 
 /// Reference counted pointer to [ProcedureMeta].
 type ProcedureMetaRef = Arc<ProcedureMeta>;
+
 /// Procedure loaded from store.
 struct LoadedProcedure {
     procedure: BoxedProcedure,
@@ -176,9 +177,20 @@ impl ManagerContext {
 
     /// Load procedure with specific `procedure_id` from cached [ProcedureMessage]s.
     fn load_one_procedure(&self, procedure_id: ProcedureId) -> Option<LoadedProcedure> {
-        let messages = self.messages.lock().unwrap();
-        let message = messages.get(&procedure_id)?;
+        let message = {
+            let messages = self.messages.lock().unwrap();
+            messages.get(&procedure_id).cloned()?
+        };
 
+        self.load_one_procedure_from_message(procedure_id, &message)
+    }
+
+    /// Load procedure from specific [ProcedureMessage].
+    fn load_one_procedure_from_message(
+        &self,
+        procedure_id: ProcedureId,
+        message: &ProcedureMessage,
+    ) -> Option<LoadedProcedure> {
         let loaders = self.loaders.lock().unwrap();
         let loader = loaders.get(&message.type_name).or_else(|| {
             logging::error!(
@@ -344,7 +356,38 @@ impl ProcedureManager for LocalManager {
     }
 
     async fn recover(&self) -> Result<()> {
-        todo!("Recover procedure and messages")
+        logging::info!("LocalManager start to recover");
+
+        let procedure_store = ProcedureStore::new(self.state_store.clone());
+        let messages = procedure_store.load_messages().await?;
+
+        for (procedure_id, message) in &messages {
+            if message.parent_id.is_none() {
+                // This is the root procedure. We only submit the root procedure as it will
+                // submit sub-procedures to the manager.
+                let Some(loaded_procedure) = self.manager_ctx.load_one_procedure_from_message(*procedure_id, message) else {
+                    // Try to load other procedures.
+                    continue;
+                };
+
+                logging::info!(
+                    "Recover root procedure {}-{}, step: {}",
+                    loaded_procedure.procedure.type_name(),
+                    procedure_id,
+                    loaded_procedure.step
+                );
+
+                if let Err(e) = self.submit_root(
+                    *procedure_id,
+                    loaded_procedure.step,
+                    loaded_procedure.procedure,
+                ) {
+                    logging::error!(e; "Failed to recover procedure {}", procedure_id);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
@@ -380,7 +423,6 @@ mod test_util {
 
 #[cfg(test)]
 mod tests {
-    use serde::{Deserialize, Serialize};
     use tempdir::TempDir;
 
     use super::*;
@@ -447,6 +489,46 @@ mod tests {
         assert_eq!(expect, ctx.procedures_in_tree(&root));
     }
 
+    #[derive(Debug)]
+    struct ProcedureToLoad {
+        content: String,
+    }
+
+    #[async_trait]
+    impl Procedure for ProcedureToLoad {
+        fn type_name(&self) -> &str {
+            "ProcedureToLoad"
+        }
+
+        async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+            Ok(Status::Done)
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(self.content.clone())
+        }
+
+        fn lock_key(&self) -> Option<LockKey> {
+            None
+        }
+    }
+
+    impl ProcedureToLoad {
+        fn new(content: &str) -> ProcedureToLoad {
+            ProcedureToLoad {
+                content: content.to_string(),
+            }
+        }
+
+        fn loader() -> BoxedProcedureLoader {
+            let f = |json: &str| {
+                let procedure = ProcedureToLoad::new(json);
+                Ok(Box::new(procedure) as _)
+            };
+            Box::new(f)
+        }
+    }
+
     #[test]
     fn test_register_loader() {
         let dir = TempDir::new("register").unwrap();
@@ -455,49 +537,59 @@ mod tests {
         };
         let manager = LocalManager::new(config);
 
-        #[derive(Debug, Serialize, Deserialize)]
-        struct MockData {
-            id: u32,
-            content: String,
-        }
-
-        #[derive(Debug)]
-        struct ProcedureToLoad {
-            data: MockData,
-        }
-
-        #[async_trait]
-        impl Procedure for ProcedureToLoad {
-            fn type_name(&self) -> &str {
-                "ProcedureToLoad"
-            }
-
-            async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
-                unimplemented!()
-            }
-
-            fn dump(&self) -> Result<String> {
-                Ok(serde_json::to_string(&self.data).unwrap())
-            }
-
-            fn lock_key(&self) -> Option<LockKey> {
-                None
-            }
-        }
-
-        let loader = |json: &str| {
-            let data = serde_json::from_str(json).unwrap();
-            let procedure = ProcedureToLoad { data };
-            Ok(Box::new(procedure) as _)
-        };
         manager
-            .register_loader("ProcedureToLoad", Box::new(loader))
+            .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
             .unwrap();
         // Register duplicate loader.
         let err = manager
-            .register_loader("ProcedureToLoad", Box::new(loader))
+            .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
             .unwrap_err();
         assert!(matches!(err, Error::LoaderConflict { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_recover() {
+        let dir = TempDir::new("recover").unwrap();
+        let object_store = test_util::new_object_store(&dir);
+        let config = ManagerConfig {
+            object_store: object_store.clone(),
+        };
+        let manager = LocalManager::new(config);
+
+        manager
+            .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
+            .unwrap();
+
+        // Prepare data
+        let procedure_store = ProcedureStore::from(object_store.clone());
+        let root: BoxedProcedure = Box::new(ProcedureToLoad::new("test recover manager"));
+        let root_id = ProcedureId::random();
+        // Prepare data for the root procedure.
+        for step in 0..3 {
+            procedure_store
+                .store_procedure(root_id, step, &root, None)
+                .await
+                .unwrap();
+        }
+
+        let child: BoxedProcedure = Box::new(ProcedureToLoad::new("a child procedure"));
+        let child_id = ProcedureId::random();
+        // Prepare data for the child procedure
+        for step in 0..2 {
+            procedure_store
+                .store_procedure(child_id, step, &child, Some(root_id))
+                .await
+                .unwrap();
+        }
+
+        // Recover the manager
+        manager.recover().await.unwrap();
+
+        // The manager should submit the root procedure.
+        assert!(manager.procedure_state(root_id).await.unwrap().is_some());
+        // Since the mocked root procedure actually doesn't submit subprocedures, so there is no
+        // related state.
+        assert!(manager.procedure_state(child_id).await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -2973,7 +2973,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=966161508646f575801bcf05f47ed283ec231d68#966161508646f575801bcf05f47ed283ec231d68"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=3e6349be127b65a8b42a38cda9d527ec423ca77d#3e6349be127b65a8b42a38cda9d527ec423ca77d"
 dependencies = [
  "prost 0.11.6",
  "tonic",
@@ -3895,6 +3895,7 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "dashmap",
+ "derive_builder 0.12.0",
  "etcd-client",
  "futures",
  "h2",
@@ -6973,9 +6974,8 @@ dependencies = [
 
 [[package]]
 name = "sqlness"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16a494ea677f9de93e8c25ec33b1073f8f72d61466d4595ecf1462ba877fe924"
+version = "0.3.0"
+source = "git+https://github.com/CeresDB/sqlness.git?rev=e6d602ed7d894ffb806580f17f4a6f1283abbf1f#e6d602ed7d894ffb806580f17f4a6f1283abbf1f"
 dependencies = [
  "async-trait",
  "derive_builder 0.11.2",
@@ -7058,6 +7058,8 @@ name = "storage"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "arrow",
+ "arrow-array",
  "async-compat",
  "async-stream",
  "async-trait",
@@ -7071,6 +7073,8 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "criterion 0.3.6",
+ "datafusion-common",
+ "datafusion-expr",
  "datatypes",
  "futures",
  "futures-util",

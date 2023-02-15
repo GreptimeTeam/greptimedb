@@ -114,6 +114,17 @@ pub enum Error {
         source: TableError,
     },
 
+    #[snafu(display(
+        "Failed to delete value from table: {}, source: {}",
+        table_name,
+        source
+    ))]
+    Delete {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: TableError,
+    },
+
     #[snafu(display("Failed to start server, source: {}", source))]
     StartServer {
         #[snafu(backtrace)]
@@ -161,7 +172,10 @@ pub enum Error {
     },
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
-    InvalidSql { msg: String, backtrace: Backtrace },
+    InvalidSql { msg: String },
+
+    #[snafu(display("Not support SQL, error: {}", msg))]
+    NotSupportSql { msg: String },
 
     #[snafu(display("Failed to create schema when creating table, source: {}", source))]
     CreateSchema {
@@ -335,7 +349,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             Error::DecodeLogicalPlan { source } => source.status_code(),
-            Error::NewCatalog { source } => source.status_code(),
+            Error::NewCatalog { source } | Error::RegisterSchema { source } => source.status_code(),
             Error::FindTable { source, .. } => source.status_code(),
             Error::CreateTable { source, .. }
             | Error::GetTable { source, .. }
@@ -343,6 +357,7 @@ impl ErrorExt for Error {
             Error::DropTable { source, .. } => source.status_code(),
 
             Error::Insert { source, .. } => source.status_code(),
+            Error::Delete { source, .. } => source.status_code(),
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
@@ -361,6 +376,7 @@ impl ErrorExt for Error {
 
             Error::ColumnValuesNumberMismatch { .. }
             | Error::InvalidSql { .. }
+            | Error::NotSupportSql { .. }
             | Error::KeyColumnNotFound { .. }
             | Error::InvalidPrimaryKey { .. }
             | Error::MissingTimestampColumn { .. }
@@ -379,7 +395,6 @@ impl ErrorExt for Error {
             | Error::CreateDir { .. }
             | Error::InsertSystemCatalog { .. }
             | Error::RenameTable { .. }
-            | Error::RegisterSchema { .. }
             | Error::Catalog { .. }
             | Error::MissingRequiredField { .. }
             | Error::IncorrectInternalState { .. } => StatusCode::Internal,

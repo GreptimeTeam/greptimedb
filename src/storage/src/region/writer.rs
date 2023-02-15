@@ -14,7 +14,8 @@
 
 use std::sync::Arc;
 
-use common_telemetry::logging;
+use common_telemetry::tracing::log::info;
+use common_telemetry::{error, logging};
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -23,8 +24,10 @@ use store_api::storage::{AlterRequest, SequenceNumber, WriteContext, WriteRespon
 use tokio::sync::Mutex;
 
 use crate::background::JobHandle;
+use crate::compaction::{CompactionRequestImpl, CompactionSchedulerRef};
+use crate::config::EngineConfig;
 use crate::error::{self, Result};
-use crate::flush::{FlushJob, FlushSchedulerRef, FlushStrategyRef};
+use crate::flush::{FlushCallback, FlushJob, FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList,
 };
@@ -34,7 +37,7 @@ use crate::proto::wal::WalHeader;
 use crate::region::{RecoverdMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef};
 use crate::schema::compat::CompatWrite;
 use crate::sst::AccessLayerRef;
-use crate::version::{VersionControl, VersionControlRef, VersionEdit};
+use crate::version::{VersionControl, VersionControlRef, VersionEdit, VersionRef};
 use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
@@ -56,9 +59,9 @@ pub struct RegionWriter {
 }
 
 impl RegionWriter {
-    pub fn new(memtable_builder: MemtableBuilderRef) -> RegionWriter {
+    pub fn new(memtable_builder: MemtableBuilderRef, config: Arc<EngineConfig>) -> RegionWriter {
         RegionWriter {
-            inner: Mutex::new(WriterInner::new(memtable_builder)),
+            inner: Mutex::new(WriterInner::new(memtable_builder, config)),
             version_mutex: Mutex::new(()),
         }
     }
@@ -95,7 +98,7 @@ impl RegionWriter {
         shared: &SharedDataRef,
         manifest: &RegionManifest,
         edit: RegionEdit,
-        max_memtable_id: MemtableId,
+        max_memtable_id: Option<MemtableId>,
     ) -> Result<()> {
         let _lock = self.version_mutex.lock().await;
         // HACK: We won't acquire the write lock here because write stall would hold
@@ -112,6 +115,7 @@ impl RegionWriter {
         );
 
         let files_to_add = edit.files_to_add.clone();
+        let files_to_remove = edit.files_to_remove.clone();
         let flushed_sequence = edit.flushed_sequence;
 
         // Persist the meta action.
@@ -121,9 +125,10 @@ impl RegionWriter {
 
         let version_edit = VersionEdit {
             files_to_add,
-            flushed_sequence: Some(flushed_sequence),
+            files_to_remove,
+            flushed_sequence,
             manifest_version,
-            max_memtable_id: Some(max_memtable_id),
+            max_memtable_id,
         };
 
         // We could tolerate failure during persisting manifest version to the WAL, since it won't
@@ -239,6 +244,7 @@ pub struct WriterContext<'a, S: LogStore> {
     pub shared: &'a SharedDataRef,
     pub flush_strategy: &'a FlushStrategyRef,
     pub flush_scheduler: &'a FlushSchedulerRef,
+    pub compaction_scheduler: &'a CompactionSchedulerRef<S>,
     pub sst_layer: &'a AccessLayerRef,
     pub wal: &'a Wal<S>,
     pub writer: &'a RegionWriterRef,
@@ -269,13 +275,15 @@ impl<'a, S: LogStore> AlterContext<'a, S> {
 struct WriterInner {
     memtable_builder: MemtableBuilderRef,
     flush_handle: Option<JobHandle>,
+    engine_config: Arc<EngineConfig>,
 }
 
 impl WriterInner {
-    fn new(memtable_builder: MemtableBuilderRef) -> WriterInner {
+    fn new(memtable_builder: MemtableBuilderRef, engine_config: Arc<EngineConfig>) -> WriterInner {
         WriterInner {
             memtable_builder,
             flush_handle: None,
+            engine_config,
         }
     }
 
@@ -539,6 +547,8 @@ impl WriterInner {
             return Ok(());
         }
 
+        let cb = Self::build_flush_callback(&current_version, ctx, &self.engine_config);
+
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),
             memtables: mem_to_flush,
@@ -549,6 +559,7 @@ impl WriterInner {
             writer: ctx.writer.clone(),
             wal: ctx.wal.clone(),
             manifest: ctx.manifest.clone(),
+            on_success: cb,
         };
 
         let flush_handle = ctx
@@ -558,5 +569,52 @@ impl WriterInner {
         self.flush_handle = Some(flush_handle);
 
         Ok(())
+    }
+
+    fn build_flush_callback<S: LogStore>(
+        version: &VersionRef,
+        ctx: &WriterContext<S>,
+        config: &Arc<EngineConfig>,
+    ) -> Option<FlushCallback> {
+        let region_id = version.metadata().id();
+        let compaction_request = CompactionRequestImpl {
+            region_id,
+            sst_layer: ctx.sst_layer.clone(),
+            writer: ctx.writer.clone(),
+            shared: ctx.shared.clone(),
+            manifest: ctx.manifest.clone(),
+            wal: ctx.wal.clone(),
+        };
+        let compaction_scheduler = ctx.compaction_scheduler.clone();
+        let shared_data = ctx.shared.clone();
+        let max_files_in_l0 = config.max_files_in_l0;
+        let schedule_compaction_cb = Box::pin(async move {
+            let level0_file_num = shared_data
+                .version_control
+                .current()
+                .ssts()
+                .level(0)
+                .file_num();
+
+            if level0_file_num <= max_files_in_l0 {
+                info!(
+                    "No enough SST files in level 0 (threshold: {}), skip compaction",
+                    max_files_in_l0
+                );
+                return;
+            }
+            match compaction_scheduler.schedule(compaction_request).await {
+                Ok(scheduled) => {
+                    info!(
+                        "Schedule region {} compaction request result: {}",
+                        region_id, scheduled
+                    )
+                }
+                Err(e) => {
+                    error!(e;"Failed to schedule region compaction request {}", region_id);
+                }
+            }
+        });
+        Some(schedule_compaction_cb)
     }
 }

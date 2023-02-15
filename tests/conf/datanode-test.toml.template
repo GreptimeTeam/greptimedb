@@ -1,0 +1,23 @@
+node_id = 1
+mode = 'distributed'
+rpc_addr = '127.0.0.1:4100'
+rpc_hostname = '127.0.0.1'
+rpc_runtime_size = 8
+
+[wal]
+dir = '{wal_dir}'
+file_size = '1GB'
+purge_interval = '10m'
+purge_threshold = '50GB'
+read_batch_size = 128
+sync_write = false
+
+[storage]
+type = 'File'
+data_dir = '{data_dir}'
+
+[meta_client_opts]
+metasrv_addrs = ['127.0.0.1:3002']
+timeout_millis = 3000
+connect_timeout_millis = 5000
+tcp_nodelay = false

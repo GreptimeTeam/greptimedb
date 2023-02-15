@@ -962,7 +962,7 @@ pub(crate) mod greptime_builtin {
                         Ok(obj) => match py_vec_obj_to_array(&obj, vm, 1){
                             Ok(v) => if v.len()==1{
                                 Ok(v)
-                            }else{
+                            } else {
                                 Err(vm.new_runtime_error(format!("Expect return's length to be at most one, found to be length of {}.", v.len())))
                             },
                             Err(err) => Err(vm

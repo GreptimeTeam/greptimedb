@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::{Duration, SystemTime};
+
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
 use common_query::Output;
@@ -64,7 +66,10 @@ impl Instance {
                 )?;
                 self.sql_handler.execute(request, query_ctx).await
             }
-
+            QueryStatement::Sql(Statement::Delete(d)) => {
+                let request = SqlRequest::Delete(*d);
+                self.sql_handler.execute(request, query_ctx).await
+            }
             QueryStatement::Sql(Statement::CreateDatabase(c)) => {
                 let request = CreateDatabaseRequest {
                     db_name: c.name.to_string(),
@@ -167,10 +172,39 @@ impl Instance {
 
     pub async fn execute_promql(
         &self,
-        query: &PromQuery,
+        promql: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let stmt = QueryLanguageParser::parse_promql(query).context(ExecuteSqlSnafu)?;
+        let stmt = QueryLanguageParser::parse_promql(promql).context(ExecuteSqlSnafu)?;
+        self.execute_stmt(stmt, query_ctx).await
+    }
+
+    // TODO(ruihang): merge this and `execute_promql` after #951 landed
+    pub async fn execute_promql_statement(
+        &self,
+        promql: &str,
+        start: SystemTime,
+        end: SystemTime,
+        interval: Duration,
+        lookback: Duration,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let query = PromQuery {
+            query: promql.to_string(),
+            start: "0".to_string(),
+            end: "0".to_string(),
+            step: "5m".to_string(),
+        };
+        let mut stmt = QueryLanguageParser::parse_promql(&query).context(ExecuteSqlSnafu)?;
+        match &mut stmt {
+            QueryStatement::Sql(_) => unreachable!(),
+            QueryStatement::Promql(eval_stmt) => {
+                eval_stmt.start = start;
+                eval_stmt.end = end;
+                eval_stmt.interval = interval;
+                eval_stmt.lookback_delta = lookback
+            }
+        }
         self.execute_stmt(stmt, query_ctx).await
     }
 }

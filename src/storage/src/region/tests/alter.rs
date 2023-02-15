@@ -179,10 +179,11 @@ impl AlterTester {
         let mut reader = resp.reader;
 
         let metadata = self.base().region.in_memory_metadata();
-        assert_eq!(metadata.schema(), reader.schema());
+        assert_eq!(metadata.schema(), reader.user_schema());
 
         let mut dst = Vec::new();
         while let Some(chunk) = reader.next_chunk().await.unwrap() {
+            let chunk = reader.project_chunk(chunk);
             append_chunk_to(&chunk, &mut dst);
         }
 

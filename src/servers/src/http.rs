@@ -417,7 +417,7 @@ impl HttpServer {
                 script_handler: self.script_handler.clone(),
             })
             .finish_api(&mut api)
-            .layer(Extension(Arc::new(api)));
+            .layer(Extension(api));
 
         let mut router = Router::new().nest(&format!("/{HTTP_API_VERSION}"), sql_router);
 

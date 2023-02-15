@@ -4,7 +4,7 @@ Affected Rows: 1
 
 CREATE SCHEMA test_public_schema;
 
-Error: 1003(Internal), Schema test_public_schema already exists
+Error: 1004(InvalidArguments), Schema test_public_schema already exists
 
 SHOW DATABASES LIKE '%public%';
 

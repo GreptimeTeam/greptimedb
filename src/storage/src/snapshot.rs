@@ -66,7 +66,7 @@ impl Snapshot for SnapshotImpl {
             builder = builder.pick_memtables(memtable.clone());
         }
 
-        let reader = builder.pick_ssts(self.version.ssts())?.build().await?;
+        let reader = builder.pick_all_ssts(self.version.ssts())?.build().await?;
 
         Ok(ScanResponse { reader })
     }

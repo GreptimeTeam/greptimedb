@@ -171,7 +171,7 @@ impl<R: Region> Table for MitoTable<R> {
                 .context(table_error::TableOperationSnafu)?
                 .reader;
 
-            let schema = reader.schema().clone();
+            let schema = reader.user_schema().clone();
             if let Some(first_schema) = &first_schema {
                 // TODO(hl): we assume all regions' schemas are the same, but undergoing table altering
                 // may make these schemas inconsistent.
@@ -198,6 +198,7 @@ impl<R: Region> Table for MitoTable<R> {
         let stream = Box::pin(async_stream::try_stream! {
             for mut reader in readers {
                 while let Some(chunk) = reader.next_chunk().await.map_err(BoxedError::new).context(ExternalSnafu)? {
+                    let chunk = reader.project_chunk(chunk);
                     yield RecordBatch::new(stream_schema.clone(), chunk.columns)?
                 }
             }

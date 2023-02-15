@@ -19,6 +19,7 @@ use query::query_engine::QueryEngineRef;
 use query::sql::{describe_table, explain, show_databases, show_tables};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use sql::statements::delete::Delete;
 use sql::statements::describe::DescribeTable;
 use sql::statements::explain::Explain;
 use sql::statements::show::{ShowDatabases, ShowTables};
@@ -31,6 +32,7 @@ use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
 mod create;
+mod delete;
 mod drop_table;
 mod insert;
 
@@ -45,6 +47,7 @@ pub enum SqlRequest {
     ShowTables(ShowTables),
     DescribeTable(DescribeTable),
     Explain(Box<Explain>),
+    Delete(Delete),
 }
 
 // Handler to execute SQL except query
@@ -78,6 +81,7 @@ impl SqlHandler {
             SqlRequest::CreateDatabase(req) => self.create_database(req).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
+            SqlRequest::Delete(stmt) => self.delete(query_ctx.clone(), stmt).await,
             SqlRequest::ShowDatabases(stmt) => {
                 show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
@@ -146,8 +150,10 @@ mod tests {
     use query::parser::{QueryLanguageParser, QueryStatement};
     use query::QueryEngineFactory;
     use sql::statements::statement::Statement;
+    use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
+    use table::engine::TableReference;
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
     use table::Table;
@@ -204,7 +210,7 @@ mod tests {
         let store_dir = dir.path().to_string_lossy();
         let accessor = Builder::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor);
-
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let sql = r#"insert into demo(host, cpu, memory, ts) values
                            ('host1', 66.6, 1024, 1655276557000),
                            ('host2', 88.8,  333.3, 1655276558000)
@@ -216,6 +222,7 @@ mod tests {
                 StorageEngineConfig::default(),
                 Arc::new(NoopLogStore::default()),
                 object_store.clone(),
+                compaction_scheduler,
             ),
             object_store,
         ));

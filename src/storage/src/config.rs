@@ -14,5 +14,13 @@
 
 //! storage engine config
 
-#[derive(Debug, Default, Clone)]
-pub struct EngineConfig {}
+#[derive(Debug, Clone)]
+pub struct EngineConfig {
+    pub max_files_in_l0: usize,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self { max_files_in_l0: 8 }
+    }
+}

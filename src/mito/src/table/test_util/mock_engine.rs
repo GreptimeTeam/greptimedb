@@ -43,7 +43,7 @@ pub struct MockChunkReader {
 impl ChunkReader for MockChunkReader {
     type Error = MockError;
 
-    fn schema(&self) -> &SchemaRef {
+    fn user_schema(&self) -> &SchemaRef {
         &self.schema
     }
 
@@ -68,6 +68,10 @@ impl ChunkReader for MockChunkReader {
         self.read = true;
 
         Ok(Some(Chunk::new(columns)))
+    }
+
+    fn project_chunk(&self, chunk: Chunk) -> Chunk {
+        chunk
     }
 }
 

@@ -195,6 +195,15 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display(
+        "Failed to batch range KVs from leader's in_memory kv store, source: {}",
+        source
+    ))]
+    Range {
+        source: tonic::Status,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("Response header not found"))]
     ResponseHeaderNotFound { backtrace: Backtrace },
 
@@ -213,11 +222,43 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display(
+        "The number of retries for the grpc call {} exceeded the limit, {}",
+        func_name,
+        retry_num
+    ))]
+    ExceededRetryLimit {
+        func_name: String,
+        retry_num: usize,
+        backtrace: Backtrace,
+    },
+
     #[snafu(display("An error occurred in Meta, source: {}", source))]
     MetaInternal {
         #[snafu(backtrace)]
         source: BoxedError,
     },
+
+    #[snafu(display("Failed to lock based on etcd, source: {}", source))]
+    Lock {
+        source: etcd_client::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to unlock based on etcd, source: {}", source))]
+    Unlock {
+        source: etcd_client::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to grant lease, source: {}", source))]
+    LeaseGrant {
+        source: etcd_client::Error,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Distributed lock is not configured"))]
+    LockNotConfig { backtrace: Backtrace },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -250,10 +291,16 @@ impl ErrorExt for Error {
             | Error::NoLeader { .. }
             | Error::CreateChannel { .. }
             | Error::BatchGet { .. }
+            | Error::Range { .. }
             | Error::ResponseHeaderNotFound { .. }
             | Error::IsNotLeader { .. }
             | Error::NoMetaPeerClient { .. }
             | Error::InvalidHttpBody { .. }
+            | Error::Lock { .. }
+            | Error::Unlock { .. }
+            | Error::LeaseGrant { .. }
+            | Error::LockNotConfig { .. }
+            | Error::ExceededRetryLimit { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
             | Error::EmptyTableName { .. }

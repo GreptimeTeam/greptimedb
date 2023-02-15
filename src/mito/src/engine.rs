@@ -605,6 +605,7 @@ mod tests {
         Float64Vector, Int32Vector, StringVector, TimestampMillisecondVector, VectorRef,
     };
     use log_store::NoopLogStore;
+    use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::region::RegionImpl;
     use storage::EngineImpl;
@@ -643,13 +644,14 @@ mod tests {
 
         let (dir, object_store) =
             test_util::new_test_object_store("test_insert_with_column_default_constraint").await;
-
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let table_engine = MitoEngine::new(
             EngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
                 Arc::new(NoopLogStore::default()),
                 object_store.clone(),
+                compaction_scheduler,
             ),
             object_store,
         );

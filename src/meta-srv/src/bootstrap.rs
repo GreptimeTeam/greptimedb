@@ -16,15 +16,18 @@ use std::sync::Arc;
 
 use api::v1::meta::cluster_server::ClusterServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
+use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
+use etcd_client::Client;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::server::Router;
 
-use crate::cluster::MetaPeerClient;
+use crate::cluster::MetaPeerClientBuilder;
 use crate::election::etcd::EtcdElection;
+use crate::lock::etcd::EtcdLock;
 use crate::metasrv::builder::MetaSrvBuilder;
 use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
 use crate::selector::lease_based::LeaseBasedSelector;
@@ -65,21 +68,36 @@ pub fn router(meta_srv: MetaSrv) -> Router {
         .add_service(RouterServer::new(meta_srv.clone()))
         .add_service(StoreServer::new(meta_srv.clone()))
         .add_service(ClusterServer::new(meta_srv.clone()))
+        .add_service(LockServer::new(meta_srv.clone()))
         .add_service(admin::make_admin_service(meta_srv))
 }
 
 pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
-    let (kv_store, election) = if opts.use_memory_store {
-        (Arc::new(MemStore::new()) as _, None)
+    let (kv_store, election, lock) = if opts.use_memory_store {
+        (Arc::new(MemStore::new()) as _, None, None)
     } else {
+        let etcd_endpoints = [&opts.store_addr];
+        let etcd_client = Client::connect(etcd_endpoints, None)
+            .await
+            .context(error::ConnectEtcdSnafu)?;
         (
-            EtcdStore::with_endpoints([&opts.store_addr]).await?,
-            Some(EtcdElection::with_endpoints(&opts.server_addr, [&opts.store_addr]).await?),
+            EtcdStore::with_etcd_client(etcd_client.clone())?,
+            Some(EtcdElection::with_etcd_client(
+                &opts.server_addr,
+                etcd_client.clone(),
+            )?),
+            Some(EtcdLock::with_etcd_client(etcd_client)?),
         )
     };
 
     let in_memory = Arc::new(MemStore::default()) as ResetableKvStoreRef;
-    let meta_peer_client = MetaPeerClient::new(in_memory.clone(), election.clone());
+
+    let meta_peer_client = MetaPeerClientBuilder::default()
+        .election(election.clone())
+        .in_memory(in_memory.clone())
+        .build()
+        // Safety: all required fields set at initialization
+        .unwrap();
 
     let selector = match opts.selector {
         SelectorType::LoadBased => Arc::new(LoadBasedSelector {
@@ -95,6 +113,7 @@ pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
         .selector(selector)
         .election(election)
         .meta_peer_client(meta_peer_client)
+        .lock(lock)
         .build()
         .await;
 

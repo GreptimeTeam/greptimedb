@@ -21,9 +21,8 @@ use crate::error::Result;
 use crate::query_engine::QueryEngineContext;
 
 /// Executor to run [ExecutionPlan].
-#[async_trait::async_trait]
 pub trait QueryExecutor {
-    async fn execute_stream(
+    fn execute_stream(
         &self,
         ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,

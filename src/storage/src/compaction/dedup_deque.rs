@@ -18,10 +18,18 @@ use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
 
 /// Deque with key deduplication.
-#[derive(Default)]
 pub struct DedupDeque<K, V> {
     deque: VecDeque<K>,
     existing: HashMap<K, V>,
+}
+
+impl<K, V> Default for DedupDeque<K, V> {
+    fn default() -> Self {
+        Self {
+            deque: VecDeque::new(),
+            existing: HashMap::new(),
+        }
+    }
 }
 
 impl<K: Eq + Hash + Clone, V> DedupDeque<K, V> {

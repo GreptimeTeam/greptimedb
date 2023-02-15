@@ -54,3 +54,7 @@ SELECT a % 2, b FROM test UNION SELECT a % 2 AS k FROM test ORDER BY -1;
 
 Error: 3000(PlanQuery), Error during planning: Union queries must have the same number of columns, (left is 2, right is 1)
 
+DROP TABLE test;
+
+Affected Rows: 1
+

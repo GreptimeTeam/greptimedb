@@ -31,6 +31,7 @@ async fn main() {
         .case_dir(util::get_case_dir())
         .fail_fast(true)
         .test_filter(test_filter)
+        .follow_links(true)
         .build()
         .unwrap();
     let runner = Runner::new_with_config(config, Env {}).await.unwrap();
