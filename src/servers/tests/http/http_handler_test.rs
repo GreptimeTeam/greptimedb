@@ -154,14 +154,14 @@ def test(n):
 
 fn create_script_query() -> Query<script_handler::ScriptQuery> {
     Query(script_handler::ScriptQuery {
-        schema: Some("test".to_string()),
+        db: Some("test".to_string()),
         name: Some("test".to_string()),
     })
 }
 
 fn create_invalid_script_query() -> Query<script_handler::ScriptQuery> {
     Query(script_handler::ScriptQuery {
-        schema: None,
+        db: None,
         name: None,
     })
 }
