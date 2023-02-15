@@ -14,7 +14,7 @@ axum-macros = "0.3"
 base64 = "0.13"
 bytes = "1.2"
 catalog = { path = "../catalog" }
-chrono = "0.4"
+chrono.workspace = true
 common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
