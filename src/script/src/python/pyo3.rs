@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod builtins;
 pub(crate) mod copr_impl;
+mod utils;
 pub(crate) mod vector_impl;
 
 pub(crate) use copr_impl::pyo3_exec_parsed;

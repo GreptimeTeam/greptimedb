@@ -23,8 +23,8 @@ use rustpython_parser::{ast, parser};
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
 
-use crate::python::ffi_types::copr::{compile, AnnotationInfo, Coprocessor};
 use crate::python::error::{ensure, CoprParseSnafu, PyParseSnafu, Result};
+use crate::python::ffi_types::copr::{compile, AnnotationInfo, Coprocessor};
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Default, Debug, Clone, PartialEq, Eq)]

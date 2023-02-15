@@ -32,8 +32,8 @@ use rustpython_vm::{AsObject, PyObjectRef, VirtualMachine};
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::python::ffi_types::PyVector;
 use crate::python::utils::{format_py_error, is_instance};
-use crate::python::PyVector;
 
 #[test]
 fn convert_scalar_to_py_obj_and_back() {

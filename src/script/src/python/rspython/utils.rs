@@ -26,8 +26,9 @@ use rustpython_vm::{PyObjectRef, PyPayload, PyRef, VirtualMachine};
 use snafu::{Backtrace, GenerateImplicitData, OptionExt, ResultExt};
 
 use crate::python::builtins::try_into_columnar_value;
+use crate::python::error;
 use crate::python::error::ret_other_error_with;
-use crate::python::{error, ffi_types::PyVector};
+use crate::python::ffi_types::PyVector;
 
 pub(crate) type PyVectorRef = PyRef<PyVector>;
 

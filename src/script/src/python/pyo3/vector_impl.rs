@@ -9,6 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
 
 use crate::python::ffi_types::vector::{wrap_result, PyVector};
+use crate::python::pyo3::utils::pyo3_obj_try_to_typed_val;
 
 macro_rules! get_con_type {
     ($obj:ident, $($pyty:ident => $con_ty:ident),*$(,)?) => {
@@ -173,90 +174,6 @@ impl PyVector {
     }
     fn __repr__(&self) -> PyResult<String> {
         Ok(format!("{self:?}"))
-    }
-}
-
-macro_rules! to_con_type {
-    ($dtype:ident,$obj:ident, $($cty:ident => $rty:ty),*$(,)?) => {
-        match $dtype {
-            $(
-                ConcreteDataType::$cty(_) => $obj.extract::<$rty>().map(value::Value::$cty),
-            )*
-            _ => unreachable!(),
-        }
-    };
-    ($dtype:ident,$obj:ident, $($cty:ident =ord=> $rty:ty),*$(,)?) => {
-        match $dtype {
-            $(
-                ConcreteDataType::$cty(_) => $obj.extract::<$rty>()
-                .map(OrderedFloat)
-                .map(value::Value::$cty),
-            )*
-            _ => unreachable!(),
-        }
-    };
-}
-
-/// to int/float/boolean, if dtype is None, then convert to highest prec type
-pub(crate) fn pyo3_obj_try_to_typed_val(
-    obj: &PyAny,
-    dtype: Option<ConcreteDataType>,
-) -> PyResult<value::Value> {
-    if let Ok(b) = obj.downcast::<PyBool>() {
-        if let Some(ConcreteDataType::Boolean(_)) = dtype {
-            let dtype = ConcreteDataType::boolean_datatype();
-            let ret = to_con_type!(dtype, b,
-                Boolean => bool
-            )?;
-            Ok(ret)
-        } else {
-            Err(PyValueError::new_err(format!(
-                "Can't cast num to {dtype:?}"
-            )))
-        }
-    } else if let Ok(num) = obj.downcast::<PyInt>() {
-        if let Some(dtype) = dtype {
-            if dtype.is_signed() || dtype.is_unsigned() {
-                let ret = to_con_type!(dtype, num,
-                    Int8 => i8,
-                    Int16 => i16,
-                    Int32 => i32,
-                    Int64 => i64,
-                    UInt8 => u8,
-                    UInt16 => u16,
-                    UInt32 => u32,
-                    UInt64 => u64,
-                )?;
-                Ok(ret)
-            } else {
-                Err(PyValueError::new_err(format!(
-                    "Can't cast num to {dtype:?}"
-                )))
-            }
-        } else {
-            num.extract::<i64>().map(value::Value::Int64)
-        }
-    } else if let Ok(num) = obj.downcast::<PyFloat>() {
-        if let Some(dtype) = dtype {
-            if dtype.is_float() {
-                let ret = to_con_type!(dtype, num,
-                    Float32 =ord=> f32,
-                    Float64 =ord=> f64,
-                )?;
-                Ok(ret)
-            } else {
-                Err(PyValueError::new_err(format!(
-                    "Can't cast num to {dtype:?}"
-                )))
-            }
-        } else {
-            num.extract::<f64>()
-                .map(|v| value::Value::Float64(OrderedFloat(v)))
-        }
-    } else {
-        Err(PyValueError::new_err(format!(
-            "Can't cast {obj} to {dtype:?}"
-        )))
     }
 }
 

@@ -27,11 +27,14 @@ use datatypes::vectors::Helper as HelperVec;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyBool, PyFloat, PyInt, PyList, PyStr};
 use rustpython_vm::{pymodule, AsObject, PyObjectRef, PyPayload, PyResult, VirtualMachine};
 
-use crate::python::utils::is_instance;
 use crate::python::ffi_types::PyVector;
+use crate::python::utils::is_instance;
 
-pub fn init_greptime_builtins(module_name: &str, vm: &mut VirtualMachine){
-    vm.add_native_module(module_name.to_owned(), Box::new(greptime_builtin::make_module));
+pub fn init_greptime_builtins(module_name: &str, vm: &mut VirtualMachine) {
+    vm.add_native_module(
+        module_name.to_owned(),
+        Box::new(greptime_builtin::make_module),
+    );
 }
 
 /// "Can't cast operand of type `{name}` into `{ty}`."
@@ -303,9 +306,9 @@ pub(crate) mod greptime_builtin {
         all_to_f64, eval_aggr_fn, from_df_err, try_into_columnar_value, try_into_py_obj,
         type_cast_error,
     };
-    use crate::python::rspython::utils::{is_instance, py_vec_obj_to_array, PyVectorRef};
     use crate::python::ffi_types::vector::val_to_pyobj;
     use crate::python::ffi_types::PyVector;
+    use crate::python::rspython::utils::{is_instance, py_vec_obj_to_array, PyVectorRef};
 
     #[pyfunction]
     fn vector(args: OptionalArg<PyObjectRef>, vm: &VirtualMachine) -> PyResult<PyVector> {

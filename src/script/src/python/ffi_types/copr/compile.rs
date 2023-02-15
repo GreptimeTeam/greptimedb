@@ -20,8 +20,8 @@ use rustpython_parser::ast::{Located, Location};
 use rustpython_parser::{ast, parser};
 use snafu::ResultExt;
 
-use crate::python::ffi_types::copr::parse::{ret_parse_error, DecoratorArgs};
 use crate::python::error::{PyCompileSnafu, PyParseSnafu, Result};
+use crate::python::ffi_types::copr::parse::{ret_parse_error, DecoratorArgs};
 use crate::rspy_fail_parse_error;
 
 fn create_located<T>(node: T, loc: Location) -> Located<T> {

@@ -40,9 +40,9 @@ use snafu::{ensure, ResultExt};
 use sql::statements::statement::Statement;
 
 use crate::engine::{CompileContext, EvalContext, Script, ScriptEngine};
-use crate::python::ffi_types::copr::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
 // use crate::python::coprocessor::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
 use crate::python::error::{self, Result};
+use crate::python::ffi_types::copr::{exec_parsed, parse, AnnotationInfo, CoprocessorRef};
 
 const PY_ENGINE: &str = "python";
 
