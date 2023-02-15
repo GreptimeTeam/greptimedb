@@ -63,13 +63,13 @@ pub async fn sql(
     Json(resp.with_execution_time(start.elapsed().as_millis()))
 }
 
-// TODO(ruihang): add db param and form data support
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PromqlQuery {
     pub query: String,
     pub start: String,
     pub end: String,
     pub step: String,
+    pub db: Option<String>,
 }
 
 /// Handler to execute promql
@@ -82,7 +82,7 @@ pub async fn promql(
 ) -> Json<JsonResponse> {
     let sql_handler = &state.sql_handler;
     let start = Instant::now();
-    let resp = match super::query_context_from_db(sql_handler.clone(), None) {
+    let resp = match super::query_context_from_db(sql_handler.clone(), params.db) {
         Ok(query_ctx) => {
             JsonResponse::from_output(sql_handler.do_promql_query(&params.query, query_ctx).await)
                 .await
