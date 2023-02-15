@@ -14,6 +14,7 @@
 
 mod health;
 mod heartbeat;
+mod meta;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -33,6 +34,13 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
         "/heartbeat",
         heartbeat::HeartBeatHandler {
             meta_peer_client: meta_srv.meta_peer_client(),
+        },
+    );
+
+    let router = router.route(
+        "/catalog",
+        meta::CatalogHandler {
+            kv_store: meta_srv.kv_store(),
         },
     );
 
