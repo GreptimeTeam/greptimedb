@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_procedure::BoxedProcedure;
 use tokio::sync::Mutex;
 
 use crate::engine::{EngineContext, TableEngine, TableReference};
@@ -56,6 +57,14 @@ impl TableEngine for MockTableEngine {
             .await
             .insert((catalog_name, schema_name, table_name), table_ref.clone());
         Ok(table_ref)
+    }
+
+    async fn create_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        _request: CreateTableRequest,
+    ) -> Result<BoxedProcedure> {
+        unimplemented!()
     }
 
     async fn open_table(

@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use common_procedure::BoxedProcedure;
 use common_telemetry::tracing::log::info;
 use common_telemetry::{debug, logging};
 use datatypes::schema::{Schema, SchemaRef};
@@ -103,6 +104,14 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)
+    }
+
+    async fn create_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        _request: CreateTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        unimplemented!()
     }
 
     async fn open_table(

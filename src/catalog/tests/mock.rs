@@ -21,6 +21,7 @@ use std::sync::Arc;
 use async_stream::stream;
 use catalog::error::Error;
 use catalog::remote::{Kv, KvBackend, ValueIter};
+use common_procedure::BoxedProcedure;
 use common_recordbatch::RecordBatch;
 use common_telemetry::logging::info;
 use datatypes::data_type::ConcreteDataType;
@@ -171,6 +172,14 @@ impl TableEngine for MockTableEngine {
         let mut tables = self.tables.write().await;
         tables.insert(table_name, table.clone() as TableRef);
         Ok(table)
+    }
+
+    async fn create_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        _request: CreateTableRequest,
+    ) -> table::Result<BoxedProcedure> {
+        unimplemented!()
     }
 
     async fn open_table(
