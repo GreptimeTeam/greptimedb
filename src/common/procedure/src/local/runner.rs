@@ -70,19 +70,14 @@ impl Runner {
             self.procedure.type_name(),
             self.meta.id
         );
-        // We use the lock key in ProcedureMeta as it considers locks inherited from
-        // its parent.
-        let lock_key = self.meta.lock_key.clone();
 
-        // TODO(yingwen):
-        // 1. Support multiple lock keys;
-        // 2. Detect recursive locking (and deadlock) if possible. Maybe we could detect
+        // TODO(yingwen): Detect recursive locking (and deadlock) if possible. Maybe we could detect
         // recursive locking by adding a root procedure id to the meta.
-        // Acquire lock if necessary.
-        if let Some(key) = &lock_key {
+        for key in self.meta.lock_key.keys() {
+            // Acquire lock for each key.
             self.manager_ctx
                 .lock_map
-                .acquire_lock(key.key(), self.meta.clone())
+                .acquire_lock(key, self.meta.clone())
                 .await;
         }
 
@@ -98,10 +93,9 @@ impl Runner {
             self.manager_ctx.notify_by_subprocedure(parent_id);
         }
 
-        if let Some(key) = &lock_key {
-            self.manager_ctx
-                .lock_map
-                .release_lock(key.key(), self.meta.id);
+        // Release lock in reverse order.
+        for key in self.meta.lock_key.keys().iter().rev() {
+            self.manager_ctx.lock_map.release_lock(key, self.meta.id);
         }
 
         // If this is the root procedure, clean up message cache.
@@ -420,7 +414,7 @@ mod tests {
     #[derive(Debug)]
     struct ProcedureAdapter<F> {
         data: String,
-        lock_key: Option<LockKey>,
+        lock_key: LockKey,
         exec_fn: F,
     }
 
@@ -452,7 +446,7 @@ mod tests {
             Ok(self.data.clone())
         }
 
-        fn lock_key(&self) -> Option<LockKey> {
+        fn lock_key(&self) -> LockKey {
             self.lock_key.clone()
         }
     }
@@ -472,7 +466,7 @@ mod tests {
         };
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
-            lock_key: Some(LockKey::new("catalog.schema.table")),
+            lock_key: LockKey::single("catalog.schema.table"),
             exec_fn,
         };
 
@@ -520,7 +514,7 @@ mod tests {
         };
         let suspend = ProcedureAdapter {
             data: "suspend".to_string(),
-            lock_key: Some(LockKey::new("catalog.schema.table")),
+            lock_key: LockKey::single("catalog.schema.table"),
             exec_fn,
         };
 
@@ -551,7 +545,7 @@ mod tests {
         };
         let child = ProcedureAdapter {
             data: "child".to_string(),
-            lock_key: Some(LockKey::new(key)),
+            lock_key: LockKey::single(key),
             exec_fn,
         };
 
@@ -608,7 +602,7 @@ mod tests {
         };
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
-            lock_key: Some(LockKey::new("catalog.schema.table")),
+            lock_key: LockKey::single("catalog.schema.table"),
             exec_fn,
         };
 
@@ -650,7 +644,7 @@ mod tests {
             |_| async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }.boxed();
         let fail = ProcedureAdapter {
             data: "fail".to_string(),
-            lock_key: Some(LockKey::new("catalog.schema.table")),
+            lock_key: LockKey::single("catalog.schema.table"),
             exec_fn,
         };
 
@@ -683,7 +677,7 @@ mod tests {
                     };
                     let fail = ProcedureAdapter {
                         data: "fail".to_string(),
-                        lock_key: Some(LockKey::new("catalog.schema.table.region-0")),
+                        lock_key: LockKey::single("catalog.schema.table.region-0"),
                         exec_fn,
                     };
 
@@ -717,7 +711,7 @@ mod tests {
         };
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
-            lock_key: Some(LockKey::new("catalog.schema.table")),
+            lock_key: LockKey::single("catalog.schema.table"),
             exec_fn,
         };
 

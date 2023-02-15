@@ -71,7 +71,7 @@ pub(crate) struct ProcedureMeta {
     /// Notify to wait for subprocedures.
     child_notify: Notify,
     /// Lock required by this procedure.
-    lock_key: Option<LockKey>,
+    lock_key: LockKey,
     /// Mutable status during execution.
     exec_meta: Mutex<ExecMeta>,
 }
@@ -417,7 +417,7 @@ mod test_util {
             lock_notify: Notify::new(),
             parent_id: None,
             child_notify: Notify::new(),
-            lock_key: None,
+            lock_key: LockKey::default(),
             exec_meta: Mutex::new(ExecMeta::default()),
         }
     }
@@ -516,8 +516,8 @@ mod tests {
             Ok(self.content.clone())
         }
 
-        fn lock_key(&self) -> Option<LockKey> {
-            None
+        fn lock_key(&self) -> LockKey {
+            LockKey::default()
         }
     }
 
@@ -625,8 +625,8 @@ mod tests {
                 unimplemented!()
             }
 
-            fn lock_key(&self) -> Option<LockKey> {
-                Some(LockKey::new("test.submit"))
+            fn lock_key(&self) -> LockKey {
+                LockKey::single("test.submit")
             }
         }
 

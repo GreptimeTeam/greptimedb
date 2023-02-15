@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
 use uuid::Uuid;
 
@@ -91,24 +92,35 @@ pub trait Procedure: Send + Sync {
     /// Dump the state of the procedure to a string.
     fn dump(&self) -> Result<String>;
 
-    /// Returns the [LockKey] if this procedure needs to acquire lock.
-    fn lock_key(&self) -> Option<LockKey>;
+    /// Returns the [LockKey] that this procedure needs to acquire lock.
+    fn lock_key(&self) -> LockKey;
 }
 
-/// A key to identify the lock.
-// We might hold multiple keys in this struct. When there are multiple keys, we need to sort the
-// keys lock all the keys in order to avoid dead lock.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LockKey(String);
+/// Keys to identify required locks.
+///
+/// [LockKey] always sorts keys lexicographically so that they can be acquired
+/// in the same order.
+// Most procedures should only acquire 1 ~ 2 locks so we use smallvec to hold keys.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LockKey(SmallVec<[String; 2]>);
 
 impl LockKey {
-    /// Returns a new [LockKey].
-    pub fn new(key: impl Into<String>) -> LockKey {
-        LockKey(key.into())
+    /// Returns a new [LockKey] with only one key.
+    pub fn single(key: impl Into<String>) -> LockKey {
+        LockKey(smallvec![key.into()])
     }
 
-    /// Returns the lock key.
-    pub fn key(&self) -> &str {
+    /// Returns a new [LockKey] with keys from specific `iter`.
+    pub fn new(iter: impl IntoIterator<Item = String>) -> LockKey {
+        let mut vec: SmallVec<_> = iter.into_iter().collect();
+        vec.sort();
+        // Dedup keys to avoid acquiring the same key multiple times.
+        vec.dedup();
+        LockKey(vec)
+    }
+
+    /// Returns the lock keys.
+    pub fn keys(&self) -> &[String] {
         &self.0
     }
 }
@@ -247,8 +259,16 @@ mod tests {
     #[test]
     fn test_lock_key() {
         let entity = "catalog.schema.my_table";
-        let key = LockKey::new(entity);
-        assert_eq!(entity, key.key());
+        let key = LockKey::single(entity);
+        assert_eq!(&[entity], key.keys());
+
+        let key = LockKey::new([
+            "b".to_string(),
+            "c".to_string(),
+            "a".to_string(),
+            "c".to_string(),
+        ]);
+        assert_eq!(&["a", "b", "c"], key.keys());
     }
 
     #[test]
