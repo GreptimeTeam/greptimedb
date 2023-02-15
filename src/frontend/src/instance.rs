@@ -44,6 +44,7 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOpts;
 use partition::manager::PartitionRuleManager;
 use partition::route::TableRoutes;
+use query::parser::PromQuery;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use servers::error as server_error;
 use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
@@ -448,12 +449,14 @@ impl SqlQueryHandler for Instance {
         }
     }
 
-    async fn do_promql_query(&self, query: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+    async fn do_promql_query(&self, query: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
         if let Some(handler) = &self.promql_handler {
-            let result = handler
-                .do_query(query)
-                .await
-                .context(ExecutePromqlSnafu { query });
+            let result = handler.do_query(query).await.with_context(|_| {
+                let query_literal = format!("{query:?}");
+                ExecutePromqlSnafu {
+                    query: query_literal,
+                }
+            });
             vec![result]
         } else {
             vec![Err(NotSupportedSnafu {
@@ -523,7 +526,7 @@ impl ScriptHandler for Instance {
 
 #[async_trait]
 impl PromqlHandler for Instance {
-    async fn do_query(&self, query: &str) -> server_error::Result<Output> {
+    async fn do_query(&self, query: &PromQuery) -> server_error::Result<Output> {
         if let Some(promql_handler) = &self.promql_handler {
             promql_handler.do_query(query).await
         } else {

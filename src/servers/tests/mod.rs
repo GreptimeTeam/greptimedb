@@ -21,7 +21,7 @@ use catalog::{CatalogList, CatalogProvider, SchemaProvider};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use datatypes::schema::Schema;
-use query::parser::{QueryLanguageParser, QueryStatement};
+use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::{QueryEngineFactory, QueryEngineRef};
 use script::engine::{CompileContext, EvalContext, Script, ScriptEngine};
 use script::python::{PyEngine, PyScript};
@@ -72,7 +72,7 @@ impl SqlQueryHandler for DummyInstance {
 
     async fn do_promql_query(
         &self,
-        _: &str,
+        _: &PromQuery,
         _: QueryContextRef,
     ) -> Vec<std::result::Result<Output, Self::Error>> {
         unimplemented!()
