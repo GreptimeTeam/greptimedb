@@ -65,7 +65,6 @@ impl SqlHandler {
         let object_store = ObjectStore::new(accessor);
 
         let mut parquet_writer = ParquetWriter::new(req.file_name, stream, object_store);
-
         let rows = parquet_writer.flush().await?;
 
         Ok(Output::AffectedRows(rows))

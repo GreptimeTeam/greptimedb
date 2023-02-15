@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
+use common_grpc_expr::insert;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;
@@ -57,10 +58,10 @@ impl Instance {
                     .await
                     .context(ExecuteSqlSnafu)
             }
-            QueryStatement::Sql(Statement::Insert(i)) => {
+            QueryStatement::Sql(Statement::Insert(insert)) => {
                 let requests = self
                     .sql_handler
-                    .insert_to_requests(self.catalog_manager.clone(), *i, query_ctx.clone())
+                    .insert_to_requests(self.catalog_manager.clone(), *insert, query_ctx.clone())
                     .await?;
 
                 match requests {
@@ -86,14 +87,14 @@ impl Instance {
                     }
                 }
             }
-            QueryStatement::Sql(Statement::Delete(d)) => {
-                let request = SqlRequest::Delete(*d);
+            QueryStatement::Sql(Statement::Delete(delete)) => {
+                let request = SqlRequest::Delete(*delete);
                 self.sql_handler.execute(request, query_ctx).await
             }
-            QueryStatement::Sql(Statement::CreateDatabase(c)) => {
+            QueryStatement::Sql(Statement::CreateDatabase(create_database)) => {
                 let request = CreateDatabaseRequest {
-                    db_name: c.name.to_string(),
-                    create_if_not_exists: c.if_not_exists,
+                    db_name: create_database.name.to_string(),
+                    create_if_not_exists: create_database.if_not_exists,
                 };
 
                 info!("Creating a new database: {}", request.db_name);
@@ -103,7 +104,7 @@ impl Instance {
                     .await
             }
 
-            QueryStatement::Sql(Statement::CreateTable(c)) => {
+            QueryStatement::Sql(Statement::CreateTable(create_table)) => {
                 let table_id = self
                     .table_id_provider
                     .as_ref()
@@ -111,15 +112,15 @@ impl Instance {
                     .next_table_id()
                     .await
                     .context(BumpTableIdSnafu)?;
-                let _engine_name = c.engine.clone();
+                let _engine_name = create_table.engine.clone();
                 // TODO(hl): Select table engine by engine_name
 
-                let name = c.name.clone();
+                let name = create_table.name.clone();
                 let (catalog, schema, table) = table_idents_to_full_name(&name, query_ctx.clone())?;
                 let table_ref = TableReference::full(&catalog, &schema, &table);
-                let request = self
-                    .sql_handler
-                    .create_to_request(table_id, c, &table_ref)?;
+                let request =
+                    self.sql_handler
+                        .create_to_request(table_id, create_table, &table_ref)?;
                 let table_id = request.id;
                 info!("Creating table: {table_ref}, table id = {table_id}",);
 
@@ -148,27 +149,27 @@ impl Instance {
                     .execute(SqlRequest::DropTable(req), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::ShowDatabases(stmt)) => {
+            QueryStatement::Sql(Statement::ShowDatabases(show_databases)) => {
                 self.sql_handler
-                    .execute(SqlRequest::ShowDatabases(stmt), query_ctx)
+                    .execute(SqlRequest::ShowDatabases(show_databases), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::ShowTables(stmt)) => {
+            QueryStatement::Sql(Statement::ShowTables(show_tables)) => {
                 self.sql_handler
-                    .execute(SqlRequest::ShowTables(stmt), query_ctx)
+                    .execute(SqlRequest::ShowTables(show_tables), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::Explain(stmt)) => {
+            QueryStatement::Sql(Statement::Explain(explain)) => {
                 self.sql_handler
-                    .execute(SqlRequest::Explain(Box::new(stmt)), query_ctx)
+                    .execute(SqlRequest::Explain(Box::new(explain)), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::DescribeTable(stmt)) => {
+            QueryStatement::Sql(Statement::DescribeTable(describe_table)) => {
                 self.sql_handler
-                    .execute(SqlRequest::DescribeTable(stmt), query_ctx)
+                    .execute(SqlRequest::DescribeTable(describe_table), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::ShowCreateTable(_stmt)) => {
+            QueryStatement::Sql(Statement::ShowCreateTable(_show_create_table)) => {
                 unimplemented!("SHOW CREATE TABLE is unimplemented yet");
             }
             QueryStatement::Sql(Statement::Use(ref schema)) => {
