@@ -20,7 +20,7 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::VectorRef;
 use datatypes::vectors::StringVector;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use sql::ast::{BinaryOperator, Expr, Value};
 use sql::statements::delete::Delete;
 use sql::statements::sql_value_to_value;
@@ -111,36 +111,31 @@ fn parse_expr(
 
 /// parse value to vector
 fn value_to_vector(column_name: &String, sql_value: &Value, table: &TableRef) -> Result<VectorRef> {
-    let data_type = table.schema().column_type_by_name(column_name);
-    match data_type {
-        Some(data_type) => {
-            let value = sql_value_to_value(column_name, &data_type, sql_value);
-            match value {
-                Ok(value) => {
-                    let mut vec = data_type.create_mutable_vector(1);
-                    if vec.push_value_ref(value.as_value_ref()).is_err() {
-                        return InvalidSqlSnafu {
-                            msg: format!(
-                                "invalid sql, column name is {column_name}, value is {sql_value}",
-                            ),
-                        }
-                        .fail();
-                    }
-                    Ok(vec.to_vector())
+    let schema = table.schema();
+    let column_schema =
+        schema
+            .column_schema_by_name(column_name)
+            .with_context(|| ColumnNotFoundSnafu {
+                table_name: table.table_info().name.clone(),
+                column_name: column_name.to_string(),
+            })?;
+    let data_type = &column_schema.data_type;
+    let value = sql_value_to_value(column_name, data_type, sql_value);
+    match value {
+        Ok(value) => {
+            let mut vec = data_type.create_mutable_vector(1);
+            if vec.push_value_ref(value.as_value_ref()).is_err() {
+                return InvalidSqlSnafu {
+                    msg: format!(
+                        "invalid sql, column name is {column_name}, value is {sql_value}",
+                    ),
                 }
-                _ => {
-                    InvalidSqlSnafu {
-                        msg: format!(
-                            "invalid sql, column name is {column_name}, value is {sql_value}",
-                        ),
-                    }
-                    .fail()
-                }
+                    .fail();
             }
+            Ok(vec.to_vector())
         }
-        None => ColumnNotFoundSnafu {
-            column_name,
-            table_name: table.table_info().name.clone(),
+        _ => InvalidSqlSnafu {
+            msg: format!("invalid sql, column name is {column_name}, value is {sql_value}",),
         }
         .fail(),
     }
