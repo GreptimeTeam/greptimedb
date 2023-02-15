@@ -321,7 +321,7 @@ async fn aggregators_complex_combined_aggrs() {
     .await;
 }
 
-// This is not from promethues test set. It's derived from `aggregators_complex_combined_aggrs()`
+// This is not from prometheus test set. It's derived from `aggregators_complex_combined_aggrs()`
 #[tokio::test(flavor = "multi_thread")]
 async fn two_aggregators_combined_aggrs() {
     create_insert_query_assert(
