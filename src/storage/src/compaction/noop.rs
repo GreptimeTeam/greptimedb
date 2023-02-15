@@ -41,6 +41,7 @@ impl<R> Debug for NoopCompactionScheduler<R> {
 
 #[derive(Default, Debug)]
 pub struct NoopCompactionRequest;
+
 #[derive(Default, Debug)]
 pub struct NoopCompactionPicker;
 
