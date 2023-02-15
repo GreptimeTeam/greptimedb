@@ -559,7 +559,7 @@ impl WriterInner {
             writer: ctx.writer.clone(),
             wal: ctx.wal.clone(),
             manifest: ctx.manifest.clone(),
-            on_success: Mutex::new(cb),
+            on_success: cb,
         };
 
         let flush_handle = ctx
