@@ -2,6 +2,8 @@ CREATE SCHEMA test_public_schema;
 
 CREATE SCHEMA test_public_schema;
 
+CREATE SCHEMA IF NOT EXISTS test_public_schema;
+
 SHOW DATABASES LIKE '%public%';
 
 USE test_public_schema;

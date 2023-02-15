@@ -281,7 +281,7 @@ impl DistInstance {
                     database_name: stmt.name.to_string(),
                     create_if_not_exists: stmt.if_not_exists,
                 };
-                Ok(self.handle_create_database(expr).await?)
+                return self.handle_create_database(expr, query_ctx).await;
             }
             Statement::CreateTable(stmt) => {
                 let create_expr = &mut expr_factory::create_to_expr(&stmt, query_ctx)?;
@@ -371,10 +371,30 @@ impl DistInstance {
     }
 
     /// Handles distributed database creation
-    async fn handle_create_database(&self, expr: CreateDatabaseExpr) -> Result<Output> {
+    async fn handle_create_database(
+        &self,
+        expr: CreateDatabaseExpr,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let catalog = query_ctx.current_catalog();
+        if self
+            .catalog_manager
+            .schema(&catalog, &expr.database_name)
+            .context(CatalogSnafu)?
+            .is_some()
+        {
+            return if expr.create_if_not_exists {
+                Ok(Output::AffectedRows(1))
+            } else {
+                SchemaExistsSnafu {
+                    name: &expr.database_name,
+                }
+                .fail()
+            };
+        }
+
         let key = SchemaKey {
-            // TODO(sunng87): custom catalog
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            catalog_name: catalog,
             schema_name: expr.database_name,
         };
         let value = SchemaValue {};

@@ -45,7 +45,7 @@ impl GrpcQueryHandler for DistInstance {
                     err_msg: "Missing 'expr' in DDL request",
                 })?;
                 match expr {
-                    DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr).await,
+                    DdlExpr::CreateDatabase(expr) => self.handle_create_database(expr, ctx).await,
                     DdlExpr::CreateTable(mut expr) => {
                         // TODO(LFC): Support creating distributed table through GRPC interface.
                         // Currently only SQL supports it; how to design the fields in CreateTableExpr?
