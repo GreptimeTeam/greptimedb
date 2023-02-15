@@ -102,8 +102,8 @@ mod tests {
     };
     use crate::metadata::RegionMetadata;
     use crate::sst;
-    use crate::sst::parquet::{ParquetWriter, Source};
-    use crate::sst::{FileMeta, FsAccessLayer, SstInfo, WriteOptions};
+    use crate::sst::parquet::ParquetWriter;
+    use crate::sst::{FileMeta, FsAccessLayer, Source, SstInfo, WriteOptions};
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     fn schema_for_test() -> RegionSchemaRef {

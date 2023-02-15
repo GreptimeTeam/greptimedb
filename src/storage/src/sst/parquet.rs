@@ -45,21 +45,18 @@ use parquet::file::properties::WriterProperties;
 use parquet::format::FileMetaData;
 use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::ChunkReader;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
-use crate::chunk::ChunkReaderImpl;
 use crate::error::{
     self, DecodeParquetTimeRangeSnafu, NewRecordBatchSnafu, ReadObjectSnafu, ReadParquetSnafu,
     Result, WriteObjectSnafu, WriteParquetSnafu,
 };
-use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BatchReader};
 use crate::schema::compat::ReadAdapter;
 use crate::schema::{ProjectedSchemaRef, StoreSchema, StoreSchemaRef};
 use crate::sst;
-use crate::sst::SstInfo;
+use crate::sst::{Source, SstInfo};
 /// Parquet sst writer.
 pub struct ParquetWriter<'a> {
     file_path: &'a str,
@@ -321,7 +318,6 @@ impl<'a> ParquetReader<'a> {
         // checks if converting time range unit into ts col unit will result into rounding error.
         if time_unit_lossy(&self.time_range, ts_col_unit) {
             let filter = RowFilter::new(vec![Box::new(PlainTimestampRowFilter::new(
-                ts_col_idx,
                 self.time_range,
                 projection,
             ))]);
@@ -343,15 +339,9 @@ impl<'a> ParquetReader<'a> {
                 .and_then(|s| s.convert_to(ts_col_unit))
                 .map(|t| t.value()),
         ) {
-            Box::new(FastTimestampRowFilter::new(
-                ts_col_idx, projection, lower, upper,
-            )) as _
+            Box::new(FastTimestampRowFilter::new(projection, lower, upper)) as _
         } else {
-            Box::new(PlainTimestampRowFilter::new(
-                ts_col_idx,
-                self.time_range,
-                projection,
-            )) as _
+            Box::new(PlainTimestampRowFilter::new(self.time_range, projection)) as _
         };
         let filter = RowFilter::new(vec![row_filter]);
         Some(filter)
@@ -372,21 +362,14 @@ fn time_unit_lossy(range: &TimestampRange, ts_col_unit: TimeUnit) -> bool {
 /// `FastTimestampRowFilter` is used to filter rows within given timestamp range when reading
 /// row groups from parquet files, while avoids fetching all columns from SSTs file.
 struct FastTimestampRowFilter {
-    timestamp_index: usize,
     lower_bound: i64,
     upper_bound: i64,
     projection: ProjectionMask,
 }
 
 impl FastTimestampRowFilter {
-    fn new(
-        ts_col_idx: usize,
-        projection: ProjectionMask,
-        lower_bound: i64,
-        upper_bound: i64,
-    ) -> Self {
+    fn new(projection: ProjectionMask, lower_bound: i64, upper_bound: i64) -> Self {
         Self {
-            timestamp_index: ts_col_idx,
             lower_bound,
             upper_bound,
             projection,
@@ -401,7 +384,8 @@ impl ArrowPredicate for FastTimestampRowFilter {
 
     /// Selects the rows matching given time range.
     fn evaluate(&mut self, batch: RecordBatch) -> std::result::Result<BooleanArray, ArrowError> {
-        let ts_col = batch.column(self.timestamp_index);
+        // the projection has only timestamp column, so we can safely take the first column in batch.
+        let ts_col = batch.column(0);
 
         macro_rules! downcast_and_compute {
             ($typ: ty) => {
@@ -443,15 +427,13 @@ impl ArrowPredicate for FastTimestampRowFilter {
 /// [PlainTimestampRowFilter] iterates each element in timestamp column, build a [Timestamp] struct
 /// and checks if given time range contains the timestamp.
 struct PlainTimestampRowFilter {
-    timestamp_index: usize,
     time_range: TimestampRange,
     projection: ProjectionMask,
 }
 
 impl PlainTimestampRowFilter {
-    fn new(timestamp_index: usize, time_range: TimestampRange, projection: ProjectionMask) -> Self {
+    fn new(time_range: TimestampRange, projection: ProjectionMask) -> Self {
         Self {
-            timestamp_index,
             time_range,
             projection,
         }
@@ -464,7 +446,8 @@ impl ArrowPredicate for PlainTimestampRowFilter {
     }
 
     fn evaluate(&mut self, batch: RecordBatch) -> std::result::Result<BooleanArray, ArrowError> {
-        let ts_col = batch.column(self.timestamp_index);
+        // the projection has only timestamp column, so we can safely take the first column in batch.
+        let ts_col = batch.column(0);
 
         macro_rules! downcast_and_compute {
             ($array_ty: ty, $unit: ident) => {{
@@ -529,33 +512,6 @@ impl BatchReader for ChunkStream {
             .await?
             .map(|rb| self.adapter.arrow_record_batch_to_batch(&rb))
             .transpose()
-    }
-}
-
-/// Parquet writer data source.
-pub enum Source {
-    /// Writes rows from memtable to parquet
-    Iter(BoxedBatchIterator),
-    /// Writes row from ChunkReaderImpl (maybe a set of SSTs) to parquet.
-    Reader(ChunkReaderImpl),
-}
-
-impl Source {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        match self {
-            Source::Iter(iter) => iter.next().transpose(),
-            Source::Reader(reader) => reader
-                .next_chunk()
-                .await
-                .map(|p| p.map(|chunk| Batch::new(chunk.columns))),
-        }
-    }
-
-    fn projected_schema(&self) -> ProjectedSchemaRef {
-        match self {
-            Source::Iter(iter) => iter.schema(),
-            Source::Reader(reader) => reader.projected_schema().clone(),
-        }
     }
 }
 

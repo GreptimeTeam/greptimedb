@@ -118,6 +118,7 @@ mod tests {
     use log_store::raft_engine::log_store::RaftEngineLogStore;
     use log_store::LogConfig;
     use mito::engine::MitoEngine;
+    use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use tempdir::TempDir;
@@ -135,12 +136,14 @@ mod tests {
         };
 
         let log_store = RaftEngineLogStore::try_new(log_config).await.unwrap();
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let mock_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
                 StorageEngineConfig::default(),
                 Arc::new(log_store),
                 object_store.clone(),
+                compaction_scheduler,
             ),
             object_store,
         ));

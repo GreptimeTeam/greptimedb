@@ -205,7 +205,7 @@ impl TimestampRange {
     pub fn new_inclusive(start: Option<Timestamp>, end: Option<Timestamp>) -> Self {
         // check for emptiness
         if let (Some(start_ts), Some(end_ts)) = (start, end) {
-            if start_ts >= end_ts {
+            if start_ts > end_ts {
                 return Self::empty();
             }
         }
@@ -461,5 +461,30 @@ mod tests {
         assert!(full.intersects(&full));
 
         assert!(!full.intersects(&empty));
+    }
+
+    #[test]
+    fn test_new_inclusive() {
+        let range = TimestampRange::new_inclusive(
+            Some(Timestamp::new_millisecond(1)),
+            Some(Timestamp::new_millisecond(3)),
+        );
+        assert!(!range.is_empty());
+        assert!(range.contains(&Timestamp::new_millisecond(1)));
+        assert!(range.contains(&Timestamp::new_millisecond(3)));
+
+        let range = TimestampRange::new_inclusive(
+            Some(Timestamp::new_millisecond(1)),
+            Some(Timestamp::new_millisecond(1)),
+        );
+        assert!(!range.is_empty());
+        assert_eq!(1, range.start.unwrap().value());
+        assert!(range.contains(&Timestamp::new_millisecond(1)));
+
+        let range = TimestampRange::new_inclusive(
+            Some(Timestamp::new_millisecond(2)),
+            Some(Timestamp::new_millisecond(1)),
+        );
+        assert!(range.is_empty());
     }
 }

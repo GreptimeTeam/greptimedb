@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -27,7 +29,7 @@ use crate::manifest::action::*;
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{IterContext, MemtableId, MemtableRef};
 use crate::region::{RegionWriterRef, SharedDataRef};
-use crate::sst::{AccessLayerRef, FileMeta, SstInfo, WriteOptions};
+use crate::sst::{AccessLayerRef, FileMeta, Source, SstInfo, WriteOptions};
 use crate::wal::Wal;
 
 /// Default write buffer size (32M).
@@ -142,6 +144,8 @@ impl FlushScheduler for FlushSchedulerImpl {
 
 pub type FlushSchedulerRef = Arc<dyn FlushScheduler>;
 
+pub type FlushCallback = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
 pub struct FlushJob<S: LogStore> {
     /// Max memtable id in these memtables,
     /// used to remove immutable memtables in current version.
@@ -160,10 +164,12 @@ pub struct FlushJob<S: LogStore> {
     pub wal: Wal<S>,
     /// Region manifest service, used to persist metadata.
     pub manifest: RegionManifest,
+    /// Callbacks that get invoked on flush success.
+    pub on_success: Option<FlushCallback>,
 }
 
 impl<S: LogStore> FlushJob<S> {
-    async fn write_memtables_to_layer(&self, ctx: &Context) -> Result<Vec<FileMeta>> {
+    async fn write_memtables_to_layer(&mut self, ctx: &Context) -> Result<Vec<FileMeta>> {
         if ctx.is_cancelled() {
             return CancelledSnafu {}.fail();
         }
@@ -184,10 +190,11 @@ impl<S: LogStore> FlushJob<S> {
             let file_name = Self::generate_sst_file_name();
             // TODO(hl): Check if random file name already exists in meta.
             let iter = m.iter(&iter_ctx)?;
+            let sst_layer = self.sst_layer.clone();
+
             futures.push(async move {
-                let SstInfo { time_range } = self
-                    .sst_layer
-                    .write_sst(&file_name, iter, &WriteOptions::default())
+                let SstInfo { time_range } = sst_layer
+                    .write_sst(&file_name, Source::Iter(iter), &WriteOptions::default())
                     .await?;
 
                 Ok(FileMeta {
@@ -209,7 +216,7 @@ impl<S: LogStore> FlushJob<S> {
         Ok(metas)
     }
 
-    async fn write_manifest_and_apply(&self, file_metas: &[FileMeta]) -> Result<()> {
+    async fn write_manifest_and_apply(&mut self, file_metas: &[FileMeta]) -> Result<()> {
         let edit = RegionEdit {
             region_version: self.shared.version_control.metadata().version(),
             flushed_sequence: Some(self.flush_sequence),
@@ -241,6 +248,10 @@ impl<S: LogStore> Job for FlushJob<S> {
     async fn run(&mut self, ctx: &Context) -> Result<()> {
         let file_metas = self.write_memtables_to_layer(ctx).await?;
         self.write_manifest_and_apply(&file_metas).await?;
+
+        if let Some(cb) = self.on_success.take() {
+            cb.await;
+        }
         Ok(())
     }
 }

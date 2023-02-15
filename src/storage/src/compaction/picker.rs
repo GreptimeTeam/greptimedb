@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use common_telemetry::debug;
 use store_api::logstore::LogStore;
 
 use crate::compaction::scheduler::CompactionRequestImpl;
-use crate::compaction::strategy::StrategyRef;
+use crate::compaction::strategy::{SimpleTimeWindowStrategy, StrategyRef};
 use crate::compaction::task::{CompactionTask, CompactionTaskImpl};
 
 /// Picker picks input SST files and builds the compaction task.
@@ -30,12 +31,17 @@ pub trait Picker<R, T: CompactionTask>: Send + 'static {
 pub struct PickerContext {}
 
 /// L0 -> L1 compaction based on time windows.
-pub(crate) struct SimplePicker<S> {
+pub struct SimplePicker<S> {
     strategy: StrategyRef,
     _phantom_data: PhantomData<S>,
 }
 
-#[allow(unused)]
+impl<S> Default for SimplePicker<S> {
+    fn default() -> Self {
+        Self::new(Arc::new(SimpleTimeWindowStrategy {}))
+    }
+}
+
 impl<S> SimplePicker<S> {
     pub fn new(strategy: StrategyRef) -> Self {
         Self {
@@ -51,7 +57,7 @@ impl<S: LogStore> Picker<CompactionRequestImpl<S>, CompactionTaskImpl<S>> for Si
         ctx: &PickerContext,
         req: &CompactionRequestImpl<S>,
     ) -> crate::error::Result<Option<CompactionTaskImpl<S>>> {
-        let levels = &req.levels;
+        let levels = &req.levels();
 
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
@@ -67,7 +73,7 @@ impl<S: LogStore> Picker<CompactionRequestImpl<S>, CompactionTaskImpl<S>> for Si
                 outputs, level_num
             );
             return Ok(Some(CompactionTaskImpl {
-                schema: req.schema.clone(),
+                schema: req.schema(),
                 sst_layer: req.sst_layer.clone(),
                 outputs,
                 writer: req.writer.clone(),

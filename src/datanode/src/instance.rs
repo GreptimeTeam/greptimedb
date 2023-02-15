@@ -38,8 +38,12 @@ use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
 use snafu::prelude::*;
+use storage::compaction::{
+    CompactionSchedulerConfig, CompactionSchedulerRef, LocalCompactionScheduler, SimplePicker,
+};
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
+use store_api::logstore::LogStore;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 use table::Table;
@@ -92,12 +96,15 @@ impl Instance {
             }
         };
 
+        let compaction_scheduler = create_compaction_scheduler(opts);
+
         let table_engine = Arc::new(DefaultEngine::new(
             TableEngineConfig::default(),
             EngineImpl::new(
-                StorageEngineConfig::default(),
+                StorageEngineConfig::from(opts),
                 logstore.clone(),
                 object_store.clone(),
+                compaction_scheduler,
             ),
             object_store,
         ));
@@ -202,6 +209,13 @@ impl Instance {
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
+}
+
+fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> CompactionSchedulerRef<S> {
+    let picker = SimplePicker::default();
+    let config = CompactionSchedulerConfig::from(opts);
+    let scheduler = LocalCompactionScheduler::new(config, picker);
+    Arc::new(scheduler)
 }
 
 pub(crate) async fn new_object_store(store_config: &ObjectStoreConfig) -> Result<ObjectStore> {

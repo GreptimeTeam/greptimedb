@@ -25,6 +25,7 @@ use store_api::storage::{
 };
 
 use crate::background::JobPoolImpl;
+use crate::compaction::CompactionSchedulerRef;
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
@@ -84,9 +85,19 @@ impl<S: LogStore> StorageEngine for EngineImpl<S> {
 }
 
 impl<S: LogStore> EngineImpl<S> {
-    pub fn new(config: EngineConfig, log_store: Arc<S>, object_store: ObjectStore) -> Self {
+    pub fn new(
+        config: EngineConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+        compaction_scheduler: CompactionSchedulerRef<S>,
+    ) -> Self {
         Self {
-            inner: Arc::new(EngineInner::new(config, log_store, object_store)),
+            inner: Arc::new(EngineInner::new(
+                config,
+                log_store,
+                object_store,
+                compaction_scheduler,
+            )),
         }
     }
 }
@@ -210,13 +221,19 @@ struct EngineInner<S: LogStore> {
     memtable_builder: MemtableBuilderRef,
     flush_scheduler: FlushSchedulerRef,
     flush_strategy: FlushStrategyRef,
+    compaction_scheduler: CompactionSchedulerRef<S>,
+    config: Arc<EngineConfig>,
 }
 
 impl<S: LogStore> EngineInner<S> {
-    pub fn new(_config: EngineConfig, log_store: Arc<S>, object_store: ObjectStore) -> Self {
+    pub fn new(
+        config: EngineConfig,
+        log_store: Arc<S>,
+        object_store: ObjectStore,
+        compaction_scheduler: CompactionSchedulerRef<S>,
+    ) -> Self {
         let job_pool = Arc::new(JobPoolImpl {});
         let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
-
         Self {
             object_store,
             log_store,
@@ -224,6 +241,8 @@ impl<S: LogStore> EngineInner<S> {
             memtable_builder: Arc::new(DefaultMemtableBuilder::default()),
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
+            compaction_scheduler,
+            config: Arc::new(config),
         }
     }
 
@@ -320,6 +339,8 @@ impl<S: LogStore> EngineInner<S> {
             memtable_builder: self.memtable_builder.clone(),
             flush_scheduler: self.flush_scheduler.clone(),
             flush_strategy: self.flush_strategy.clone(),
+            compaction_scheduler: self.compaction_scheduler.clone(),
+            engine_config: self.config.clone(),
         }
     }
 }
@@ -333,6 +354,7 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
+    use crate::compaction::noop::NoopCompactionScheduler;
     use crate::test_util::descriptor_util::RegionDescBuilder;
 
     #[tokio::test]
@@ -347,7 +369,14 @@ mod tests {
 
         let config = EngineConfig::default();
 
-        let engine = EngineImpl::new(config, Arc::new(log_store), object_store);
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
+
+        let engine = EngineImpl::new(
+            config,
+            Arc::new(log_store),
+            object_store,
+            compaction_scheduler,
+        );
 
         let region_name = "region-0";
         let desc = RegionDescBuilder::new(region_name)

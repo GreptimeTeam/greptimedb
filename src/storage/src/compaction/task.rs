@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::fmt::{Debug, Formatter};
 
 use common_telemetry::{error, info};
-use object_store::ObjectStore;
 use store_api::logstore::LogStore;
 use uuid::Uuid;
 
@@ -25,17 +25,15 @@ use crate::manifest::action::RegionEdit;
 use crate::manifest::region::RegionManifest;
 use crate::region::{RegionWriterRef, SharedDataRef};
 use crate::schema::RegionSchemaRef;
-use crate::sst::parquet::{ParquetWriter, Source};
-use crate::sst::{AccessLayerRef, FileHandle, FileMeta, Level, SstInfo, WriteOptions};
+use crate::sst::{AccessLayerRef, FileHandle, FileMeta, Level, Source, SstInfo, WriteOptions};
 use crate::wal::Wal;
 
 #[async_trait::async_trait]
-pub trait CompactionTask: Send + Sync + 'static {
+pub trait CompactionTask: Debug + Send + Sync + 'static {
     async fn run(self) -> Result<()>;
 }
 
-#[allow(unused)]
-pub(crate) struct CompactionTaskImpl<S: LogStore> {
+pub struct CompactionTaskImpl<S: LogStore> {
     pub schema: RegionSchemaRef,
     pub sst_layer: AccessLayerRef,
     pub outputs: Vec<CompactionOutput>,
@@ -43,6 +41,14 @@ pub(crate) struct CompactionTaskImpl<S: LogStore> {
     pub shared_data: SharedDataRef,
     pub wal: Wal<S>,
     pub manifest: RegionManifest,
+}
+
+impl<S: LogStore> Debug for CompactionTaskImpl<S> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactionTaskImpl")
+            .field("region_name", &self.shared_data.name())
+            .finish()
+    }
 }
 
 impl<S: LogStore> Drop for CompactionTaskImpl<S> {
@@ -60,7 +66,6 @@ impl<S: LogStore> CompactionTaskImpl<S> {
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
             let sst_layer = self.sst_layer.clone();
-            let object_store = self.sst_layer.object_store();
             compacted_inputs.extend(output.inputs.iter().map(|f| FileMeta {
                 file_name: f.file_name().to_string(),
                 time_range: *f.time_range(),
@@ -69,7 +74,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
 
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
             futs.push(async move {
-                match output.build(schema, sst_layer, object_store).await {
+                match output.build(schema, sst_layer).await {
                     Ok(meta) => Ok(meta),
                     Err(e) => Err(e),
                 }
@@ -137,17 +142,9 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
     }
 }
 
-#[allow(unused)]
-pub(crate) struct CompactionInput {
-    input_level: u8,
-    output_level: u8,
-    file: FileHandle,
-}
-
 /// Many-to-many compaction can be decomposed to a many-to-one compaction from level n to level n+1
 /// and a many-to-one compaction from level n+1 to level n+1.
 #[derive(Debug)]
-#[allow(unused)]
 pub struct CompactionOutput {
     /// Compaction output file level.
     pub(crate) output_level: Level,
@@ -160,15 +157,10 @@ pub struct CompactionOutput {
 }
 
 impl CompactionOutput {
-    async fn build(
-        &self,
-        schema: RegionSchemaRef,
-        sst_layer: AccessLayerRef,
-        object_store: ObjectStore,
-    ) -> Result<FileMeta> {
+    async fn build(&self, schema: RegionSchemaRef, sst_layer: AccessLayerRef) -> Result<FileMeta> {
         let reader = build_sst_reader(
             schema,
-            sst_layer,
+            sst_layer.clone(),
             &self.inputs,
             self.bucket_bound,
             self.bucket_bound + self.bucket,
@@ -176,10 +168,10 @@ impl CompactionOutput {
         .await?;
         let output_file_name = format!("{}.parquet", Uuid::new_v4().hyphenated());
         let opts = WriteOptions {};
-        let SstInfo { time_range } =
-            ParquetWriter::new(&output_file_name, Source::Reader(reader), object_store)
-                .write_sst(&opts)
-                .await?;
+
+        let SstInfo { time_range } = sst_layer
+            .write_sst(&output_file_name, Source::Reader(reader), &opts)
+            .await?;
 
         Ok(FileMeta {
             file_name: output_file_name,
@@ -197,8 +189,16 @@ pub mod tests {
     use crate::compaction::task::CompactionTask;
 
     pub type CallbackRef = Arc<dyn Fn() + Send + Sync>;
+
     pub struct NoopCompactionTask {
         pub cbs: Vec<CallbackRef>,
+    }
+
+    impl Debug for NoopCompactionTask {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("storage::compaction::task::tests::NoopCompactionTask")
+                .finish()
+        }
     }
 
     impl NoopCompactionTask {

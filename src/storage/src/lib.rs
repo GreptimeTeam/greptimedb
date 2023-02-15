@@ -17,7 +17,7 @@
 mod background;
 mod chunk;
 pub mod codec;
-mod compaction;
+pub mod compaction;
 pub mod config;
 mod engine;
 pub mod error;

@@ -23,13 +23,15 @@ use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use object_store::{util, ObjectStore};
 use serde::{Deserialize, Serialize};
+use store_api::storage::ChunkReader;
 use table::predicate::Predicate;
 
+use crate::chunk::ChunkReaderImpl;
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
-use crate::read::BoxedBatchReader;
+use crate::read::{Batch, BoxedBatchReader};
 use crate::schema::ProjectedSchemaRef;
-use crate::sst::parquet::{ParquetReader, ParquetWriter, Source};
+use crate::sst::parquet::{ParquetReader, ParquetWriter};
 
 /// Maximum level of SSTs.
 pub const MAX_LEVEL: u8 = 2;
@@ -111,7 +113,7 @@ pub struct LevelMeta {
 }
 
 impl LevelMeta {
-    pub fn new_empty(level: Level) -> Self {
+    pub fn new(level: Level) -> Self {
         Self {
             level,
             files: HashMap::new(),
@@ -132,6 +134,12 @@ impl LevelMeta {
         self.level
     }
 
+    /// Returns number of SST files in level.
+    #[inline]
+    pub fn file_num(&self) -> usize {
+        self.files.len()
+    }
+
     pub fn files(&self) -> impl Iterator<Item = &FileHandle> {
         self.files.values()
     }
@@ -140,7 +148,7 @@ impl LevelMeta {
 fn new_level_meta_vec() -> LevelMetaVec {
     (0u8..MAX_LEVEL)
         .into_iter()
-        .map(LevelMeta::new_empty)
+        .map(LevelMeta::new)
         .collect::<Vec<_>>()
         .try_into()
         .unwrap() // safety: LevelMetaVec is a fixed length array with length MAX_LEVEL
@@ -243,7 +251,7 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     async fn write_sst(
         &self,
         file_name: &str,
-        iter: BoxedBatchIterator,
+        source: Source,
         opts: &WriteOptions,
     ) -> Result<SstInfo>;
 
@@ -255,6 +263,33 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
+
+/// Parquet writer data source.
+pub enum Source {
+    /// Writes rows from memtable to parquet
+    Iter(BoxedBatchIterator),
+    /// Writes row from ChunkReaderImpl (maybe a set of SSTs) to parquet.
+    Reader(ChunkReaderImpl),
+}
+
+impl Source {
+    async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        match self {
+            Source::Iter(iter) => iter.next().transpose(),
+            Source::Reader(reader) => reader
+                .next_chunk()
+                .await
+                .map(|p| p.map(|chunk| Batch::new(chunk.columns))),
+        }
+    }
+
+    fn projected_schema(&self) -> ProjectedSchemaRef {
+        match self {
+            Source::Iter(iter) => iter.schema(),
+            Source::Reader(reader) => reader.projected_schema().clone(),
+        }
+    }
+}
 
 /// Sst access layer based on local file system.
 #[derive(Debug)]
@@ -282,13 +317,13 @@ impl AccessLayer for FsAccessLayer {
     async fn write_sst(
         &self,
         file_name: &str,
-        iter: BoxedBatchIterator,
+        source: Source,
         opts: &WriteOptions,
     ) -> Result<SstInfo> {
         // Now we only supports parquet format. We may allow caller to specific SST format in
         // WriteOptions in the future.
         let file_path = self.sst_file_path(file_name);
-        let writer = ParquetWriter::new(&file_path, Source::Iter(iter), self.object_store.clone());
+        let writer = ParquetWriter::new(&file_path, source, self.object_store.clone());
         writer.write_sst(opts).await
     }
 

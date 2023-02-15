@@ -150,6 +150,7 @@ mod tests {
     use query::parser::{QueryLanguageParser, QueryStatement};
     use query::QueryEngineFactory;
     use sql::statements::statement::Statement;
+    use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
     use table::engine::TableReference;
@@ -209,7 +210,7 @@ mod tests {
         let store_dir = dir.path().to_string_lossy();
         let accessor = Builder::default().root(&store_dir).build().unwrap();
         let object_store = ObjectStore::new(accessor);
-
+        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
         let sql = r#"insert into demo(host, cpu, memory, ts) values
                            ('host1', 66.6, 1024, 1655276557000),
                            ('host2', 88.8,  333.3, 1655276558000)
@@ -221,6 +222,7 @@ mod tests {
                 StorageEngineConfig::default(),
                 Arc::new(NoopLogStore::default()),
                 object_store.clone(),
+                compaction_scheduler,
             ),
             object_store,
         ));

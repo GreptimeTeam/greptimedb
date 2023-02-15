@@ -28,6 +28,8 @@ use store_api::storage::{
     WriteResponse,
 };
 
+use crate::compaction::CompactionSchedulerRef;
+use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
@@ -107,13 +109,15 @@ impl<S: LogStore> Region for RegionImpl<S> {
 ///
 /// Contains all necessary storage related components needed by the region, such as logstore,
 /// manifest, memtable builder.
-pub struct StoreConfig<S> {
+pub struct StoreConfig<S: LogStore> {
     pub log_store: Arc<S>,
     pub sst_layer: AccessLayerRef,
     pub manifest: RegionManifest,
     pub memtable_builder: MemtableBuilderRef,
     pub flush_scheduler: FlushSchedulerRef,
     pub flush_strategy: FlushStrategyRef,
+    pub compaction_scheduler: CompactionSchedulerRef<S>,
+    pub engine_config: Arc<EngineConfig>,
 }
 
 pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
@@ -163,10 +167,14 @@ impl<S: LogStore> RegionImpl<S> {
                 name,
                 version_control: Arc::new(version_control),
             }),
-            writer: Arc::new(RegionWriter::new(store_config.memtable_builder)),
+            writer: Arc::new(RegionWriter::new(
+                store_config.memtable_builder,
+                store_config.engine_config.clone(),
+            )),
             wal,
             flush_strategy: store_config.flush_strategy,
             flush_scheduler: store_config.flush_scheduler,
+            compaction_scheduler: store_config.compaction_scheduler,
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
         });
@@ -236,11 +244,15 @@ impl<S: LogStore> RegionImpl<S> {
             version_control,
         });
 
-        let writer = Arc::new(RegionWriter::new(store_config.memtable_builder));
+        let writer = Arc::new(RegionWriter::new(
+            store_config.memtable_builder,
+            store_config.engine_config.clone(),
+        ));
         let writer_ctx = WriterContext {
             shared: &shared,
             flush_strategy: &store_config.flush_strategy,
             flush_scheduler: &store_config.flush_scheduler,
+            compaction_scheduler: &store_config.compaction_scheduler,
             sst_layer: &store_config.sst_layer,
             wal: &wal,
             writer: &writer,
@@ -257,6 +269,7 @@ impl<S: LogStore> RegionImpl<S> {
             wal,
             flush_strategy: store_config.flush_strategy,
             flush_scheduler: store_config.flush_scheduler,
+            compaction_scheduler: store_config.compaction_scheduler,
             sst_layer: store_config.sst_layer,
             manifest: store_config.manifest,
         });
@@ -387,6 +400,7 @@ impl<S: LogStore> RegionImpl<S> {
             shared: &inner.shared,
             flush_strategy: &inner.flush_strategy,
             flush_scheduler: &inner.flush_scheduler,
+            compaction_scheduler: &inner.compaction_scheduler,
             sst_layer: &inner.sst_layer,
             wal: &inner.wal,
             writer: &inner.writer,
@@ -429,6 +443,7 @@ struct RegionInner<S: LogStore> {
     wal: Wal<S>,
     flush_strategy: FlushStrategyRef,
     flush_scheduler: FlushSchedulerRef,
+    compaction_scheduler: CompactionSchedulerRef<S>,
     sst_layer: AccessLayerRef,
     manifest: RegionManifest,
 }
@@ -467,6 +482,7 @@ impl<S: LogStore> RegionInner<S> {
             shared: &self.shared,
             flush_strategy: &self.flush_strategy,
             flush_scheduler: &self.flush_scheduler,
+            compaction_scheduler: &self.compaction_scheduler,
             sst_layer: &self.sst_layer,
             wal: &self.wal,
             writer: &self.writer,

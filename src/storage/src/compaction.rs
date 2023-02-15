@@ -13,9 +13,22 @@
 // limitations under the License.
 
 mod dedup_deque;
+pub mod noop;
 mod picker;
 mod rate_limit;
 mod scheduler;
 mod strategy;
 mod task;
 mod writer;
+
+use std::sync::Arc;
+
+pub use picker::{Picker, PickerContext, SimplePicker};
+pub use scheduler::{
+    CompactionRequest, CompactionRequestImpl, CompactionScheduler, CompactionSchedulerConfig,
+    LocalCompactionScheduler,
+};
+pub use task::{CompactionTask, CompactionTaskImpl};
+
+pub type CompactionSchedulerRef<S> =
+    Arc<dyn CompactionScheduler<CompactionRequestImpl<S>> + Send + Sync>;
