@@ -307,17 +307,17 @@ async fn aggregators_complex_combined_aggrs() {
     create_insert_query_assert(
         AGGREGATORS_CREATE_TABLE,
         AGGREGATORS_INSERT_DATA,
-        "sum(http_requests) by (job) + min(http_requests) by (job) ",
+        "sum(http_requests) by (job) + min(http_requests) by (job) + max(http_requests) by (job) + avg(http_requests) by (job)",
         UNIX_EPOCH,
         unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
-        "+------------+---------------------------------------------------------+\
-        \n| job        | lhs.SUM(http_requests.value) + MIN(http_requests.value) |\
-        \n+------------+---------------------------------------------------------+\
-        \n| api-server | 1100                                                    |\
-        \n| app-server | 3100                                                    |\
-        \n+------------+---------------------------------------------------------+",
+        "+------------+-----------------------------------------------------------------------------------------------------------+\
+        \n| job        | SUM(http_requests.value) + MIN(http_requests.value) + MAX(http_requests.value) + AVG(http_requests.value) |\
+        \n+------------+-----------------------------------------------------------------------------------------------------------+\
+        \n| api-server | 1750                                                                                                      |\
+        \n| app-server | 4550                                                                                                      |\
+        \n+------------+-----------------------------------------------------------------------------------------------------------+",
     )
     .await;
 }
@@ -333,12 +333,12 @@ async fn two_aggregators_combined_aggrs() {
         unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
-        "+------------+---------------------------------------------------------+\
-        \n| job        | lhs.SUM(http_requests.value) + MIN(http_requests.value) |\
-        \n+------------+---------------------------------------------------------+\
-        \n| api-server | 1100                                                    |\
-        \n| app-server | 3100                                                    |\
-        \n+------------+---------------------------------------------------------+",
+        "+------------+-----------------------------------------------------+\
+        \n| job        | SUM(http_requests.value) + MIN(http_requests.value) |\
+        \n+------------+-----------------------------------------------------+\
+        \n| api-server | 1100                                                |\
+        \n| app-server | 3100                                                |\
+        \n+------------+-----------------------------------------------------+",
     )
     .await;
 }

@@ -17,7 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use datafusion::common::DFSchemaRef;
+use datafusion::common::{DFSchemaRef, Result as DfResult};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
@@ -177,6 +177,9 @@ impl<S: ContextProvider> PromPlanner<S> {
                                 .field_with_name(None, &right_col_name)
                                 .context(DataFusionPlanningSnafu)?
                                 .qualified_column();
+
+                            println!("left: {:?}, right: {:?}", left_col, right_col);
+
                             Ok(DfExpr::BinaryExpr(BinaryExpr {
                                 left: Box::new(DfExpr::Column(left_col)),
                                 op: Self::prom_token_to_binary_op(*op)?,
@@ -752,8 +755,13 @@ impl<S: ContextProvider> PromPlanner<S> {
 
     /// Build a projection that project and perform operation expr for every value columns.
     /// Non-value columns (tag and timestamp) will be preserved in the projection.
+    ///
+    /// # Side effect
+    ///
+    /// This function will update the value columns in the context. Those new column names
+    /// don't contains qualifier.
     fn projection_for_each_value_column<F>(
-        &self,
+        &mut self,
         input: LogicalPlan,
         name_to_expr: F,
     ) -> Result<LogicalPlan>
@@ -767,8 +775,26 @@ impl<S: ContextProvider> PromPlanner<S> {
             .chain(self.ctx.time_index_column.iter())
             .map(|col| Ok(DfExpr::Column(Column::from(col))));
 
-        let value_columns_iter = self.ctx.value_columns.iter().map(name_to_expr);
+        // build computation exprs
+        let result_value_columns = self
+            .ctx
+            .value_columns
+            .iter()
+            .map(name_to_expr)
+            .collect::<Result<Vec<_>>>()?;
 
+        // alias the computation exprs to remove qualifier
+        self.ctx.value_columns = result_value_columns
+            .iter()
+            .map(|expr| expr.display_name())
+            .collect::<DfResult<Vec<_>>>()
+            .context(DataFusionPlanningSnafu)?;
+        let value_columns_iter = result_value_columns
+            .into_iter()
+            .zip(self.ctx.value_columns.iter())
+            .map(|(expr, name)| Ok(DfExpr::Alias(Box::new(expr), name.to_string())));
+
+        // chain non-value columns (unchanged) and value columns (applied computation then alias)
         let project_fields = non_value_columns_iter
             .chain(value_columns_iter)
             .collect::<Result<Vec<_>>>()?;
@@ -1235,7 +1261,7 @@ mod test {
         let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
 
         let  expected = String::from(
-            "Projection: lhs.tag_0, lhs.timestamp, some_metric.field_0 + some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), some_metric.field_0 + some_metric.field_0:Float64;N]\
+            "Projection: lhs.tag_0, lhs.timestamp, some_metric.field_0 + some_metric.field_0 AS some_metric.field_0 + some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), some_metric.field_0 + some_metric.field_0:Float64;N]\
             \n  Inner Join: lhs.tag_0 = some_metric.tag_0, lhs.timestamp = some_metric.timestamp [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N, tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    SubqueryAlias: lhs [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
@@ -1272,7 +1298,7 @@ mod test {
         let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
 
         let  expected = String::from(
-            "Projection: some_metric.tag_0, some_metric.timestamp, Float64(1) + some_metric.field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), Float64(1) + some_metric.field_0:Float64;N]\
+            "Projection: some_metric.tag_0, some_metric.timestamp, Float64(1) + some_metric.field_0 AS Float64(1) + field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), Float64(1) + field_0:Float64;N]\
             \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
