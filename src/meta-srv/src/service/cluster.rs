@@ -16,6 +16,7 @@ use api::v1::meta::{
     cluster_server, BatchGetRequest, BatchGetResponse, Error, RangeRequest, RangeResponse,
     ResponseHeader,
 };
+use common_telemetry::warn;
 use tonic::{Request, Response};
 
 use crate::metasrv::MetaSrv;
@@ -31,6 +32,8 @@ impl cluster_server::Cluster for MetaSrv {
                 header: Some(is_not_leader),
                 ..Default::default()
             };
+
+            warn!("The current meta is not leader, but a batch_get request have reached the meta. Detail: {:?}.", req);
             return Ok(Response::new(resp));
         }
 
@@ -53,6 +56,8 @@ impl cluster_server::Cluster for MetaSrv {
                 header: Some(is_not_leader),
                 ..Default::default()
             };
+
+            warn!("The current meta is not leader, but a range request have reached the meta. Detail: {:?}.", req);
             return Ok(Response::new(resp));
         }
 

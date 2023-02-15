@@ -20,6 +20,7 @@ common-runtime = { path = "../common/runtime" }
 common-telemetry = { path = "../common/telemetry" }
 common-time = { path = "../common/time" }
 dashmap = "5.4"
+derive_builder = "0.12"
 etcd-client = "0.10"
 futures.workspace = true
 h2 = "0.3"
