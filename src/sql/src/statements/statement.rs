@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::copy::CopyTable;
 use crate::statements::alter::AlterTable;
+use crate::statements::copy::CopyTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
