@@ -24,8 +24,8 @@ use datafusion::physical_plan::RecordBatchStream;
 use futures::TryStreamExt;
 use object_store::services::fs::Builder;
 use object_store::ObjectStore;
-use snafu::ResultExt;
-use table::engine::TableReference;
+use snafu::{OptionExt, ResultExt};
+use table::engine::{EngineContext, TableReference};
 use table::requests::CopyTableRequest;
 
 use crate::error::{self, Result};
@@ -39,7 +39,15 @@ impl SqlHandler {
             table: &req.table_name.to_string(),
         };
 
-        let table = self.get_table(&table_ref)?;
+        let table = self
+            .table_engine()
+            .get_table(&EngineContext::default(), &table_ref)
+            .context(error::GetTableSnafu {
+                table_name: table_ref.to_string(),
+            })?
+            .context(error::TableNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?;
 
         let stream = table
             .scan(None, &[], None)
@@ -48,14 +56,12 @@ impl SqlHandler {
                 table_name: table_ref.to_string(),
             })?;
 
-        let session_ctx = SessionContext::new();
         let stream = stream
-            .execute(0, session_ctx.task_ctx())
+            .execute(0, SessionContext::default().task_ctx())
             .context(error::TableScanExecSnafu)?;
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
 
-        // TODO(jiachun): make this configurable
-        let accessor = Builder::default().root(".").build().unwrap();
+        let accessor = Builder::default().build().unwrap();
         let object_store = ObjectStore::new(accessor);
 
         let mut parquet_writer = ParquetWriter::new(req.file_name, stream, object_store);
@@ -84,7 +90,7 @@ impl ParquetWriter {
             object_store,
             // TODO(jiachun): make these configurable
             max_row_group_size: 4096,
-            max_rows_in_segment: 100000,
+            max_rows_in_segment: 1000000,
         }
     }
 
@@ -96,18 +102,14 @@ impl ParquetWriter {
             .set_max_row_group_size(self.max_row_group_size)
             .build();
         let mut total_rows = 0;
-        let mut seq = 0;
         loop {
             let mut buf = vec![];
             let mut arrow_writer =
                 ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props.clone()))
                     .context(error::WriteParquetSnafu)?;
-            let file_name = format!("{}_{}", self.file_name, seq);
-            seq += 1;
-            let object = self.object_store.object(&file_name);
+
             let mut rows = 0;
             let mut end_loop = true;
-
             // TODO(hl & jiachun): Since OpenDAL's writer is async and ArrowWriter requires a `std::io::Write`,
             // here we use a Vec<u8> to buffer all parquet bytes in memory and write to object store
             // at a time. Maybe we should find a better way to brige ArrowWriter and OpenDAL's object.
@@ -133,6 +135,9 @@ impl ParquetWriter {
 
             total_rows += rows;
             arrow_writer.close().context(error::WriteParquetSnafu)?;
+
+            let file_name = format!("{}_{}", self.file_name, total_rows);
+            let object = self.object_store.object(&file_name);
             object.write(buf).await.context(error::WriteObjectSnafu {
                 path: object.path(),
             })?;

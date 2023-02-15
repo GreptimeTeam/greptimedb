@@ -589,6 +589,9 @@ pub fn check_permission(
         Statement::Delete(delete) => {
             validate_param(delete.table_name(), query_ctx)?;
         }
+        Statement::Copy(stmd) => {
+            validate_param(stmd.table_name(), query_ctx)?;
+        }
     }
     Ok(())
 }
