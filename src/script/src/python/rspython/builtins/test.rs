@@ -311,7 +311,7 @@ impl PyValue {
 fn run_builtin_fn_testcases() {
     common_telemetry::init_default_ut_logging();
 
-    let loc = Path::new("src/python/builtins/testcases.ron");
+    let loc = Path::new("src/python/rspython/builtins/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
     let mut buf = String::new();

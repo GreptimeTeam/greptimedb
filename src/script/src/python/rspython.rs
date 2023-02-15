@@ -3,7 +3,7 @@ mod copr_impl;
 pub(crate) mod tests;
 pub(crate) mod vector_impl;
 
-mod builtins;
+pub(crate) mod builtins;
 mod dataframe_impl;
 mod utils;
 

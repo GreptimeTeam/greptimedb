@@ -420,7 +420,7 @@ pub fn exec_copr_print(
 
 #[cfg(test)]
 mod tests {
-    use crate::python::coprocessor::parse::parse_and_compile_copr;
+    use crate::python::ffi_types::copr::parse::parse_and_compile_copr;
 
     #[test]
     fn test_parse_copr() {
