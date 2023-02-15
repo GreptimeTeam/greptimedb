@@ -258,14 +258,11 @@ impl ListVectorBuilder {
         self.null_buffer_builder.append(is_valid);
     }
 
-    fn push_null(&mut self) {
-        self.finish_list(false);
-    }
-
     fn push_list_value(&mut self, list_value: &ListValue) -> Result<()> {
         if let Some(items) = list_value.items() {
             for item in &**items {
-                self.values_builder.push_value_ref(item.as_value_ref());
+                self.values_builder
+                    .try_push_value_ref(item.as_value_ref())?;
             }
         }
 
@@ -321,7 +318,7 @@ impl MutableVector for ListVectorBuilder {
     }
 
     fn push_null(&mut self) {
-        self.push_null();
+        self.finish_list(false);
     }
 }
 

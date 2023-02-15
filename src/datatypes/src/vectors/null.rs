@@ -198,7 +198,7 @@ impl MutableVector for NullVectorBuilder {
     }
 
     fn push_null(&mut self) {
-        self.push_value_ref(ValueRef::Null);
+        self.length += 1;
     }
 }
 

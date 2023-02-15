@@ -333,7 +333,9 @@ fn add_values_to_builder(
             match is_null(&null_mask, idx) {
                 Some(true) => builder.push_null(),
                 _ => {
-                    builder.push_value_ref(values[idx_of_values].as_value_ref());
+                    builder
+                        .try_push_value_ref(values[idx_of_values].as_value_ref())
+                        .context(CreateVectorSnafu)?;
                     idx_of_values += 1
                 }
             }
