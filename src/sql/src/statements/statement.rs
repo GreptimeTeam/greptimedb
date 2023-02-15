@@ -14,6 +14,7 @@
 
 use crate::statements::alter::AlterTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
+use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
 use crate::statements::drop::DropTable;
 use crate::statements::explain::Explain;
@@ -29,6 +30,8 @@ pub enum Statement {
     Query(Box<Query>),
     // Insert
     Insert(Box<Insert>),
+    // Delete
+    Delete(Box<Delete>),
     /// CREATE TABLE
     CreateTable(CreateTable),
     // DROP TABLE

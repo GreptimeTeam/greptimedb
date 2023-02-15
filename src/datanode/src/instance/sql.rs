@@ -66,7 +66,10 @@ impl Instance {
                 )?;
                 self.sql_handler.execute(request, query_ctx).await
             }
-
+            QueryStatement::Sql(Statement::Delete(d)) => {
+                let request = SqlRequest::Delete(*d);
+                self.sql_handler.execute(request, query_ctx).await
+            }
             QueryStatement::Sql(Statement::CreateDatabase(c)) => {
                 let request = CreateDatabaseRequest {
                     db_name: c.name.to_string(),

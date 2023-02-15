@@ -94,6 +94,7 @@ where
             Statement::Query(qb) => self.query_to_plan(qb),
             Statement::Explain(explain) => self.explain_to_plan(explain),
             Statement::ShowTables(_)
+            | Statement::Delete(_)
             | Statement::ShowDatabases(_)
             | Statement::ShowCreateTable(_)
             | Statement::DescribeTable(_)
