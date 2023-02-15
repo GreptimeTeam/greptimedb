@@ -64,8 +64,8 @@ fn region_id(table_id: TableId, n: u32) -> RegionId {
 }
 
 #[inline]
-fn table_dir(schema_name: &str, table_id: TableId) -> String {
-    format!("{schema_name}/{table_id}/")
+fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
+    format!("{catalog_name}/{schema_name}/{table_id}/")
 }
 
 /// [TableEngine] implementation.
@@ -336,7 +336,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         )?;
 
         let table_id = request.id;
-        let table_dir = table_dir(schema_name, table_id);
+        let table_dir = table_dir(catalog_name, schema_name, table_id);
         let mut regions = HashMap::with_capacity(request.region_numbers.len());
 
         let _lock = self.table_mutex.lock().await;
@@ -446,7 +446,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
             let table_id = request.table_id;
             let engine_ctx = StorageEngineContext::default();
-            let table_dir = table_dir(schema_name, table_id);
+            let table_dir = table_dir(catalog_name, schema_name, table_id);
             let opts = OpenOptions {
                 parent_dir: table_dir.to_string(),
             };
@@ -747,8 +747,14 @@ mod tests {
 
     #[test]
     fn test_table_dir() {
-        assert_eq!("public/1024/", table_dir("public", 1024));
-        assert_eq!("prometheus/1024/", table_dir("prometheus", 1024));
+        assert_eq!(
+            "greptime/public/1024/",
+            table_dir("greptime", "public", 1024)
+        );
+        assert_eq!(
+            "0x4354a1/prometheus/1024/",
+            table_dir("0x4354a1", "prometheus", 1024)
+        );
     }
 
     #[test]
