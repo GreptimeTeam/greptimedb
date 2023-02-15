@@ -529,7 +529,7 @@ mod tests {
         assert!(res.is_continue(), "{res:?}");
     }
 
-    fn new_child_procedure(procedure_id: ProcedureId, key: &str) -> ProcedureWithId {
+    fn new_child_procedure(procedure_id: ProcedureId, keys: &[&str]) -> ProcedureWithId {
         let mut times = 0;
         let exec_fn = move |_| {
             times += 1;
@@ -545,7 +545,7 @@ mod tests {
         };
         let child = ProcedureAdapter {
             data: "child".to_string(),
-            lock_key: LockKey::single(key),
+            lock_key: LockKey::new(keys.iter().map(|k| k.to_string())),
             exec_fn,
         };
 
@@ -560,8 +560,14 @@ mod tests {
         let mut times = 0;
         let children_ids = [ProcedureId::random(), ProcedureId::random()];
         let keys = [
-            "catalog.schema.table.region-0",
-            "catalog.schema.table.region-1",
+            &[
+                "catalog.schema.table.region-0",
+                "catalog.schema.table.region-1",
+            ],
+            &[
+                "catalog.schema.table.region-2",
+                "catalog.schema.table.region-3",
+            ],
         ];
 
         let exec_fn = move |ctx: Context| {
@@ -573,7 +579,7 @@ mod tests {
                         subprocedures: children_ids
                             .into_iter()
                             .zip(keys)
-                            .map(|(id, key)| new_child_procedure(id, key))
+                            .map(|(id, key_slice)| new_child_procedure(id, key_slice))
                             .collect(),
                         persist: true,
                     })
@@ -691,7 +697,6 @@ mod tests {
                 } else {
                     // Wait for subprocedures.
                     let state = ctx.provider.procedure_state(child_id).await.unwrap();
-                    logging::info!("child state is {:?}", state);
                     if state == Some(ProcedureState::Failed) {
                         // The parent procedure to abort itself if child procedure is failed.
                         Err(Error::external(PlainError::new(
