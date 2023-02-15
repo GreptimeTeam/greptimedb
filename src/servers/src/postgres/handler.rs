@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::LocalResult;
 use common_query::Output;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
@@ -171,9 +172,37 @@ fn encode_text_value(value: &Value, builder: &mut DataRowEncoder) -> PgWireResul
         Value::Float64(v) => builder.encode_text_format_field(Some(&v.0)),
         Value::String(v) => builder.encode_text_format_field(Some(&v.as_utf8())),
         Value::Binary(v) => builder.encode_text_format_field(Some(&hex::encode(v.deref()))),
-        Value::Date(v) => builder.encode_text_format_field(Some(&v.to_string())),
-        Value::DateTime(v) => builder.encode_text_format_field(Some(&v.to_string())),
-        Value::Timestamp(v) => builder.encode_text_format_field(Some(&v.to_iso8601_string())),
+        Value::Date(v) => {
+            if let Some(date) = v.to_chrono_date() {
+                builder.encode_text_format_field(Some(&date.format("%Y-%m-%d").to_string()))
+            } else {
+                Err(PgWireError::ApiError(Box::new(Error::Internal {
+                    err_msg: format!("Failed to convert date to postgres type {v:?}",),
+                })))
+            }
+        }
+        Value::DateTime(v) => {
+            if let Some(datetime) = v.to_chrono_datetime() {
+                builder.encode_text_format_field(Some(
+                    &datetime.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                ))
+            } else {
+                Err(PgWireError::ApiError(Box::new(Error::Internal {
+                    err_msg: format!("Failed to convert date to postgres type {v:?}",),
+                })))
+            }
+        }
+        Value::Timestamp(v) => {
+            if let LocalResult::Single(datetime) = v.to_chrono_datetime() {
+                builder.encode_text_format_field(Some(
+                    &datetime.format("%Y-%m-%d %H:%M:%S%.6f").to_string(),
+                ))
+            } else {
+                Err(PgWireError::ApiError(Box::new(Error::Internal {
+                    err_msg: format!("Failed to convert date to postgres type {v:?}",),
+                })))
+            }
+        }
         Value::List(_) => Err(PgWireError::ApiError(Box::new(Error::Internal {
             err_msg: format!(
                 "cannot write value {:?} in postgres protocol: unimplemented",
@@ -203,9 +232,24 @@ fn encode_binary_value(
         Value::Float64(v) => builder.encode_binary_format_field(&v.0, datatype),
         Value::String(v) => builder.encode_binary_format_field(&v.as_utf8(), datatype),
         Value::Binary(v) => builder.encode_binary_format_field(&v.deref(), datatype),
-        // TODO(sunng87): correct date/time types encoding
-        Value::Date(v) => builder.encode_binary_format_field(&v.to_string(), datatype),
-        Value::DateTime(v) => builder.encode_binary_format_field(&v.to_string(), datatype),
+        Value::Date(v) => {
+            if let Some(date) = v.to_chrono_date() {
+                builder.encode_binary_format_field(&date, datatype)
+            } else {
+                Err(PgWireError::ApiError(Box::new(Error::Internal {
+                    err_msg: format!("Failed to convert date to postgres type {v:?}",),
+                })))
+            }
+        }
+        Value::DateTime(v) => {
+            if let Some(datetime) = v.to_chrono_datetime() {
+                builder.encode_binary_format_field(&datetime, datatype)
+            } else {
+                Err(PgWireError::ApiError(Box::new(Error::Internal {
+                    err_msg: format!("Failed to convert datetime to postgres type {v:?}",),
+                })))
+            }
+        }
         Value::Timestamp(v) => {
             // convert timestamp to SystemTime
             if let Some(ts) = v.convert_to(TimeUnit::Microsecond) {
@@ -213,7 +257,7 @@ fn encode_binary_value(
                 builder.encode_binary_format_field(&sys_time, datatype)
             } else {
                 Err(PgWireError::ApiError(Box::new(Error::Internal {
-                    err_msg: format!("Failed to conver timestamp to postgres type {v:?}",),
+                    err_msg: format!("Failed to convert timestamp to postgres type {v:?}",),
                 })))
             }
         }
