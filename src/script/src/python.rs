@@ -23,5 +23,3 @@ pub use self::engine::{PyEngine, PyScript};
 mod ffi_types;
 mod pyo3;
 mod rspython;
-
-pub(crate) use ffi_types::PyVector;

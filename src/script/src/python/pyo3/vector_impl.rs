@@ -160,12 +160,15 @@ impl PyVector {
             )
         }
     }
+    #[allow(unused)]
     fn __rtruediv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         todo!()
     }
+    #[allow(unused)]
     fn __floordiv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         todo!()
     }
+    #[allow(unused)]
     fn __rfloordiv__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         todo!()
     }
