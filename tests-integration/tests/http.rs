@@ -336,7 +336,7 @@ pub async fn test_scripts_api(store_type: StorageType) {
     let client = TestClient::new(app);
 
     let res = client
-        .post("/v1/scripts?schema=schema_test&name=test")
+        .post("/v1/scripts?db=schema_test&name=test")
         .body(
             r#"
 @copr(sql='select number from numbers limit 10', args=['number'], returns=['n'])
@@ -354,7 +354,7 @@ def test(n):
 
     // call script
     let res = client
-        .post("/v1/run-script?schema=schema_test&name=test")
+        .post("/v1/run-script?db=schema_test&name=test")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);

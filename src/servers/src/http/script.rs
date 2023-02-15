@@ -51,7 +51,7 @@ pub async fn scripts(
     RawBody(body): RawBody,
 ) -> Json<JsonResponse> {
     if let Some(script_handler) = &state.script_handler {
-        let schema = params.schema.as_ref();
+        let schema = params.db.as_ref();
 
         if schema.is_none() || schema.unwrap().is_empty() {
             json_err!("invalid schema")
@@ -83,7 +83,7 @@ pub async fn scripts(
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ScriptQuery {
-    pub schema: Option<String>,
+    pub db: Option<String>,
     pub name: Option<String>,
 }
 
@@ -95,7 +95,7 @@ pub async fn run_script(
 ) -> Json<JsonResponse> {
     if let Some(script_handler) = &state.script_handler {
         let start = Instant::now();
-        let schema = params.schema.as_ref();
+        let schema = params.db.as_ref();
 
         if schema.is_none() || schema.unwrap().is_empty() {
             json_err!("invalid schema")
