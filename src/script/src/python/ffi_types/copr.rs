@@ -15,7 +15,6 @@
 pub mod compile;
 pub mod parse;
 
-#[cfg(test)]
 use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
@@ -27,6 +26,7 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
 // use crate::python::builtins::greptime_builtin;
 use parse::DecoratorArgs;
+use pyo3::pyclass as pyo3class;
 use query::parser::QueryLanguageParser;
 use query::QueryEngine;
 use rustpython_compiler_core::CodeObject;
@@ -308,29 +308,32 @@ pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
     exec_parsed(&copr, rb)
 }
 
+#[pyo3class(name = "query_engine")]
 #[rspyclass(module = false, name = "query_engine")]
 #[derive(Debug, PyPayload)]
 pub struct PyQueryEngine {
     inner: QueryEngineWeakRef,
 }
-
+pub(crate) enum Either {
+    Rb(RecordBatches),
+    AffectedRows(usize),
+}
 #[rspyclass]
 impl PyQueryEngine {
     pub(crate) fn from_weakref(inner: QueryEngineWeakRef) -> Self {
         Self { inner }
     }
-    // TODO(discord9): find a better way to call sql query api, now we don't if we are in async contex or not
-    /// return sql query results in List[List[PyVector]], or List[usize] for AffectedRows number if no recordbatches is returned
-    #[pymethod]
-    fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
-        enum Either {
-            Rb(RecordBatches),
-            AffectedRows(usize),
-        }
-        let query = self.inner.0.upgrade();
+    pub(crate) fn get_ref(&self)->Option<Arc<dyn QueryEngine>>{
+        self.inner.0.upgrade()
+    }
+    pub(crate) fn query_with_new_thread(
+        &self,
+        query: Option<Arc<dyn QueryEngine>>,
+        s: String,
+    ) -> StdResult<Either, String> {
         let thread_handle = std::thread::spawn(move || -> std::result::Result<_, String> {
             if let Some(engine) = query {
-                let stmt = QueryLanguageParser::parse_sql(s.as_str()).map_err(|e| e.to_string())?;
+                let stmt = QueryLanguageParser::parse_sql(&s).map_err(|e| e.to_string())?;
                 let plan = engine
                     .statement_to_plan(stmt, Default::default())
                     .map_err(|e| e.to_string())?;
@@ -362,9 +365,14 @@ impl PyQueryEngine {
         });
         thread_handle
             .join()
-            .map_err(|e| {
-                vm.new_system_error(format!("Dedicated thread for sql query panic: {e:?}"))
-            })?
+            .map_err(|e| format!("Dedicated thread for sql query panic: {e:?}"))?
+    }
+    // TODO(discord9): find a better way to call sql query api, now we don't if we are in async contex or not
+    /// return sql query results in List[List[PyVector]], or List[usize] for AffectedRows number if no recordbatches is returned
+    #[pymethod]
+    fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
+        let query = self.inner.0.upgrade();
+        self.query_with_new_thread(query, s)
             .map_err(|e| vm.new_system_error(e))
             .map(|rbs| match rbs {
                 Either::Rb(rbs) => {

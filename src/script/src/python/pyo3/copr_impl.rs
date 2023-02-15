@@ -15,19 +15,52 @@
 use common_recordbatch::RecordBatch;
 use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::PyValueError;
-use pyo3::types::{PyDict, PyModule, PyTuple};
-use pyo3::{PyAny, PyCell, PyResult, Python};
+use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
+use pyo3::{
+    pyclass as pyo3class, pymethods, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject,
+};
 use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
 
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
+use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
+use crate::python::pyo3::builtins::greptime_builtins;
 use crate::python::pyo3::utils::pyo3_obj_try_to_typed_val;
 
+#[pymethods]
+impl PyQueryEngine {
+    #[pyo3(name = "sql")]
+    pub(crate) fn sql_pyo3(&self, py: Python<'_>, s: String) -> PyResult<PyObject> {
+        let query = self.get_ref();
+        let res = self
+            .query_with_new_thread(query, s)
+            .map_err(PyValueError::new_err)?;
+        match res {
+            crate::python::ffi_types::copr::Either::Rb(rbs) => {
+                let mut top_vec = Vec::with_capacity(rbs.iter().count());
+                for rb in rbs.iter() {
+                    let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
+                    for v in rb.columns() {
+                        let v = PyVector::from(v.to_owned());
+                        let v = PyCell::new(py, v)?;
+                        vec_of_vec.push(v.to_object(py));
+                    }
+                    let vec_of_vec = PyList::new(py, vec_of_vec);
+                    top_vec.push(vec_of_vec);
+                }
+                let top_vec = PyList::new(py, top_vec);
+                Ok(top_vec.to_object(py))
+            }
+            crate::python::ffi_types::copr::Either::AffectedRows(count) => Ok(count.to_object(py)),
+        }
+    }
+}
 /// Execute a `Coprocessor` with given `RecordBatch`
 pub(crate) fn pyo3_exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
     let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
     check_args_anno_real_type(&args, copr, rb)?;
     // Just in case python is not inited
+    pyo3::append_to_inittab!(greptime_builtins);
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| -> Result<_> {
         let mut cols = (|| -> PyResult<_> {

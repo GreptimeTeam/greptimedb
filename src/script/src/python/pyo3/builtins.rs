@@ -37,7 +37,7 @@ macro_rules! batch_import {
 }
 
 #[pymodule]
-fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     batch_import!(
         m,
         [
