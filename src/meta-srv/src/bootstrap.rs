@@ -92,8 +92,7 @@ pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
 
     let in_memory = Arc::new(MemStore::default()) as ResetableKvStoreRef;
 
-    let mut builder = MetaPeerClientBuilder::default();
-    let meta_peer_client = builder
+    let meta_peer_client = MetaPeerClientBuilder::default()
         .election(election.clone())
         .in_memory(in_memory.clone())
         .build()
