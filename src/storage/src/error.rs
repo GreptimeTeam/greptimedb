@@ -44,12 +44,6 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to write columns, source: {}", source))]
-    FlushIo {
-        source: object_store::Error,
-        backtrace: Backtrace,
-    },
-
     #[snafu(display("Failed to write parquet file, source: {}", source))]
     WriteParquet {
         source: parquet::errors::ParquetError,
@@ -466,8 +460,7 @@ impl ErrorExt for Error {
             | EncodeArrow { .. }
             | ParseSchema { .. } => StatusCode::Unexpected,
 
-            FlushIo { .. }
-            | WriteParquet { .. }
+            WriteParquet { .. }
             | ReadObject { .. }
             | WriteObject { .. }
             | ListObjects { .. }
@@ -528,27 +521,6 @@ mod tests {
 
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
         assert!(err.backtrace_opt().is_some());
-    }
-
-    #[test]
-    pub fn test_flush_error() {
-        fn throw_io_error() -> std::result::Result<(), std::io::Error> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "writer is closed",
-            ))
-        }
-
-        let error = throw_io_error()
-            .map_err(|err| {
-                object_store::Error::new(object_store::ErrorKind::Unexpected, "writer close failed")
-                    .set_source(err)
-            })
-            .context(FlushIoSnafu)
-            .err()
-            .unwrap();
-        assert_eq!(StatusCode::StorageUnavailable, error.status_code());
-        assert!(error.backtrace_opt().is_some());
     }
 
     #[test]
