@@ -15,7 +15,7 @@
 use std::time::{Duration, SystemTime};
 
 use chrono::DateTime;
-use common_error::ext::{CompoundError, PlainError};
+use common_error::ext::PlainError;
 use common_error::prelude::BoxedError;
 use common_error::status_code::StatusCode;
 use common_telemetry::timer;
@@ -118,7 +118,7 @@ impl QueryLanguageParser {
         }
 
         // try float format
-        let float_result = timestamp
+        timestamp
             .parse::<f64>()
             .context(ParseFloatSnafu { raw: timestamp })
             .map(|float| {
@@ -126,23 +126,9 @@ impl QueryLanguageParser {
                 SystemTime::UNIX_EPOCH
                     .checked_add(duration)
                     .unwrap_or(max_system_timestamp())
-            });
-
-        match float_result {
-            Ok(float) => Ok(float),
-            Err(float) => {
-                Err(CompoundError::new(
-                    BoxedError::new(rfc3339_result.unwrap_err()),
-                    BoxedError::new(float),
-                    format!("Cannot parse timestamp {timestamp} into rfc3339 or float",),
-                )
-                .boxed())
-                .context(QueryParseSnafu {
-                    // It will be set outside
-                    query: String::new(),
-                })
-            }
-        }
+            })
+            // also report rfc3339 error if float parsing fails
+            .map_err(|_| rfc3339_result.unwrap_err())
     }
 }
 
