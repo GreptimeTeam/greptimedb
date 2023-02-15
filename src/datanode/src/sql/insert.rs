@@ -11,11 +11,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use datatypes::data_type::DataType;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::vectors::MutableVector;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -26,8 +25,8 @@ use table::requests::*;
 
 use crate::error::{
     CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
-    ColumnValuesNumberMismatchSnafu, InsertSnafu, ParseSqlSnafu, ParseSqlValueSnafu, Result,
-    TableNotFoundSnafu,
+    ColumnValuesNumberMismatchSnafu, InsertSnafu, MissingInsertValuesSnafu, ParseSqlSnafu,
+    ParseSqlValueSnafu, Result, TableNotFoundSnafu,
 };
 use crate::sql::{SqlHandler, SqlRequest};
 
@@ -52,31 +51,21 @@ impl SqlHandler {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    pub(crate) fn insert_to_request(
+    // FIXME(dennis): move it to frontend when refactor is done.
+    fn insert_to_columns_values<'a>(
         &self,
-        catalog_manager: CatalogManagerRef,
-        stmt: Insert,
-        table_ref: TableReference,
-    ) -> Result<SqlRequest> {
-        let columns = stmt.columns();
-        let values = stmt.values().context(ParseSqlValueSnafu)?;
-
-        let table = catalog_manager
-            .table(table_ref.catalog, table_ref.schema, table_ref.table)
-            .context(CatalogSnafu)?
-            .context(TableNotFoundSnafu {
-                table_name: table_ref.table,
-            })?;
-        let schema = table.schema();
-        let columns_num = if columns.is_empty() {
-            schema.column_schemas().len()
-        } else {
-            columns.len()
-        };
+        table_ref: &'a TableReference,
+        schema: &'a SchemaRef,
+        stmt: &'a Insert,
+        columns: &Vec<&String>,
+        columns_num: usize,
+        columns_builders: &mut Vec<(&'a ColumnSchema, Box<dyn MutableVector>)>,
+    ) -> Result<()> {
+        let values = stmt
+            .values_body()
+            .context(ParseSqlValueSnafu)?
+            .context(MissingInsertValuesSnafu)?;
         let rows_num = values.len();
-
-        let mut columns_builders: Vec<(&ColumnSchema, Box<dyn MutableVector>)> =
-            Vec::with_capacity(columns_num);
 
         if columns.is_empty() {
             for column_schema in schema.column_schemas() {
@@ -111,6 +100,41 @@ impl SqlHandler {
                 add_row_to_vector(column_schema, sql_val, builder)?;
             }
         }
+
+        Ok(())
+    }
+
+    pub(crate) fn insert_to_request(
+        &self,
+        catalog_manager: CatalogManagerRef,
+        stmt: Insert,
+        table_ref: TableReference,
+    ) -> Result<SqlRequest> {
+        let columns = stmt.columns();
+
+        let table = catalog_manager
+            .table(table_ref.catalog, table_ref.schema, table_ref.table)
+            .context(CatalogSnafu)?
+            .context(TableNotFoundSnafu {
+                table_name: table_ref.table,
+            })?;
+        let schema = table.schema();
+        let columns_num = if columns.is_empty() {
+            schema.column_schemas().len()
+        } else {
+            columns.len()
+        };
+
+        let mut columns_builders: Vec<(&ColumnSchema, Box<dyn MutableVector>)> =
+            Vec::with_capacity(columns_num);
+        self.insert_to_columns_values(
+            &table_ref,
+            &schema,
+            &stmt,
+            &columns,
+            columns_num,
+            &mut columns_builders,
+        )?;
 
         Ok(SqlRequest::Insert(InsertRequest {
             catalog_name: table_ref.catalog.to_string(),

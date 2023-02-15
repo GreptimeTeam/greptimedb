@@ -107,6 +107,9 @@ pub enum Error {
         source: sql::error::Error,
     },
 
+    #[snafu(display("Missing insert values"))]
+    MissingInsertValues { backtrace: Backtrace },
+
     #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
     Insert {
         table_name: String,
@@ -379,7 +382,11 @@ impl ErrorExt for Error {
             | Error::ConstraintNotSupported { .. }
             | Error::SchemaExists { .. }
             | Error::ParseTimestamp { .. }
-            | Error::DatabaseNotFound { .. } => StatusCode::InvalidArguments,
+            | Error::MissingInsertValues { .. }
+            | Error::DatabaseNotFound { .. }
+            | Error::MissingNodeId { .. }
+            | Error::MissingMetasrvOpts { .. }
+            | Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
 
             // TODO(yingwen): Further categorize http error.
             Error::StartServer { .. }
@@ -401,10 +408,7 @@ impl ErrorExt for Error {
             Error::MetaClientInit { source, .. } => source.status_code(),
             Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
             Error::BumpTableId { source, .. } => source.status_code(),
-            Error::MissingNodeId { .. } => StatusCode::InvalidArguments,
-            Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
-            Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
         }
     }
 

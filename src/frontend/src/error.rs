@@ -56,6 +56,9 @@ pub enum Error {
         source: sql::error::Error,
     },
 
+    #[snafu(display("Missing insert values"))]
+    MissingInsertValues { backtrace: Backtrace },
+
     #[snafu(display("Column datatype error, source: {}", source))]
     ColumnDataType {
         #[snafu(backtrace)]
@@ -356,7 +359,15 @@ impl ErrorExt for Error {
             | Error::InvalidSql { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::ColumnValuesNumberMismatch { .. }
-            | Error::IllegalPrimaryKeysDef { .. } => StatusCode::InvalidArguments,
+            | Error::IllegalPrimaryKeysDef { .. }
+            | Error::CatalogNotFound { .. }
+            | Error::SchemaNotFound { .. }
+            | Error::SchemaExists { .. }
+            | Error::MissingInsertValues { .. }
+            | Error::PrimaryKeyNotFound { .. }
+            | Error::MissingMetasrvOpts { .. }
+            | Error::ColumnNoneDefaultValue { .. }
+            | Error::ColumnValuesNumberMismatch { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -399,26 +410,20 @@ impl ErrorExt for Error {
             Error::StartMetaClient { source } | Error::RequestMeta { source } => {
                 source.status_code()
             }
-            Error::CatalogNotFound { .. }
-            | Error::SchemaNotFound { .. }
-            | Error::SchemaExists { .. } => StatusCode::InvalidArguments,
-
             Error::BuildCreateExprOnInsertion { source }
             | Error::ToTableInsertRequest { source }
             | Error::FindNewColumnsOnInsertion { source } => source.status_code(),
 
-            Error::PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
             Error::ExecuteStatement { source, .. } | Error::DescribeStatement { source } => {
                 source.status_code()
             }
-            Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::EncodeSubstraitLogicalPlan { source } => source.status_code(),
             Error::InvokeDatanode { source } => source.status_code(),
             Error::ColumnDefaultValue { source, .. } => source.status_code(),
-            Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+
             Error::External { source } => source.status_code(),
             Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
                 source.status_code()
