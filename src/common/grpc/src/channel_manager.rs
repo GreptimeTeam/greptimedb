@@ -62,15 +62,10 @@ impl ChannelManager {
     }
 
     pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {
-        let pool = Arc::new(Pool::default());
-        let cloned_pool = pool.clone();
-
-        common_runtime::spawn_bg(async {
-            recycle_channel_in_loop(cloned_pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
-        });
+        let mut cm = Self::with_config(config.clone());
 
         // setup tls
-        let path_config = config.client_tls.clone().context(InvalidTlsConfigSnafu {
+        let path_config = config.client_tls.context(InvalidTlsConfigSnafu {
             msg: "no config input",
         })?;
 
@@ -83,15 +78,13 @@ impl ChannelManager {
             .context(InvalidConfigFilePathSnafu)?;
         let client_identity = Identity::from_pem(client_cert, client_key);
 
-        Ok(Self {
-            config,
-            client_tls_config: Some(
-                ClientTlsConfig::new()
-                    .ca_certificate(server_root_ca_cert)
-                    .identity(client_identity),
-            ),
-            pool,
-        })
+        cm.client_tls_config = Some(
+            ClientTlsConfig::new()
+                .ca_certificate(server_root_ca_cert)
+                .identity(client_identity),
+        );
+
+        Ok(cm)
     }
 
     pub fn config(&self) -> &ChannelConfig {
