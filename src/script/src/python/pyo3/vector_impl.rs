@@ -16,7 +16,6 @@ use datafusion::arrow::compute::kernels::arithmetic;
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, DataType};
-use datatypes::value::{self, OrderedFloat};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
@@ -190,6 +189,7 @@ impl PyVector {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn into_pyo3_cell(py: Python, val: PyVector) -> PyResult<&PyCell<PyVector>> {
     PyCell::new(py, val)
 }

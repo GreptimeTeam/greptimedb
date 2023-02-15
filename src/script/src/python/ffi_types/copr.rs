@@ -15,8 +15,9 @@
 pub mod compile;
 pub mod parse;
 
-use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
+#[cfg(test)]
+use std::result::Result as StdResult;
 
 use common_recordbatch::{RecordBatch, RecordBatches};
 use datatypes::arrow::array::Array;
@@ -38,13 +39,12 @@ use vm::convert::ToPyObject;
 use vm::{pyclass as rspyclass, PyPayload, PyResult, VirtualMachine};
 
 use crate::python::error::{
-    ensure, ret_other_error_with, ArrowSnafu, NewRecordBatchSnafu, OtherSnafu, Result,
+    ensure, ArrowSnafu, OtherSnafu, Result,
     TypeCastSnafu,
 };
 use crate::python::ffi_types::PyVector;
 use crate::python::pyo3::pyo3_exec_parsed;
 use crate::python::rspython::rspy_exec_parsed;
-use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
 
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,6 +302,7 @@ pub(crate) fn check_args_anno_real_type(
 /// # Return Constant columns
 /// You can return constant in python code like `return 1, 1.0, True`
 /// which create a constant array(with same value)(currently support int, float and bool) as column on return
+#[cfg(test)]
 pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error

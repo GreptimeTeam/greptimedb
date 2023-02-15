@@ -26,7 +26,7 @@ use crate::python::ffi_types::utils::{collect_diff_types_string, new_item_field}
 use crate::python::ffi_types::PyVector;
 
 pub fn val_to_py_any(py: Python<'_>, val: Value) -> PyResult<PyObject> {
-    let ret = match val {
+    Ok(match val {
         Value::Null => py.None(),
         Value::Boolean(val) => val.to_object(py),
         Value::UInt8(val) => val.to_object(py),
@@ -45,15 +45,14 @@ pub fn val_to_py_any(py: Python<'_>, val: Value) -> PyResult<PyObject> {
         Value::DateTime(val) => val.val().to_object(py),
         Value::Timestamp(val) => val.value().to_object(py),
         Value::List(val) => {
-            let list = val.items().clone().unwrap_or(Box::new(Vec::default()));
+            let list = val.items().clone().unwrap_or(Default::default());
             let list = list
                 .into_iter()
                 .map(|v| val_to_py_any(py, v))
                 .collect::<PyResult<Vec<_>>>()?;
             list.to_object(py)
         }
-    };
-    todo!()
+    })
 }
 
 macro_rules! to_con_type {

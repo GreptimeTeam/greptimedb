@@ -37,7 +37,7 @@ macro_rules! batch_import {
 }
 
 #[pymodule]
-fn greptime_builtins(py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     batch_import!(
         m,
         [
@@ -69,6 +69,7 @@ fn greptime_builtins(py: Python<'_>, m: &PyModule) -> PyResult<()> {
             ln,
             log2,
             log10,
+            random,
             approx_distinct,
             median,
             approx_percentile_cont,
@@ -230,8 +231,8 @@ fn random(py: Python<'_>, len: usize) -> PyResult<PyObject> {
     let args = &[ColumnarValue::Array(std::sync::Arc::new(arg) as _)];
     let res =
         math_expressions::random(args).map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
-    let ret = columnar_value_to_py_any(py, res);
-    ret
+
+    columnar_value_to_py_any(py, res)
 }
 
 /// The macro for binding function in `datafusion_physical_expr::expressions`(most of them are aggregate function)
