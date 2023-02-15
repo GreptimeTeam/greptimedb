@@ -6,6 +6,10 @@ CREATE SCHEMA test_public_schema;
 
 Error: 1004(InvalidArguments), Schema test_public_schema already exists
 
+CREATE SCHEMA IF NOT EXISTS test_public_schema;
+
+Affected Rows: 1
+
 SHOW DATABASES LIKE '%public%';
 
 +--------------------+

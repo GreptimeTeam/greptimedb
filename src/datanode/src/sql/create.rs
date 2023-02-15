@@ -16,11 +16,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use catalog::{RegisterSchemaRequest, RegisterTableRequest};
-use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_telemetry::tracing::info;
 use common_telemetry::tracing::log::error;
 use datatypes::schema::SchemaBuilder;
+use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnOption, TableConstraint};
 use sql::statements::column_def_to_schema;
@@ -38,24 +38,34 @@ use crate::error::{
 use crate::sql::SqlHandler;
 
 impl SqlHandler {
-    pub(crate) async fn create_database(&self, req: CreateDatabaseRequest) -> Result<Output> {
+    pub(crate) async fn create_database(
+        &self,
+        req: CreateDatabaseRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let catalog = query_ctx.current_catalog();
         let schema = req.db_name;
+        if self
+            .catalog_manager
+            .schema(&catalog, &schema)
+            .context(CatalogSnafu)?
+            .is_some()
+        {
+            return if req.create_if_not_exists {
+                Ok(Output::AffectedRows(1))
+            } else {
+                SchemaExistsSnafu { name: schema }.fail()
+            };
+        }
+
         let reg_req = RegisterSchemaRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            catalog,
             schema: schema.clone(),
         };
-        let success = self
-            .catalog_manager
+        self.catalog_manager
             .register_schema(reg_req)
             .await
             .context(RegisterSchemaSnafu)?;
-
-        // FIXME(dennis): looks like register_schema always returns true even
-        // even when the schema already exists.
-        ensure!(
-            success || req.create_if_not_exists,
-            SchemaExistsSnafu { name: schema }
-        );
 
         info!("Successfully created database: {:?}", schema);
         Ok(Output::AffectedRows(1))

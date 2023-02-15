@@ -222,7 +222,7 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Schema already exists, name: {}", name))]
+    #[snafu(display("Schema {} already exists", name))]
     SchemaExists { name: String, backtrace: Backtrace },
 
     #[snafu(display("Failed to convert alter expr to request: {}", source))]
