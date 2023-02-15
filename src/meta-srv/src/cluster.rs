@@ -75,16 +75,16 @@ impl MetaPeerClient {
             return self.in_memory.range(request).await.map(|resp| resp.kvs);
         }
 
-        let retry_num = self.max_retry_count;
-        let interval_mills = self.retry_interval_ms;
+        let max_retry_count = self.max_retry_count;
+        let retry_interval_ms = self.retry_interval_ms;
 
-        for _ in 0..retry_num {
+        for _ in 0..max_retry_count {
             match self.remote_range(key.clone(), range_end.clone()).await {
                 Ok(kvs) => return Ok(kvs),
                 Err(e) => {
                     if need_retry(&e) {
                         warn!("Encountered an error that need to retry, err: {:?}", e);
-                        tokio::time::sleep(Duration::from_millis(interval_mills)).await;
+                        tokio::time::sleep(Duration::from_millis(retry_interval_ms)).await;
                     } else {
                         return Err(e);
                     }
@@ -94,7 +94,7 @@ impl MetaPeerClient {
 
         error::ExceededRetryLimitSnafu {
             func_name: "range",
-            retry_num,
+            retry_num: max_retry_count,
         }
         .fail()
     }
@@ -133,16 +133,16 @@ impl MetaPeerClient {
             return self.in_memory.batch_get(keys).await;
         }
 
-        let retry_num = self.max_retry_count;
-        let interval_mills = self.retry_interval_ms;
+        let max_retry_count = self.max_retry_count;
+        let retry_interval_ms = self.retry_interval_ms;
 
-        for _ in 0..retry_num {
+        for _ in 0..max_retry_count {
             match self.remote_batch_get(keys.clone()).await {
                 Ok(kvs) => return Ok(kvs),
                 Err(e) => {
                     if need_retry(&e) {
                         warn!("Encountered an error that need to retry, err: {:?}", e);
-                        tokio::time::sleep(Duration::from_millis(interval_mills)).await;
+                        tokio::time::sleep(Duration::from_millis(retry_interval_ms)).await;
                     } else {
                         return Err(e);
                     }
@@ -152,7 +152,7 @@ impl MetaPeerClient {
 
         error::ExceededRetryLimitSnafu {
             func_name: "batch_get",
-            retry_num,
+            retry_num: max_retry_count,
         }
         .fail()
     }
