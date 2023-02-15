@@ -92,7 +92,9 @@ mod tests {
     use common_catalog::consts::MIN_USER_TABLE_ID;
     use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder, SchemaRef};
+    use datatypes::schema::{
+        ColumnDefaultConstraint, ColumnSchema, RawSchema, SchemaBuilder, SchemaRef,
+    };
     use datatypes::value::Value;
 
     use super::*;
@@ -107,7 +109,7 @@ mod tests {
         assert_eq!(request.schema_name, "public".to_string());
         assert_eq!(request.table_name, "my-metrics");
         assert_eq!(request.desc, Some("blabla little magic fairy".to_string()));
-        assert_eq!(request.schema, expected_table_schema());
+        assert_eq!(request.schema, RawSchema::from(&*expected_table_schema()));
         assert_eq!(request.primary_key_indices, vec![1, 0]);
         assert!(request.create_if_not_exists);
 

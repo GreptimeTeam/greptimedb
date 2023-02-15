@@ -522,7 +522,7 @@ mod test {
     use catalog::{CatalogList, CatalogProvider, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datafusion::common::{DFSchema, ToDFSchema};
-    use datatypes::schema::Schema;
+    use datatypes::schema::RawSchema;
     use table::requests::CreateTableRequest;
     use table::test_util::{EmptyTable, MockTableEngine};
 
@@ -558,7 +558,7 @@ mod test {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
             desc: None,
-            schema: Arc::new(Schema::new(supported_types())),
+            schema: RawSchema::new(supported_types()),
             region_numbers: vec![0],
             primary_key_indices: vec![],
             create_if_not_exists: true,

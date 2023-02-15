@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::vectors::VectorRef;
 use log_store::NoopLogStore;
 use object_store::services::fs::Builder;
@@ -109,7 +109,7 @@ fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
         schema_name: "public".to_string(),
         table_name: TABLE_NAME.to_string(),
         desc: Some("a test table".to_string()),
-        schema,
+        schema: RawSchema::from(&*schema),
         region_numbers: vec![0],
         create_if_not_exists: true,
         primary_key_indices: vec![0],

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use api::v1::alter_expr::Kind;
 use api::v1::{column_def, AlterExpr, CreateTableExpr, DropColumns, RenameTable};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, RawSchema, SchemaBuilder, SchemaRef};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
@@ -173,7 +173,7 @@ pub fn create_expr_to_request(
         schema_name,
         table_name: expr.table_name,
         desc,
-        schema,
+        schema: RawSchema::from(&*schema),
         region_numbers: region_ids,
         primary_key_indices,
         create_if_not_exists: expr.create_if_not_exists,

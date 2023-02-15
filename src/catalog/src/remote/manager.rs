@@ -32,8 +32,8 @@ use table::TableRef;
 use tokio::sync::Mutex;
 
 use crate::error::{
-    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, InvalidTableSchemaSnafu,
-    OpenTableSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
+    CatalogNotFoundSnafu, CreateTableSnafu, InvalidCatalogValueSnafu, OpenTableSnafu, Result,
+    SchemaNotFoundSnafu, TableExistsSnafu, UnimplementedSnafu,
 };
 use crate::helper::{
     build_catalog_prefix, build_schema_prefix, build_table_global_prefix, CatalogKey, CatalogValue,
@@ -346,21 +346,13 @@ impl RemoteCatalogManager {
                 );
 
                 let meta = &table_info.meta;
-                let schema = meta
-                    .schema
-                    .clone()
-                    .try_into()
-                    .context(InvalidTableSchemaSnafu {
-                        table_info: format!("{catalog_name}.{schema_name}.{table_name}"),
-                        schema: meta.schema.clone(),
-                    })?;
                 let req = CreateTableRequest {
                     id: table_id,
                     catalog_name: catalog_name.clone(),
                     schema_name: schema_name.clone(),
                     table_name: table_name.clone(),
                     desc: None,
-                    schema: Arc::new(schema),
+                    schema: meta.schema.clone(),
                     region_numbers: region_numbers.clone(),
                     primary_key_indices: meta.primary_key_indices.clone(),
                     create_if_not_exists: true,

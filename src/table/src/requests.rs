@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use datatypes::prelude::VectorRef;
-use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::schema::{ColumnSchema, RawSchema};
 use store_api::storage::RegionNumber;
 
 use crate::metadata::TableId;
@@ -45,7 +45,7 @@ pub struct CreateTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub desc: Option<String>,
-    pub schema: SchemaRef,
+    pub schema: RawSchema,
     pub region_numbers: Vec<u32>,
     pub primary_key_indices: Vec<usize>,
     pub create_if_not_exists: bool,

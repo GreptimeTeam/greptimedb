@@ -13,13 +13,12 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use catalog::{RegisterSchemaRequest, RegisterTableRequest};
 use common_query::Output;
 use common_telemetry::tracing::info;
 use common_telemetry::tracing::log::error;
-use datatypes::schema::SchemaBuilder;
+use datatypes::schema::RawSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::{ColumnOption, TableConstraint};
@@ -31,8 +30,8 @@ use table::metadata::TableId;
 use table::requests::*;
 
 use crate::error::{
-    self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateSchemaSnafu,
-    CreateTableSnafu, IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
+    self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
+    IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
     RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
 };
 use crate::sql::SqlHandler;
@@ -239,13 +238,7 @@ impl SqlHandler {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let schema = Arc::new(
-            SchemaBuilder::try_from(columns_schemas)
-                .context(CreateSchemaSnafu)?
-                .build()
-                .context(CreateSchemaSnafu)?,
-        );
-
+        let schema = RawSchema::new(columns_schemas);
         let request = CreateTableRequest {
             id: table_id,
             catalog_name: table_ref.catalog.to_string(),
@@ -267,6 +260,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::Schema;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;
@@ -320,8 +314,8 @@ mod tests {
         assert_eq!(42, c.id);
         assert!(!c.create_if_not_exists);
         assert_eq!(vec![0], c.primary_key_indices);
-        assert_eq!(1, c.schema.timestamp_index().unwrap());
-        assert_eq!(4, c.schema.column_schemas().len());
+        assert_eq!(1, c.schema.timestamp_index.unwrap());
+        assert_eq!(4, c.schema.column_schemas.len());
     }
 
     #[tokio::test]
@@ -371,7 +365,7 @@ mod tests {
             .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
             .unwrap();
         assert!(c.primary_key_indices.is_empty());
-        assert_eq!(c.schema.timestamp_index(), Some(1));
+        assert_eq!(c.schema.timestamp_index, Some(1));
     }
 
     /// Constraints specified, not column cannot be found.
@@ -438,40 +432,25 @@ mod tests {
         assert_eq!("s".to_string(), request.schema_name);
         assert_eq!("demo".to_string(), request.table_name);
         assert!(!request.create_if_not_exists);
-        assert_eq!(4, request.schema.column_schemas().len());
+        assert_eq!(4, request.schema.column_schemas.len());
 
         assert_eq!(vec![0], request.primary_key_indices);
+        let schema = Schema::try_from(request.schema).unwrap();
         assert_eq!(
             ConcreteDataType::string_datatype(),
-            request
-                .schema
-                .column_schema_by_name("host")
-                .unwrap()
-                .data_type
+            schema.column_schema_by_name("host").unwrap().data_type
         );
         assert_eq!(
             ConcreteDataType::timestamp_millisecond_datatype(),
-            request
-                .schema
-                .column_schema_by_name("ts")
-                .unwrap()
-                .data_type
+            schema.column_schema_by_name("ts").unwrap().data_type
         );
         assert_eq!(
             ConcreteDataType::float64_datatype(),
-            request
-                .schema
-                .column_schema_by_name("cpu")
-                .unwrap()
-                .data_type
+            schema.column_schema_by_name("cpu").unwrap().data_type
         );
         assert_eq!(
             ConcreteDataType::float64_datatype(),
-            request
-                .schema
-                .column_schema_by_name("memory")
-                .unwrap()
-                .data_type
+            schema.column_schema_by_name("memory").unwrap().data_type
         );
     }
 }

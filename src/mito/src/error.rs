@@ -184,6 +184,9 @@ pub enum Error {
         region_name: String,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Invalid schema, source: {}", source))]
+    InvalidRawSchema { source: datatypes::error::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -207,7 +210,8 @@ impl ErrorExt for Error {
             | ProjectedColumnNotFound { .. }
             | InvalidPrimaryKey { .. }
             | MissingTimestampIndex { .. }
-            | TableNotFound { .. } => StatusCode::InvalidArguments,
+            | TableNotFound { .. }
+            | InvalidRawSchema { .. } => StatusCode::InvalidArguments,
 
             TableInfoNotFound { .. } | ConvertRaw { .. } => StatusCode::Unexpected,
 

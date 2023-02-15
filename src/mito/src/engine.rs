@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_telemetry::tracing::log::info;
 use common_telemetry::{debug, logging};
-use datatypes::schema::SchemaRef;
+use datatypes::schema::{Schema, SchemaRef};
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
@@ -42,8 +42,8 @@ use tokio::sync::Mutex;
 use crate::config::EngineConfig;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
-    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, MissingTimestampIndexSnafu,
-    RegionNotFoundSnafu, Result, TableExistsSnafu,
+    BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, InvalidRawSchemaSnafu,
+    MissingTimestampIndexSnafu, RegionNotFoundSnafu, Result, TableExistsSnafu,
 };
 use crate::manifest::TableManifest;
 use crate::table::MitoTable;
@@ -274,7 +274,7 @@ fn build_column_family(
 fn validate_create_table_request(request: &CreateTableRequest) -> Result<()> {
     let ts_index = request
         .schema
-        .timestamp_index()
+        .timestamp_index
         .context(MissingTimestampIndexSnafu {
             table_name: &request.table_name,
         })?;
@@ -320,18 +320,19 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             }
         }
 
-        let table_schema = &request.schema;
+        let table_schema =
+            Arc::new(Schema::try_from(request.schema).context(InvalidRawSchemaSnafu)?);
         let primary_key_indices = &request.primary_key_indices;
         let (next_column_id, default_cf) = build_column_family(
             INIT_COLUMN_ID,
             table_name,
-            table_schema,
+            &table_schema,
             primary_key_indices,
         )?;
         let (next_column_id, row_key) = build_row_key_desc(
             next_column_id,
             table_name,
-            table_schema,
+            &table_schema,
             primary_key_indices,
         )?;
 
@@ -378,7 +379,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         }
 
         let table_meta = TableMetaBuilder::default()
-            .schema(request.schema)
+            .schema(table_schema)
             .engine(MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(request.primary_key_indices.clone())
@@ -599,7 +600,7 @@ mod tests {
     use common_query::physical_plan::SessionContext;
     use common_recordbatch::util;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, SchemaBuilder};
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
     use datatypes::value::Value;
     use datatypes::vectors::{
         Float64Vector, Int32Vector, StringVector, TimestampMillisecondVector, VectorRef,
@@ -635,12 +636,7 @@ mod tests {
             .with_time_index(true),
         ];
 
-        let schema = Arc::new(
-            SchemaBuilder::try_from(column_schemas)
-                .unwrap()
-                .build()
-                .expect("ts must be timestamp column"),
-        );
+        let schema = RawSchema::new(column_schemas);
 
         let (dir, object_store) =
             test_util::new_test_object_store("test_insert_with_column_default_constraint").await;
@@ -665,7 +661,7 @@ mod tests {
                     schema_name: "public".to_string(),
                     table_name: table_name.to_string(),
                     desc: Some("a test table".to_string()),
-                    schema: schema.clone(),
+                    schema,
                     create_if_not_exists: true,
                     primary_key_indices: Vec::default(),
                     table_options: HashMap::new(),
@@ -770,12 +766,7 @@ mod tests {
             .with_time_index(true),
         ];
 
-        let schema = Arc::new(
-            SchemaBuilder::try_from(column_schemas)
-                .unwrap()
-                .build()
-                .expect("ts must be timestamp column"),
-        );
+        let schema = RawSchema::new(column_schemas);
 
         let mut request = CreateTableRequest {
             id: 1,
@@ -944,7 +935,7 @@ mod tests {
             catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
             table_name: table_info.name.to_string(),
-            schema: table_info.meta.schema.clone(),
+            schema: RawSchema::from(&*table_info.meta.schema),
             create_if_not_exists: true,
             desc: None,
             primary_key_indices: Vec::default(),
@@ -961,7 +952,7 @@ mod tests {
             catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
             table_name: table_info.name.to_string(),
-            schema: table_info.meta.schema.clone(),
+            schema: RawSchema::from(&*table_info.meta.schema),
             create_if_not_exists: false,
             desc: None,
             primary_key_indices: Vec::default(),
@@ -1170,7 +1161,7 @@ mod tests {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: another_name.to_string(),
             desc: Some("another test table".to_string()),
-            schema: Arc::new(schema_for_test()),
+            schema: RawSchema::from(&schema_for_test()),
             region_numbers: vec![0],
             primary_key_indices: vec![0],
             create_if_not_exists: true,
@@ -1253,7 +1244,7 @@ mod tests {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_info.name.to_string(),
-            schema: table_info.meta.schema.clone(),
+            schema: RawSchema::from(&*table_info.meta.schema),
             create_if_not_exists: true,
             desc: None,
             primary_key_indices: Vec::default(),
@@ -1286,7 +1277,7 @@ mod tests {
             catalog_name: DEFAULT_CATALOG_NAME.to_string(),
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_info.name.to_string(),
-            schema: table_info.meta.schema.clone(),
+            schema: RawSchema::from(&*table_info.meta.schema),
             create_if_not_exists: false,
             desc: None,
             primary_key_indices: Vec::default(),

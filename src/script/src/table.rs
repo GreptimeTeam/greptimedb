@@ -24,7 +24,7 @@ use common_recordbatch::util as record_util;
 use common_telemetry::logging;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector};
-use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder};
+use datatypes::schema::{ColumnSchema, RawSchema};
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
 use query::parser::QueryLanguageParser;
 use query::QueryEngineRef;
@@ -50,7 +50,7 @@ impl ScriptsTable {
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
     ) -> Result<Self> {
-        let schema = Arc::new(build_scripts_schema());
+        let schema = build_scripts_schema();
         // TODO(dennis): we put scripts table into default catalog and schema.
         // maybe put into system catalog?
         let request = CreateTableRequest {
@@ -202,7 +202,7 @@ impl ScriptsTable {
 }
 
 /// Build scripts table
-fn build_scripts_schema() -> Schema {
+fn build_scripts_schema() -> RawSchema {
     let cols = vec![
         ColumnSchema::new(
             "schema".to_string(),
@@ -242,6 +242,5 @@ fn build_scripts_schema() -> Schema {
         ),
     ];
 
-    // Schema is always valid here
-    SchemaBuilder::try_from(cols).unwrap().build().unwrap()
+    RawSchema::new(cols)
 }
