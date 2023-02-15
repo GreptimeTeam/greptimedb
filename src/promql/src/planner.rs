@@ -170,15 +170,13 @@ impl<S: ContextProvider> PromPlanner<S> {
                         self.projection_for_each_value_column(join_plan, |_| {
                             let (left_col_name, right_col_name) = value_columns.next().unwrap();
                             let left_col = left_schema
-                                .field_with_name(None, &left_col_name)
+                                .field_with_name(None, left_col_name)
                                 .context(DataFusionPlanningSnafu)?
                                 .qualified_column();
                             let right_col = right_schema
-                                .field_with_name(None, &right_col_name)
+                                .field_with_name(None, right_col_name)
                                 .context(DataFusionPlanningSnafu)?
                                 .qualified_column();
-
-                            println!("left: {:?}, right: {:?}", left_col, right_col);
 
                             Ok(DfExpr::BinaryExpr(BinaryExpr {
                                 left: Box::new(DfExpr::Column(left_col)),
@@ -729,7 +727,7 @@ impl<S: ContextProvider> PromPlanner<S> {
             .ctx
             .tag_columns
             .iter()
-            .map(|col| Column::from_name(col))
+            .map(Column::from_name)
             .collect::<Vec<_>>();
 
         // push time index column if it exist
