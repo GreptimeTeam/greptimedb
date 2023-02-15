@@ -92,7 +92,7 @@ pub trait Procedure: Send + Sync {
     /// Dump the state of the procedure to a string.
     fn dump(&self) -> Result<String>;
 
-    /// Returns the [LockKey] that this procedure needs to acquire lock.
+    /// Returns the [LockKey] that this procedure needs to acquire.
     fn lock_key(&self) -> LockKey;
 }
 
@@ -119,9 +119,14 @@ impl LockKey {
         LockKey(vec)
     }
 
-    /// Returns the lock keys.
-    pub fn keys(&self) -> &[String] {
-        &self.0
+    /// Returns the keys to lock.
+    pub fn keys_to_lock(&self) -> impl Iterator<Item = &String> {
+        self.0.iter()
+    }
+
+    /// Returns the keys to unlock.
+    pub fn keys_to_unlock(&self) -> impl Iterator<Item = &String> {
+        self.0.iter().rev()
     }
 }
 
@@ -260,7 +265,8 @@ mod tests {
     fn test_lock_key() {
         let entity = "catalog.schema.my_table";
         let key = LockKey::single(entity);
-        assert_eq!(&[entity], key.keys());
+        assert_eq!(vec![entity], key.keys_to_lock().collect::<Vec<_>>());
+        assert_eq!(vec![entity], key.keys_to_unlock().collect::<Vec<_>>());
 
         let key = LockKey::new([
             "b".to_string(),
@@ -268,7 +274,11 @@ mod tests {
             "a".to_string(),
             "c".to_string(),
         ]);
-        assert_eq!(&["a", "b", "c"], key.keys());
+        assert_eq!(vec!["a", "b", "c"], key.keys_to_lock().collect::<Vec<_>>());
+        assert_eq!(
+            vec!["c", "b", "a"],
+            key.keys_to_unlock().collect::<Vec<_>>()
+        );
     }
 
     #[test]

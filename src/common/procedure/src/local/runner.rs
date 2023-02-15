@@ -73,7 +73,7 @@ impl Runner {
 
         // TODO(yingwen): Detect recursive locking (and deadlock) if possible. Maybe we could detect
         // recursive locking by adding a root procedure id to the meta.
-        for key in self.meta.lock_key.keys() {
+        for key in self.meta.lock_key.keys_to_lock() {
             // Acquire lock for each key.
             self.manager_ctx
                 .lock_map
@@ -94,7 +94,7 @@ impl Runner {
         }
 
         // Release lock in reverse order.
-        for key in self.meta.lock_key.keys().iter().rev() {
+        for key in self.meta.lock_key.keys_to_unlock() {
             self.manager_ctx.lock_map.release_lock(key, self.meta.id);
         }
 
