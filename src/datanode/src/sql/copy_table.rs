@@ -24,8 +24,8 @@ use datafusion::physical_plan::RecordBatchStream;
 use futures::TryStreamExt;
 use object_store::services::fs::Builder;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ResultExt};
-use table::engine::{EngineContext, TableReference};
+use snafu::ResultExt;
+use table::engine::TableReference;
 use table::requests::CopyTableRequest;
 
 use crate::error::{self, Result};
@@ -38,16 +38,7 @@ impl SqlHandler {
             schema: &req.schema_name.to_string(),
             table: &req.table_name.to_string(),
         };
-
-        let table = self
-            .table_engine()
-            .get_table(&EngineContext::default(), &table_ref)
-            .context(error::GetTableSnafu {
-                table_name: table_ref.to_string(),
-            })?
-            .context(error::TableNotFoundSnafu {
-                table_name: table_ref.to_string(),
-            })?;
+        let table = self.get_table(&table_ref)?;
 
         let stream = table
             .scan(None, &[], None)
