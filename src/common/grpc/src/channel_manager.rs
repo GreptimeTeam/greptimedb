@@ -18,18 +18,20 @@ use std::time::Duration;
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use snafu::ResultExt;
-use tonic::transport::{Channel as InnerChannel, Endpoint, Uri};
+use snafu::{OptionExt, ResultExt};
+use tonic::transport::{
+    Certificate, Channel as InnerChannel, ClientTlsConfig, Endpoint, Identity, Uri,
+};
 use tower::make::MakeConnection;
 
-use crate::error;
-use crate::error::Result;
+use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsConfigSnafu, Result};
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 
 #[derive(Clone, Debug)]
 pub struct ChannelManager {
     config: ChannelConfig,
+    client_tls_config: Option<ClientTlsConfig>,
     pool: Arc<Pool>,
 }
 
@@ -52,7 +54,37 @@ impl ChannelManager {
             recycle_channel_in_loop(cloned_pool, RECYCLE_CHANNEL_INTERVAL_SECS).await;
         });
 
-        Self { config, pool }
+        Self {
+            config,
+            client_tls_config: None,
+            pool,
+        }
+    }
+
+    pub fn with_tls_config(config: ChannelConfig) -> Result<Self> {
+        let mut cm = Self::with_config(config.clone());
+
+        // setup tls
+        let path_config = config.client_tls.context(InvalidTlsConfigSnafu {
+            msg: "no config input",
+        })?;
+
+        let server_root_ca_cert = std::fs::read_to_string(path_config.server_ca_cert_path)
+            .context(InvalidConfigFilePathSnafu)?;
+        let server_root_ca_cert = Certificate::from_pem(server_root_ca_cert);
+        let client_cert = std::fs::read_to_string(path_config.client_cert_path)
+            .context(InvalidConfigFilePathSnafu)?;
+        let client_key = std::fs::read_to_string(path_config.client_key_path)
+            .context(InvalidConfigFilePathSnafu)?;
+        let client_identity = Identity::from_pem(client_cert, client_key);
+
+        cm.client_tls_config = Some(
+            ClientTlsConfig::new()
+                .ca_certificate(server_root_ca_cert)
+                .identity(client_identity),
+        );
+
+        Ok(cm)
     }
 
     pub fn config(&self) -> &ChannelConfig {
@@ -119,8 +151,7 @@ impl ChannelManager {
     }
 
     fn build_endpoint(&self, addr: &str) -> Result<Endpoint> {
-        let mut endpoint =
-            Endpoint::new(format!("http://{addr}")).context(error::CreateChannelSnafu)?;
+        let mut endpoint = Endpoint::new(format!("http://{addr}")).context(CreateChannelSnafu)?;
 
         if let Some(dur) = self.config.timeout {
             endpoint = endpoint.timeout(dur);
@@ -152,12 +183,25 @@ impl ChannelManager {
         if let Some(enabled) = self.config.http2_adaptive_window {
             endpoint = endpoint.http2_adaptive_window(enabled);
         }
+        if let Some(tls_config) = &self.client_tls_config {
+            endpoint = endpoint
+                .tls_config(tls_config.clone())
+                .context(CreateChannelSnafu)?;
+        }
+
         endpoint = endpoint
             .tcp_keepalive(self.config.tcp_keepalive)
             .tcp_nodelay(self.config.tcp_nodelay);
 
         Ok(endpoint)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientTlsOption {
+    pub server_ca_cert_path: String,
+    pub client_cert_path: String,
+    pub client_key_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,6 +218,7 @@ pub struct ChannelConfig {
     pub http2_adaptive_window: Option<bool>,
     pub tcp_keepalive: Option<Duration>,
     pub tcp_nodelay: bool,
+    pub client_tls: Option<ClientTlsOption>,
 }
 
 impl Default for ChannelConfig {
@@ -191,6 +236,7 @@ impl Default for ChannelConfig {
             http2_adaptive_window: None,
             tcp_keepalive: None,
             tcp_nodelay: true,
+            client_tls: None,
         }
     }
 }
@@ -307,6 +353,16 @@ impl ChannelConfig {
             ..self
         }
     }
+
+    /// Set the value of tls client auth.
+    ///
+    /// Disabled by default.
+    pub fn client_tls_config(self, client_tls_option: ClientTlsOption) -> Self {
+        Self {
+            client_tls: Some(client_tls_option),
+            ..self
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -401,7 +457,11 @@ mod tests {
     async fn test_access_count() {
         let pool = Arc::new(Pool::default());
         let config = ChannelConfig::new();
-        let mgr = Arc::new(ChannelManager { pool, config });
+        let mgr = Arc::new(ChannelManager {
+            pool,
+            config,
+            client_tls_config: None,
+        });
         let addr = "test_uri";
 
         let mut joins = Vec::with_capacity(10);
@@ -443,6 +503,7 @@ mod tests {
                 http2_adaptive_window: None,
                 tcp_keepalive: None,
                 tcp_nodelay: true,
+                client_tls: None,
             },
             default_cfg
         );
@@ -459,7 +520,12 @@ mod tests {
             .http2_keep_alive_while_idle(true)
             .http2_adaptive_window(true)
             .tcp_keepalive(Duration::from_secs(2))
-            .tcp_nodelay(false);
+            .tcp_nodelay(false)
+            .client_tls_config(ClientTlsOption {
+                server_ca_cert_path: "some_server_path".to_string(),
+                client_cert_path: "some_cert_path".to_string(),
+                client_key_path: "some_key_path".to_string(),
+            });
 
         assert_eq!(
             ChannelConfig {
@@ -475,6 +541,11 @@ mod tests {
                 http2_adaptive_window: Some(true),
                 tcp_keepalive: Some(Duration::from_secs(2)),
                 tcp_nodelay: false,
+                client_tls: Some(ClientTlsOption {
+                    server_ca_cert_path: "some_server_path".to_string(),
+                    client_cert_path: "some_cert_path".to_string(),
+                    client_key_path: "some_key_path".to_string(),
+                }),
             },
             cfg
         );
@@ -496,7 +567,11 @@ mod tests {
             .http2_adaptive_window(true)
             .tcp_keepalive(Duration::from_secs(2))
             .tcp_nodelay(true);
-        let mgr = ChannelManager { pool, config };
+        let mgr = ChannelManager {
+            pool,
+            config,
+            client_tls_config: None,
+        };
 
         let res = mgr.build_endpoint("test_addr");
 
@@ -512,7 +587,11 @@ mod tests {
         let pool = Arc::new(pool);
 
         let config = ChannelConfig::new();
-        let mgr = ChannelManager { pool, config };
+        let mgr = ChannelManager {
+            pool,
+            config,
+            client_tls_config: None,
+        };
 
         let addr = "test_addr";
         let res = mgr.get(addr);
