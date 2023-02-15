@@ -88,52 +88,6 @@ impl crate::snafu::ErrorCompat for BoxedError {
     }
 }
 
-#[derive(Debug)]
-pub struct CompoundError {
-    one: BoxedError,
-    another: BoxedError,
-    msg: String,
-}
-
-impl CompoundError {
-    pub fn new(one: BoxedError, another: BoxedError, msg: String) -> Self {
-        Self { one, another, msg }
-    }
-
-    pub fn boxed(self) -> BoxedError {
-        BoxedError::new(self)
-    }
-}
-
-impl std::fmt::Display for CompoundError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}, {}", self.msg, self.one, self.another)
-    }
-}
-
-impl std::error::Error for CompoundError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        // Return one errors as source. Which one doesn't matter.
-        self.one.source()
-    }
-}
-
-impl crate::ext::ErrorExt for CompoundError {
-    fn status_code(&self) -> crate::status_code::StatusCode {
-        // Return one errors as status code. Which one doesn't matter.
-        self.one.status_code()
-    }
-
-    fn backtrace_opt(&self) -> Option<&crate::snafu::Backtrace> {
-        // Return one errors as backtrace. Which one doesn't matter.
-        self.one.backtrace_opt()
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self as _
-    }
-}
-
 /// Error type with plain error message
 #[derive(Debug)]
 pub struct PlainError {
