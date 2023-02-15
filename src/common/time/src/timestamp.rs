@@ -114,22 +114,14 @@ impl Timestamp {
     /// Format timestamp to ISO8601 string. If the timestamp exceeds what chrono timestamp can
     /// represent, this function simply print the timestamp unit and value in plain string.
     pub fn to_iso8601_string(&self) -> String {
-        let nano_factor = TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor();
-        let (mut secs, mut nsecs) = self.split();
-
-        if nsecs < 0 {
-            secs -= 1;
-            nsecs += nano_factor;
-        }
-
-        if let LocalResult::Single(datetime) = Utc.timestamp_opt(secs, nsecs as u32) {
+        if let LocalResult::Single(datetime) = self.to_chrono_datetime() {
             format!("{}", datetime.format("%Y-%m-%d %H:%M:%S%.f%z"))
         } else {
             format!("[Timestamp{}: {}]", self.unit, self.value)
         }
     }
 
-    pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
+    pub fn to_chrono_datetime(&self) -> LocalResult<DateTime<Utc>> {
         let nano_factor = TimeUnit::Second.factor() / TimeUnit::Nanosecond.factor();
         let (mut secs, mut nsecs) = self.split();
 
@@ -138,7 +130,7 @@ impl Timestamp {
             nsecs += nano_factor;
         }
 
-        NaiveDateTime::from_timestamp_opt(secs, nsecs as u32)
+        Utc.timestamp_opt(secs, nsecs as u32)
     }
 }
 

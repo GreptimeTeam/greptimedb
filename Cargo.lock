@@ -6669,6 +6669,7 @@ dependencies = [
  "base64 0.13.1",
  "bytes",
  "catalog",
+ "chrono",
  "common-base",
  "common-catalog",
  "common-error",
