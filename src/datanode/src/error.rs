@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
 
@@ -100,6 +101,18 @@ pub enum Error {
         values
     ))]
     ColumnValuesNumberMismatch { columns: usize, values: usize },
+
+    #[snafu(display(
+        "Columns type mismatch, column: {}, expected type: {:?}, acutal: {:?}",
+        column,
+        expected,
+        actual,
+    ))]
+    ColumnTypeMismatch {
+        column: String,
+        expected: ConcreteDataType,
+        actual: ConcreteDataType,
+    },
 
     #[snafu(display("Failed to parse sql value, source: {}", source))]
     ParseSqlValue {
@@ -372,6 +385,7 @@ impl ErrorExt for Error {
             }
 
             Error::ColumnValuesNumberMismatch { .. }
+            | Error::ColumnTypeMismatch { .. }
             | Error::InvalidSql { .. }
             | Error::NotSupportSql { .. }
             | Error::KeyColumnNotFound { .. }

@@ -11,12 +11,19 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use std::collections::HashMap;
+use std::pin::Pin;
+
 use catalog::CatalogManagerRef;
 use common_query::Output;
-use common_recordbatch::RecordBatches;
+use common_recordbatch::{RecordBatch, RecordBatches};
+use datafusion_expr::type_coercion::binary::coerce_types;
+use datafusion_expr::Operator;
 use datatypes::data_type::DataType;
-use datatypes::schema::{ColumnSchema, SchemaRef};
+use datatypes::schema::ColumnSchema;
 use datatypes::vectors::MutableVector;
+use futures::stream::{self, StreamExt};
+use futures::Stream;
 use query::parser::QueryStatement;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -26,15 +33,24 @@ use sql::statements::statement::Statement;
 use sql::statements::{self};
 use table::engine::TableReference;
 use table::requests::*;
+use table::TableRef;
 
 use crate::error::{
     CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
-    ColumnValuesNumberMismatchSnafu, ExecuteSqlSnafu, InsertSnafu, MissingInsertBodySnafu,
-    ParseSqlSnafu, ParseSqlValueSnafu, Result, TableNotFoundSnafu,
+    ColumnTypeMismatchSnafu, ColumnValuesNumberMismatchSnafu, ExecuteSqlSnafu, InsertSnafu,
+    MissingInsertBodySnafu, ParseSqlSnafu, ParseSqlValueSnafu, Result, TableNotFoundSnafu,
 };
 use crate::sql::{table_idents_to_full_name, SqlHandler, SqlRequest};
 
 const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
+
+type InsertRequstStream = Pin<Box<dyn Stream<Item = Result<SqlRequest>> + Send>>;
+pub(crate) enum InsertRequests {
+    // Single request
+    Request(SqlRequest),
+    // Streaming requests
+    Stream(InsertRequstStream),
+}
 
 impl SqlHandler {
     pub(crate) async fn insert(&self, req: InsertRequest) -> Result<Output> {
@@ -55,15 +71,26 @@ impl SqlHandler {
         Ok(Output::AffectedRows(affected_rows))
     }
 
-    fn build_columns_from_values<'a>(
-        table_ref: &'a TableReference<'a>,
-        schema: &'a SchemaRef,
-        values: Vec<Vec<SqlValue>>,
-        columns: &Vec<&String>,
-        columns_builders: &mut Vec<(&'a ColumnSchema, Box<dyn MutableVector>)>,
-    ) -> Result<()> {
-        let columns_num = Self::columns_num(schema, columns);
+    fn build_request_from_values(
+        table_ref: TableReference,
+        table: &TableRef,
+        stmt: Insert,
+    ) -> Result<SqlRequest> {
+        let values = stmt
+            .values_body()
+            .context(ParseSqlValueSnafu)?
+            .context(MissingInsertBodySnafu)?;
+        let columns = stmt.columns();
+        let schema = table.schema();
+        let columns_num = if columns.is_empty() {
+            schema.column_schemas().len()
+        } else {
+            columns.len()
+        };
         let rows_num = values.len();
+
+        let mut columns_builders: Vec<(&ColumnSchema, Box<dyn MutableVector>)> =
+            Vec::with_capacity(columns_num);
 
         // Initialize vectors
         if columns.is_empty() {
@@ -100,97 +127,6 @@ impl SqlHandler {
             }
         }
 
-        Ok(())
-    }
-
-    // FIXME(dennis): move it to frontend when refactor is done.
-    async fn build_columns_from_stmt<'a>(
-        &self,
-        table_ref: &'a TableReference<'a>,
-        schema: &'a SchemaRef,
-        stmt: &'a Insert,
-        columns: &Vec<&String>,
-        columns_builders: &mut Vec<(&'a ColumnSchema, Box<dyn MutableVector>)>,
-        query_ctx: QueryContextRef,
-    ) -> Result<()> {
-        if stmt.is_insert_select() {
-            let query = stmt
-                .query_body()
-                .context(ParseSqlValueSnafu)?
-                .context(MissingInsertBodySnafu)?;
-
-            let logical_plan = self
-                .query_engine
-                .statement_to_plan(
-                    QueryStatement::Sql(Statement::Query(Box::new(query))),
-                    query_ctx,
-                )
-                .context(ExecuteSqlSnafu)?;
-
-            let output = self
-                .query_engine
-                .execute(&logical_plan)
-                .await
-                .context(ExecuteSqlSnafu)?;
-
-            // TODO(dennis): streaming insert to avoid too much memroy consumption.
-            let _batches = match output {
-                Output::Stream(s) => RecordBatches::try_collect(s).await.unwrap(),
-                Output::RecordBatches(bs) => bs,
-                _ => unreachable!(),
-            };
-
-            Ok(())
-        } else {
-            let values = stmt
-                .values_body()
-                .context(ParseSqlValueSnafu)?
-                .context(MissingInsertBodySnafu)?;
-
-            Self::build_columns_from_values(table_ref, schema, values, columns, columns_builders)
-        }
-    }
-
-    fn columns_num(schema: &SchemaRef, columns: &Vec<&String>) -> usize {
-        if columns.is_empty() {
-            schema.column_schemas().len()
-        } else {
-            columns.len()
-        }
-    }
-
-    pub(crate) async fn insert_to_request(
-        &self,
-        catalog_manager: CatalogManagerRef,
-        stmt: Insert,
-        query_ctx: QueryContextRef,
-    ) -> Result<SqlRequest> {
-        let (catalog_name, schema_name, table_name) =
-            table_idents_to_full_name(stmt.table_name(), query_ctx.clone())?;
-        let table_ref = TableReference::full(&catalog_name, &schema_name, &table_name);
-
-        let columns = stmt.columns();
-
-        let table = catalog_manager
-            .table(&catalog_name, &schema_name, &table_name)
-            .context(CatalogSnafu)?
-            .context(TableNotFoundSnafu {
-                table_name: table_ref.table,
-            })?;
-        let schema = table.schema();
-
-        let mut columns_builders: Vec<(&ColumnSchema, Box<dyn MutableVector>)> =
-            Vec::with_capacity(Self::columns_num(&schema, &columns));
-        self.build_columns_from_stmt(
-            &table_ref,
-            &schema,
-            &stmt,
-            &columns,
-            &mut columns_builders,
-            query_ctx,
-        )
-        .await?;
-
         Ok(SqlRequest::Insert(InsertRequest {
             catalog_name: table_ref.catalog.to_string(),
             schema_name: table_ref.schema.to_string(),
@@ -201,6 +137,138 @@ impl SqlHandler {
                 .collect(),
             region_number: 0,
         }))
+    }
+
+    fn build_request_from_batch(
+        stmt: Insert,
+        table: TableRef,
+        batch: RecordBatch,
+        query_ctx: QueryContextRef,
+    ) -> Result<SqlRequest> {
+        let (catalog_name, schema_name, table_name) =
+            table_idents_to_full_name(stmt.table_name(), query_ctx)?;
+
+        let columns: Vec<String> = stmt.columns().iter().map(|c| (*c).clone()).collect();
+        let schema = table.schema();
+        let columns = if columns.is_empty() {
+            schema
+                .column_schemas()
+                .iter()
+                .map(|c| c.name.to_string())
+                .collect()
+        } else {
+            columns
+        };
+        let columns_num = columns.len();
+
+        ensure!(
+            batch.num_columns() == columns_num,
+            ColumnValuesNumberMismatchSnafu {
+                columns: columns_num,
+                values: batch.num_columns(),
+            }
+        );
+
+        let batch_schema = batch.schema.clone();
+        let batch_columns = batch_schema.column_schemas();
+        assert_eq!(batch_columns.len(), columns_num);
+        let mut columns_values = HashMap::with_capacity(columns_num);
+
+        for (i, column_name) in columns.into_iter().enumerate() {
+            let column_schema = schema
+                .column_schema_by_name(&column_name)
+                .with_context(|| ColumnNotFoundSnafu {
+                    table_name: &table_name,
+                    column_name: &column_name,
+                })?;
+            let expect_datatype = column_schema.data_type.as_arrow_type();
+            let batch_datatype = batch_columns[i].data_type.as_arrow_type();
+
+            ensure!(
+                expect_datatype
+                    == coerce_types(&expect_datatype, &Operator::Eq, &batch_datatype).unwrap(),
+                ColumnTypeMismatchSnafu {
+                    column: column_name,
+                    expected: column_schema.data_type.clone(),
+                    actual: batch_columns[i].data_type.clone(),
+                }
+            );
+            let vector = batch.column(i);
+            columns_values.insert(column_name, vector.cast(&column_schema.data_type).unwrap());
+        }
+
+        Ok(SqlRequest::Insert(InsertRequest {
+            catalog_name,
+            schema_name,
+            table_name,
+            columns_values,
+            region_number: 0,
+        }))
+    }
+
+    // FIXME(dennis): move it to frontend when refactor is done.
+    async fn build_stream_from_query(
+        &self,
+        table: TableRef,
+        stmt: Insert,
+        query_ctx: QueryContextRef,
+    ) -> Result<InsertRequstStream> {
+        let query = stmt
+            .query_body()
+            .context(ParseSqlValueSnafu)?
+            .context(MissingInsertBodySnafu)?;
+
+        let logical_plan = self
+            .query_engine
+            .statement_to_plan(
+                QueryStatement::Sql(Statement::Query(Box::new(query))),
+                query_ctx.clone(),
+            )
+            .context(ExecuteSqlSnafu)?;
+
+        let output = self
+            .query_engine
+            .execute(&logical_plan)
+            .await
+            .context(ExecuteSqlSnafu)?;
+
+        let batches = match output {
+            Output::Stream(s) => RecordBatches::try_collect(s).await.unwrap(),
+            Output::RecordBatches(bs) => bs,
+            _ => unreachable!(),
+        };
+
+        Ok(Box::pin(stream::iter(batches.take()).map(move |batch| {
+            Self::build_request_from_batch(stmt.clone(), table.clone(), batch, query_ctx.clone())
+        })))
+    }
+
+    pub(crate) async fn insert_to_request(
+        &self,
+        catalog_manager: CatalogManagerRef,
+        stmt: Insert,
+        query_ctx: QueryContextRef,
+    ) -> Result<InsertRequests> {
+        let (catalog_name, schema_name, table_name) =
+            table_idents_to_full_name(stmt.table_name(), query_ctx.clone())?;
+
+        let table = catalog_manager
+            .table(&catalog_name, &schema_name, &table_name)
+            .context(CatalogSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_name.clone(),
+            })?;
+
+        if stmt.is_insert_select() {
+            Ok(InsertRequests::Stream(
+                self.build_stream_from_query(table, stmt, query_ctx).await?,
+            ))
+        } else {
+            let table_ref = TableReference::full(&catalog_name, &schema_name, &table_name);
+            Ok(InsertRequests::Request(Self::build_request_from_values(
+                table_ref, &table, stmt,
+            )?))
+        }
     }
 }
 

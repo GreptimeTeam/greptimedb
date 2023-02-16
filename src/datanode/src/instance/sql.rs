@@ -22,6 +22,7 @@ use common_telemetry::logging::info;
 use common_telemetry::timer;
 use datatypes::schema::Schema;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use futures::StreamExt;
 use servers::error as server_error;
 use servers::promql::PromqlHandler;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -35,6 +36,7 @@ use table::requests::{CreateDatabaseRequest, DropTableRequest};
 use crate::error::{self, BumpTableIdSnafu, ExecuteSqlSnafu, Result, TableIdProviderNotFoundSnafu};
 use crate::instance::Instance;
 use crate::metric;
+use crate::sql::insert::InsertRequests;
 use crate::sql::SqlRequest;
 
 impl Instance {
@@ -56,11 +58,28 @@ impl Instance {
                     .context(ExecuteSqlSnafu)
             }
             QueryStatement::Sql(Statement::Insert(i)) => {
-                let request = self
+                let requests = self
                     .sql_handler
                     .insert_to_request(self.catalog_manager.clone(), *i, query_ctx.clone())
                     .await?;
-                self.sql_handler.execute(request, query_ctx).await
+
+                match requests {
+                    InsertRequests::Request(request) => {
+                        self.sql_handler.execute(request, query_ctx.clone()).await
+                    }
+
+                    InsertRequests::Stream(mut s) => {
+                        let mut output = None;
+                        while let Some(request) = s.next().await {
+                            output = Some(
+                                self.sql_handler
+                                    .execute(request?, query_ctx.clone())
+                                    .await?,
+                            )
+                        }
+                        Ok(output.unwrap())
+                    }
+                }
             }
             QueryStatement::Sql(Statement::Delete(d)) => {
                 let request = SqlRequest::Delete(*d);

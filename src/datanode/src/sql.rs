@@ -34,7 +34,7 @@ mod alter;
 mod create;
 mod delete;
 mod drop_table;
-mod insert;
+pub(crate) mod insert;
 
 #[derive(Debug)]
 pub enum SqlRequest {
@@ -160,6 +160,7 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
+    use crate::sql::insert::InsertRequests;
 
     struct DemoTable;
 
@@ -260,7 +261,7 @@ mod tests {
             .unwrap();
 
         match request {
-            SqlRequest::Insert(req) => {
+            InsertRequests::Request(SqlRequest::Insert(req)) => {
                 assert_eq!(req.table_name, "demo");
                 let columns_values = req.columns_values;
                 assert_eq!(4, columns_values.len());
