@@ -38,10 +38,9 @@ use object_store::{util, ObjectStore};
 use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
 use snafu::prelude::*;
-use storage::compaction::{
-    CompactionHandler, CompactionSchedulerRef, LocalScheduler, SchedulerConfig, SimplePicker,
-};
+use storage::compaction::{CompactionHandler, CompactionSchedulerRef, SimplePicker};
 use storage::config::EngineConfig as StorageEngineConfig;
+use storage::scheduler::{LocalScheduler, SchedulerConfig};
 use storage::EngineImpl;
 use store_api::logstore::LogStore;
 use table::table::numbers::NumbersTable;

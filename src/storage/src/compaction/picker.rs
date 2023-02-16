@@ -86,38 +86,3 @@ impl<S: LogStore> Picker<CompactionRequestImpl<S>, CompactionTaskImpl<S>> for Si
         Ok(None)
     }
 }
-
-#[cfg(test)]
-pub mod tests {
-    use std::marker::PhantomData;
-
-    use store_api::storage::RegionId;
-
-    use super::*;
-    use crate::compaction::scheduler::Request;
-    use crate::compaction::task::tests::{CallbackRef, NoopCompactionTask};
-
-    pub(crate) struct MockPicker<R> {
-        pub cbs: Vec<CallbackRef>,
-        _phantom_data: PhantomData<R>,
-    }
-
-    impl<R: Request<RegionId>> MockPicker<R> {
-        pub fn new(cbs: Vec<CallbackRef>) -> Self {
-            Self {
-                cbs,
-                _phantom_data: Default::default(),
-            }
-        }
-    }
-
-    impl<R: Request<RegionId>> Picker<R, NoopCompactionTask> for MockPicker<R> {
-        fn pick(
-            &self,
-            _ctx: &PickerContext,
-            _req: &R,
-        ) -> crate::error::Result<Option<NoopCompactionTask>> {
-            Ok(Some(NoopCompactionTask::new(self.cbs.clone())))
-        }
-    }
-}

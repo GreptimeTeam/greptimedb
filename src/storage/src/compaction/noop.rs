@@ -17,7 +17,8 @@ use std::marker::PhantomData;
 
 use store_api::storage::RegionId;
 
-use crate::compaction::{CompactionTask, Picker, PickerContext, Request, Scheduler};
+use crate::compaction::{CompactionTask, Picker, PickerContext};
+use crate::scheduler::{Request, Scheduler};
 
 pub struct NoopCompactionScheduler<R> {
     _phantom_data: PhantomData<R>,

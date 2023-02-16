@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use crate::error::{CompactionRateLimitedSnafu, Result};
+use crate::error::{RateLimitedSnafu, Result};
 
 pub trait RateLimitToken {
     /// Releases the token.
@@ -66,7 +66,7 @@ impl<R> RateLimiter for MaxInflightTaskLimiter<R> {
     fn acquire_token(&self, _: &Self::Request) -> Result<BoxedRateLimitToken> {
         if self.inflight_task.fetch_add(1, Ordering::Relaxed) >= self.max_inflight_task {
             self.inflight_task.fetch_sub(1, Ordering::Relaxed);
-            return CompactionRateLimitedSnafu {
+            return RateLimitedSnafu {
                 msg: format!(
                     "Max inflight task num exceeds, current: {}, max: {}",
                     self.inflight_task.load(Ordering::Relaxed),

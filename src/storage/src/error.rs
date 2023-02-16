@@ -408,11 +408,11 @@ pub enum Error {
     #[snafu(display("Failed to decode parquet file time range, msg: {}", msg))]
     DecodeParquetTimeRange { msg: String, backtrace: Backtrace },
 
-    #[snafu(display("Compaction rate limited, msg: {}", msg))]
-    CompactionRateLimited { msg: String, backtrace: Backtrace },
+    #[snafu(display("Scheduler rate limited, msg: {}", msg))]
+    RateLimited { msg: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to stop compaction scheduler, source: {:?}", source))]
-    StopCompactionScheduler {
+    #[snafu(display("Failed to stop scheduler, source: {:?}", source))]
+    StopScheduler {
         source: JoinError,
         backtrace: Backtrace,
     },
@@ -484,8 +484,8 @@ impl ErrorExt for Error {
             ConvertChunk { source, .. } => source.status_code(),
             MarkWalObsolete { source, .. } => source.status_code(),
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
-            CompactionRateLimited { .. } => StatusCode::Internal,
-            StopCompactionScheduler { .. } => StatusCode::Internal,
+            RateLimited { .. } => StatusCode::Internal,
+            StopScheduler { .. } => StatusCode::Internal,
         }
     }
 

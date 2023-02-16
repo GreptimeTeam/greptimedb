@@ -20,8 +20,8 @@ use common_telemetry::info;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
 use servers::Mode;
-use storage::compaction::SchedulerConfig;
 use storage::config::EngineConfig as StorageEngineConfig;
+use storage::scheduler::SchedulerConfig;
 
 use crate::error::Result;
 use crate::instance::{Instance, InstanceRef};
