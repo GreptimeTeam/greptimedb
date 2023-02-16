@@ -88,7 +88,12 @@ impl Default for SchedulerConfig {
 
 #[async_trait::async_trait]
 pub trait Handler<R> {
-    async fn handle_request(&self, req: R, token: BoxedRateLimitToken) -> Result<()>;
+    async fn handle_request(
+        &self,
+        req: R,
+        token: BoxedRateLimitToken,
+        finish_notifier: Arc<Notify>,
+    ) -> Result<()>;
 }
 
 /// CompactionScheduler defines a set of API to schedule compaction tasks.
@@ -212,7 +217,7 @@ impl<R: Request<K>, K: Debug + Clone + Eq + Hash + Send + 'static, H: Handler<R>
                     while let Some((task_key,  req)) = self.poll_task().await{
                         if let Ok(token) = limiter.acquire_token(&req) {
                             debug!("Executing request: {:?}", task_key);
-                            if let Err(e) = self.handle_request(req, token).await {
+                            if let Err(e) = self.handle_request(req, token, self.task_notifier.clone()).await {
                                 error!(e; "Failed to submit request: {:?}", task_key);
                             } else {
                                 info!("Submitted task: {:?}", task_key);
@@ -247,14 +252,20 @@ impl<R: Request<K>, K: Debug + Clone + Eq + Hash + Send + 'static, H: Handler<R>
     }
 
     // Handles request, submit task to bg runtime.
-    async fn handle_request(&self, req: R, token: BoxedRateLimitToken) -> Result<()> {
-        self.request_handler.handle_request(req, token).await
+    async fn handle_request(
+        &self,
+        req: R,
+        token: BoxedRateLimitToken,
+        finish_notifier: Arc<Notify>,
+    ) -> Result<()> {
+        self.request_handler
+            .handle_request(req, token, finish_notifier)
+            .await
     }
 }
 
 pub struct CompactionHandler<R: Request<K>, P: Picker<R, T>, T: CompactionTask, K> {
     pub picker: P,
-    pub notifier: Arc<Notify>,
     pub _phantom: PhantomData<(R, K, T)>,
 }
 
@@ -266,10 +277,13 @@ where
     T: CompactionTask,
     K: Debug + Clone + Eq + Hash + Send + Sync + 'static,
 {
-    async fn handle_request(&self, req: R, token: BoxedRateLimitToken) -> Result<()> {
-        let cloned_notify = self.notifier.clone();
+    async fn handle_request(
+        &self,
+        req: R,
+        token: BoxedRateLimitToken,
+        finish_notifier: Arc<Notify>,
+    ) -> Result<()> {
         let region_id = req.key();
-
         let Some(task) = self.picker.pick(&PickerContext {}, &req)? else {
             info!("No file needs compaction in region: {:?}", region_id);
             return Ok(());
@@ -287,7 +301,7 @@ where
             // releases rate limit token
             token.try_release();
             // notify scheduler to schedule next task when current task finishes.
-            cloned_notify.notify_one();
+            finish_notifier.notify_one();
         });
 
         Ok(())
@@ -380,7 +394,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Handler<MockRequest> for MockHandler {
-        async fn handle_request(&self, req: MockRequest, token: BoxedRateLimitToken) -> Result<()> {
+        async fn handle_request(
+            &self,
+            req: MockRequest,
+            token: BoxedRateLimitToken,
+            finish_notfier: Arc<Notify>,
+        ) -> Result<()> {
+            finish_notfier.notify_one();
             Ok(())
         }
     }

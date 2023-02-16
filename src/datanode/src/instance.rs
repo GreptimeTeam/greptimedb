@@ -47,7 +47,6 @@ use store_api::logstore::LogStore;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 use table::Table;
-use tokio::sync::Notify;
 
 use crate::datanode::{
     DatanodeOptions, ObjectStoreConfig, WalConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE,
@@ -215,10 +214,8 @@ impl Instance {
 fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> CompactionSchedulerRef<S> {
     let picker = SimplePicker::default();
     let config = SchedulerConfig::from(opts);
-    let notify = Arc::new(Notify::new()); // TODO(hl):
     let handler = CompactionHandler {
         picker,
-        notifier: notify,
         _phantom: Default::default(),
     };
     let scheduler = LocalScheduler::new(config, handler);
