@@ -17,9 +17,7 @@ use std::marker::PhantomData;
 
 use store_api::storage::RegionId;
 
-use crate::compaction::{
-    CompactionRequest, CompactionScheduler, CompactionTask, Picker, PickerContext,
-};
+use crate::compaction::{CompactionScheduler, CompactionTask, Picker, PickerContext, Request};
 
 pub struct NoopCompactionScheduler<R> {
     _phantom_data: PhantomData<R>,
@@ -61,14 +59,14 @@ impl CompactionTask for NoopCompactionTask {
     }
 }
 
-impl CompactionRequest for NoopCompactionRequest {
-    fn region_id(&self) -> RegionId {
+impl Request<RegionId> for NoopCompactionRequest {
+    fn key(&self) -> RegionId {
         0
     }
 }
 
 #[async_trait::async_trait]
-impl<R: CompactionRequest> CompactionScheduler<R> for NoopCompactionScheduler<R> {
+impl<R: Request<RegionId>> CompactionScheduler<R> for NoopCompactionScheduler<R> {
     async fn schedule(&self, _request: R) -> crate::error::Result<bool> {
         Ok(true)
     }

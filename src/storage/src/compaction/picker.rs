@@ -91,16 +91,18 @@ impl<S: LogStore> Picker<CompactionRequestImpl<S>, CompactionTaskImpl<S>> for Si
 pub mod tests {
     use std::marker::PhantomData;
 
+    use store_api::storage::RegionId;
+
     use super::*;
-    use crate::compaction::scheduler::CompactionRequest;
+    use crate::compaction::scheduler::Request;
     use crate::compaction::task::tests::{CallbackRef, NoopCompactionTask};
 
-    pub(crate) struct MockPicker<R: CompactionRequest> {
+    pub(crate) struct MockPicker<R: Request<RegionId>> {
         pub cbs: Vec<CallbackRef>,
         _phantom_data: PhantomData<R>,
     }
 
-    impl<R: CompactionRequest> MockPicker<R> {
+    impl<R: Request<RegionId>> MockPicker<R> {
         pub fn new(cbs: Vec<CallbackRef>) -> Self {
             Self {
                 cbs,
@@ -109,7 +111,7 @@ pub mod tests {
         }
     }
 
-    impl<R: CompactionRequest> Picker<R, NoopCompactionTask> for MockPicker<R> {
+    impl<R: Request<RegionId>> Picker<R, NoopCompactionTask> for MockPicker<R> {
         fn pick(
             &self,
             _ctx: &PickerContext,

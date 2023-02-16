@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt::{Debug, Formatter};
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -61,15 +62,15 @@ impl<S: LogStore> CompactionRequestImpl<S> {
     }
 }
 
-impl<S: LogStore> CompactionRequest for CompactionRequestImpl<S> {
+impl<S: LogStore> Request<RegionId> for CompactionRequestImpl<S> {
     #[inline]
-    fn region_id(&self) -> RegionId {
+    fn key(&self) -> RegionId {
         self.region_id
     }
 }
 
-pub trait CompactionRequest: Send + Sync + 'static {
-    fn region_id(&self) -> RegionId;
+pub trait Request<K>: Send + Sync + 'static {
+    fn key(&self) -> K;
 }
 
 #[derive(Debug)]
@@ -98,16 +99,16 @@ pub trait CompactionScheduler<R>: Debug {
 }
 
 /// Compaction task scheduler based on local state.
-pub struct LocalCompactionScheduler<R: CompactionRequest> {
-    request_queue: Arc<RwLock<DedupDeque<RegionId, R>>>,
+pub struct LocalCompactionScheduler<R: Request<T>, T> {
+    request_queue: Arc<RwLock<DedupDeque<T, R>>>,
     cancel_token: CancellationToken,
     task_notifier: Arc<Notify>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl<R> Debug for LocalCompactionScheduler<R>
+impl<R, K> Debug for LocalCompactionScheduler<R, K>
 where
-    R: CompactionRequest + Send + Sync,
+    R: Request<K> + Send + Sync,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalCompactionScheduler<...>").finish()
@@ -115,18 +116,19 @@ where
 }
 
 #[async_trait]
-impl<R> CompactionScheduler<R> for LocalCompactionScheduler<R>
+impl<R, K> CompactionScheduler<R> for LocalCompactionScheduler<R, K>
 where
-    R: CompactionRequest + Send + Sync,
+    R: Request<K> + Send,
+    K: Debug + Eq + Hash + Clone + Send + Sync + 'static,
 {
     async fn schedule(&self, request: R) -> Result<bool> {
         debug!(
-            "Schedule request: {}, queue size: {}",
-            request.region_id(),
-            self.remaining_requests().await
+            "Schedule request: {:?}, queue size: {}",
+            request.key(),
+            self.remaining_requests()
         );
         let mut queue = self.request_queue.write().unwrap();
-        let res = queue.push_back(request.region_id(), request);
+        let res = queue.push_back(request.key(), request);
         self.task_notifier.notify_one();
         Ok(res)
     }
@@ -141,16 +143,17 @@ where
     }
 }
 
-impl<R> LocalCompactionScheduler<R>
+impl<R, K> LocalCompactionScheduler<R, K>
 where
-    R: CompactionRequest,
+    R: Request<K>,
+    K: Debug + Eq + Hash + Clone + Send + Sync + 'static,
 {
     pub fn new<P, T>(config: CompactionSchedulerConfig, picker: P) -> Self
     where
         T: CompactionTask,
         P: Picker<R, T> + Send + Sync,
     {
-        let request_queue: Arc<RwLock<DedupDeque<RegionId, R>>> =
+        let request_queue: Arc<RwLock<DedupDeque<K, R>>> =
             Arc::new(RwLock::new(DedupDeque::default()));
         let cancel_token = CancellationToken::new();
         let task_notifier = Arc::new(Notify::new());
@@ -177,13 +180,13 @@ where
         }
     }
 
-    async fn remaining_requests(&self) -> usize {
+    fn remaining_requests(&self) -> usize {
         self.request_queue.read().unwrap().len()
     }
 }
 
-struct CompactionHandler<R, T: CompactionTask, P: Picker<R, T>> {
-    req_queue: Arc<RwLock<DedupDeque<RegionId, R>>>,
+struct CompactionHandler<R, T: CompactionTask, P: Picker<R, T>, K> {
+    req_queue: Arc<RwLock<DedupDeque<K, R>>>,
     cancel_token: CancellationToken,
     task_notifier: Arc<Notify>,
     limiter: Arc<CascadeRateLimiter<R>>,
@@ -191,7 +194,13 @@ struct CompactionHandler<R, T: CompactionTask, P: Picker<R, T>> {
     _phantom_data: PhantomData<T>,
 }
 
-impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler<R, T, P> {
+impl<
+        R: Request<K>,
+        T: CompactionTask,
+        P: Picker<R, T>,
+        K: Debug + Clone + Eq + Hash + Send + 'static,
+    > CompactionHandler<R, T, P, K>
+{
     /// Runs region compaction requests dispatch loop.
     pub async fn run(&self) {
         let task_notifier = self.task_notifier.clone();
@@ -204,16 +213,16 @@ impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler
                     debug!("Notified, queue size: {:?}", self.req_queue.read().unwrap().len());
                     while let Some((region_id,  req)) = self.poll_task().await{
                         if let Ok(token) = limiter.acquire_token(&req) {
-                            debug!("Executing compaction request: {}", region_id);
+                            debug!("Executing compaction request: {:?}", region_id);
                             if let Err(e) = self.handle_compaction_request(req, token).await {
-                                error!(e; "Failed to submit compaction task for region: {}", region_id);
+                                error!(e; "Failed to submit compaction task for region: {:?}", region_id);
                             } else {
-                                info!("Submitted region compaction task: {}", region_id);
+                                info!("Submitted region compaction task: {:?}", region_id);
                             }
                         } else {
                             // compaction rate limited, put back to req queue to wait for next
                             // schedule
-                            debug!("Put back request {}, queue size: {}", region_id, self.req_queue.read().unwrap().len());
+                            debug!("Put back request {:?}, queue size: {}", region_id, self.req_queue.read().unwrap().len());
                             self.put_back_req(region_id, req).await;
                             break;
                         }
@@ -228,35 +237,35 @@ impl<R: CompactionRequest, T: CompactionTask, P: Picker<R, T>> CompactionHandler
     }
 
     #[inline]
-    async fn poll_task(&self) -> Option<(RegionId, R)> {
+    async fn poll_task(&self) -> Option<(K, R)> {
         let mut queue = self.req_queue.write().unwrap();
         queue.pop_front()
     }
 
     /// Puts request back to the front of request queue.
     #[inline]
-    async fn put_back_req(&self, region_id: RegionId, req: R) {
+    async fn put_back_req(&self, key: K, req: R) {
         let mut queue = self.req_queue.write().unwrap();
-        queue.push_front(region_id, req);
+        queue.push_front(key, req);
     }
 
     // Handles compaction request, submit task to bg runtime.
     async fn handle_compaction_request(&self, req: R, token: BoxedRateLimitToken) -> Result<()> {
         let cloned_notify = self.task_notifier.clone();
-        let region_id = req.region_id();
+        let region_id = req.key();
         let Some(task) = self.build_compaction_task(req).await? else {
-            info!("No file needs compaction in region: {}", region_id);
+            info!("No file needs compaction in region: {:?}", region_id);
             return Ok(());
         };
 
-        debug!("Compaction task, region: {}, task: {:?}", region_id, task);
+        debug!("Compaction task, region: {:?}, task: {:?}", region_id, task);
         // TODO(hl): we need to keep a track of task handle here to allow task cancellation.
         common_runtime::spawn_bg(async move {
             if let Err(e) = task.run().await {
                 // TODO(hl): maybe resubmit compaction task on failure?
-                error!(e; "Failed to compact region: {}", region_id);
+                error!(e; "Failed to compact region: {:?}", region_id);
             } else {
-                info!("Successfully compacted region: {}", region_id);
+                info!("Successfully compacted region: {:?}", region_id);
             }
             // releases rate limit token
             token.try_release();
@@ -356,8 +365,8 @@ mod tests {
         region_id: RegionId,
     }
 
-    impl CompactionRequest for MockRequest {
-        fn region_id(&self) -> RegionId {
+    impl Request<RegionId> for MockRequest {
+        fn key(&self) -> RegionId {
             self.region_id
         }
     }
