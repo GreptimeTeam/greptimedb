@@ -36,9 +36,10 @@ use table::requests::*;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
-    ColumnTypeMismatchSnafu, ColumnValuesNumberMismatchSnafu, ExecuteSqlSnafu, InsertSnafu,
-    MissingInsertBodySnafu, ParseSqlSnafu, ParseSqlValueSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, CollectRecordsSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
+    ColumnNotFoundSnafu, ColumnTypeMismatchSnafu, ColumnValuesNumberMismatchSnafu, Error,
+    ExecuteSqlSnafu, InsertSnafu, MissingInsertBodySnafu, ParseSqlSnafu, ParseSqlValueSnafu,
+    Result, TableNotFoundSnafu,
 };
 use crate::sql::{table_idents_to_full_name, SqlHandler, SqlRequest};
 
@@ -169,7 +170,7 @@ impl SqlHandler {
             }
         );
 
-        let batch_schema = batch.schema.clone();
+        let batch_schema = &batch.schema;
         let batch_columns = batch_schema.column_schemas();
         assert_eq!(batch_columns.len(), columns_num);
         let mut columns_values = HashMap::with_capacity(columns_num);
@@ -183,18 +184,31 @@ impl SqlHandler {
                 })?;
             let expect_datatype = column_schema.data_type.as_arrow_type();
             let batch_datatype = batch_columns[i].data_type.as_arrow_type();
+            let coerced_type = coerce_types(&expect_datatype, &Operator::Eq, &batch_datatype)
+                .map_err(|_| Error::ColumnTypeMismatch {
+                    column: column_name.clone(),
+                    expected: column_schema.data_type.clone(),
+                    actual: batch_columns[i].data_type.clone(),
+                })?;
 
             ensure!(
-                expect_datatype
-                    == coerce_types(&expect_datatype, &Operator::Eq, &batch_datatype).unwrap(),
+                expect_datatype == coerced_type,
                 ColumnTypeMismatchSnafu {
                     column: column_name,
                     expected: column_schema.data_type.clone(),
                     actual: batch_columns[i].data_type.clone(),
                 }
             );
-            let vector = batch.column(i);
-            columns_values.insert(column_name, vector.cast(&column_schema.data_type).unwrap());
+            let vector = batch
+                .column(i)
+                .cast(&column_schema.data_type)
+                .map_err(|_| Error::ColumnTypeMismatch {
+                    column: column_name.clone(),
+                    expected: column_schema.data_type.clone(),
+                    actual: batch_columns[i].data_type.clone(),
+                })?;
+
+            columns_values.insert(column_name, vector);
         }
 
         Ok(SqlRequest::Insert(InsertRequest {
@@ -233,7 +247,9 @@ impl SqlHandler {
             .context(ExecuteSqlSnafu)?;
 
         let batches = match output {
-            Output::Stream(s) => RecordBatches::try_collect(s).await.unwrap(),
+            Output::Stream(s) => RecordBatches::try_collect(s)
+                .await
+                .context(CollectRecordsSnafu)?,
             Output::RecordBatches(bs) => bs,
             _ => unreachable!(),
         };
@@ -243,7 +259,7 @@ impl SqlHandler {
         })))
     }
 
-    pub(crate) async fn insert_to_request(
+    pub(crate) async fn insert_to_requests(
         &self,
         catalog_manager: CatalogManagerRef,
         stmt: Insert,

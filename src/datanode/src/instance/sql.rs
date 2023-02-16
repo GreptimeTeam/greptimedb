@@ -60,7 +60,7 @@ impl Instance {
             QueryStatement::Sql(Statement::Insert(i)) => {
                 let requests = self
                     .sql_handler
-                    .insert_to_request(self.catalog_manager.clone(), *i, query_ctx.clone())
+                    .insert_to_requests(self.catalog_manager.clone(), *i, query_ctx.clone())
                     .await?;
 
                 match requests {

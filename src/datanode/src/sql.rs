@@ -256,7 +256,7 @@ mod tests {
             }
         };
         let request = sql_handler
-            .insert_to_request(catalog_list.clone(), *stmt, QueryContext::arc())
+            .insert_to_requests(catalog_list.clone(), *stmt, QueryContext::arc())
             .await
             .unwrap();
 

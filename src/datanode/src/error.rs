@@ -15,6 +15,7 @@
 use std::any::Any;
 
 use common_error::prelude::*;
+use common_recordbatch::error::Error as RecordBatchError;
 use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
@@ -103,7 +104,7 @@ pub enum Error {
     ColumnValuesNumberMismatch { columns: usize, values: usize },
 
     #[snafu(display(
-        "Columns type mismatch, column: {}, expected type: {:?}, acutal: {:?}",
+        "Column type mismatch, column: {}, expected type: {:?}, actual: {:?}",
         column,
         expected,
         actual,
@@ -112,6 +113,12 @@ pub enum Error {
         column: String,
         expected: ConcreteDataType,
         actual: ConcreteDataType,
+    },
+
+    #[snafu(display("Failed to collect record batch, source: {}", source))]
+    CollectRecords {
+        #[snafu(backtrace)]
+        source: RecordBatchError,
     },
 
     #[snafu(display("Failed to parse sql value, source: {}", source))]
@@ -354,75 +361,71 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
+        use Error::*;
         match self {
-            Error::ExecuteSql { source } | Error::DescribeStatement { source } => {
+            ExecuteSql { source } | DescribeStatement { source } => source.status_code(),
+            DecodeLogicalPlan { source } => source.status_code(),
+            NewCatalog { source } | RegisterSchema { source } => source.status_code(),
+            FindTable { source, .. } => source.status_code(),
+            CreateTable { source, .. } | GetTable { source, .. } | AlterTable { source, .. } => {
                 source.status_code()
             }
-            Error::DecodeLogicalPlan { source } => source.status_code(),
-            Error::NewCatalog { source } | Error::RegisterSchema { source } => source.status_code(),
-            Error::FindTable { source, .. } => source.status_code(),
-            Error::CreateTable { source, .. }
-            | Error::GetTable { source, .. }
-            | Error::AlterTable { source, .. } => source.status_code(),
-            Error::DropTable { source, .. } => source.status_code(),
+            DropTable { source, .. } => source.status_code(),
 
-            Error::Insert { source, .. } => source.status_code(),
-            Error::Delete { source, .. } => source.status_code(),
+            Insert { source, .. } => source.status_code(),
+            Delete { source, .. } => source.status_code(),
+            CollectRecords { source, .. } => source.status_code(),
 
-            Error::TableNotFound { .. } => StatusCode::TableNotFound,
-            Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
+            TableNotFound { .. } => StatusCode::TableNotFound,
+            ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
-            Error::ParseSqlValue { source, .. } | Error::ParseSql { source, .. } => {
-                source.status_code()
-            }
+            ParseSqlValue { source, .. } | ParseSql { source, .. } => source.status_code(),
 
-            Error::AlterExprToRequest { source, .. }
-            | Error::CreateExprToRequest { source }
-            | Error::InsertData { source } => source.status_code(),
+            AlterExprToRequest { source, .. }
+            | CreateExprToRequest { source }
+            | InsertData { source } => source.status_code(),
 
-            Error::ConvertSchema { source, .. } | Error::VectorComputation { source } => {
-                source.status_code()
-            }
+            ConvertSchema { source, .. } | VectorComputation { source } => source.status_code(),
 
-            Error::ColumnValuesNumberMismatch { .. }
-            | Error::ColumnTypeMismatch { .. }
-            | Error::InvalidSql { .. }
-            | Error::NotSupportSql { .. }
-            | Error::KeyColumnNotFound { .. }
-            | Error::IllegalPrimaryKeysDef { .. }
-            | Error::MissingTimestampColumn { .. }
-            | Error::CatalogNotFound { .. }
-            | Error::SchemaNotFound { .. }
-            | Error::ConstraintNotSupported { .. }
-            | Error::SchemaExists { .. }
-            | Error::ParseTimestamp { .. }
-            | Error::MissingInsertBody { .. }
-            | Error::DatabaseNotFound { .. }
-            | Error::MissingNodeId { .. }
-            | Error::MissingMetasrvOpts { .. }
-            | Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+            ColumnValuesNumberMismatch { .. }
+            | ColumnTypeMismatch { .. }
+            | InvalidSql { .. }
+            | NotSupportSql { .. }
+            | KeyColumnNotFound { .. }
+            | IllegalPrimaryKeysDef { .. }
+            | MissingTimestampColumn { .. }
+            | CatalogNotFound { .. }
+            | SchemaNotFound { .. }
+            | ConstraintNotSupported { .. }
+            | SchemaExists { .. }
+            | ParseTimestamp { .. }
+            | MissingInsertBody { .. }
+            | DatabaseNotFound { .. }
+            | MissingNodeId { .. }
+            | MissingMetasrvOpts { .. }
+            | ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
 
             // TODO(yingwen): Further categorize http error.
-            Error::StartServer { .. }
-            | Error::ParseAddr { .. }
-            | Error::TcpBind { .. }
-            | Error::StartGrpc { .. }
-            | Error::CreateDir { .. }
-            | Error::InsertSystemCatalog { .. }
-            | Error::RenameTable { .. }
-            | Error::Catalog { .. }
-            | Error::MissingRequiredField { .. }
-            | Error::IncorrectInternalState { .. } => StatusCode::Internal,
+            StartServer { .. }
+            | ParseAddr { .. }
+            | TcpBind { .. }
+            | StartGrpc { .. }
+            | CreateDir { .. }
+            | InsertSystemCatalog { .. }
+            | RenameTable { .. }
+            | Catalog { .. }
+            | MissingRequiredField { .. }
+            | IncorrectInternalState { .. } => StatusCode::Internal,
 
-            Error::InitBackend { .. } => StatusCode::StorageUnavailable,
-            Error::OpenLogStore { source } => source.status_code(),
-            Error::StartScriptManager { source } => source.status_code(),
-            Error::OpenStorageEngine { source } => source.status_code(),
-            Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
-            Error::MetaClientInit { source, .. } => source.status_code(),
-            Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
-            Error::BumpTableId { source, .. } => source.status_code(),
-            Error::ColumnDefaultValue { source, .. } => source.status_code(),
+            InitBackend { .. } => StatusCode::StorageUnavailable,
+            OpenLogStore { source } => source.status_code(),
+            StartScriptManager { source } => source.status_code(),
+            OpenStorageEngine { source } => source.status_code(),
+            RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
+            MetaClientInit { source, .. } => source.status_code(),
+            TableIdProviderNotFound { .. } => StatusCode::Unsupported,
+            BumpTableId { source, .. } => source.status_code(),
+            ColumnDefaultValue { source, .. } => source.status_code(),
         }
     }
 
