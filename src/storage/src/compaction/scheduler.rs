@@ -34,7 +34,9 @@ use crate::sst::AccessLayerRef;
 use crate::version::LevelMetasRef;
 use crate::wal::Wal;
 
-impl<S: LogStore> Request<RegionId> for CompactionRequestImpl<S> {
+impl<S: LogStore> Request for CompactionRequestImpl<S> {
+    type Key = RegionId;
+
     #[inline]
     fn key(&self) -> RegionId {
         self.region_id
@@ -63,12 +65,12 @@ impl<S: LogStore> CompactionRequestImpl<S> {
     }
 }
 
-pub struct CompactionHandler<R: Request<K>, P: Picker<R, T>, T: CompactionTask, K> {
+pub struct CompactionHandler<R: Request<Key = K>, P: Picker<R, T>, T: CompactionTask, K> {
     pub picker: P,
     pub _phantom: PhantomData<(R, K, T)>,
 }
 
-impl<R: Request<K>, P: Picker<R, T>, T: CompactionTask, K> CompactionHandler<R, P, T, K> {
+impl<R: Request<Key = K>, P: Picker<R, T>, T: CompactionTask, K> CompactionHandler<R, P, T, K> {
     pub fn new(picker: P) -> Self {
         Self {
             picker,
@@ -80,7 +82,7 @@ impl<R: Request<K>, P: Picker<R, T>, T: CompactionTask, K> CompactionHandler<R, 
 #[async_trait::async_trait]
 impl<R, P, T, K> Handler<R> for CompactionHandler<R, P, T, K>
 where
-    R: Request<K>,
+    R: Request<Key = K>,
     P: Picker<R, T> + Send + Sync,
     T: CompactionTask,
     K: Debug + Clone + Eq + Hash + Send + Sync + 'static,
@@ -224,8 +226,10 @@ mod tests {
         }
     }
 
-    impl Request<RegionId> for MockRequest {
-        fn key(&self) -> RegionId {
+    impl Request for MockRequest {
+        type Key = RegionId;
+
+        fn key(&self) -> Self::Key {
             self.region_id
         }
     }

@@ -60,14 +60,16 @@ impl CompactionTask for NoopCompactionTask {
     }
 }
 
-impl Request<RegionId> for NoopCompactionRequest {
-    fn key(&self) -> RegionId {
+impl Request for NoopCompactionRequest {
+    type Key = RegionId;
+
+    fn key(&self) -> Self::Key {
         0
     }
 }
 
 #[async_trait::async_trait]
-impl<R: Request<RegionId>> Scheduler<R> for NoopCompactionScheduler<R> {
+impl<R: Request<Key = RegionId>> Scheduler<R> for NoopCompactionScheduler<R> {
     async fn schedule(&self, _request: R) -> crate::error::Result<bool> {
         Ok(true)
     }

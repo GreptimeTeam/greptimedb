@@ -33,8 +33,10 @@ use crate::scheduler::rate_limit::{
 pub mod dedup_deque;
 pub mod rate_limit;
 
-pub trait Request<K>: Send + Sync + 'static {
-    fn key(&self) -> K;
+pub trait Request: Send + Sync + 'static {
+    type Key;
+
+    fn key(&self) -> Self::Key;
 }
 
 #[derive(Debug)]
@@ -73,7 +75,7 @@ pub trait Scheduler<R>: Debug {
 }
 
 /// Request scheduler based on local state.
-pub struct LocalScheduler<R: Request<T>, T> {
+pub struct LocalScheduler<R: Request<Key = T>, T> {
     /// Request FIFO with key deduplication.
     request_queue: Arc<RwLock<DedupDeque<T, R>>>,
     /// Token used to halt the scheduler.
@@ -86,7 +88,7 @@ pub struct LocalScheduler<R: Request<T>, T> {
 
 impl<R, K> Debug for LocalScheduler<R, K>
 where
-    R: Request<K> + Send + Sync,
+    R: Request<Key = K> + Send + Sync,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalScheduler<...>").finish()
@@ -96,7 +98,7 @@ where
 #[async_trait]
 impl<R, K> Scheduler<R> for LocalScheduler<R, K>
 where
-    R: Request<K> + Send,
+    R: Request<Key = K> + Send,
     K: Debug + Eq + Hash + Clone + Send + Sync + 'static,
 {
     async fn schedule(&self, request: R) -> error::Result<bool> {
@@ -123,7 +125,7 @@ where
 
 impl<R, K> LocalScheduler<R, K>
 where
-    R: Request<K>,
+    R: Request<Key = K>,
     K: Debug + Eq + Hash + Clone + Send + Sync + 'static,
 {
     /// Creates a new scheduler instance with given config and request handler.
@@ -171,7 +173,7 @@ pub struct HandlerLoop<R, K, H> {
     pub limiter: Arc<CascadeRateLimiter<R>>,
 }
 
-impl<R: Request<K>, K: Debug + Clone + Eq + Hash + Send + 'static, H: Handler<R>>
+impl<R: Request<Key = K>, K: Debug + Clone + Eq + Hash + Send + 'static, H: Handler<R>>
     HandlerLoop<R, K, H>
 {
     /// Runs scheduled requests dispatch loop.
