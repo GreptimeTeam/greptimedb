@@ -171,18 +171,17 @@ where
     }
 }
 
-pub struct HandlerLoop<R, K, H> {
-    pub req_queue: Arc<RwLock<DedupDeque<K, R>>>,
+pub struct HandlerLoop<R: Request, H: Handler> {
+    pub req_queue: Arc<RwLock<DedupDeque<R::Key, R>>>,
     pub cancel_token: CancellationToken,
     pub task_notifier: Arc<Notify>,
     pub request_handler: H,
     pub limiter: Arc<CascadeRateLimiter<R>>,
 }
 
-impl<R, K, H> HandlerLoop<R, K, H>
+impl<R, H> HandlerLoop<R, H>
 where
-    R: Request<Key = K>,
-    K: Debug + Clone + Eq + Hash + Send + 'static,
+    R: Request,
     H: Handler<Request = R>,
 {
     /// Runs scheduled requests dispatch loop.
@@ -220,14 +219,14 @@ where
     }
 
     #[inline]
-    async fn poll_task(&self) -> Option<(K, R)> {
+    async fn poll_task(&self) -> Option<(R::Key, R)> {
         let mut queue = self.req_queue.write().unwrap();
         queue.pop_front()
     }
 
     /// Puts request back to the front of request queue.
     #[inline]
-    async fn put_back_req(&self, key: K, req: R) {
+    async fn put_back_req(&self, key: R::Key, req: R) {
         let mut queue = self.req_queue.write().unwrap();
         queue.push_front(key, req);
     }
