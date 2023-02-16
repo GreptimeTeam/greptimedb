@@ -267,7 +267,12 @@ impl KvStore for MemStore {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::meta::{BatchPutRequest, KeyValue, PutRequest, RangeRequest};
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::Arc;
+
+    use api::v1::meta::{
+        BatchPutRequest, CompareAndPutRequest, KeyValue, PutRequest, RangeRequest,
+    };
 
     use super::MemStore;
     use crate::service::store::kv::KvStore;
@@ -454,8 +459,36 @@ mod tests {
         assert_eq!(b"val3".to_vec(), batch_resp.kvs[1].value);
     }
 
-    #[tokio::test]
-    async fn test_compare_and_put() {}
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compare_and_put() {
+        let kv_store = Arc::new(MemStore::new());
+        let success = Arc::new(AtomicU8::new(0));
+
+        let mut joins = vec![];
+        for _ in 0..20 {
+            let kv_store_clone = kv_store.clone();
+            let success_clone = success.clone();
+            let join = tokio::spawn(async move {
+                let req = CompareAndPutRequest {
+                    key: b"key".to_vec(),
+                    expect: b"".to_vec(),
+                    value: b"val_new".to_vec(),
+                    ..Default::default()
+                };
+                let resp = kv_store_clone.compare_and_put(req).await.unwrap();
+                if resp.success {
+                    success_clone.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            joins.push(join);
+        }
+
+        for join in joins {
+            join.await.unwrap();
+        }
+
+        assert_eq!(1, success.load(Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn test_delete_range() {}
