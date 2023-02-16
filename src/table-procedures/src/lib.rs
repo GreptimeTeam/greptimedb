@@ -15,3 +15,6 @@
 //! Procedures for table operations.
 
 mod create;
+pub mod error;
+
+pub use create::CreateTableProcedure;

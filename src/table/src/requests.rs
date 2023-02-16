@@ -43,6 +43,7 @@ pub struct CreateDatabaseRequest {
     pub create_if_not_exists: bool,
 }
 
+// TODO(yingwen): Add serialize/deserialize test.
 /// Create table request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTableRequest {

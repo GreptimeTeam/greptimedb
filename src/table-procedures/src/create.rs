@@ -13,3 +13,302 @@
 // limitations under the License.
 
 //! Procedure to create a table.
+
+use async_trait::async_trait;
+use catalog::{CatalogManagerRef, RegisterTableRequest};
+use common_procedure::{
+    Context, Error, LockKey, Procedure, ProcedureId, ProcedureManagerRef, ProcedureState,
+    ProcedureWithId, Result, Status,
+};
+use common_telemetry::logging;
+use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt};
+use table::engine::{EngineContext, TableEngineProcedureRef, TableEngineRef, TableReference};
+use table::requests::CreateTableRequest;
+
+use crate::error::{
+    AccessCatalogSnafu, CatalogNotFoundSnafu, DeserializeProcedureSnafu, SchemaNotFoundSnafu,
+    SerializeProcedureSnafu,
+};
+
+/// Procedure to create a table.
+pub struct CreateTableProcedure {
+    data: CreateTableData,
+    catalog_manager: CatalogManagerRef,
+    table_engine: TableEngineRef,
+    engine_procedure: TableEngineProcedureRef,
+}
+
+#[async_trait]
+impl Procedure for CreateTableProcedure {
+    fn type_name(&self) -> &str {
+        Self::TYPE_NAME
+    }
+
+    async fn execute(&mut self, ctx: &Context) -> Result<Status> {
+        match self.data.state {
+            CreateTableState::Prepare => self.on_prepare(),
+            CreateTableState::EngineCreateTable => self.on_engine_create_table(ctx).await,
+            CreateTableState::RegisterCatalog => self.on_register_catalog().await,
+        }
+    }
+
+    fn dump(&self) -> Result<String> {
+        let json = serde_json::to_string(&self.data).context(SerializeProcedureSnafu)?;
+        Ok(json)
+    }
+
+    fn lock_key(&self) -> LockKey {
+        // We lock the whole table.
+        let table_name = self.data.table_ref().to_string();
+        LockKey::single(table_name)
+    }
+}
+
+impl CreateTableProcedure {
+    const TYPE_NAME: &str = "table-procedures::CreateTable";
+
+    /// Returns a new [CreateTableProcedure].
+    pub fn new(
+        request: CreateTableRequest,
+        catalog_manager: CatalogManagerRef,
+        table_engine: TableEngineRef,
+        engine_procedure: TableEngineProcedureRef,
+    ) -> CreateTableProcedure {
+        CreateTableProcedure {
+            data: CreateTableData {
+                state: CreateTableState::Prepare,
+                request,
+                sub_procedure_id: None,
+            },
+            catalog_manager,
+            table_engine,
+            engine_procedure,
+        }
+    }
+
+    /// Register the loader of this procedure to the `procedure_manager`.
+    ///
+    /// # Panics
+    /// Panics on error.
+    pub fn register_loader(
+        catalog_manager: CatalogManagerRef,
+        engine_procedure: TableEngineProcedureRef,
+        table_engine: TableEngineRef,
+        procedure_manager: ProcedureManagerRef,
+    ) {
+        procedure_manager
+            .register_loader(
+                Self::TYPE_NAME,
+                Box::new(move |data| {
+                    Self::from_json(
+                        data,
+                        catalog_manager.clone(),
+                        table_engine.clone(),
+                        engine_procedure.clone(),
+                    )
+                    .map(|p| Box::new(p) as _)
+                }),
+            )
+            .unwrap()
+    }
+
+    /// Recover the procedure from json.
+    fn from_json(
+        json: &str,
+        catalog_manager: CatalogManagerRef,
+        table_engine: TableEngineRef,
+        engine_procedure: TableEngineProcedureRef,
+    ) -> Result<Self> {
+        let data: CreateTableData =
+            serde_json::from_str(json).context(DeserializeProcedureSnafu)?;
+
+        Ok(CreateTableProcedure {
+            data,
+            catalog_manager,
+            table_engine,
+            engine_procedure,
+        })
+    }
+
+    fn on_prepare(&mut self) -> Result<Status> {
+        // Check whether catalog and schema exist.
+        let catalog = self
+            .catalog_manager
+            .catalog(&self.data.request.catalog_name)
+            .context(AccessCatalogSnafu)?
+            .with_context(|| {
+                logging::error!(
+                    "Failed to create table {}, catalog not found",
+                    self.data.table_ref()
+                );
+                CatalogNotFoundSnafu {
+                    name: &self.data.request.catalog_name,
+                }
+            })?;
+        catalog
+            .schema(&self.data.request.schema_name)
+            .context(AccessCatalogSnafu)?
+            .with_context(|| {
+                logging::error!(
+                    "Failed to create table {}, schema not found",
+                    self.data.table_ref(),
+                );
+                SchemaNotFoundSnafu {
+                    name: &self.data.request.schema_name,
+                }
+            })?;
+
+        self.data.state = CreateTableState::EngineCreateTable;
+        // Assign procedure id to the subprocedure.
+        self.data.sub_procedure_id = Some(ProcedureId::random());
+
+        Ok(Status::executing(true))
+    }
+
+    async fn on_engine_create_table(&mut self, ctx: &Context) -> Result<Status> {
+        // Safety: subprocedure id is always set in this state.
+        let sub_id = self.data.sub_procedure_id.unwrap();
+
+        // Check procedure state.
+        if let Some(sub_state) = ctx.provider.procedure_state(sub_id).await? {
+            match sub_state {
+                ProcedureState::Running => Ok(Status::Suspended {
+                    subprocedures: Vec::new(),
+                    persist: false,
+                }),
+                ProcedureState::Done => {
+                    logging::info!(
+                        "On engine create table {}, done, sub_id: {}",
+                        self.data.request.table_name,
+                        sub_id
+                    );
+                    // The sub procedure is done, we can execute next step.
+                    self.data.state = CreateTableState::RegisterCatalog;
+                    Ok(Status::executing(true))
+                }
+                ProcedureState::Failed => {
+                    // If failed, try to create a new procedure to create table.
+                    let engine_ctx = EngineContext::default();
+                    let procedure = self
+                        .engine_procedure
+                        .create_table_procedure(&engine_ctx, self.data.request.clone())
+                        .map_err(Error::external)?;
+                    let sub_id = ProcedureId::random();
+                    // Store the procedure id.
+                    self.data.sub_procedure_id = Some(sub_id);
+
+                    Ok(Status::Suspended {
+                        subprocedures: vec![ProcedureWithId {
+                            id: sub_id,
+                            procedure,
+                        }],
+                        persist: true,
+                    })
+                }
+            }
+        } else {
+            logging::info!(
+                "On engine create table {}, not found, sub_id: {}",
+                self.data.request.table_name,
+                sub_id
+            );
+
+            // If the sub procedure is not found, we create a new sub procedure with the same id.
+            let engine_ctx = EngineContext::default();
+            let procedure = self
+                .engine_procedure
+                .create_table_procedure(&engine_ctx, self.data.request.clone())
+                .map_err(Error::external)?;
+            Ok(Status::Suspended {
+                subprocedures: vec![ProcedureWithId {
+                    id: sub_id,
+                    procedure,
+                }],
+                persist: true,
+            })
+        }
+    }
+
+    async fn on_register_catalog(&mut self) -> Result<Status> {
+        let catalog = self
+            .catalog_manager
+            .catalog(&self.data.request.catalog_name)
+            .context(AccessCatalogSnafu)?
+            .context(CatalogNotFoundSnafu {
+                name: &self.data.request.catalog_name,
+            })?;
+        let schema = catalog
+            .schema(&self.data.request.schema_name)
+            .context(AccessCatalogSnafu)?
+            .context(SchemaNotFoundSnafu {
+                name: &self.data.request.schema_name,
+            })?;
+        let table_exists = schema
+            .table(&self.data.request.table_name)
+            .map_err(Error::external)?
+            .is_some();
+        if table_exists {
+            // Table already exists.
+            return Ok(Status::Done);
+        }
+
+        let engine_ctx = EngineContext::default();
+        let table_ref = self.data.table_ref();
+        // Safety: The procedure owns the lock so the table should exist.
+        let table = self
+            .table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .map_err(Error::external)?
+            .unwrap();
+
+        let register_req = RegisterTableRequest {
+            catalog: self.data.request.catalog_name.clone(),
+            schema: self.data.request.schema_name.clone(),
+            table_name: self.data.request.table_name.clone(),
+            table_id: self.data.request.id,
+            table,
+        };
+        self.catalog_manager
+            .register_table(register_req)
+            .await
+            .map_err(Error::external)?;
+
+        Ok(Status::Done)
+    }
+}
+
+/// Represents each step while creating a table in the datanode.
+#[derive(Debug, Serialize, Deserialize)]
+enum CreateTableState {
+    /// Validate request and prepare to create table.
+    Prepare,
+    /// Create table in the table engine.
+    EngineCreateTable,
+    /// Register the table to the catalog.
+    RegisterCatalog,
+}
+
+/// Serializable data of [CreateTableProcedure].
+#[derive(Debug, Serialize, Deserialize)]
+struct CreateTableData {
+    /// Current state.
+    state: CreateTableState,
+    /// Request to create this table.
+    request: CreateTableRequest,
+    /// Id of the subprocedure to create this table in the engine.
+    ///
+    /// This id is `Some` while the procedure is in [CreateTableState::EngineCreateTable]
+    /// state.
+    sub_procedure_id: Option<ProcedureId>,
+}
+
+impl CreateTableData {
+    fn table_ref(&self) -> TableReference {
+        TableReference {
+            catalog: &self.request.catalog_name,
+            schema: &self.request.schema_name,
+            table: &self.request.table_name,
+        }
+    }
+}

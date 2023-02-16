@@ -4,4 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-trait.workspace = true
+catalog = { path = "../catalog" }
+common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
+common-telemetry = { path = "../common/telemetry" }
+datatypes = { path = "../datatypes" }
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+table = { path = "../table" }

@@ -7477,7 +7477,16 @@ dependencies = [
 name = "table-procedures"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "catalog",
+ "common-error",
  "common-procedure",
+ "common-telemetry",
+ "datatypes",
+ "serde",
+ "serde_json",
+ "snafu",
+ "table",
 ]
 
 [[package]]
