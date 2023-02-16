@@ -80,13 +80,15 @@ impl<R: Request<Key = K>, P: Picker<R, T>, T: CompactionTask, K> CompactionHandl
 }
 
 #[async_trait::async_trait]
-impl<R, P, T, K> Handler<R> for CompactionHandler<R, P, T, K>
+impl<R, P, T, K> Handler for CompactionHandler<R, P, T, K>
 where
     R: Request<Key = K>,
     P: Picker<R, T> + Send + Sync,
     T: CompactionTask,
     K: Debug + Clone + Eq + Hash + Send + Sync + 'static,
 {
+    type Request = R;
+
     async fn handle_request(
         &self,
         req: R,
@@ -209,13 +211,15 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl<F> Handler<MockRequest> for MockHandler<F>
+    impl<F> Handler for MockHandler<F>
     where
         F: Fn() + Send + Sync,
     {
+        type Request = MockRequest;
+
         async fn handle_request(
             &self,
-            _req: MockRequest,
+            _req: Self::Request,
             token: BoxedRateLimitToken,
             finish_notifier: Arc<Notify>,
         ) -> Result<()> {

@@ -27,4 +27,5 @@ pub use task::{CompactionTask, CompactionTaskImpl};
 
 use crate::scheduler::Scheduler;
 
-pub type CompactionSchedulerRef<S> = Arc<dyn Scheduler<CompactionRequestImpl<S>> + Send + Sync>;
+pub type CompactionSchedulerRef<S> =
+    Arc<dyn Scheduler<Request = CompactionRequestImpl<S>> + Send + Sync>;

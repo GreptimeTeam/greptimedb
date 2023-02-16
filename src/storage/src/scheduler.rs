@@ -33,12 +33,41 @@ use crate::scheduler::rate_limit::{
 pub mod dedup_deque;
 pub mod rate_limit;
 
+/// Request that can be scheduled.
+/// It must contain a key for deduplication.
 pub trait Request: Send + Sync + 'static {
+    /// Type of request key.
     type Key;
 
     fn key(&self) -> Self::Key;
 }
 
+#[async_trait::async_trait]
+pub trait Handler {
+    type Request;
+
+    async fn handle_request(
+        &self,
+        req: Self::Request,
+        token: BoxedRateLimitToken,
+        finish_notifier: Arc<Notify>,
+    ) -> error::Result<()>;
+}
+
+/// [Scheduler] defines a set of API to schedule requests.
+#[async_trait]
+pub trait Scheduler: Debug {
+    type Request;
+    /// Schedules a request.
+    /// Returns true if request is scheduled. Returns false if task queue already
+    /// contains the request with same key.
+    async fn schedule(&self, request: Self::Request) -> error::Result<bool>;
+
+    /// Stops scheduler.
+    async fn stop(&self) -> error::Result<()>;
+}
+
+/// Scheduler config.
 #[derive(Debug)]
 pub struct SchedulerConfig {
     pub max_inflight_task: usize,
@@ -51,29 +80,6 @@ impl Default for SchedulerConfig {
         }
     }
 }
-
-#[async_trait::async_trait]
-pub trait Handler<R> {
-    async fn handle_request(
-        &self,
-        req: R,
-        token: BoxedRateLimitToken,
-        finish_notifier: Arc<Notify>,
-    ) -> error::Result<()>;
-}
-
-/// [Scheduler] defines a set of API to schedule requests.
-#[async_trait]
-pub trait Scheduler<R>: Debug {
-    /// Schedules a request.
-    /// Returns true if request is scheduled. Returns false if task queue already
-    /// contains the request with same key.
-    async fn schedule(&self, request: R) -> error::Result<bool>;
-
-    /// Stops scheduler.
-    async fn stop(&self) -> error::Result<()>;
-}
-
 /// Request scheduler based on local state.
 pub struct LocalScheduler<R: Request<Key = T>, T> {
     /// Request FIFO with key deduplication.
@@ -96,12 +102,14 @@ where
 }
 
 #[async_trait]
-impl<R, K> Scheduler<R> for LocalScheduler<R, K>
+impl<R, K> Scheduler for LocalScheduler<R, K>
 where
     R: Request<Key = K> + Send,
     K: Debug + Eq + Hash + Clone + Send + Sync + 'static,
 {
-    async fn schedule(&self, request: R) -> error::Result<bool> {
+    type Request = R;
+
+    async fn schedule(&self, request: Self::Request) -> error::Result<bool> {
         debug!(
             "Schedule request: {:?}, queue size: {}",
             request.key(),
@@ -131,7 +139,7 @@ where
     /// Creates a new scheduler instance with given config and request handler.
     pub fn new<H>(config: SchedulerConfig, handler: H) -> Self
     where
-        H: Handler<R> + Send + Sync + 'static,
+        H: Handler<Request = R> + Send + Sync + 'static,
     {
         let request_queue = Arc::new(RwLock::new(DedupDeque::default()));
         let cancel_token = CancellationToken::new();
@@ -173,8 +181,11 @@ pub struct HandlerLoop<R, K, H> {
     pub limiter: Arc<CascadeRateLimiter<R>>,
 }
 
-impl<R: Request<Key = K>, K: Debug + Clone + Eq + Hash + Send + 'static, H: Handler<R>>
-    HandlerLoop<R, K, H>
+impl<R, K, H> HandlerLoop<R, K, H>
+where
+    R: Request<Key = K>,
+    K: Debug + Clone + Eq + Hash + Send + 'static,
+    H: Handler<Request = R>,
 {
     /// Runs scheduled requests dispatch loop.
     pub async fn run(&self) {

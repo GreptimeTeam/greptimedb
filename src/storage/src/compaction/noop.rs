@@ -69,8 +69,13 @@ impl Request for NoopCompactionRequest {
 }
 
 #[async_trait::async_trait]
-impl<R: Request<Key = RegionId>> Scheduler<R> for NoopCompactionScheduler<R> {
-    async fn schedule(&self, _request: R) -> crate::error::Result<bool> {
+impl<R> Scheduler for NoopCompactionScheduler<R>
+where
+    R: Request<Key = RegionId>,
+{
+    type Request = R;
+
+    async fn schedule(&self, _request: Self::Request) -> crate::error::Result<bool> {
         Ok(true)
     }
 
