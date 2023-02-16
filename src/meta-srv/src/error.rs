@@ -267,6 +267,9 @@ pub enum Error {
         source: FromUtf8Error,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Missing required parameter, msg: {:?}", msg))]
+    MissingRequiredParameter { msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -311,6 +314,7 @@ impl ErrorExt for Error {
             | Error::ExceededRetryLimit { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
+            | Error::MissingRequiredParameter {..}
             | Error::EmptyTableName { .. }
             | Error::InvalidLeaseKey { .. }
             | Error::InvalidStatKey { .. }
