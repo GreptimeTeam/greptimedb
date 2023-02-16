@@ -29,8 +29,9 @@ pub struct EmptyTable {
 
 impl EmptyTable {
     pub fn new(req: CreateTableRequest) -> Self {
+        let schema = Arc::new(req.schema.try_into().unwrap());
         let table_meta = TableMetaBuilder::default()
-            .schema(req.schema)
+            .schema(schema)
             .primary_key_indices(req.primary_key_indices)
             .next_column_id(0)
             .options(req.table_options)

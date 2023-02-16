@@ -12,19 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use api::v1::alter_expr::Kind;
 use api::v1::{column_def, AlterExpr, CreateTableExpr, DropColumns, RenameTable};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
 use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
 
 use crate::error::{
-    ColumnNotFoundSnafu, CreateSchemaSnafu, InvalidColumnDefSnafu, MissingFieldSnafu,
-    MissingTimestampColumnSnafu, Result,
+    ColumnNotFoundSnafu, InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu,
+    Result,
 };
 
 /// Convert an [`AlterExpr`] to an [`AlterTableRequest`]
@@ -92,7 +90,7 @@ pub fn alter_expr_to_request(expr: AlterExpr) -> Result<AlterTableRequest> {
     }
 }
 
-pub fn create_table_schema(expr: &CreateTableExpr) -> Result<SchemaRef> {
+pub fn create_table_schema(expr: &CreateTableExpr) -> Result<RawSchema> {
     let column_schemas = expr
         .column_defs
         .iter()
@@ -121,12 +119,7 @@ pub fn create_table_schema(expr: &CreateTableExpr) -> Result<SchemaRef> {
         })
         .collect::<Vec<_>>();
 
-    Ok(Arc::new(
-        SchemaBuilder::try_from(column_schemas)
-            .context(CreateSchemaSnafu)?
-            .build()
-            .context(CreateSchemaSnafu)?,
-    ))
+    Ok(RawSchema::new(column_schemas))
 }
 
 pub fn create_expr_to_request(
@@ -138,8 +131,11 @@ pub fn create_expr_to_request(
         .primary_keys
         .iter()
         .map(|key| {
+            // We do a linear search here.
             schema
-                .column_index_by_name(key)
+                .column_schemas
+                .iter()
+                .position(|column_schema| column_schema.name == *key)
                 .context(ColumnNotFoundSnafu {
                     column_name: key,
                     table_name: &expr.table_name,

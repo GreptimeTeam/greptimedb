@@ -177,12 +177,6 @@ pub enum Error {
     #[snafu(display("Not support SQL, error: {}", msg))]
     NotSupportSql { msg: String },
 
-    #[snafu(display("Failed to create schema when creating table, source: {}", source))]
-    CreateSchema {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Failed to convert datafusion schema, source: {}", source))]
     ConvertSchema {
         #[snafu(backtrace)]
@@ -370,9 +364,9 @@ impl ErrorExt for Error {
             | Error::CreateExprToRequest { source }
             | Error::InsertData { source } => source.status_code(),
 
-            Error::CreateSchema { source, .. }
-            | Error::ConvertSchema { source, .. }
-            | Error::VectorComputation { source } => source.status_code(),
+            Error::ConvertSchema { source, .. } | Error::VectorComputation { source } => {
+                source.status_code()
+            }
 
             Error::ColumnValuesNumberMismatch { .. }
             | Error::InvalidSql { .. }

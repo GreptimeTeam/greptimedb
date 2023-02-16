@@ -19,7 +19,6 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::prelude::{Snafu, StatusCode};
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::RawSchema;
 use snafu::{Backtrace, ErrorCompat};
 
 use crate::DeregisterTableRequest;
@@ -162,19 +161,6 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display(
-        "Invalid table schema in catalog entry, table:{}, schema: {:?}, source: {}",
-        table_info,
-        schema,
-        source
-    ))]
-    InvalidTableSchema {
-        table_info: String,
-        schema: RawSchema,
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display("Failure during SchemaProvider operation, source: {}", source))]
     SchemaProviderOperation {
         #[snafu(backtrace)]
@@ -254,8 +240,7 @@ impl ErrorExt for Error {
             Error::MetaSrv { source, .. } => source.status_code(),
             Error::SystemCatalogTableScan { source } => source.status_code(),
             Error::SystemCatalogTableScanExec { source } => source.status_code(),
-            Error::InvalidTableSchema { source, .. }
-            | Error::InvalidTableInfoInCatalog { source } => source.status_code(),
+            Error::InvalidTableInfoInCatalog { source } => source.status_code(),
             Error::SchemaProviderOperation { source } | Error::Internal { source } => {
                 source.status_code()
             }

@@ -26,7 +26,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
-use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, RawSchema, SchemaRef};
 use datatypes::vectors::{BinaryVector, TimestampMillisecondVector, UInt8Vector};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -88,7 +88,7 @@ impl SystemCatalogTable {
             table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
             table_id: SYSTEM_CATALOG_TABLE_ID,
         };
-        let schema = Arc::new(build_system_catalog_schema());
+        let schema = build_system_catalog_schema();
         let ctx = EngineContext::default();
 
         if let Some(table) = engine
@@ -105,7 +105,7 @@ impl SystemCatalogTable {
                 schema_name: INFORMATION_SCHEMA_NAME.to_string(),
                 table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
                 desc: Some("System catalog table".to_string()),
-                schema: schema.clone(),
+                schema,
                 region_numbers: vec![0],
                 primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX],
                 create_if_not_exists: true,
@@ -143,7 +143,7 @@ impl SystemCatalogTable {
 /// - value: JSON-encoded value of entry's metadata.
 /// - gmt_created: create time of this metadata.
 /// - gmt_modified: last updated time of this metadata.
-fn build_system_catalog_schema() -> Schema {
+fn build_system_catalog_schema() -> RawSchema {
     let cols = vec![
         ColumnSchema::new(
             "entry_type".to_string(),
@@ -178,8 +178,7 @@ fn build_system_catalog_schema() -> Schema {
         ),
     ];
 
-    // The schema of this table must be valid.
-    SchemaBuilder::try_from(cols).unwrap().build().unwrap()
+    RawSchema::new(cols)
 }
 
 /// Formats key string for table entry in system catalog

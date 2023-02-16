@@ -19,7 +19,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MIN_USER
 use common_query::Output;
 use common_recordbatch::util;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, SchemaBuilder};
+use datatypes::schema::{ColumnSchema, RawSchema};
 use mito::config::EngineConfig;
 use mito::table::test_util::{new_test_object_store, MockEngine, MockMitoEngine};
 use query::QueryEngineFactory;
@@ -104,12 +104,7 @@ pub(crate) async fn create_test_table(
                 schema_name: "public".to_string(),
                 table_name: table_name.to_string(),
                 desc: Some(" a test table".to_string()),
-                schema: Arc::new(
-                    SchemaBuilder::try_from(column_schemas)
-                        .unwrap()
-                        .build()
-                        .expect("ts is expected to be timestamp column"),
-                ),
+                schema: RawSchema::new(column_schemas),
                 create_if_not_exists: true,
                 primary_key_indices: vec![0], // "host" is in primary keys
                 table_options: HashMap::new(),
