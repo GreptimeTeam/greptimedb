@@ -194,7 +194,7 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
     null_mask.reserve_exact(origin_count + len);
     null_mask.extend(BitVec::repeat(false, len));
 
-    (0..len).into_iter().for_each(|idx| match vector.get(idx) {
+    (0..len).for_each(|idx| match vector.get(idx) {
         Value::Null => null_mask.set(idx + origin_count, true),
         Value::Boolean(val) => values.bool_values.push(val),
         Value::UInt8(val) => values.u8_values.push(val.into()),

@@ -509,7 +509,6 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     // not using full stdlib to prevent security issue, instead filter out a few simple util module
                     vm.add_native_modules(
                         rustpython_stdlib::get_module_inits()
-                            .into_iter()
                             .filter(|(k, _)| native_module_allow_list.contains(k.as_ref())),
                     );
 

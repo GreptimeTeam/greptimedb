@@ -14,7 +14,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datatypes = { path = "../../datatypes" }
 snafu.workspace = true
-statrs = "0.15"
+statrs = "0.16"
 
 [dev-dependencies]
 common-base = { path = "../base" }

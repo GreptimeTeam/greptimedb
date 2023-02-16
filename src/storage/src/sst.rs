@@ -147,7 +147,6 @@ impl LevelMeta {
 
 fn new_level_meta_vec() -> LevelMetaVec {
     (0u8..MAX_LEVEL)
-        .into_iter()
         .map(LevelMeta::new)
         .collect::<Vec<_>>()
         .try_into()

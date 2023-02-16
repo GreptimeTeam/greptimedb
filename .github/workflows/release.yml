@@ -10,7 +10,7 @@ on:
 name: Release
 
 env:
-  RUST_TOOLCHAIN: nightly-2022-12-20
+  RUST_TOOLCHAIN: nightly-2023-02-14
 
   # FIXME(zyy17): Would be better to use `gh release list -L 1 | cut -f 3` to get the latest release version tag, but for a long time, we will stay at 'v0.1.0-alpha-*'.
   SCHEDULED_BUILD_VERSION_PREFIX: v0.1.0-alpha
