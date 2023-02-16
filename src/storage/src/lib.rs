@@ -40,3 +40,4 @@ mod wal;
 pub mod write_batch;
 
 pub use engine::EngineImpl;
+mod file_purger;

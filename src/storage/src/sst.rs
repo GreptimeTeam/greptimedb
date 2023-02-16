@@ -15,6 +15,7 @@
 pub(crate) mod parquet;
 
 use std::collections::HashMap;
+use std::iter::once;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -23,11 +24,12 @@ use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use object_store::{util, ObjectStore};
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use store_api::storage::ChunkReader;
 use table::predicate::Predicate;
 
 use crate::chunk::ChunkReaderImpl;
-use crate::error::Result;
+use crate::error::{DeleteSstSnafu, Result};
 use crate::memtable::BoxedBatchIterator;
 use crate::read::{Batch, BoxedBatchReader};
 use crate::schema::ProjectedSchemaRef;
@@ -257,8 +259,8 @@ pub trait AccessLayer: Send + Sync + std::fmt::Debug {
     /// Read SST file with given `file_name` and schema.
     async fn read_sst(&self, file_name: &str, opts: &ReadOptions) -> Result<BoxedBatchReader>;
 
-    /// Returns backend object store.
-    fn object_store(&self) -> ObjectStore;
+    /// Deletes a SST file with given name.
+    async fn delete_sst(&self, file_name: &str) -> Result<()>;
 }
 
 pub type AccessLayerRef = Arc<dyn AccessLayer>;
@@ -340,8 +342,11 @@ impl AccessLayer for FsAccessLayer {
         Ok(Box::new(stream))
     }
 
-    fn object_store(&self) -> ObjectStore {
-        self.object_store.clone()
+    async fn delete_sst(&self, file_name: &str) -> Result<()> {
+        let path = self.sst_file_path(file_name);
+        println!("path: {:?}\n", path);
+        let object = self.object_store.object(&path);
+        object.delete().await.context(DeleteSstSnafu)
     }
 }
 

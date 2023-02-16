@@ -58,6 +58,7 @@ pub trait Handler {
 #[async_trait]
 pub trait Scheduler: Debug {
     type Request;
+
     /// Schedules a request.
     /// Returns true if request is scheduled. Returns false if task queue already
     /// contains the request with same key.
@@ -80,6 +81,7 @@ impl Default for SchedulerConfig {
         }
     }
 }
+
 /// Request scheduler based on local state.
 pub struct LocalScheduler<R: Request> {
     /// Request FIFO with key deduplication.

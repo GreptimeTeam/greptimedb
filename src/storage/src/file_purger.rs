@@ -19,8 +19,10 @@ use tokio::sync::Notify;
 
 use crate::scheduler::rate_limit::{BoxedRateLimitToken, RateLimitToken};
 use crate::scheduler::{Handler, LocalScheduler, Request};
+use crate::sst::AccessLayerRef;
 
-struct FilePurgeRequest {
+pub struct FilePurgeRequest {
+    sst_layer: AccessLayerRef,
     file_path: String,
 }
 
@@ -32,10 +34,9 @@ impl Request for FilePurgeRequest {
     }
 }
 
-struct FilePurgeHandler {
-    object_store: ObjectStore,
-}
+struct FilePurgeHandler {}
 
+#[async_trait::async_trait]
 impl Handler for FilePurgeHandler {
     type Request = FilePurgeRequest;
 
@@ -45,60 +46,73 @@ impl Handler for FilePurgeHandler {
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
     ) -> crate::error::Result<()> {
-        let object = self.object_store.object(&req.file_path);
-        object.delete().await?;
+        req.sst_layer.delete_sst(&req.file_path).await?;
         token.try_release();
         finish_notifier.notify_one();
         Ok(())
     }
 }
 
-pub type FilePurgerRef = Arc<LocalScheduler<FilePurgeRequest, String>>;
+pub type FilePurgerRef = Arc<LocalScheduler<FilePurgeRequest>>;
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU64;
-
     use object_store::backend::fs::Builder;
     use store_api::storage::OpType;
     use tempdir::TempDir;
 
     use super::*;
-    use crate::memtable::tests::schema_for_test;
+    use crate::memtable::tests::{schema_for_test, write_kvs};
     use crate::memtable::{DefaultMemtableBuilder, IterContext, MemtableBuilder};
     use crate::sst::parquet::ParquetWriter;
-    use crate::sst::{Source, WriteOptions};
+    use crate::sst::{AccessLayer, FsAccessLayer, Source, WriteOptions};
+
+    struct MockRateLimitToken;
+
+    impl RateLimitToken for MockRateLimitToken {
+        fn try_release(&self) {}
+    }
 
     #[tokio::test]
     async fn test_file_purger() {
-        let schema = memtable_tests::schema_for_test();
+        let schema = schema_for_test();
         let memtable = DefaultMemtableBuilder::default().build(schema.clone());
 
-        let rows_total = 100;
-        let mut keys_vec = Vec::with_capacity(rows_total);
-        let mut values_vec = Vec::with_capacity(rows_total);
-
-        for i in 0..rows_total {
-            keys_vec.push((i as i64, i as u64));
-            values_vec.push((Some(i as u64), Some(i as u64)));
-        }
-
-        memtable_tests::write_kvs(&*memtable, 10, OpType::Put, &keys_vec, &values_vec);
+        write_kvs(
+            &*memtable,
+            10,
+            OpType::Put,
+            &[(1, 1), (2, 2)],
+            &[(Some(1), Some(1)), (Some(2), Some(2))],
+        );
 
         let dir = TempDir::new("write_parquet").unwrap();
-        let path = dir.path().to_str().unwrap();
-        let backend = Builder::default().root(path).build().unwrap();
-        let object_store = ObjectStore::new(backend);
+        let object_store = ObjectStore::new(
+            Builder::default()
+                .root(dir.path().to_str().unwrap())
+                .build()
+                .unwrap(),
+        );
+
         let sst_file_name = "test-read-large.parquet";
         let iter = memtable.iter(&IterContext::default()).unwrap();
-        let writer = ParquetWriter::new(sst_file_name, Source::Iter(iter), object_store.clone());
-        writer.write_sst(&WriteOptions {}).await.unwrap();
+        let layer = Arc::new(FsAccessLayer::new("sst", object_store.clone()));
+        let sst_info = layer
+            .write_sst(sst_file_name, Source::Iter(iter), &WriteOptions {})
+            .await
+            .unwrap();
 
         let request = FilePurgeRequest {
-            file_path: sst_file_name,
+            sst_layer: layer.clone(),
+            file_path: sst_file_name.to_string(),
         };
-        FilePurgeHandler {
-            object_store: object_store.clone(),
-        }
+
+        let handler = FilePurgeHandler {};
+
+        let notify = Arc::new(Notify::new());
+        handler
+            .handle_request(request, Box::new(MockRateLimitToken {}), notify)
+            .await
+            .unwrap();
     }
 }

@@ -416,6 +416,12 @@ pub enum Error {
         source: JoinError,
         backtrace: Backtrace,
     },
+
+    #[snafu(display("Failed to delete SST file, source: {:?}", source))]
+    DeleteSst {
+        source: object_store::Error,
+        backtrace: Backtrace,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -486,6 +492,7 @@ impl ErrorExt for Error {
             DecodeParquetTimeRange { .. } => StatusCode::Unexpected,
             RateLimited { .. } => StatusCode::Internal,
             StopScheduler { .. } => StatusCode::Internal,
+            DeleteSst { .. } => StatusCode::StorageUnavailable,
         }
     }
 
