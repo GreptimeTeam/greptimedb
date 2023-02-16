@@ -28,6 +28,11 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
 use futures::FutureExt;
+use promql_parser::label::METRIC_NAME;
+use promql_parser::parser::{
+    AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, MatrixSelector, ParenExpr, SubqueryExpr,
+    UnaryExpr, VectorSelector,
+};
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -184,17 +189,17 @@ impl PromqlJsonResponse {
     }
 
     /// Convert from `Result<Output>`
-    pub async fn from_query_result(result: Result<Output>) -> Json<Self> {
+    pub async fn from_query_result(result: Result<Output>, metric_name: String) -> Json<Self> {
         let response: Result<Json<Self>> = try {
             let json = match result? {
                 Output::RecordBatches(batches) => {
-                    Self::success(Self::record_batches_to_data(batches)?)
+                    Self::success(Self::record_batches_to_data(batches, metric_name)?)
                 }
                 Output::Stream(stream) => {
                     let record_batches = RecordBatches::try_collect(stream)
                         .await
                         .context(CollectRecordbatchSnafu)?;
-                    Self::success(Self::record_batches_to_data(record_batches)?)
+                    Self::success(Self::record_batches_to_data(record_batches, metric_name)?)
                 }
                 Output::AffectedRows(_) => Self::error(
                     "unexpected result",
@@ -208,7 +213,7 @@ impl PromqlJsonResponse {
         response.unwrap_or_else(|err| Self::error(err.status_code().to_string(), err.to_string()))
     }
 
-    fn record_batches_to_data(batches: RecordBatches) -> Result<PromqlData> {
+    fn record_batches_to_data(batches: RecordBatches, metric_name: String) -> Result<PromqlData> {
         // infer semantic type of each column from schema.
         // TODO(ruihang): wish there is a better way to do this.
         let mut timestamp_column_index = None;
@@ -241,6 +246,7 @@ impl PromqlJsonResponse {
             err_msg: "no value column found".to_string(),
         })?;
 
+        let metric_name = (METRIC_NAME.to_string(), metric_name);
         let mut buffer = HashMap::<Vec<(String, String)>, Vec<(f64, String)>>::new();
 
         for batch in batches.iter() {
@@ -274,7 +280,7 @@ impl PromqlJsonResponse {
             for row_index in 0..batch.num_rows() {
                 // retrieve tags
                 // TODO(ruihang): push table name `__metric__`
-                let mut tags = Vec::new();
+                let mut tags = vec![metric_name.clone()];
                 for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
                     let tag_value = tag_column.get_data(row_index).unwrap().to_string();
                     tags.push((tag_name.to_string(), tag_value));
@@ -348,5 +354,38 @@ pub async fn range_query(
         step: params.step,
     };
     let result = handler.do_query(&prom_query).await;
-    PromqlJsonResponse::from_query_result(result).await
+    let metric_name = retrieve_metric_name(&prom_query.query).unwrap_or_default();
+    PromqlJsonResponse::from_query_result(result, metric_name).await
+}
+
+fn retrieve_metric_name(promql: &str) -> Option<String> {
+    let promql_expr = promql_parser::parser::parse(promql).ok()?;
+    promql_expr_to_metric_name(promql_expr)
+}
+
+fn promql_expr_to_metric_name(expr: PromqlExpr) -> Option<String> {
+    match expr {
+        PromqlExpr::Aggregate(AggregateExpr { expr, .. }) => promql_expr_to_metric_name(*expr),
+        PromqlExpr::Unary(UnaryExpr { expr }) => promql_expr_to_metric_name(*expr),
+        PromqlExpr::Binary(BinaryExpr { lhs, rhs, .. }) => {
+            promql_expr_to_metric_name(*lhs).or(promql_expr_to_metric_name(*rhs))
+        }
+        PromqlExpr::Paren(ParenExpr { expr }) => promql_expr_to_metric_name(*expr),
+        PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => promql_expr_to_metric_name(*expr),
+        PromqlExpr::NumberLiteral(_) => None,
+        PromqlExpr::StringLiteral(_) => None,
+        PromqlExpr::VectorSelector(VectorSelector { matchers, .. }) => {
+            matchers.find_matchers(METRIC_NAME).pop().cloned()
+        }
+        PromqlExpr::MatrixSelector(MatrixSelector {
+            vector_selector, ..
+        }) => {
+            let VectorSelector { matchers, .. } = vector_selector;
+            matchers.find_matchers(METRIC_NAME).pop().cloned()
+        }
+        PromqlExpr::Call(Call { args, .. }) => args
+            .args
+            .into_iter()
+            .find_map(|e| promql_expr_to_metric_name(*e)),
+    }
 }
