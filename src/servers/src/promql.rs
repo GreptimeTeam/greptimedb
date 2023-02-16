@@ -24,11 +24,14 @@ use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::info;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::scalars::ScalarVector;
+use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
 use futures::FutureExt;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Mutex};
 use tower::ServiceBuilder;
@@ -36,7 +39,9 @@ use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
-use crate::error::{AlreadyStartedSnafu, CollectRecordbatchSnafu, Result, StartHttpSnafu};
+use crate::error::{
+    AlreadyStartedSnafu, CollectRecordbatchSnafu, InternalSnafu, Result, StartHttpSnafu,
+};
 use crate::http::authorize::HttpAuth;
 use crate::server::Server;
 
@@ -203,16 +208,101 @@ impl PromqlJsonResponse {
         response.unwrap_or_else(|err| Self::error(err.status_code().to_string(), err.to_string()))
     }
 
-    /// TODO(ruihang): implement this conversion method
-    fn record_batches_to_data(_: RecordBatches) -> Result<PromqlData> {
+    fn record_batches_to_data(batches: RecordBatches) -> Result<PromqlData> {
+        // infer semantic type of each column from schema.
+        // TODO(ruihang): wish there is a better way to do this.
+        let mut time_index_column = None;
+        let mut tag_column_indices = Vec::new();
+        let mut first_value_column = None;
+
+        for (i, column) in batches.schema().column_schemas().iter().enumerate() {
+            match column.data_type {
+                ConcreteDataType::Timestamp(datatypes::types::TimestampType::Millisecond(_)) => {
+                    if time_index_column.is_none() {
+                        time_index_column = Some(i);
+                    }
+                }
+                ConcreteDataType::Float64(_) => {
+                    if first_value_column.is_none() {
+                        first_value_column = Some(i);
+                    }
+                }
+                ConcreteDataType::String(_) => {
+                    tag_column_indices.push(i);
+                }
+                _ => {}
+            }
+        }
+
+        let time_index_column = time_index_column.context(InternalSnafu {
+            err_msg: "no timestamp column found".to_string(),
+        })?;
+        let first_value_column = first_value_column.context(InternalSnafu {
+            err_msg: "no value column found".to_string(),
+        })?;
+
+        let mut buffer = HashMap::<Vec<(String, String)>, Vec<(i64, String)>>::new();
+
+        for batch in batches.iter() {
+            for row_index in 0..batch.num_rows() {
+                // retrieve tags
+                // TODO(ruihang): push table name `__metric__`
+                let mut tags = Vec::new();
+                for tag_column in &tag_column_indices {
+                    let tag_value = batch
+                        .column(*tag_column)
+                        .as_any()
+                        .downcast_ref::<StringVector>()
+                        .unwrap()
+                        .get_data(row_index)
+                        .unwrap()
+                        .to_string();
+                    tags.push((
+                        batches
+                            .schema()
+                            .column_name_by_index(*tag_column)
+                            .to_string(),
+                        tag_value,
+                    ));
+                }
+
+                // retrieve timestamp
+                let timestamp: i64 = batch
+                    .column(time_index_column)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondVector>()
+                    .unwrap()
+                    .get_data(row_index)
+                    .unwrap()
+                    .into();
+
+                // retrieve value
+                let value = Into::<f64>::into(
+                    batch
+                        .column(first_value_column)
+                        .as_any()
+                        .downcast_ref::<Float64Vector>()
+                        .unwrap()
+                        .get_data(row_index)
+                        .unwrap(),
+                )
+                .to_string();
+
+                buffer.entry(tags).or_default().push((timestamp, value));
+            }
+        }
+
+        let result = buffer
+            .into_iter()
+            .map(|(tags, values)| PromqlSeries {
+                metric: tags.into_iter().collect(),
+                values,
+            })
+            .collect();
+
         let data = PromqlData {
             result_type: "matrix".to_string(),
-            result: vec![PromqlSeries {
-                metric: vec![("__name__".to_string(), "foo".to_string())]
-                    .into_iter()
-                    .collect(),
-                values: vec![(1, "123.45".to_string())],
-            }],
+            result,
         };
 
         Ok(data)
