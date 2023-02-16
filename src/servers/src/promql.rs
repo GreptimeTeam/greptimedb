@@ -139,7 +139,7 @@ impl Server for PromqlServer {
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PromqlSeries {
     metric: HashMap<String, String>,
-    values: Vec<(i64, String)>,
+    values: Vec<(f64, String)>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -211,20 +211,20 @@ impl PromqlJsonResponse {
     fn record_batches_to_data(batches: RecordBatches) -> Result<PromqlData> {
         // infer semantic type of each column from schema.
         // TODO(ruihang): wish there is a better way to do this.
-        let mut time_index_column = None;
+        let mut timestamp_column_index = None;
         let mut tag_column_indices = Vec::new();
-        let mut first_value_column = None;
+        let mut first_value_column_index = None;
 
         for (i, column) in batches.schema().column_schemas().iter().enumerate() {
             match column.data_type {
                 ConcreteDataType::Timestamp(datatypes::types::TimestampType::Millisecond(_)) => {
-                    if time_index_column.is_none() {
-                        time_index_column = Some(i);
+                    if timestamp_column_index.is_none() {
+                        timestamp_column_index = Some(i);
                     }
                 }
                 ConcreteDataType::Float64(_) => {
-                    if first_value_column.is_none() {
-                        first_value_column = Some(i);
+                    if first_value_column_index.is_none() {
+                        first_value_column_index = Some(i);
                     }
                 }
                 ConcreteDataType::String(_) => {
@@ -234,59 +234,59 @@ impl PromqlJsonResponse {
             }
         }
 
-        let time_index_column = time_index_column.context(InternalSnafu {
+        let timestamp_column_index = timestamp_column_index.context(InternalSnafu {
             err_msg: "no timestamp column found".to_string(),
         })?;
-        let first_value_column = first_value_column.context(InternalSnafu {
+        let first_value_column_index = first_value_column_index.context(InternalSnafu {
             err_msg: "no value column found".to_string(),
         })?;
 
-        let mut buffer = HashMap::<Vec<(String, String)>, Vec<(i64, String)>>::new();
+        let mut buffer = HashMap::<Vec<(String, String)>, Vec<(f64, String)>>::new();
 
         for batch in batches.iter() {
+            // prepare things...
+            let tag_columns = tag_column_indices
+                .iter()
+                .map(|i| {
+                    batch
+                        .column(*i)
+                        .as_any()
+                        .downcast_ref::<StringVector>()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let tag_names = tag_column_indices
+                .iter()
+                .map(|c| batches.schema().column_name_by_index(*c).to_string())
+                .collect::<Vec<_>>();
+            let timestamp_column = batch
+                .column(timestamp_column_index)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondVector>()
+                .unwrap();
+            let value_column = batch
+                .column(first_value_column_index)
+                .as_any()
+                .downcast_ref::<Float64Vector>()
+                .unwrap();
+
+            // assemble rows
             for row_index in 0..batch.num_rows() {
                 // retrieve tags
                 // TODO(ruihang): push table name `__metric__`
                 let mut tags = Vec::new();
-                for tag_column in &tag_column_indices {
-                    let tag_value = batch
-                        .column(*tag_column)
-                        .as_any()
-                        .downcast_ref::<StringVector>()
-                        .unwrap()
-                        .get_data(row_index)
-                        .unwrap()
-                        .to_string();
-                    tags.push((
-                        batches
-                            .schema()
-                            .column_name_by_index(*tag_column)
-                            .to_string(),
-                        tag_value,
-                    ));
+                for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
+                    let tag_value = tag_column.get_data(row_index).unwrap().to_string();
+                    tags.push((tag_name.to_string(), tag_value));
                 }
 
                 // retrieve timestamp
-                let timestamp: i64 = batch
-                    .column(time_index_column)
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondVector>()
-                    .unwrap()
-                    .get_data(row_index)
-                    .unwrap()
-                    .into();
+                let timestamp_millis: i64 = timestamp_column.get_data(row_index).unwrap().into();
+                let timestamp = timestamp_millis as f64 / 1000.0;
 
                 // retrieve value
-                let value = Into::<f64>::into(
-                    batch
-                        .column(first_value_column)
-                        .as_any()
-                        .downcast_ref::<Float64Vector>()
-                        .unwrap()
-                        .get_data(row_index)
-                        .unwrap(),
-                )
-                .to_string();
+                let value =
+                    Into::<f64>::into(value_column.get_data(row_index).unwrap()).to_string();
 
                 buffer.entry(tags).or_default().push((timestamp, value));
             }
