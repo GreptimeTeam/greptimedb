@@ -214,10 +214,7 @@ impl Instance {
 fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> CompactionSchedulerRef<S> {
     let picker = SimplePicker::default();
     let config = SchedulerConfig::from(opts);
-    let handler = CompactionHandler {
-        picker,
-        _phantom: Default::default(),
-    };
+    let handler = CompactionHandler::new(picker);
     let scheduler = LocalScheduler::new(config, handler);
     Arc::new(scheduler)
 }

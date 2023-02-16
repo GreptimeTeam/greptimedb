@@ -269,6 +269,15 @@ pub struct CompactionHandler<R: Request<K>, P: Picker<R, T>, T: CompactionTask, 
     pub _phantom: PhantomData<(R, K, T)>,
 }
 
+impl<R: Request<K>, P: Picker<R, T>, T: CompactionTask, K> CompactionHandler<R, P, T, K> {
+    pub fn new(picker: P) -> Self {
+        Self {
+            picker,
+            _phantom: Default::default(),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl<R, P, T, K> Handler<R> for CompactionHandler<R, P, T, K>
 where
@@ -313,7 +322,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::compaction::picker::tests::MockPicker;
     use crate::compaction::rate_limit::MaxInflightTaskLimiter;
 
     struct CountdownLatch {
@@ -359,14 +367,15 @@ mod tests {
         let queue = Arc::new(RwLock::new(DedupDeque::default()));
         let latch = Arc::new(CountdownLatch::new(2));
         let latch_cloned = latch.clone();
-        let picker: MockPicker<MockRequest> = MockPicker::new(vec![Arc::new(move || {
-            latch_cloned.countdown();
-        })]);
         let handler = Arc::new(HandlerLoop {
             req_queue: queue.clone(),
             cancel_token: Default::default(),
             task_notifier: Arc::new(Default::default()),
-            request_handler: MockHandler {},
+            request_handler: MockHandler {
+                cb: move || {
+                    latch_cloned.countdown();
+                },
+            },
             limiter: Arc::new(CascadeRateLimiter::new(vec![Box::new(
                 MaxInflightTaskLimiter::new(3),
             )])),
@@ -390,17 +399,24 @@ mod tests {
         region_id: RegionId,
     }
 
-    struct MockHandler {}
+    struct MockHandler<F> {
+        cb: F,
+    }
 
     #[async_trait::async_trait]
-    impl Handler<MockRequest> for MockHandler {
+    impl<F> Handler<MockRequest> for MockHandler<F>
+    where
+        F: Fn() + Send + Sync,
+    {
         async fn handle_request(
             &self,
-            req: MockRequest,
+            _req: MockRequest,
             token: BoxedRateLimitToken,
-            finish_notfier: Arc<Notify>,
+            finish_notifier: Arc<Notify>,
         ) -> Result<()> {
-            finish_notfier.notify_one();
+            (self.cb)();
+            token.try_release();
+            finish_notifier.notify_one();
             Ok(())
         }
     }
@@ -416,10 +432,11 @@ mod tests {
         let latch = Arc::new(CountdownLatch::new(2));
         let latch_cloned = latch.clone();
 
-        let picker: MockPicker<MockRequest> =
-            MockPicker::new(vec![Arc::new(move || latch_cloned.countdown())]);
-
-        let handler = MockHandler {};
+        let handler = MockHandler {
+            cb: move || {
+                latch_cloned.countdown();
+            },
+        };
         let scheduler: LocalScheduler<MockRequest, RegionId> = LocalScheduler::new(
             SchedulerConfig {
                 max_inflight_task: 3,
@@ -450,7 +467,11 @@ mod tests {
         let latch = Arc::new(CountdownLatch::new(task_size));
         let latch_clone = latch.clone();
 
-        let handler = MockHandler {};
+        let handler = MockHandler {
+            cb: move || {
+                latch_clone.countdown();
+            },
+        };
 
         let config = SchedulerConfig {
             max_inflight_task: 3,
@@ -478,7 +499,11 @@ mod tests {
         let latch = Arc::new(CountdownLatch::new(task_size));
         let latch_clone = latch.clone();
 
-        let handler = MockHandler {};
+        let handler = MockHandler {
+            cb: move || {
+                latch_clone.countdown();
+            },
+        };
 
         let config = SchedulerConfig {
             max_inflight_task: 3,
@@ -512,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_duplicate_tasks() {
         common_telemetry::init_default_ut_logging();
-        let handler = MockHandler {};
+        let handler = MockHandler { cb: || {} };
         let config = SchedulerConfig {
             max_inflight_task: 3,
         };
