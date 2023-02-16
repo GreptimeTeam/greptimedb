@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use common_query::Output;
 use common_telemetry::timer;
@@ -34,8 +36,15 @@ impl ScriptHandler for Instance {
             .await
     }
 
-    async fn execute_script(&self, schema: &str, name: &str) -> servers::error::Result<Output> {
+    async fn execute_script(
+        &self,
+        schema: &str,
+        name: &str,
+        params: HashMap<String, String>,
+    ) -> servers::error::Result<Output> {
         let _timer = timer!(metric::METRIC_RUN_SCRIPT_ELAPSED);
-        self.script_executor.execute_script(schema, name).await
+        self.script_executor
+            .execute_script(schema, name, params)
+            .await
     }
 }

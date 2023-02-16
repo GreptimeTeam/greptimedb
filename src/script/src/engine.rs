@@ -15,6 +15,7 @@
 //! Script engine
 
 use std::any::Any;
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
@@ -30,7 +31,11 @@ pub trait Script {
     fn as_any(&self) -> &dyn Any;
 
     /// Execute the script and returns the output.
-    async fn execute(&self, ctx: EvalContext) -> std::result::Result<Output, Self::Error>;
+    async fn execute(
+        &self,
+        params: HashMap<String, String>,
+        ctx: EvalContext,
+    ) -> std::result::Result<Output, Self::Error>;
 }
 
 #[async_trait]

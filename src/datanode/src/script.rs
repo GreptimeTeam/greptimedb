@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use query::QueryEngineRef;
@@ -34,13 +36,19 @@ mod dummy {
 
         pub async fn insert_script(
             &self,
+            _schema: &str,
             _name: &str,
             _script: &str,
         ) -> servers::error::Result<()> {
             servers::error::NotSupportedSnafu { feat: "script" }.fail()
         }
 
-        pub async fn execute_script(&self, _script: &str) -> servers::error::Result<Output> {
+        pub async fn execute_script(
+            &self,
+            _schema: &str,
+            _name: &str,
+            _params: HashMap<String, String>,
+        ) -> servers::error::Result<Output> {
             servers::error::NotSupportedSnafu { feat: "script" }.fail()
         }
     }
@@ -94,9 +102,10 @@ mod python {
             &self,
             schema: &str,
             name: &str,
+            params: HashMap<String, String>,
         ) -> servers::error::Result<Output> {
             self.script_manager
-                .execute(schema, name)
+                .execute(schema, name, params)
                 .await
                 .map_err(|e| {
                     error!(e; "Instance failed to execute script");

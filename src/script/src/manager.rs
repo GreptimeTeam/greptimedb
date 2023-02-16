@@ -76,7 +76,12 @@ impl ScriptManager {
         Ok(compiled_script)
     }
 
-    pub async fn execute(&self, schema: &str, name: &str) -> Result<Output> {
+    pub async fn execute(
+        &self,
+        schema: &str,
+        name: &str,
+        params: HashMap<String, String>,
+    ) -> Result<Output> {
         let script = {
             let s = self.compiled.read().unwrap().get(name).cloned();
 
@@ -90,7 +95,7 @@ impl ScriptManager {
         let script = script.context(ScriptNotFoundSnafu { name })?;
 
         script
-            .execute(EvalContext::default())
+            .execute(params, EvalContext::default())
             .await
             .context(ExecutePythonSnafu { name })
     }

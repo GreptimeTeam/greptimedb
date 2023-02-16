@@ -14,6 +14,7 @@
 
 //! Python script engine
 use std::any::Any;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -25,7 +26,9 @@ use common_query::error::{PyUdfSnafu, UdfTempRecordBatchSnafu};
 use common_query::prelude::Signature;
 use common_query::Output;
 use common_recordbatch::error::{ExternalSnafu, Result as RecordBatchResult};
-use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    RecordBatch, RecordBatchStream, RecordBatches, SendableRecordBatchStream,
+};
 use datafusion_expr::Volatility;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::vectors::VectorRef;
@@ -53,7 +56,12 @@ impl std::fmt::Display for PyUDF {
             f,
             "{}({})->",
             &self.copr.name,
-            &self.copr.deco_args.arg_names.join(",")
+            self.copr
+                .deco_args
+                .arg_names
+                .as_ref()
+                .unwrap_or(&vec![])
+                .join(",")
         )
     }
 }
@@ -73,11 +81,17 @@ impl PyUDF {
 
     /// Fake a schema, should only be used with dynamically eval a Python Udf
     fn fake_schema(&self, columns: &[VectorRef]) -> SchemaRef {
-        let arg_names = &self.copr.deco_args.arg_names;
+        let empty_args = vec![];
+        let arg_names = self
+            .copr
+            .deco_args
+            .arg_names
+            .as_ref()
+            .unwrap_or(&empty_args);
         let col_sch: Vec<_> = columns
             .iter()
             .enumerate()
-            .map(|(i, col)| ColumnSchema::new(arg_names[i].to_owned(), col.data_type(), true))
+            .map(|(i, col)| ColumnSchema::new(arg_names[i].clone(), col.data_type(), true))
             .collect();
         let schema = datatypes::schema::Schema::new(col_sch);
         Arc::new(schema)
@@ -97,7 +111,7 @@ impl Function for PyUDF {
         match self.copr.return_types.get(0) {
             Some(Some(AnnotationInfo {
                 datatype: Some(ty), ..
-            })) => Ok(ty.to_owned()),
+            })) => Ok(ty.clone()),
             _ => PyUdfSnafu {
                 msg: "Can't found return type for python UDF {self}",
             }
@@ -113,7 +127,7 @@ impl Function for PyUDF {
             match ty {
                 Some(AnnotationInfo {
                     datatype: Some(ty), ..
-                }) => arg_types.push(ty.to_owned()),
+                }) => arg_types.push(ty.clone()),
                 _ => {
                     know_all_types = false;
                     break;
@@ -135,9 +149,8 @@ impl Function for PyUDF {
         // FIXME(discord9): exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
         let schema = self.fake_schema(columns);
         let columns = columns.to_vec();
-        // TODO(discord9): remove unwrap
-        let rb = RecordBatch::new(schema, columns).context(UdfTempRecordBatchSnafu)?;
-        let res = exec_parsed(&self.copr, &rb).map_err(|err| {
+        let rb = Some(RecordBatch::new(schema, columns).context(UdfTempRecordBatchSnafu)?);
+        let res = exec_parsed(&self.copr, &rb, &HashMap::new()).map_err(|err| {
             PyUdfSnafu {
                 msg: format!("{err:#?}"),
             }
@@ -153,7 +166,7 @@ impl Function for PyUDF {
 
         // TODO(discord9): more error handling
         let res0 = res.column(0);
-        Ok(res0.to_owned())
+        Ok(res0.clone())
     }
 }
 
@@ -168,13 +181,14 @@ impl PyScript {
     pub fn register_udf(&self) {
         let udf = PyUDF::from_copr(self.copr.clone());
         PyUDF::register_as_udf(udf.clone());
-        PyUDF::register_to_query_engine(udf, self.query_engine.to_owned());
+        PyUDF::register_to_query_engine(udf, self.query_engine.clone());
     }
 }
 
 pub struct CoprStream {
     stream: SendableRecordBatchStream,
     copr: CoprocessorRef,
+    params: HashMap<String, String>,
 }
 
 impl RecordBatchStream for CoprStream {
@@ -190,7 +204,7 @@ impl Stream for CoprStream {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(recordbatch))) => {
-                let batch = exec_parsed(&self.copr, &recordbatch)
+                let batch = exec_parsed(&self.copr, &Some(recordbatch), &self.params)
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
 
@@ -218,7 +232,7 @@ impl Script for PyScript {
         self
     }
 
-    async fn execute(&self, _ctx: EvalContext) -> Result<Output> {
+    async fn execute(&self, params: HashMap<String, String>, _ctx: EvalContext) -> Result<Output> {
         if let Some(sql) = &self.copr.deco_args.sql {
             let stmt = QueryLanguageParser::parse_sql(sql).unwrap();
             ensure!(
@@ -231,12 +245,17 @@ impl Script for PyScript {
             let res = self.query_engine.execute(&plan).await?;
             let copr = self.copr.clone();
             match res {
-                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream { copr, stream }))),
+                Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream {
+                    params,
+                    copr,
+                    stream,
+                }))),
                 _ => unreachable!(),
             }
         } else {
-            // TODO(boyan): try to retrieve sql from user request
-            error::MissingSqlSnafu {}.fail()
+            let batch = exec_parsed(&self.copr, &None, &params)?;
+            let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
+            Ok(Output::RecordBatches(batches))
         }
     }
 }
@@ -284,6 +303,7 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_recordbatch::util;
     use datatypes::prelude::ScalarVector;
+    use datatypes::value::Value;
     use datatypes::vectors::{Float64Vector, Int64Vector};
     use query::QueryEngineFactory;
     use table::table::numbers::NumbersTable;
@@ -326,7 +346,10 @@ def test(number)->vector[u32]:
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let output = script.execute(EvalContext::default()).await.unwrap();
+        let output = script
+            .execute(HashMap::default(), EvalContext::default())
+            .await
+            .unwrap();
         let res = common_recordbatch::util::collect_batches(match output {
             Output::Stream(s) => s,
             _ => unreachable!(),
@@ -335,6 +358,36 @@ def test(number)->vector[u32]:
         .unwrap();
         let rb = res.iter().next().expect("One and only one recordbatch");
         assert_eq!(rb.column(0).len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_user_params_in_py() {
+        let script_engine = sample_script_engine();
+
+        let script = r#"
+@copr(returns = ["number"])
+def test(**params)->vector[i64]:
+    return int(params['a']) + int(params['b'])
+"#;
+        let script = script_engine
+            .compile(script, CompileContext::default())
+            .await
+            .unwrap();
+        let mut params = HashMap::new();
+        params.insert("a".to_string(), "30".to_string());
+        params.insert("b".to_string(), "12".to_string());
+        let _output = script
+            .execute(params, EvalContext::default())
+            .await
+            .unwrap();
+        let res = match _output {
+            Output::RecordBatches(s) => s,
+            _ => todo!(),
+        };
+        let rb = res.iter().next().expect("One and only one recordbatch");
+        assert_eq!(rb.column(0).len(), 1);
+        let result = rb.column(0).get(0);
+        assert!(matches!(result, Value::Int64(42)));
     }
 
     #[tokio::test]
@@ -353,7 +406,10 @@ def test(number)->vector[u32]:
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let _output = script.execute(EvalContext::default()).await.unwrap();
+        let _output = script
+            .execute(HashMap::new(), EvalContext::default())
+            .await
+            .unwrap();
         let res = common_recordbatch::util::collect_batches(match _output {
             Output::Stream(s) => s,
             _ => todo!(),
@@ -382,7 +438,10 @@ def test(a, b, c):
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let output = script.execute(EvalContext::default()).await.unwrap();
+        let output = script
+            .execute(HashMap::new(), EvalContext::default())
+            .await
+            .unwrap();
         match output {
             Output::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
@@ -417,7 +476,10 @@ def test(a):
             .compile(script, CompileContext::default())
             .await
             .unwrap();
-        let output = script.execute(EvalContext::default()).await.unwrap();
+        let output = script
+            .execute(HashMap::new(), EvalContext::default())
+            .await
+            .unwrap();
         match output {
             Output::Stream(stream) => {
                 let numbers = util::collect(stream).await.unwrap();
