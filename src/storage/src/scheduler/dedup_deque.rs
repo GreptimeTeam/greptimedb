@@ -66,9 +66,15 @@ impl<K: Eq + Hash + Clone, V> DedupDeque<K, V> {
         Some((key, value))
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         debug_assert_eq!(self.deque.len(), self.existing.len());
         self.deque.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.deque.is_empty()
     }
 }
 

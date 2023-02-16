@@ -17,9 +17,8 @@ use std::marker::PhantomData;
 
 use store_api::storage::RegionId;
 
-use crate::compaction::{
-    CompactionRequest, CompactionScheduler, CompactionTask, Picker, PickerContext,
-};
+use crate::compaction::{CompactionTask, Picker, PickerContext};
+use crate::scheduler::{Request, Scheduler};
 
 pub struct NoopCompactionScheduler<R> {
     _phantom_data: PhantomData<R>,
@@ -45,8 +44,15 @@ pub struct NoopCompactionRequest;
 #[derive(Default, Debug)]
 pub struct NoopCompactionPicker;
 
-impl<R, T: CompactionTask> Picker<R, T> for NoopCompactionPicker {
-    fn pick(&self, _ctx: &PickerContext, _req: &R) -> crate::error::Result<Option<T>> {
+impl Picker for NoopCompactionPicker {
+    type Request = NoopCompactionRequest;
+    type Task = NoopCompactionTask;
+
+    fn pick(
+        &self,
+        _ctx: &PickerContext,
+        _req: &Self::Request,
+    ) -> crate::error::Result<Option<Self::Task>> {
         Ok(None)
     }
 }
@@ -61,15 +67,22 @@ impl CompactionTask for NoopCompactionTask {
     }
 }
 
-impl CompactionRequest for NoopCompactionRequest {
-    fn region_id(&self) -> RegionId {
+impl Request for NoopCompactionRequest {
+    type Key = RegionId;
+
+    fn key(&self) -> Self::Key {
         0
     }
 }
 
 #[async_trait::async_trait]
-impl<R: CompactionRequest> CompactionScheduler<R> for NoopCompactionScheduler<R> {
-    async fn schedule(&self, _request: R) -> crate::error::Result<bool> {
+impl<R> Scheduler for NoopCompactionScheduler<R>
+where
+    R: Request<Key = RegionId>,
+{
+    type Request = R;
+
+    async fn schedule(&self, _request: Self::Request) -> crate::error::Result<bool> {
         Ok(true)
     }
 

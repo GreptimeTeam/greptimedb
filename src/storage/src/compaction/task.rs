@@ -201,12 +201,6 @@ pub mod tests {
         }
     }
 
-    impl NoopCompactionTask {
-        pub fn new(cbs: Vec<CallbackRef>) -> Self {
-            Self { cbs }
-        }
-    }
-
     #[async_trait::async_trait]
     impl CompactionTask for NoopCompactionTask {
         async fn run(self) -> Result<()> {

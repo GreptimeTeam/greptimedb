@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod dedup_deque;
 pub mod noop;
 mod picker;
-mod rate_limit;
 mod scheduler;
 mod strategy;
 mod task;
@@ -24,11 +22,10 @@ mod writer;
 use std::sync::Arc;
 
 pub use picker::{Picker, PickerContext, SimplePicker};
-pub use scheduler::{
-    CompactionRequest, CompactionRequestImpl, CompactionScheduler, CompactionSchedulerConfig,
-    LocalCompactionScheduler,
-};
+pub use scheduler::{CompactionHandler, CompactionRequestImpl};
 pub use task::{CompactionTask, CompactionTaskImpl};
 
+use crate::scheduler::Scheduler;
+
 pub type CompactionSchedulerRef<S> =
-    Arc<dyn CompactionScheduler<CompactionRequestImpl<S>> + Send + Sync>;
+    Arc<dyn Scheduler<Request = CompactionRequestImpl<S>> + Send + Sync>;

@@ -28,6 +28,7 @@ pub mod metadata;
 pub mod proto;
 pub mod read;
 pub mod region;
+pub mod scheduler;
 pub mod schema;
 mod snapshot;
 mod sst;

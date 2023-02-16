@@ -21,11 +21,19 @@ use store_api::logstore::LogStore;
 use crate::compaction::scheduler::CompactionRequestImpl;
 use crate::compaction::strategy::{SimpleTimeWindowStrategy, StrategyRef};
 use crate::compaction::task::{CompactionTask, CompactionTaskImpl};
+use crate::scheduler::Request;
 
 /// Picker picks input SST files and builds the compaction task.
 /// Different compaction strategy may implement different pickers.
-pub trait Picker<R, T: CompactionTask>: Send + 'static {
-    fn pick(&self, ctx: &PickerContext, req: &R) -> crate::error::Result<Option<T>>;
+pub trait Picker: Send + 'static {
+    type Request: Request;
+    type Task: CompactionTask;
+
+    fn pick(
+        &self,
+        ctx: &PickerContext,
+        req: &Self::Request,
+    ) -> crate::error::Result<Option<Self::Task>>;
 }
 
 pub struct PickerContext {}
@@ -51,7 +59,10 @@ impl<S> SimplePicker<S> {
     }
 }
 
-impl<S: LogStore> Picker<CompactionRequestImpl<S>, CompactionTaskImpl<S>> for SimplePicker<S> {
+impl<S: LogStore> Picker for SimplePicker<S> {
+    type Request = CompactionRequestImpl<S>;
+    type Task = CompactionTaskImpl<S>;
+
     fn pick(
         &self,
         ctx: &PickerContext,
@@ -84,38 +95,5 @@ impl<S: LogStore> Picker<CompactionRequestImpl<S>, CompactionTaskImpl<S>> for Si
         }
 
         Ok(None)
-    }
-}
-
-#[cfg(test)]
-pub mod tests {
-    use std::marker::PhantomData;
-
-    use super::*;
-    use crate::compaction::scheduler::CompactionRequest;
-    use crate::compaction::task::tests::{CallbackRef, NoopCompactionTask};
-
-    pub(crate) struct MockPicker<R: CompactionRequest> {
-        pub cbs: Vec<CallbackRef>,
-        _phantom_data: PhantomData<R>,
-    }
-
-    impl<R: CompactionRequest> MockPicker<R> {
-        pub fn new(cbs: Vec<CallbackRef>) -> Self {
-            Self {
-                cbs,
-                _phantom_data: Default::default(),
-            }
-        }
-    }
-
-    impl<R: CompactionRequest> Picker<R, NoopCompactionTask> for MockPicker<R> {
-        fn pick(
-            &self,
-            _ctx: &PickerContext,
-            _req: &R,
-        ) -> crate::error::Result<Option<NoopCompactionTask>> {
-            Ok(Some(NoopCompactionTask::new(self.cbs.clone())))
-        }
     }
 }
