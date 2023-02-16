@@ -44,8 +44,15 @@ pub struct NoopCompactionRequest;
 #[derive(Default, Debug)]
 pub struct NoopCompactionPicker;
 
-impl<R, T: CompactionTask> Picker<R, T> for NoopCompactionPicker {
-    fn pick(&self, _ctx: &PickerContext, _req: &R) -> crate::error::Result<Option<T>> {
+impl Picker for NoopCompactionPicker {
+    type Request = NoopCompactionRequest;
+    type Task = NoopCompactionTask;
+
+    fn pick(
+        &self,
+        _ctx: &PickerContext,
+        _req: &Self::Request,
+    ) -> crate::error::Result<Option<Self::Task>> {
         Ok(None)
     }
 }

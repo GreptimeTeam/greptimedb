@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Debug;
-use std::hash::Hash;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info};
@@ -65,33 +62,26 @@ impl<S: LogStore> CompactionRequestImpl<S> {
     }
 }
 
-pub struct CompactionHandler<R: Request<Key = K>, P: Picker<R, T>, T: CompactionTask, K> {
+pub struct CompactionHandler<P> {
     pub picker: P,
-    pub _phantom: PhantomData<(R, K, T)>,
 }
 
-impl<R: Request<Key = K>, P: Picker<R, T>, T: CompactionTask, K> CompactionHandler<R, P, T, K> {
+impl<P> CompactionHandler<P> {
     pub fn new(picker: P) -> Self {
-        Self {
-            picker,
-            _phantom: Default::default(),
-        }
+        Self { picker }
     }
 }
 
 #[async_trait::async_trait]
-impl<R, P, T, K> Handler for CompactionHandler<R, P, T, K>
+impl<P> Handler for CompactionHandler<P>
 where
-    R: Request<Key = K>,
-    P: Picker<R, T> + Send + Sync,
-    T: CompactionTask,
-    K: Debug + Clone + Eq + Hash + Send + Sync + 'static,
+    P: Picker + Send + Sync,
 {
-    type Request = R;
+    type Request = P::Request;
 
     async fn handle_request(
         &self,
-        req: R,
+        req: Self::Request,
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
     ) -> Result<()> {

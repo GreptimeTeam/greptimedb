@@ -37,7 +37,7 @@ pub mod rate_limit;
 /// It must contain a key for deduplication.
 pub trait Request: Send + Sync + 'static {
     /// Type of request key.
-    type Key;
+    type Key: Debug + Send + Sync;
 
     fn key(&self) -> Self::Key;
 }
