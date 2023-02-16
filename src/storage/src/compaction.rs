@@ -25,10 +25,8 @@ use std::sync::Arc;
 
 pub use picker::{Picker, PickerContext, SimplePicker};
 pub use scheduler::{
-    CompactionRequestImpl, CompactionScheduler, CompactionSchedulerConfig,
-    LocalCompactionScheduler, Request,
+    CompactionRequestImpl, CompactionSchedulerConfig, LocalScheduler, Request, Scheduler,
 };
 pub use task::{CompactionTask, CompactionTaskImpl};
 
-pub type CompactionSchedulerRef<S> =
-    Arc<dyn CompactionScheduler<CompactionRequestImpl<S>> + Send + Sync>;
+pub type CompactionSchedulerRef<S> = Arc<dyn Scheduler<CompactionRequestImpl<S>> + Send + Sync>;

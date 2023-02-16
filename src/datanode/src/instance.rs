@@ -39,7 +39,7 @@ use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
 use snafu::prelude::*;
 use storage::compaction::{
-    CompactionSchedulerConfig, CompactionSchedulerRef, LocalCompactionScheduler, SimplePicker,
+    CompactionSchedulerConfig, CompactionSchedulerRef, LocalScheduler, SimplePicker,
 };
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
@@ -214,7 +214,7 @@ impl Instance {
 fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> CompactionSchedulerRef<S> {
     let picker = SimplePicker::default();
     let config = CompactionSchedulerConfig::from(opts);
-    let scheduler = LocalCompactionScheduler::new(config, picker);
+    let scheduler = LocalScheduler::new(config, picker);
     Arc::new(scheduler)
 }
 
