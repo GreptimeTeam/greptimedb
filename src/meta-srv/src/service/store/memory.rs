@@ -264,3 +264,202 @@ impl KvStore for MemStore {
         Ok(MoveValueResponse { header, kv })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use api::v1::meta::{BatchPutRequest, KeyValue, PutRequest, RangeRequest};
+
+    use super::MemStore;
+    use crate::service::store::kv::KvStore;
+    use crate::util;
+
+    async fn mock_mem_store_with_data() -> MemStore {
+        let kv_store = MemStore::new();
+        let kvs = mock_kvs();
+
+        kv_store
+            .batch_put(BatchPutRequest {
+                kvs,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        kv_store
+            .put(PutRequest {
+                key: b"key11".to_vec(),
+                value: b"val11".to_vec(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        kv_store
+    }
+
+    fn mock_kvs() -> Vec<KeyValue> {
+        vec![
+            KeyValue {
+                key: b"key1".to_vec(),
+                value: b"val1".to_vec(),
+            },
+            KeyValue {
+                key: b"key2".to_vec(),
+                value: b"val2".to_vec(),
+            },
+            KeyValue {
+                key: b"key3".to_vec(),
+                value: b"val3".to_vec(),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_put() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        let resp = kv_store
+            .put(PutRequest {
+                key: b"key11".to_vec(),
+                value: b"val12".to_vec(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(resp.prev_kv.is_none());
+
+        let resp = kv_store
+            .put(PutRequest {
+                key: b"key11".to_vec(),
+                value: b"val13".to_vec(),
+                prev_kv: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(b"key11".to_vec(), resp.prev_kv.as_ref().unwrap().key);
+        assert_eq!(b"val12".to_vec(), resp.prev_kv.as_ref().unwrap().value);
+    }
+
+    #[tokio::test]
+    async fn test_range() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        let key = b"key1".to_vec();
+        let range_end = util::get_prefix_end_key(b"key1");
+
+        let resp = kv_store
+            .range(RangeRequest {
+                key: key.clone(),
+                range_end: range_end.clone(),
+                limit: 0,
+                keys_only: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(2, resp.kvs.len());
+        assert_eq!(b"key1".to_vec(), resp.kvs[0].key);
+        assert_eq!(b"val1".to_vec(), resp.kvs[0].value);
+        assert_eq!(b"key11".to_vec(), resp.kvs[1].key);
+        assert_eq!(b"val11".to_vec(), resp.kvs[1].value);
+
+        let resp = kv_store
+            .range(RangeRequest {
+                key: key.clone(),
+                range_end: range_end.clone(),
+                limit: 0,
+                keys_only: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(2, resp.kvs.len());
+        assert_eq!(b"key1".to_vec(), resp.kvs[0].key);
+        assert_eq!(b"".to_vec(), resp.kvs[0].value);
+        assert_eq!(b"key11".to_vec(), resp.kvs[1].key);
+        assert_eq!(b"".to_vec(), resp.kvs[1].value);
+
+        let resp = kv_store
+            .range(RangeRequest {
+                key: key.clone(),
+                limit: 0,
+                keys_only: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(1, resp.kvs.len());
+        assert_eq!(b"key1".to_vec(), resp.kvs[0].key);
+        assert_eq!(b"val1".to_vec(), resp.kvs[0].value);
+
+        let resp = kv_store
+            .range(RangeRequest {
+                key,
+                range_end,
+                limit: 1,
+                keys_only: false,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(1, resp.kvs.len());
+        assert_eq!(b"key1".to_vec(), resp.kvs[0].key);
+        assert_eq!(b"val1".to_vec(), resp.kvs[0].value);
+    }
+
+    #[tokio::test]
+    async fn test_batch_get() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        let keys = vec![];
+        let batch_resp = kv_store
+            .batch_get(api::v1::meta::BatchGetRequest {
+                keys,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(batch_resp.kvs.is_empty());
+
+        let keys = vec![b"key10".to_vec()];
+        let batch_resp = kv_store
+            .batch_get(api::v1::meta::BatchGetRequest {
+                keys,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(batch_resp.kvs.is_empty());
+
+        let keys = vec![b"key1".to_vec(), b"key3".to_vec(), b"key4".to_vec()];
+        let batch_resp = kv_store
+            .batch_get(api::v1::meta::BatchGetRequest {
+                keys,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(2, batch_resp.kvs.len());
+        assert_eq!(b"key1".to_vec(), batch_resp.kvs[0].key);
+        assert_eq!(b"val1".to_vec(), batch_resp.kvs[0].value);
+        assert_eq!(b"key3".to_vec(), batch_resp.kvs[1].key);
+        assert_eq!(b"val3".to_vec(), batch_resp.kvs[1].value);
+    }
+
+    #[tokio::test]
+    async fn test_compare_and_put() {}
+
+    #[tokio::test]
+    async fn test_delete_range() {}
+
+    #[tokio::test]
+    async fn test_move_value() {}
+}

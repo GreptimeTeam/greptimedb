@@ -596,6 +596,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_batch_get() {
+        let req = BatchGetRequest {
+            keys: vec![b"k1".to_vec(), b"k2".to_vec(), b"k3".to_vec()],
+            ..Default::default()
+        };
+
+        let batch_get: BatchGet = req.try_into().unwrap();
+        let keys = batch_get.keys;
+
+        assert_eq!(b"k1".to_vec(), keys.get(0).unwrap().to_vec());
+        assert_eq!(b"k2".to_vec(), keys.get(1).unwrap().to_vec());
+        assert_eq!(b"k3".to_vec(), keys.get(2).unwrap().to_vec());
+    }
+
+    #[test]
     fn test_parse_batch_put() {
         let req = BatchPutRequest {
             kvs: vec![KeyValue {
