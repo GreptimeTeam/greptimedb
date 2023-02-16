@@ -37,7 +37,7 @@ pub mod rate_limit;
 /// It must contain a key for deduplication.
 pub trait Request: Send + Sync + 'static {
     /// Type of request key.
-    type Key: Debug + Send + Sync;
+    type Key: Eq + Hash + Clone + Debug + Send + Sync;
 
     fn key(&self) -> Self::Key;
 }
@@ -81,9 +81,9 @@ impl Default for SchedulerConfig {
     }
 }
 /// Request scheduler based on local state.
-pub struct LocalScheduler<R: Request<Key = T>, T> {
+pub struct LocalScheduler<R: Request> {
     /// Request FIFO with key deduplication.
-    request_queue: Arc<RwLock<DedupDeque<T, R>>>,
+    request_queue: Arc<RwLock<DedupDeque<R::Key, R>>>,
     /// Token used to halt the scheduler.
     cancel_token: CancellationToken,
     /// Tasks use a cooperative manner to notify scheduler that another request can be scheduled.
@@ -92,9 +92,9 @@ pub struct LocalScheduler<R: Request<Key = T>, T> {
     join_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl<R, K> Debug for LocalScheduler<R, K>
+impl<R> Debug for LocalScheduler<R>
 where
-    R: Request<Key = K> + Send + Sync,
+    R: Request + Send + Sync,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalScheduler<...>").finish()
@@ -102,10 +102,9 @@ where
 }
 
 #[async_trait]
-impl<R, K> Scheduler for LocalScheduler<R, K>
+impl<R> Scheduler for LocalScheduler<R>
 where
-    R: Request<Key = K> + Send,
-    K: Debug + Eq + Hash + Clone + Send + Sync + 'static,
+    R: Request + Send,
 {
     type Request = R;
 
@@ -131,10 +130,9 @@ where
     }
 }
 
-impl<R, K> LocalScheduler<R, K>
+impl<R> LocalScheduler<R>
 where
-    R: Request<Key = K>,
-    K: Debug + Eq + Hash + Clone + Send + Sync + 'static,
+    R: Request,
 {
     /// Creates a new scheduler instance with given config and request handler.
     pub fn new<H>(config: SchedulerConfig, handler: H) -> Self

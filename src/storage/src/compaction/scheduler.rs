@@ -238,7 +238,7 @@ mod tests {
                 latch_cloned.countdown();
             },
         };
-        let scheduler: LocalScheduler<MockRequest, RegionId> = LocalScheduler::new(
+        let scheduler: LocalScheduler<MockRequest> = LocalScheduler::new(
             SchedulerConfig {
                 max_inflight_task: 3,
             },
