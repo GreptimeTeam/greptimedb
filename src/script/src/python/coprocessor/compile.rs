@@ -37,7 +37,7 @@ fn gen_call(
     kwarg: &Option<String>,
     loc: &Location,
 ) -> ast::Stmt<()> {
-    let mut loc = loc.to_owned();
+    let mut loc = *loc;
     // adding a line to avoid confusing if any error occurs when calling the function
     // then the pretty print will point to the last line in code
     // instead of point to any of existing code written by user.
@@ -47,7 +47,7 @@ fn gen_call(
             .iter()
             .map(|v| {
                 let node = ast::ExprKind::Name {
-                    id: v.to_owned(),
+                    id: v.clone(),
                     ctx: ast::ExprContext::Load,
                 };
                 create_located(node, loc)
@@ -59,7 +59,7 @@ fn gen_call(
 
     if let Some(kwarg) = kwarg {
         let node = ast::ExprKind::Name {
-            id: kwarg.to_owned(),
+            id: kwarg.clone(),
             ctx: ast::ExprContext::Load,
         };
         args.push(create_located(node, loc));
@@ -116,7 +116,7 @@ pub fn compile_script(
                     if let Some(kwarg) = kwarg {
                         args.kwarg = None;
                         let node = ArgData {
-                            arg: kwarg.to_owned(),
+                            arg: kwarg.clone(),
                             annotation: None,
                             type_comment: Some("kwargs".to_string()),
                         };
@@ -158,7 +158,7 @@ pub fn compile_script(
     // use `compile::Mode::BlockExpr` so it return the result of statement
     compile_top(
         &top,
-        "<embedded>".to_owned(),
+        "<embedded>".to_string(),
         Mode::BlockExpr,
         CompileOpts { optimize: 0 },
     )

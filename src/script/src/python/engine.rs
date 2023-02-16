@@ -91,7 +91,7 @@ impl PyUDF {
         let col_sch: Vec<_> = columns
             .iter()
             .enumerate()
-            .map(|(i, col)| ColumnSchema::new(arg_names[i].to_owned(), col.data_type(), true))
+            .map(|(i, col)| ColumnSchema::new(arg_names[i].clone(), col.data_type(), true))
             .collect();
         let schema = datatypes::schema::Schema::new(col_sch);
         Arc::new(schema)
@@ -111,7 +111,7 @@ impl Function for PyUDF {
         match self.copr.return_types.get(0) {
             Some(Some(AnnotationInfo {
                 datatype: Some(ty), ..
-            })) => Ok(ty.to_owned()),
+            })) => Ok(ty.clone()),
             _ => PyUdfSnafu {
                 msg: "Can't found return type for python UDF {self}",
             }
@@ -127,7 +127,7 @@ impl Function for PyUDF {
             match ty {
                 Some(AnnotationInfo {
                     datatype: Some(ty), ..
-                }) => arg_types.push(ty.to_owned()),
+                }) => arg_types.push(ty.clone()),
                 _ => {
                     know_all_types = false;
                     break;
@@ -166,7 +166,7 @@ impl Function for PyUDF {
 
         // TODO(discord9): more error handling
         let res0 = res.column(0);
-        Ok(res0.to_owned())
+        Ok(res0.clone())
     }
 }
 
@@ -181,7 +181,7 @@ impl PyScript {
     pub fn register_udf(&self) {
         let udf = PyUDF::from_copr(self.copr.clone());
         PyUDF::register_as_udf(udf.clone());
-        PyUDF::register_to_query_engine(udf, self.query_engine.to_owned());
+        PyUDF::register_to_query_engine(udf, self.query_engine.clone());
     }
 }
 

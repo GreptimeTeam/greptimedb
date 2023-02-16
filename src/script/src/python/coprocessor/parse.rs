@@ -58,7 +58,7 @@ fn py_str_to_string(s: &ast::Expr<()>) -> Result<String> {
         kind: _,
     } = &s.node
     {
-        Ok(v.to_owned())
+        Ok(v.clone())
     } else {
         fail_parse_error!(
             format!(
@@ -100,10 +100,7 @@ fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<ConcreteDataType
         // for any datatype
         "_" => Ok(None),
         // note the different between "_" and _
-        _ => fail_parse_error!(
-            format!("Unknown datatype: {ty} at {loc:?}"),
-            Some(loc.to_owned())
-        ),
+        _ => fail_parse_error!(format!("Unknown datatype: {ty} at {loc:?}"), Some(*loc)),
     }
 }
 
@@ -508,7 +505,7 @@ pub fn parse_and_compile_copr(
                     arg_types,
                     return_types,
                     kwarg,
-                    script: script.to_owned(),
+                    script: script.to_string(),
                     query_engine: query_engine.as_ref().map(|e| Arc::downgrade(e).into()),
                 });
             }

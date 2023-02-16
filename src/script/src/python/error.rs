@@ -216,7 +216,7 @@ pub fn visualize_loc(
 /// extract a reason for [`Error`] in string format, also return a location if possible
 pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
     match err {
-        Error::CoprParse { reason, loc, .. } => (reason.clone(), loc.to_owned()),
+        Error::CoprParse { reason, loc, .. } => (reason.clone(), *loc),
         Error::Other { reason, .. } => (reason.clone(), None),
         Error::PyRuntime { msg, .. } => (msg.clone(), None),
         Error::PyParse { source, .. } => (source.error.to_string(), Some(source.location)),

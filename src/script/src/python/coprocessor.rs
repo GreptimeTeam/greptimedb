@@ -105,7 +105,7 @@ impl From<&Arc<dyn QueryEngine>> for QueryEngineWeakRef {
 impl std::fmt::Debug for QueryEngineWeakRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("QueryEngineWeakRef")
-            .field(&self.0.upgrade().map(|f| f.name().to_owned()))
+            .field(&self.0.upgrade().map(|f| f.name().to_string()))
             .finish()
     }
 }
@@ -149,7 +149,7 @@ impl Coprocessor {
                 let AnnotationInfo {
                     datatype: ty,
                     is_nullable,
-                } = anno[idx].to_owned().unwrap_or_else(|| {
+                } = anno[idx].clone().unwrap_or_else(|| {
                     // default to be not nullable and use DataType inferred by PyVector itself
                     AnnotationInfo {
                         datatype: Some(real_ty.clone()),
@@ -250,15 +250,15 @@ fn check_args_anno_real_type(
     rb: &RecordBatch,
 ) -> Result<()> {
     for (idx, arg) in args.iter().enumerate() {
-        let anno_ty = copr.arg_types[idx].to_owned();
-        let real_ty = arg.to_arrow_array().data_type().to_owned();
+        let anno_ty = copr.arg_types[idx].clone();
+        let real_ty = arg.to_arrow_array().data_type().clone();
         let real_ty = ConcreteDataType::from_arrow_type(&real_ty);
         let is_nullable: bool = rb.schema.column_schemas()[idx].is_nullable();
         ensure!(
             anno_ty
-                .to_owned()
+                .clone()
                 .map(|v| v.datatype.is_none() // like a vector[_]
-                     || v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
+                     || v.datatype == Some(real_ty.clone()) && v.is_nullable == is_nullable)
                 .unwrap_or(true),
             OtherSnafu {
                 reason: format!(
@@ -417,7 +417,7 @@ impl PyQueryEngine {
                     for rb in rbs.iter() {
                         let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
                         for v in rb.columns() {
-                            let v = PyVector::from(v.to_owned());
+                            let v = PyVector::from(v.clone());
                             vec_of_vec.push(v.to_pyobject(vm));
                         }
                         let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);

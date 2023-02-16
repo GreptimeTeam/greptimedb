@@ -564,7 +564,7 @@ impl PyVector {
         // in the newest version of rustpython_vm, wrapped_at for isize is replace by wrap_index(i, len)
         let i = i
             .wrapped_at(self.len())
-            .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_owned()))?;
+            .ok_or_else(|| vm.new_index_error("PyVector index out of range".to_string()))?;
         Ok(val_to_pyobj(self.as_vector_ref().get(i), vm))
     }
 
@@ -927,7 +927,7 @@ impl AsSequence for PyVector {
                 zelf.getitem_by_index(i, vm)
             }),
             ass_item: atomic_func!(|_seq, _i, _value, vm| {
-                Err(vm.new_type_error("PyVector object doesn't support item assigns".to_owned()))
+                Err(vm.new_type_error("PyVector object doesn't support item assigns".to_string()))
             }),
             ..PySequenceMethods::NOT_IMPLEMENTED
         });
@@ -1095,7 +1095,7 @@ pub mod tests {
                     .compile(
                         script,
                         rustpython_compiler_core::Mode::BlockExpr,
-                        "<embedded>".to_owned(),
+                        "<embedded>".to_string(),
                     )
                     .map_err(|err| vm.new_syntax_error(&err))?;
                 let ret = vm.run_code_obj(code_obj, scope);
