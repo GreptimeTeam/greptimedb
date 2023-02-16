@@ -27,12 +27,48 @@ pub struct CatalogHandler {
     pub kv_store: KvStoreRef,
 }
 
+pub struct SchemaHandler {
+    pub kv_store: KvStoreRef,
+}
+
 const CATALOG_KEY_PREFIX: &str = "__c-";
+const SCHEMA_KEY_PREFIX: &str = "__s-";
 
 #[async_trait::async_trait]
 impl HttpHandler for CatalogHandler {
     async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
         let key = String::from(CATALOG_KEY_PREFIX).into_bytes();
+        let range_end = util::get_prefix_end_key(&key);
+        let req = RangeRequest {
+            key,
+            range_end,
+            ..Default::default()
+        };
+
+        let response: RangeResponse = self.kv_store.range(req).await?;
+
+        let kvs = response.kvs;
+        let mut catalog_list = vec![];
+        for kv in kvs {
+            let catalog = String::from_utf8(kv.key).context(error::InvalidUtf8ValueSnafu)?;
+            let split_catalog = catalog.split(CATALOG_KEY_PREFIX).collect::<Vec<&str>>()[1];
+            catalog_list.push(split_catalog.to_string());
+        }
+        let r = serde_json::to_string(&catalog_list).context(error::SerializeToJsonSnafu {
+            input: format!("{catalog_list:?}"),
+        })?;
+
+        Ok(http::Response::builder()
+            .status(http::StatusCode::OK)
+            .body(r)
+            .unwrap())
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpHandler for SchemaHandler{
+    async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
+        let key = String::from(SCHEMA_KEY_PREFIX).into_bytes();
         let range_end = util::get_prefix_end_key(&key);
         let req = RangeRequest {
             key,
