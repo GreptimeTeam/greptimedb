@@ -83,10 +83,10 @@ impl CachePolicy for LruCachePolicy {
                             }
                             Ok(v)
                         }
-                        Err(_) => return inner.read(&path, args).await,
+                        Err(_) => inner.read(&path, args).await,
                     }
                 }
-                Err(_) => return inner.read(&path, args).await,
+                Err(_) => inner.read(&path, args).await,
             }
         })
     }
@@ -117,7 +117,7 @@ impl CachePolicy for LruCachePolicy {
             for file in cache_files {
                 let _ = cache.delete(&file, OpDelete::new()).await;
             }
-            return inner.delete(&path, args).await;
+            inner.delete(&path, args).await
         })
     }
 }

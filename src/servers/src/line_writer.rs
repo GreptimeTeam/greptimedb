@@ -111,7 +111,6 @@ impl LineWriter {
             let rows = self.current_rows;
             let mut builder = datatype.create_mutable_vector(self.expected_rows);
             (0..rows)
-                .into_iter()
                 .try_for_each(|_| builder.push_value_ref(ValueRef::Null))
                 .context(VectorConversionSnafu)
                 .unwrap();
@@ -130,7 +129,6 @@ impl LineWriter {
         self.current_rows += 1;
         self.columns_builders
             .values_mut()
-            .into_iter()
             .try_for_each(|(builder, len)| {
                 if self.current_rows > *len {
                     builder.push_value_ref(ValueRef::Null)

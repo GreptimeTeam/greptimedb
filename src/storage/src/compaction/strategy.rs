@@ -301,7 +301,6 @@ mod tests {
 
         // file with an large time range
         let expected = (0..(TIME_BUCKETS[4] / TIME_BUCKETS[0]))
-            .into_iter()
             .map(|b| (b * TIME_BUCKETS[0], &["a"] as _))
             .collect::<Vec<_>>();
         check_bucket_calculation(
