@@ -56,6 +56,11 @@ impl SqlHandler {
         let object_store = ObjectStore::new(accessor);
 
         let mut parquet_writer = ParquetWriter::new(req.file_name, stream, object_store);
+        // TODO(jiachun):
+        // For now, COPY is implemented synchronously.
+        // When copying large table, it will be blocked for a long time.
+        // Maybe we should make "copy" runs in background?
+        // Like pg: https://www.postgresql.org/docs/current/sql-copy.html
         let rows = parquet_writer.flush().await?;
 
         Ok(Output::AffectedRows(rows))
