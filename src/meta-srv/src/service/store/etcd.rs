@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use api::v1::meta::{
-    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, KeyValue, MoveValueRequest, MoveValueResponse,
-    PutRequest, PutResponse, RangeRequest, RangeResponse, ResponseHeader,
+    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
+    CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse, KeyValue, MoveValueRequest,
+    MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse, ResponseHeader,
 };
 use common_error::prelude::*;
 use common_telemetry::warn;
@@ -96,6 +96,40 @@ impl KvStore for EtcdStore {
 
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(PutResponse { header, prev_kv })
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        let BatchGet {
+            cluster_id,
+            keys,
+            options,
+        } = req.try_into()?;
+
+        let get_ops: Vec<_> = keys
+            .into_iter()
+            .map(|k| TxnOp::get(k, options.clone()))
+            .collect();
+        let txn = Txn::new().and_then(get_ops);
+
+        let txn_res = self
+            .client
+            .kv_client()
+            .txn(txn)
+            .await
+            .context(error::EtcdFailedSnafu)?;
+
+        let mut kvs = vec![];
+        for op_res in txn_res.op_responses() {
+            let get_res = match op_res {
+                TxnOpResponse::Get(get_res) => get_res,
+                _ => unreachable!(),
+            };
+
+            kvs.extend(get_res.kvs().iter().map(KvPair::to_kv));
+        }
+
+        let header = Some(ResponseHeader::success(cluster_id));
+        Ok(BatchGetResponse { header, kvs })
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
@@ -355,6 +389,28 @@ impl TryFrom<PutRequest> for Put {
             cluster_id: header.map_or(0, |h| h.cluster_id),
             key,
             value,
+            options: Some(options),
+        })
+    }
+}
+
+struct BatchGet {
+    cluster_id: u64,
+    keys: Vec<Vec<u8>>,
+    options: Option<GetOptions>,
+}
+
+impl TryFrom<BatchGetRequest> for BatchGet {
+    type Error = error::Error;
+
+    fn try_from(req: BatchGetRequest) -> Result<Self> {
+        let BatchGetRequest { header, keys } = req;
+
+        let options = GetOptions::default().with_keys_only();
+
+        Ok(BatchGet {
+            cluster_id: header.map_or(0, |h| h.cluster_id),
+            keys,
             options: Some(options),
         })
     }

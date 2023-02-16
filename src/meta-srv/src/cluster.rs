@@ -27,7 +27,6 @@ use snafu::{ensure, OptionExt, ResultExt};
 use crate::error::{match_for_io_error, Result};
 use crate::keys::{StatKey, StatValue, DN_STAT_PREFIX};
 use crate::metasrv::ElectionRef;
-use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::ResettableKvStoreRef;
 use crate::{error, util};
 
@@ -130,7 +129,12 @@ impl MetaPeerClient {
     // Get kv information from the leader's in_mem kv store
     pub async fn batch_get(&self, keys: Vec<Vec<u8>>) -> Result<Vec<KeyValue>> {
         if self.is_leader() {
-            return self.in_memory.batch_get(keys).await;
+            let request = BatchGetRequest {
+                keys,
+                ..Default::default()
+            };
+
+            return self.in_memory.batch_get(request).await.map(|resp| resp.kvs);
         }
 
         let max_retry_count = self.max_retry_count;

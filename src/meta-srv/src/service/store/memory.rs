@@ -17,12 +17,13 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 use api::v1::meta::{
-    BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, KeyValue, MoveValueRequest, MoveValueResponse,
-    PutRequest, PutResponse, RangeRequest, RangeResponse, ResponseHeader,
+    BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse, CompareAndPutRequest,
+    CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse, KeyValue, MoveValueRequest,
+    MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse, ResponseHeader,
 };
 use parking_lot::RwLock;
 
+use super::ext::KvStoreExt;
 use crate::error::Result;
 use crate::service::store::kv::{KvStore, ResettableKvStore};
 
@@ -115,6 +116,22 @@ impl KvStore for MemStore {
         let cluster_id = header.map_or(0, |h| h.cluster_id);
         let header = Some(ResponseHeader::success(cluster_id));
         Ok(PutResponse { header, prev_kv })
+    }
+
+    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+        let keys = req.keys;
+
+        let mut kvs = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Some(kv) = self.get(key).await? {
+                kvs.push(kv);
+            }
+        }
+
+        Ok(BatchGetResponse {
+            kvs,
+            ..Default::default()
+        })
     }
 
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
