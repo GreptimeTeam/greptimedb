@@ -366,8 +366,7 @@ impl ErrorExt for Error {
             | Error::MissingInsertValues { .. }
             | Error::PrimaryKeyNotFound { .. }
             | Error::MissingMetasrvOpts { .. }
-            | Error::ColumnNoneDefaultValue { .. }
-            | Error::ColumnValuesNumberMismatch { .. } => StatusCode::InvalidArguments,
+            | Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
