@@ -20,7 +20,7 @@ use common_telemetry::info;
 use meta_client::MetaClientOpts;
 use serde::{Deserialize, Serialize};
 use servers::Mode;
-use storage::compaction::CompactionSchedulerConfig;
+use storage::compaction::SchedulerConfig;
 use storage::config::EngineConfig as StorageEngineConfig;
 
 use crate::error::Result;
@@ -124,7 +124,7 @@ impl Default for CompactionConfig {
     }
 }
 
-impl From<&DatanodeOptions> for CompactionSchedulerConfig {
+impl From<&DatanodeOptions> for SchedulerConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
             max_inflight_task: value.compaction.max_inflight_task,

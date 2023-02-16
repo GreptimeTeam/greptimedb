@@ -97,7 +97,7 @@ pub mod tests {
     use crate::compaction::scheduler::Request;
     use crate::compaction::task::tests::{CallbackRef, NoopCompactionTask};
 
-    pub(crate) struct MockPicker<R: Request<RegionId>> {
+    pub(crate) struct MockPicker<R> {
         pub cbs: Vec<CallbackRef>,
         _phantom_data: PhantomData<R>,
     }

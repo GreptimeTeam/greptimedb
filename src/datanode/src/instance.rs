@@ -39,7 +39,7 @@ use query::query_engine::{QueryEngineFactory, QueryEngineRef};
 use servers::Mode;
 use snafu::prelude::*;
 use storage::compaction::{
-    CompactionSchedulerConfig, CompactionSchedulerRef, LocalScheduler, SimplePicker,
+    CompactionHandler, CompactionSchedulerRef, LocalScheduler, SchedulerConfig, SimplePicker,
 };
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
@@ -47,6 +47,7 @@ use store_api::logstore::LogStore;
 use table::table::numbers::NumbersTable;
 use table::table::TableIdProviderRef;
 use table::Table;
+use tokio::sync::Notify;
 
 use crate::datanode::{
     DatanodeOptions, ObjectStoreConfig, WalConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE,
@@ -213,8 +214,14 @@ impl Instance {
 
 fn create_compaction_scheduler<S: LogStore>(opts: &DatanodeOptions) -> CompactionSchedulerRef<S> {
     let picker = SimplePicker::default();
-    let config = CompactionSchedulerConfig::from(opts);
-    let scheduler = LocalScheduler::new(config, picker);
+    let config = SchedulerConfig::from(opts);
+    let notify = Arc::new(Notify::new()); // TODO(hl):
+    let handler = CompactionHandler {
+        picker,
+        notifier: notify,
+        _phantom: Default::default(),
+    };
+    let scheduler = LocalScheduler::new(config, handler);
     Arc::new(scheduler)
 }
 

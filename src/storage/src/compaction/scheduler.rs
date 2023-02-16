@@ -74,11 +74,11 @@ pub trait Request<K>: Send + Sync + 'static {
 }
 
 #[derive(Debug)]
-pub struct CompactionSchedulerConfig {
+pub struct SchedulerConfig {
     pub max_inflight_task: usize,
 }
 
-impl Default for CompactionSchedulerConfig {
+impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
             max_inflight_task: 4,
@@ -153,27 +153,27 @@ where
     R: Request<K>,
     K: Debug + Eq + Hash + Clone + Send + Sync + 'static,
 {
-    pub fn new<P, T>(config: CompactionSchedulerConfig, _picker: P) -> Self
+    pub fn new<H>(config: SchedulerConfig, handler: H) -> Self
     where
-        T: CompactionTask,
-        P: Picker<R, T> + Send + Sync,
+        H: Handler<R> + Send + Sync + 'static,
     {
         let request_queue: Arc<RwLock<DedupDeque<K, R>>> =
             Arc::new(RwLock::new(DedupDeque::default()));
         let cancel_token = CancellationToken::new();
         let task_notifier = Arc::new(Notify::new());
 
-        let handler = HandlerLoop {
+        let handle_loop = HandlerLoop {
             task_notifier: task_notifier.clone(),
             req_queue: request_queue.clone(),
             cancel_token: cancel_token.child_token(),
             limiter: Arc::new(CascadeRateLimiter::new(vec![Box::new(
                 MaxInflightTaskLimiter::new(config.max_inflight_task),
             )])),
+            request_handler: handler,
         };
         let join_handle = common_runtime::spawn_bg(async move {
             debug!("Compaction handler loop spawned");
-            handler.run().await;
+            handle_loop.run().await;
         });
         Self {
             join_handle: Mutex::new(Some(join_handle)),
@@ -188,14 +188,17 @@ where
     }
 }
 
-struct HandlerLoop<R, K> {
+struct HandlerLoop<R, K, H> {
     req_queue: Arc<RwLock<DedupDeque<K, R>>>,
     cancel_token: CancellationToken,
     task_notifier: Arc<Notify>,
+    request_handler: H,
     limiter: Arc<CascadeRateLimiter<R>>,
 }
 
-impl<R: Request<K>, K: Debug + Clone + Eq + Hash + Send + 'static> HandlerLoop<R, K> {
+impl<R: Request<K>, K: Debug + Clone + Eq + Hash + Send + 'static, H: Handler<R>>
+    HandlerLoop<R, K, H>
+{
     /// Runs region compaction requests dispatch loop.
     pub async fn run(&self) {
         let task_notifier = self.task_notifier.clone();
@@ -206,25 +209,24 @@ impl<R: Request<K>, K: Debug + Clone + Eq + Hash + Send + 'static> HandlerLoop<R
                     // poll requests as many as possible until rate limited, and then wait for
                     // notification (some task's finished).
                     debug!("Notified, queue size: {:?}", self.req_queue.read().unwrap().len());
-                    while let Some((region_id,  req)) = self.poll_task().await{
+                    while let Some((task_key,  req)) = self.poll_task().await{
                         if let Ok(token) = limiter.acquire_token(&req) {
-                            debug!("Executing compaction request: {:?}", region_id);
-                            if let Err(e) = self.handle_compaction_request(req, token).await {
-                                error!(e; "Failed to submit compaction task for region: {:?}", region_id);
+                            debug!("Executing request: {:?}", task_key);
+                            if let Err(e) = self.handle_request(req, token).await {
+                                error!(e; "Failed to submit request: {:?}", task_key);
                             } else {
-                                info!("Submitted region compaction task: {:?}", region_id);
+                                info!("Submitted task: {:?}", task_key);
                             }
                         } else {
-                            // compaction rate limited, put back to req queue to wait for next
-                            // schedule
-                            debug!("Put back request {:?}, queue size: {}", region_id, self.req_queue.read().unwrap().len());
-                            self.put_back_req(region_id, req).await;
+                            // rate limited, put back to req queue to wait for next schedule
+                            debug!("Put back request {:?}, queue size: {}", task_key, self.req_queue.read().unwrap().len());
+                            self.put_back_req(task_key, req).await;
                             break;
                         }
                     }
                 }
                 _ = self.cancel_token.cancelled() => {
-                    info!("Compaction tasks scheduler stopped.");
+                    info!("Task scheduler stopped.");
                     return;
                 }
             }
@@ -244,16 +246,16 @@ impl<R: Request<K>, K: Debug + Clone + Eq + Hash + Send + 'static> HandlerLoop<R
         queue.push_front(key, req);
     }
 
-    // Handles compaction request, submit task to bg runtime.
-    async fn handle_compaction_request(&self, _req: R, _token: BoxedRateLimitToken) -> Result<()> {
-        todo!()
+    // Handles request, submit task to bg runtime.
+    async fn handle_request(&self, req: R, token: BoxedRateLimitToken) -> Result<()> {
+        self.request_handler.handle_request(req, token).await
     }
 }
 
-struct CompactionHandler<R: Request<K>, P: Picker<R, T>, T: CompactionTask, K> {
-    picker: P,
-    notifier: Arc<Notify>,
-    _phantom: PhantomData<(R, K, T)>,
+pub struct CompactionHandler<R: Request<K>, P: Picker<R, T>, T: CompactionTask, K> {
+    pub picker: P,
+    pub notifier: Arc<Notify>,
+    pub _phantom: PhantomData<(R, K, T)>,
 }
 
 #[async_trait::async_trait]
@@ -350,6 +352,7 @@ mod tests {
             req_queue: queue.clone(),
             cancel_token: Default::default(),
             task_notifier: Arc::new(Default::default()),
+            request_handler: MockHandler {},
             limiter: Arc::new(CascadeRateLimiter::new(vec![Box::new(
                 MaxInflightTaskLimiter::new(3),
             )])),
@@ -373,6 +376,15 @@ mod tests {
         region_id: RegionId,
     }
 
+    struct MockHandler {}
+
+    #[async_trait::async_trait]
+    impl Handler<MockRequest> for MockHandler {
+        async fn handle_request(&self, req: MockRequest, token: BoxedRateLimitToken) -> Result<()> {
+            Ok(())
+        }
+    }
+
     impl Request<RegionId> for MockRequest {
         fn key(&self) -> RegionId {
             self.region_id
@@ -384,12 +396,15 @@ mod tests {
         let latch = Arc::new(CountdownLatch::new(2));
         let latch_cloned = latch.clone();
 
-        let picker = MockPicker::new(vec![Arc::new(move || latch_cloned.countdown())]);
-        let scheduler = LocalScheduler::new(
-            CompactionSchedulerConfig {
+        let picker: MockPicker<MockRequest> =
+            MockPicker::new(vec![Arc::new(move || latch_cloned.countdown())]);
+
+        let handler = MockHandler {};
+        let scheduler: LocalScheduler<MockRequest, RegionId> = LocalScheduler::new(
+            SchedulerConfig {
                 max_inflight_task: 3,
             },
-            picker,
+            handler,
         );
 
         scheduler
@@ -415,14 +430,12 @@ mod tests {
         let latch = Arc::new(CountdownLatch::new(task_size));
         let latch_clone = latch.clone();
 
-        let picker = MockPicker::new(vec![Arc::new(move || {
-            latch_clone.countdown();
-        })]);
+        let handler = MockHandler {};
 
-        let config = CompactionSchedulerConfig {
+        let config = SchedulerConfig {
             max_inflight_task: 3,
         };
-        let scheduler = LocalScheduler::new(config, picker);
+        let scheduler = LocalScheduler::new(config, handler);
 
         for i in 0..task_size {
             scheduler
@@ -445,14 +458,12 @@ mod tests {
         let latch = Arc::new(CountdownLatch::new(task_size));
         let latch_clone = latch.clone();
 
-        let picker = MockPicker::new(vec![Arc::new(move || {
-            latch_clone.countdown();
-        })]);
+        let handler = MockHandler {};
 
-        let config = CompactionSchedulerConfig {
+        let config = SchedulerConfig {
             max_inflight_task: 3,
         };
-        let scheduler = LocalScheduler::new(config, picker);
+        let scheduler = LocalScheduler::new(config, handler);
 
         for i in 0..task_size / 2 {
             scheduler
@@ -481,11 +492,11 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_duplicate_tasks() {
         common_telemetry::init_default_ut_logging();
-        let picker = MockPicker::new(vec![]);
-        let config = CompactionSchedulerConfig {
+        let handler = MockHandler {};
+        let config = SchedulerConfig {
             max_inflight_task: 3,
         };
-        let scheduler = LocalScheduler::new(config, picker);
+        let scheduler = LocalScheduler::new(config, handler);
 
         let mut scheduled_task = 0;
         for _ in 0..10 {

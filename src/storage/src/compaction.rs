@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 pub use picker::{Picker, PickerContext, SimplePicker};
 pub use scheduler::{
-    CompactionRequestImpl, CompactionSchedulerConfig, LocalScheduler, Request, Scheduler,
+    CompactionHandler, CompactionRequestImpl, LocalScheduler, Request, Scheduler, SchedulerConfig,
 };
 pub use task::{CompactionTask, CompactionTaskImpl};
 
