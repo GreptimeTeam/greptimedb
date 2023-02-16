@@ -36,17 +36,9 @@ impl RawSchema {
     /// Sets [RawSchema::timestamp_index] to the first index of the timestamp
     /// column. It doesn't check whether time index column is duplicate.
     pub fn new(column_schemas: Vec<ColumnSchema>) -> RawSchema {
-        let timestamp_index =
-            column_schemas
-                .iter()
-                .enumerate()
-                .find_map(|(index, column_schema)| {
-                    if column_schema.is_time_index() {
-                        Some(index)
-                    } else {
-                        None
-                    }
-                });
+        let timestamp_index = column_schemas
+            .iter()
+            .position(|column_schema| column_schema.is_time_index());
 
         RawSchema {
             column_schemas,
@@ -60,6 +52,8 @@ impl TryFrom<RawSchema> for Schema {
     type Error = Error;
 
     fn try_from(raw: RawSchema) -> Result<Schema> {
+        // While building Schema, we don't trust the fields, such as timestamp_index,
+        // in RawSchema. We use SchemaBuilder to perform the validation.
         SchemaBuilder::try_from(raw.column_schemas)?
             .version(raw.version)
             .build()

@@ -86,15 +86,11 @@ impl Instance {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use api::v1::{column_def, ColumnDataType, ColumnDef, TableId};
     use common_catalog::consts::MIN_USER_TABLE_ID;
     use common_grpc_expr::create_table_schema;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{
-        ColumnDefaultConstraint, ColumnSchema, RawSchema, SchemaBuilder, SchemaRef,
-    };
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema};
     use datatypes::value::Value;
 
     use super::*;
@@ -109,7 +105,7 @@ mod tests {
         assert_eq!(request.schema_name, "public".to_string());
         assert_eq!(request.table_name, "my-metrics");
         assert_eq!(request.desc, Some("blabla little magic fairy".to_string()));
-        assert_eq!(request.schema, RawSchema::from(&*expected_table_schema()));
+        assert_eq!(request.schema, expected_table_schema());
         assert_eq!(request.primary_key_indices, vec![1, 0]);
         assert!(request.create_if_not_exists);
 
@@ -226,7 +222,7 @@ mod tests {
         }
     }
 
-    fn expected_table_schema() -> SchemaRef {
+    fn expected_table_schema() -> RawSchema {
         let column_schemas = vec![
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
@@ -238,11 +234,7 @@ mod tests {
             ColumnSchema::new("cpu", ConcreteDataType::float32_datatype(), true),
             ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), true),
         ];
-        Arc::new(
-            SchemaBuilder::try_from(column_schemas)
-                .unwrap()
-                .build()
-                .unwrap(),
-        )
+
+        RawSchema::new(column_schemas)
     }
 }

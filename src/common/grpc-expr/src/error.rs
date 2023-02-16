@@ -40,12 +40,6 @@ pub enum Error {
         source: api::error::Error,
     },
 
-    #[snafu(display("Failed to create schema when creating table, source: {}", source))]
-    CreateSchema {
-        #[snafu(backtrace)]
-        source: datatypes::error::Error,
-    },
-
     #[snafu(display(
         "Duplicated timestamp column in gRPC requests, exists {}, duplicated: {}",
         exists,
@@ -102,9 +96,9 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             Error::ColumnDataType { .. } => StatusCode::Internal,
-            Error::CreateSchema { .. }
-            | Error::DuplicatedTimestampColumn { .. }
-            | Error::MissingTimestampColumn { .. } => StatusCode::InvalidArguments,
+            Error::DuplicatedTimestampColumn { .. } | Error::MissingTimestampColumn { .. } => {
+                StatusCode::InvalidArguments
+            }
             Error::InvalidColumnProto { .. } => StatusCode::InvalidArguments,
             Error::CreateVector { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,
