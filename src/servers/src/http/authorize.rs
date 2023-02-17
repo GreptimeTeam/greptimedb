@@ -159,7 +159,7 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
             return Ok(None);
         }
         // TODO(shuiyisong): remove this for performance optimization
-        // authorize would deserialize agian
+        // `authorize` would deserialize query from urlencoded again
         let query = match serde_urlencoded::from_str::<HashMap<String, String>>(query_str.unwrap())
         {
             Ok(query_map) => query_map,
