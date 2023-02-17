@@ -50,7 +50,7 @@ use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
 use self::authorize::HttpAuth;
-use self::influxdb::{influxdb_ping, influxdb_write};
+use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write};
 use crate::auth::UserProviderRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -493,7 +493,7 @@ impl HttpServer {
         Router::new()
             .route("/write", routing::post(influxdb_write))
             .route("/ping", routing::get(influxdb_ping))
-            .route("/health", routing::get(influxdb_ping))
+            .route("/health", routing::get(influxdb_health))
             .with_state(influxdb_handler)
     }
 
