@@ -68,6 +68,12 @@ impl<S: LogStore> fmt::Debug for RegionImpl<S> {
         f.debug_struct("RegionImpl")
             .field("id", &self.inner.shared.id)
             .field("name", &self.inner.shared.name)
+            .field("wal", &self.inner.wal)
+            .field("flush_strategy", &self.inner.flush_strategy)
+            .field("flush_scheduler", &self.inner.flush_scheduler)
+            .field("compaction_scheduler", &self.inner.compaction_scheduler)
+            .field("sst_layer", &self.inner.sst_layer)
+            .field("manifest", &self.inner.manifest)
             .finish()
     }
 }

@@ -271,10 +271,6 @@ async fn test_new_region() {
 
     assert_eq!(region_name, region.name());
     assert_eq!(expect_schema, *region.in_memory_metadata().schema());
-    assert_eq!(
-        r#"RegionImpl { id: 0, name: "region-0" }"#,
-        format!("{:?}", region)
-    );
 }
 
 #[tokio::test]
