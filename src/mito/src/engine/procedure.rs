@@ -13,3 +13,5 @@
 // limitations under the License.
 
 mod create;
+
+pub(crate) use create::CreateMitoTable;

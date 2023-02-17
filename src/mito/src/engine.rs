@@ -22,7 +22,7 @@ use common_error::ext::BoxedError;
 use common_procedure::BoxedProcedure;
 use common_telemetry::tracing::log::info;
 use common_telemetry::{debug, logging};
-use datatypes::schema::{Schema, SchemaRef};
+use datatypes::schema::Schema;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
@@ -43,6 +43,7 @@ use table::{error as table_error, Result as TableResult, Table};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
+use crate::engine::procedure::CreateMitoTable;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
     BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, InvalidRawSchemaSnafu,
@@ -109,9 +110,14 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     async fn create_table_procedure(
         &self,
         _ctx: &EngineContext,
-        _request: CreateTableRequest,
+        request: CreateTableRequest,
     ) -> TableResult<BoxedProcedure> {
-        unimplemented!()
+        validate_create_table_request(&request)
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        let procedure = Box::new(CreateMitoTable::new(request, self.inner.clone()));
+        Ok(procedure)
     }
 
     async fn open_table(
@@ -163,7 +169,7 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     }
 }
 
-struct MitoEngineInner<S: StorageEngine> {
+pub(crate) struct MitoEngineInner<S: StorageEngine> {
     /// All tables opened by the engine. Map key is formatted [TableReference].
     ///
     /// Writing to `tables` should also hold the `table_mutex`.

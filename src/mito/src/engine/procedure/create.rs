@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_procedure::error::FromJsonSnafu;
+use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{Context, Error, LockKey, Procedure, ProcedureManager, Result, Status};
 use datatypes::schema::{Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::storage::{
-    ColumnId, CreateOptions, EngineContext, OpenOptions, RegionDescriptor, RegionDescriptorBuilder,
-    RegionId, RegionNumber, StorageEngine,
+    ColumnId, CreateOptions, EngineContext, OpenOptions, RegionDescriptorBuilder, RegionNumber,
+    StorageEngine,
 };
 use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::CreateTableRequest;
@@ -36,7 +36,7 @@ use crate::error::{
 use crate::table::MitoTable;
 
 /// Procedure to create a [MitoTable].
-pub struct CreateMitoTable<S: StorageEngine> {
+pub(crate) struct CreateMitoTable<S: StorageEngine> {
     data: CreateTableData,
     engine_inner: Arc<MitoEngineInner<S>>,
     /// Created regions of the table.
@@ -60,11 +60,19 @@ impl<S: StorageEngine> Procedure for CreateMitoTable<S> {
     }
 
     fn dump(&self) -> Result<String> {
-        unimplemented!()
+        let json = serde_json::to_string(&self.data).context(ToJsonSnafu)?;
+        Ok(json)
     }
 
     fn lock_key(&self) -> LockKey {
-        unimplemented!()
+        let table_ref = self.data.table_ref();
+        let keys = self
+            .data
+            .request
+            .region_numbers
+            .iter()
+            .map(|number| format!("{table_ref}/region-{number}"));
+        LockKey::new(keys)
     }
 }
 
@@ -72,7 +80,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
     const TYPE_NAME: &str = "mito::CreateMitoTable";
 
     /// Returns a new [CreateMitoTable].
-    fn new(request: CreateTableRequest, engine_inner: Arc<MitoEngineInner<S>>) -> Self {
+    pub(crate) fn new(request: CreateTableRequest, engine_inner: Arc<MitoEngineInner<S>>) -> Self {
         CreateMitoTable {
             data: CreateTableData {
                 state: CreateTableState::Prepare,
@@ -225,10 +233,6 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             &self.data.request.schema_name,
             self.data.request.id,
         );
-        let opts = OpenOptions {
-            parent_dir: table_dir.to_string(),
-        };
-
         // Try to open the table first, as the table manifest might already exist.
         let table_ref = self.data.table_ref();
         if let Some((manifest, table_info)) = self
