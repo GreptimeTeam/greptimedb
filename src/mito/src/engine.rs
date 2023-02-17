@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_procedure::BoxedProcedure;
+use common_procedure::{BoxedProcedure, ProcedureManager};
 use common_telemetry::tracing::log::info;
 use common_telemetry::{debug, logging};
 use datatypes::schema::Schema;
@@ -86,6 +86,14 @@ impl<S: StorageEngine> MitoEngine<S> {
         Self {
             inner: Arc::new(MitoEngineInner::new(config, storage_engine, object_store)),
         }
+    }
+
+    /// Register all procedure loaders to the procedure manager.
+    ///
+    /// # Panics
+    /// Panics on error.
+    pub fn register_procedure_loaders(&self, procedure_manager: &dyn ProcedureManager) {
+        procedure::register_procedure_loaders(self.inner.clone(), procedure_manager);
     }
 }
 

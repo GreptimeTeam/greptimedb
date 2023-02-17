@@ -53,9 +53,9 @@ impl<S: StorageEngine> Procedure for CreateMitoTable<S> {
 
     async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
         match self.data.state {
-            CreateTableState::Prepare => todo!(),
-            CreateTableState::CreateRegions => todo!(),
-            CreateTableState::WriteTableManifest => todo!(),
+            CreateTableState::Prepare => self.on_prepare(),
+            CreateTableState::CreateRegions => self.on_create_regions().await,
+            CreateTableState::WriteTableManifest => self.on_write_table_manifest().await,
         }
     }
 
@@ -93,23 +93,11 @@ impl<S: StorageEngine> CreateMitoTable<S> {
         }
     }
 
-    /// Recover the procedure from json.
-    fn from_json(json: &str, engine_inner: Arc<MitoEngineInner<S>>) -> Result<Self> {
-        let data: CreateTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
-
-        Ok(CreateMitoTable {
-            data,
-            engine_inner,
-            regions: HashMap::new(),
-            table_schema: None,
-        })
-    }
-
     /// Register the loader of this procedure to the `procedure_manager`.
     ///
     /// # Panics
     /// Panics on error.
-    fn register_loader(
+    pub(crate) fn register_loader(
         engine_inner: Arc<MitoEngineInner<S>>,
         procedure_manager: &dyn ProcedureManager,
     ) {
@@ -121,6 +109,18 @@ impl<S: StorageEngine> CreateMitoTable<S> {
                 }),
             )
             .unwrap()
+    }
+
+    /// Recover the procedure from json.
+    fn from_json(json: &str, engine_inner: Arc<MitoEngineInner<S>>) -> Result<Self> {
+        let data: CreateTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+
+        Ok(CreateMitoTable {
+            data,
+            engine_inner,
+            regions: HashMap::new(),
+            table_schema: None,
+        })
     }
 
     /// Checks whether the table exists.
