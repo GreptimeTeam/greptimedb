@@ -16,7 +16,7 @@ use std::pin::Pin;
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
-use common_recordbatch::{RecordBatch, RecordBatches};
+use common_recordbatch::RecordBatch;
 use datafusion_expr::type_coercion::binary::coerce_types;
 use datafusion_expr::Operator;
 use datatypes::data_type::DataType;
@@ -149,16 +149,15 @@ impl SqlHandler {
         let (catalog_name, schema_name, table_name) =
             table_idents_to_full_name(stmt.table_name(), query_ctx)?;
 
-        let columns: Vec<String> = stmt.columns().iter().map(|c| (*c).clone()).collect();
         let schema = table.schema();
-        let columns = if columns.is_empty() {
+        let columns: Vec<_> = if stmt.columns().is_empty() {
             schema
                 .column_schemas()
                 .iter()
                 .map(|c| c.name.to_string())
                 .collect()
         } else {
-            columns
+            stmt.columns().iter().map(|c| (*c).clone()).collect()
         };
         let columns_num = columns.len();
 
@@ -183,6 +182,8 @@ impl SqlHandler {
                     column_name: &column_name,
                 })?;
             let expect_datatype = column_schema.data_type.as_arrow_type();
+            // It's safe to retrieve the column schema by index, we already
+            // check columns number is the same above.
             let batch_datatype = batch_columns[i].data_type.as_arrow_type();
             let coerced_type = coerce_types(&expect_datatype, &Operator::Eq, &batch_datatype)
                 .map_err(|_| Error::ColumnTypeMismatch {
@@ -246,17 +247,30 @@ impl SqlHandler {
             .await
             .context(ExecuteSqlSnafu)?;
 
-        let batches = match output {
-            Output::Stream(s) => RecordBatches::try_collect(s)
-                .await
-                .context(CollectRecordsSnafu)?,
-            Output::RecordBatches(bs) => bs,
+        let stream: InsertRequestStream = match output {
+            Output::RecordBatches(batches) => {
+                Box::pin(stream::iter(batches.take()).map(move |batch| {
+                    Self::build_request_from_batch(
+                        stmt.clone(),
+                        table.clone(),
+                        batch,
+                        query_ctx.clone(),
+                    )
+                })) as _
+            }
+
+            Output::Stream(stream) => Box::pin(stream.map(move |batch| {
+                Self::build_request_from_batch(
+                    stmt.clone(),
+                    table.clone(),
+                    batch.context(CollectRecordsSnafu)?,
+                    query_ctx.clone(),
+                )
+            })),
             _ => unreachable!(),
         };
 
-        Ok(Box::pin(stream::iter(batches.take()).map(move |batch| {
-            Self::build_request_from_batch(stmt.clone(), table.clone(), batch, query_ctx.clone())
-        })))
+        Ok(stream)
     }
 
     pub(crate) async fn insert_to_requests(

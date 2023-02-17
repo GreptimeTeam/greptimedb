@@ -52,9 +52,10 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Unsupported operation for vector: {}", vector))]
+    #[snafu(display("Unsupported operation: {} for vector: {}", op, vector_type))]
     UnsupportedOperation {
-        vector: String,
+        op: String,
+        vector_type: String,
         backtrace: Backtrace,
     },
 

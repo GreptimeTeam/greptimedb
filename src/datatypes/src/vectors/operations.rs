@@ -126,7 +126,8 @@ impl VectorOp for NullVector {
     fn cast(&self, _to_type: &ConcreteDataType) -> Result<VectorRef> {
         // TODO(dennis): impl it when NullVector has other datatype.
         error::UnsupportedOperationSnafu {
-            vector: self.vector_type_name(),
+            op: "cast",
+            vector_type: self.vector_type_name(),
         }
         .fail()
     }
