@@ -142,6 +142,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
+    use futures::StreamExt;
     use log_store::NoopLogStore;
     use mito::config::EngineConfig as TableEngineConfig;
     use mito::engine::MitoEngine;
@@ -160,6 +161,7 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
+    use crate::error::Error;
     use crate::sql::insert::InsertRequests;
 
     struct DemoTable;
@@ -295,6 +297,66 @@ mod tests {
             _ => {
                 panic!("Not supposed to reach here")
             }
+        }
+
+        // test inert into select
+
+        // type mismatch
+        let sql = "insert into demo(cpu) select number from numbers limit 3";
+
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(Statement::Insert(i)) => i,
+            _ => {
+                unreachable!()
+            }
+        };
+        let request = sql_handler
+            .insert_to_requests(catalog_list.clone(), *stmt, QueryContext::arc())
+            .await
+            .unwrap();
+
+        match request {
+            InsertRequests::Stream(mut stream) => {
+                assert_eq!((1, Some(1)), stream.size_hint());
+                assert!(matches!(
+                    stream.next().await.unwrap().unwrap_err(),
+                    Error::ColumnTypeMismatch { .. }
+                ));
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "insert into demo(cpu) select cast(number as double) from numbers limit 3";
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(Statement::Insert(i)) => i,
+            _ => {
+                unreachable!()
+            }
+        };
+        let request = sql_handler
+            .insert_to_requests(catalog_list.clone(), *stmt, QueryContext::arc())
+            .await
+            .unwrap();
+
+        match request {
+            InsertRequests::Stream(mut stream) => {
+                assert_eq!((1, Some(1)), stream.size_hint());
+                let mut times = 0;
+                while let Some(Ok(SqlRequest::Insert(req))) = stream.next().await {
+                    times += 1;
+                    assert_eq!(req.table_name, "demo");
+                    let columns_values = req.columns_values;
+                    assert_eq!(1, columns_values.len());
+
+                    let memories = &columns_values["cpu"];
+                    assert_eq!(3, memories.len());
+                    assert_eq!(Value::from(0.0f64), memories.get(0));
+                    assert_eq!(Value::from(1.0f64), memories.get(1));
+                    assert_eq!(Value::from(2.0f64), memories.get(2));
+                }
+                assert_eq!(1, times);
+            }
+            _ => unreachable!(),
         }
     }
 }

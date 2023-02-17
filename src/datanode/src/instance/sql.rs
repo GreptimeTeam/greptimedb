@@ -69,15 +69,20 @@ impl Instance {
                     }
 
                     InsertRequests::Stream(mut s) => {
-                        let mut output = None;
+                        let mut rows = 0;
                         while let Some(request) = s.next().await {
-                            output = Some(
-                                self.sql_handler
-                                    .execute(request?, query_ctx.clone())
-                                    .await?,
-                            )
+                            match self
+                                .sql_handler
+                                .execute(request?, query_ctx.clone())
+                                .await?
+                            {
+                                Output::AffectedRows(n) => {
+                                    rows += n;
+                                }
+                                _ => unreachable!(),
+                            }
                         }
-                        Ok(output.unwrap())
+                        Ok(Output::AffectedRows(rows))
                     }
                 }
             }
