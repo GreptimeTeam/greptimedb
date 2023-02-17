@@ -110,24 +110,10 @@ async fn test_influxdb_write() {
     let app = make_test_app(tx.clone(), None);
     let client = TestClient::new(app);
 
-    let result = client
-        .get("/v1/influxdb/health")
-        .header(
-            http::header::AUTHORIZATION,
-            "basic Z3JlcHRpbWU6Z3JlcHRpbWU=",
-        )
-        .send()
-        .await;
+    let result = client.get("/v1/influxdb/health").send().await;
     assert_eq!(result.status(), 200);
 
-    let result = client
-        .get("/v1/influxdb/ping")
-        .header(
-            http::header::AUTHORIZATION,
-            "basic Z3JlcHRpbWU6Z3JlcHRpbWU=",
-        )
-        .send()
-        .await;
+    let result = client.get("/v1/influxdb/ping").send().await;
     assert_eq!(result.status(), 204);
 
     // right request
