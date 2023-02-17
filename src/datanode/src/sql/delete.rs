@@ -124,7 +124,7 @@ fn value_to_vector(column_name: &String, sql_value: &Value, table: &TableRef) ->
     match value {
         Ok(value) => {
             let mut vec = data_type.create_mutable_vector(1);
-            if vec.push_value_ref(value.as_value_ref()).is_err() {
+            if vec.try_push_value_ref(value.as_value_ref()).is_err() {
                 return InvalidSqlSnafu {
                     msg: format!(
                         "invalid sql, column name is {column_name}, value is {sql_value}",
