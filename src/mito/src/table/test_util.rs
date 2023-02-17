@@ -102,7 +102,7 @@ pub async fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     (dir, ObjectStore::new(accessor))
 }
 
-fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
+pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
     CreateTableRequest {
         id: 1,
         catalog_name: "greptime".to_string(),

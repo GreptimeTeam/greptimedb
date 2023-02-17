@@ -338,3 +338,38 @@ impl CreateTableData {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use table::engine::{EngineContext, TableEngine};
+
+    use super::*;
+    use crate::engine::procedure::procedure_test_util::{self, TestEnv};
+    use crate::table::test_util;
+
+    #[tokio::test]
+    async fn test_create_table_procedure() {
+        let TestEnv {
+            table_engine,
+            dir: _dir,
+        } = procedure_test_util::setup_test_engine("create_procedure").await;
+        let schema = Arc::new(test_util::schema_for_test());
+        let request = test_util::new_create_request(schema);
+
+        let mut procedure = table_engine
+            .create_table_procedure(&EngineContext::default(), request.clone())
+            .await
+            .unwrap();
+        procedure_test_util::execute_procedure_until_done(&mut procedure).await;
+
+        let table_ref = TableReference {
+            catalog: &request.catalog_name,
+            schema: &request.schema_name,
+            table: &request.table_name,
+        };
+        assert!(table_engine
+            .get_table(&EngineContext::default(), &table_ref)
+            .unwrap()
+            .is_some());
+    }
+}
