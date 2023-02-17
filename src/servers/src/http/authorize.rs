@@ -133,7 +133,7 @@ async fn authorize<B: Send + Sync + 'static>(
 
 fn get_influxdb_credentials<B: Send + Sync + 'static>(
     request: &Request<B>,
-) -> Result<Option<(String, String)>> {
+) -> Result<Option<(Username, Password)>> {
     // compat with influxdb v2 and v1
     if let Some(header) = request.headers().get(http::header::AUTHORIZATION) {
         // try v2 first
@@ -188,32 +188,23 @@ async fn authenticate<B: Send + Sync + 'static>(
     user_provider: &UserProviderRef,
     request: &Request<B>,
 ) -> Result<UserInfo> {
-    if request.uri().path().contains("influxdb") {
-        let (username, password) =
-            get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?;
-
-        Ok(user_provider
-            .authenticate(
-                Identity::UserId(&username, None),
-                crate::auth::Password::PlainText(&password),
-            )
-            .await?)
+    let (username, password) = if request.uri().path().contains("influxdb") {
+        // compatible with influxdb auth
+        get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
     } else {
         // normal http auth
         let (scheme, credential) = auth_header(request)?;
         match scheme {
-            AuthScheme::Basic => {
-                let (username, password) = decode_basic(credential)?;
-
-                Ok(user_provider
-                    .authenticate(
-                        Identity::UserId(&username, None),
-                        crate::auth::Password::PlainText(&password),
-                    )
-                    .await?)
-            }
+            AuthScheme::Basic => decode_basic(credential)?,
         }
-    }
+    };
+
+    Ok(user_provider
+        .authenticate(
+            Identity::UserId(&username, None),
+            crate::auth::Password::PlainText(&password),
+        )
+        .await?)
 }
 
 fn unauthorized_resp<RespBody>() -> Response<RespBody>
