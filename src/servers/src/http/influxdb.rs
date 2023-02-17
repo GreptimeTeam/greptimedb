@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::writer::Precision;
 use session::context::QueryContext;
@@ -25,12 +26,24 @@ use crate::error::{Result, TimePrecisionSnafu};
 use crate::influxdb::InfluxdbRequest;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 
+// https://docs.influxdata.com/influxdb/v1.8/tools/api/#ping-http-endpoint
+#[axum_macros::debug_handler]
+pub async fn influxdb_ping() -> Result<impl IntoResponse> {
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// https://docs.influxdata.com/influxdb/v1.8/tools/api/#health-http-endpoint
+#[axum_macros::debug_handler]
+pub async fn influxdb_health() -> Result<impl IntoResponse> {
+    Ok(StatusCode::OK)
+}
+
 #[axum_macros::debug_handler]
 pub async fn influxdb_write(
     State(handler): State<InfluxdbLineProtocolHandlerRef>,
     Query(mut params): Query<HashMap<String, String>>,
     lines: String,
-) -> Result<(StatusCode, ())> {
+) -> Result<impl IntoResponse> {
     let db = params
         .remove("db")
         .unwrap_or_else(|| DEFAULT_SCHEMA_NAME.to_string());
