@@ -129,7 +129,7 @@ impl ParquetWriter {
             arrow_writer.close().context(error::WriteParquetSnafu)?;
 
             // if rows == 0, we just end up with a empty file.
-            // 
+            //
             // file_name like:
             // "file_name_1"            (row num: 1 ~ 1000000),
             // "file_name_1000001"      (row num: 1000001 ~ max_row_num)

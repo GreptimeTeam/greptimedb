@@ -14,17 +14,21 @@
 
 use sqlparser::ast::ObjectName;
 
+use crate::error::{self, Result};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyTable {
     table_name: ObjectName,
     file_name: String,
+    format: Format,
 }
 
 impl CopyTable {
-    pub(crate) fn new(table_name: ObjectName, file_name: String) -> Self {
+    pub(crate) fn new(table_name: ObjectName, file_name: String, format: Format) -> Self {
         Self {
             table_name,
             file_name,
+            format,
         }
     }
 
@@ -34,5 +38,25 @@ impl CopyTable {
 
     pub fn file_name(&self) -> &str {
         &self.file_name
+    }
+
+    pub fn format(&self) -> &Format {
+        &self.format
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Format {
+    Parquet,
+}
+
+impl TryFrom<String> for Format {
+    type Error = error::Error;
+
+    fn try_from(name: String) -> Result<Self> {
+        match name.to_uppercase().as_str() {
+            "PARQUET" => Ok(Format::Parquet),
+            _ => error::UnsupportedFormatSnafu { name }.fail(),
+        }
     }
 }

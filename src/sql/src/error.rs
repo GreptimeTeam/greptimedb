@@ -135,6 +135,9 @@ pub enum Error {
         timestamp: Timestamp,
         target_unit: TimeUnit,
     },
+
+    #[snafu(display("Unsupported format: {}", name))]
+    UnsupportedFormat { name: String },
 }
 
 impl ErrorExt for Error {
@@ -156,12 +159,14 @@ impl ErrorExt for Error {
             InvalidColumnOption { .. }
             | InvalidDatabaseName { .. }
             | ColumnTypeMismatch { .. }
-            | InvalidTableName { .. } => StatusCode::InvalidArguments,
+            | InvalidTableName { .. }
+            | InvalidSqlValue { .. }
+            | TimestampOverflow { .. }
+            | UnsupportedFormat { .. } => StatusCode::InvalidArguments,
+
             UnsupportedAlterTableStatement { .. } => StatusCode::InvalidSyntax,
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
-            InvalidSqlValue { .. } => StatusCode::InvalidArguments,
-            TimestampOverflow { .. } => StatusCode::InvalidArguments,
         }
     }
 

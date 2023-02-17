@@ -17,7 +17,7 @@ use sqlparser::keywords::Keyword;
 
 use crate::error::{self, Result};
 use crate::parser::ParserContext;
-use crate::statements::copy::CopyTable;
+use crate::statements::copy::{CopyTable, Format};
 use crate::statements::statement::Statement;
 
 // COPY tbl TO 'output.parquet';
@@ -51,7 +51,22 @@ impl<'a> ParserContext<'a> {
                     actual: self.peek_token_as_string(),
                 })?;
 
-        Ok(CopyTable::new(table_name, file_name))
+        let format = if self.parser.parse_keyword(Keyword::FORMAT) {
+            let format =
+                self.parser
+                    .parse_literal_string()
+                    .with_context(|_| error::UnexpectedSnafu {
+                        sql: self.sql,
+                        expected: "a format name",
+                        actual: self.peek_token_as_string(),
+                    })?;
+            Format::try_from(format)?
+        } else {
+            // default is Parquet format.
+            Format::Parquet
+        };
+
+        Ok(CopyTable::new(table_name, file_name, format))
     }
 }
 
@@ -65,33 +80,52 @@ mod tests {
 
     #[test]
     fn test_parse_copy_table() {
-        let sql = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet'";
-        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
-        assert_eq!(1, result.len());
+        let sql0 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet'";
+        let sql1 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' FORMAT 'parquet'";
+        let result0 = ParserContext::create_with_dialect(sql0, &GenericDialect {}).unwrap();
+        let result1 = ParserContext::create_with_dialect(sql1, &GenericDialect {}).unwrap();
 
-        let statement = result.remove(0);
-        assert_matches!(statement, Statement::Copy { .. });
-        match statement {
-            Statement::Copy(copy_table) => {
-                let (catalog, schema, table) =
-                    if let [catalog, schema, table] = &copy_table.table_name().0[..] {
-                        (
-                            catalog.value.clone(),
-                            schema.value.clone(),
-                            table.value.clone(),
-                        )
-                    } else {
-                        unreachable!()
-                    };
+        for mut result in vec![result0, result1] {
+            assert_eq!(1, result.len());
 
-                assert_eq!("catalog0", catalog);
-                assert_eq!("schema0", schema);
-                assert_eq!("tbl", table);
+            let statement = result.remove(0);
+            assert_matches!(statement, Statement::Copy { .. });
+            match statement {
+                Statement::Copy(copy_table) => {
+                    let (catalog, schema, table) =
+                        if let [catalog, schema, table] = &copy_table.table_name().0[..] {
+                            (
+                                catalog.value.clone(),
+                                schema.value.clone(),
+                                table.value.clone(),
+                            )
+                        } else {
+                            unreachable!()
+                        };
 
-                let file_name = copy_table.file_name();
-                assert_eq!("tbl_file.parquet", file_name);
+                    assert_eq!("catalog0", catalog);
+                    assert_eq!("schema0", schema);
+                    assert_eq!("tbl", table);
+
+                    let file_name = copy_table.file_name();
+                    assert_eq!("tbl_file.parquet", file_name);
+
+                    let format = copy_table.format();
+                    assert_eq!(Format::Parquet, *format);
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_parse_copy_table_with_unsupopoted_format() {
+        let sql = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' FORMAT 'unknow_format'";
+        let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
+        assert!(result.is_err());
+        assert_matches!(
+            result.err().unwrap(),
+            error::Error::UnsupportedFormat { .. }
+        );
     }
 }
