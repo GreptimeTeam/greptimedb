@@ -284,7 +284,7 @@ impl ManagerContext {
 #[derive(Debug)]
 pub struct ManagerConfig {
     /// Object store
-    object_store: ObjectStore,
+    pub object_store: ObjectStore,
 }
 
 /// A [ProcedureManager] that maintains procedure states locally.
