@@ -82,7 +82,7 @@ macro_rules! impl_scalar_vector_op {
             }
 
             fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
-                cast::cast_non_constant!(self, $VectorType, to_type)
+                cast::cast_non_constant!(self, to_type)
             }
         }
     )+};
@@ -106,7 +106,7 @@ impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
     }
 
     fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
-        cast::cast_non_constant!(self, PrimitiveVector<T>, to_type)
+        cast::cast_non_constant!(self, to_type)
     }
 }
 
