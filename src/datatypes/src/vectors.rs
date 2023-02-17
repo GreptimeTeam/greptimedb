@@ -172,10 +172,25 @@ pub trait MutableVector: Send + Sync {
     /// Convert `self` to an (immutable) [VectorRef] and reset `self`.
     fn to_vector(&mut self) -> VectorRef;
 
+    /// Try to push value ref to this mutable vector.
+    fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()>;
+
     /// Push value ref to this mutable vector.
     ///
-    /// Returns error if data types mismatch.
-    fn push_value_ref(&mut self, value: ValueRef) -> Result<()>;
+    /// # Panics
+    /// Panics if error if data types mismatch.
+    fn push_value_ref(&mut self, value: ValueRef) {
+        self.try_push_value_ref(value).unwrap_or_else(|_| {
+            panic!(
+                "expecting pushing value of datatype {:?}, actual {:?}",
+                self.data_type(),
+                value
+            );
+        });
+    }
+
+    // Push null to this mutable vector.
+    fn push_null(&mut self);
 
     /// Extend this mutable vector by slice of `vector`.
     ///

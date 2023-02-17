@@ -60,7 +60,7 @@ impl ChunkReader for MockChunkReader {
                 let data = self.memtable.get(&column_schema.name).unwrap();
                 let mut builder = column_schema.data_type.create_mutable_vector(data.len());
                 for v in data {
-                    builder.push_value_ref(v.as_value_ref()).unwrap();
+                    builder.push_value_ref(v.as_value_ref());
                 }
                 builder.to_vector()
             })

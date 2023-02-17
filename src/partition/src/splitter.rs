@@ -143,9 +143,7 @@ fn split_insert_request(
                 .or_insert_with(|| vector.data_type().create_mutable_vector(row_num));
             val_idxs.iter().for_each(|idx| {
                 // Safety: MutableVector is built according to column data type.
-                builder
-                    .push_value_ref(vector.get(*idx).as_value_ref())
-                    .unwrap();
+                builder.push_value_ref(vector.get(*idx).as_value_ref());
             });
         }
     }

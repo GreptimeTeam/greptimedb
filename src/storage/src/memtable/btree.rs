@@ -452,10 +452,7 @@ fn rows_to_vectors<I: Iterator<Item = ConcreteDataType>, T: RowsProvider>(
         for row_idx in 0..row_num {
             let row = provider.row_by_index(row_idx);
             let value = &row[col_idx];
-            builder
-                .as_mut()
-                .push_value_ref(value.as_value_ref())
-                .unwrap();
+            builder.as_mut().push_value_ref(value.as_value_ref());
         }
 
         vectors.push(builder.to_vector());
