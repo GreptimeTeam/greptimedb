@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, RawSchema};
+use serde::{Deserialize, Serialize};
 use store_api::storage::RegionNumber;
 
 use crate::metadata::TableId;
@@ -38,7 +39,7 @@ pub struct CreateDatabaseRequest {
 }
 
 /// Create table request
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTableRequest {
     pub id: TableId,
     pub catalog_name: String,
