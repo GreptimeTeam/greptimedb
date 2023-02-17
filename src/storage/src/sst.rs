@@ -95,7 +95,9 @@ impl LevelMetas {
 
         for file in files_to_remove {
             let level = file.level;
-            merged.levels[level as usize].remove_file(&file.file_name);
+            if let Some(removed_file) = merged.levels[level as usize].remove_file(&file.file_name) {
+                removed_file.mark_deleted();
+            }
         }
         merged
     }
@@ -127,8 +129,8 @@ impl LevelMeta {
         self.files.insert(file.file_name().to_string(), file);
     }
 
-    fn remove_file(&mut self, file_to_remove: &str) {
-        self.files.remove(file_to_remove);
+    fn remove_file(&mut self, file_to_remove: &str) -> Option<FileHandle> {
+        self.files.remove(file_to_remove)
     }
 
     /// Returns the level of level meta.
