@@ -19,3 +19,4 @@ pub(crate) mod vector_impl;
 
 pub(crate) use copr_impl::pyo3_exec_parsed;
 pub(crate) use utils::init_cpython_interpreter;
+mod dataframe_impl;
