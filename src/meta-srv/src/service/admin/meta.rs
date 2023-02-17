@@ -40,9 +40,10 @@ pub struct TableHandler {
     pub kv_store: KvStoreRef,
 }
 
-const CATALOG_KEY_PREFIX: &str = "__c-";
-const SCHEMA_KEY_PREFIX: &str = "__s-";
-const TABLE_KEY_PREFIX: &str = "__tg-";
+const CATALOG_KEY_PREFIX: &str = "__c";
+const SCHEMA_KEY_PREFIX: &str = "__s";
+const TABLE_KEY_PREFIX: &str = "__tg";
+const SEPARATOR: &str = "-";
 
 #[async_trait::async_trait]
 impl HttpHandler for CatalogsHandler {
@@ -58,9 +59,9 @@ impl HttpHandler for SchemasHandler {
         _: &str,
         map: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let mut schema_key_prefix = String::from(SCHEMA_KEY_PREFIX);
+        let mut key_prefix = String::from(SCHEMA_KEY_PREFIX) + SEPARATOR;
         match map.get("catalog_name") {
-            Some(catalog_value) => schema_key_prefix = schema_key_prefix + catalog_value + "-",
+            Some(catalog_value) => key_prefix = key_prefix + catalog_value + SEPARATOR,
             None => {
                 return error::MissingRequiredParameterSnafu {
                     msg: "catalog_name parameter is required".to_string(),
@@ -68,7 +69,7 @@ impl HttpHandler for SchemasHandler {
                 .fail();
             }
         }
-        get_key_list_response_by_prefix_key(&schema_key_prefix, &self.kv_store).await
+        get_key_list_response_by_prefix_key(&key_prefix, &self.kv_store).await
     }
 }
 
@@ -79,9 +80,9 @@ impl HttpHandler for TablesHandler {
         _: &str,
         map: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let mut table_key_prefix = String::from(TABLE_KEY_PREFIX);
+        let mut key_prefix = String::from(TABLE_KEY_PREFIX) + SEPARATOR;
         match map.get("catalog_name") {
-            Some(catalog_value) => table_key_prefix = table_key_prefix + catalog_value + "-",
+            Some(catalog_value) => key_prefix = key_prefix + catalog_value + SEPARATOR,
             None => {
                 return error::MissingRequiredParameterSnafu {
                     msg: "catalog_name parameter is required".to_string(),
@@ -91,7 +92,7 @@ impl HttpHandler for TablesHandler {
         }
 
         match map.get("schema_name") {
-            Some(schema_value) => table_key_prefix = table_key_prefix + schema_value + "-",
+            Some(schema_value) => key_prefix = key_prefix + schema_value + SEPARATOR,
             None => {
                 return error::MissingRequiredParameterSnafu {
                     msg: "schema_name parameter is required".to_string(),
@@ -99,7 +100,7 @@ impl HttpHandler for TablesHandler {
                 .fail();
             }
         }
-        get_key_list_response_by_prefix_key(&table_key_prefix, &self.kv_store).await
+        get_key_list_response_by_prefix_key(&key_prefix, &self.kv_store).await
     }
 }
 
@@ -110,10 +111,10 @@ impl HttpHandler for TableHandler {
         _: &str,
         map: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let mut table_key_prefix = String::from(TABLE_KEY_PREFIX);
+        let mut table_key_prefix = String::from(TABLE_KEY_PREFIX) + SEPARATOR;
         match map.get("full_table_name") {
             Some(full_table_name) => {
-                let replace_name = full_table_name.replace('.', "-");
+                let replace_name = full_table_name.replace('.', SEPARATOR);
                 table_key_prefix = table_key_prefix + &replace_name
             }
             None => {
