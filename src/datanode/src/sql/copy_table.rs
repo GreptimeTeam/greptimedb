@@ -60,7 +60,7 @@ impl SqlHandler {
         // For now, COPY is implemented synchronously.
         // When copying large table, it will be blocked for a long time.
         // Maybe we should make "copy" runs in background?
-        // Like pg: https://www.postgresql.org/docs/current/sql-copy.html
+        // Like PG: https://www.postgresql.org/docs/current/sql-copy.html
         let rows = parquet_writer.flush().await?;
 
         Ok(Output::AffectedRows(rows))
@@ -131,9 +131,9 @@ impl ParquetWriter {
             // if rows == 0, we just end up with a empty file.
             //
             // file_name like:
-            // "file_name_1"            (row num: 1 ~ 1000000),
-            // "file_name_1000001"      (row num: 1000001 ~ max_row_num)
-            let file_name = format!("{}_{}", self.file_name, start_row_num);
+            // "file_name_1_1000000"        (row num: 1 ~ 1000000),
+            // "file_name_1000001_xxx"      (row num: 1000001 ~ xxx)
+            let file_name = format!("{}_{}_{}", self.file_name, start_row_num, total_rows);
             let object = self.object_store.object(&file_name);
             object.write(buf).await.context(error::WriteObjectSnafu {
                 path: object.path(),

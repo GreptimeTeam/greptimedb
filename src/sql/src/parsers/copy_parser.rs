@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use snafu::ResultExt;
+use sqlparser::ast::Value;
 use sqlparser::keywords::Keyword;
 
 use crate::error::{self, Result};
@@ -51,20 +52,20 @@ impl<'a> ParserContext<'a> {
                     actual: self.peek_token_as_string(),
                 })?;
 
-        let format = if self.parser.parse_keyword(Keyword::FORMAT) {
-            let format =
-                self.parser
-                    .parse_literal_string()
-                    .with_context(|_| error::UnexpectedSnafu {
-                        sql: self.sql,
-                        expected: "a format name",
-                        actual: self.peek_token_as_string(),
-                    })?;
-            Format::try_from(format)?
-        } else {
-            // default is Parquet format.
-            Format::Parquet
-        };
+        let options = self
+            .parser
+            .parse_options(Keyword::WITH)
+            .context(error::SyntaxSnafu { sql: self.sql })?;
+
+        // default format is parquet
+        let mut format = Format::Parquet;
+        for option in options {
+            if option.name.value.to_uppercase() == "FORMAT" {
+                if let Value::SingleQuotedString(fmt_str) = option.value {
+                    format = Format::try_from(fmt_str)?;
+                }
+            }
+        }
 
         Ok(CopyTable::new(table_name, file_name, format))
     }
@@ -81,7 +82,7 @@ mod tests {
     #[test]
     fn test_parse_copy_table() {
         let sql0 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet'";
-        let sql1 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' FORMAT 'parquet'";
+        let sql1 = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' WITH (FORMAT = 'parquet')";
         let result0 = ParserContext::create_with_dialect(sql0, &GenericDialect {}).unwrap();
         let result1 = ParserContext::create_with_dialect(sql1, &GenericDialect {}).unwrap();
 
@@ -120,7 +121,7 @@ mod tests {
 
     #[test]
     fn test_parse_copy_table_with_unsupopoted_format() {
-        let sql = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' FORMAT 'unknow_format'";
+        let sql = "COPY catalog0.schema0.tbl TO 'tbl_file.parquet' WITH (FORMAT = 'unknow_format')";
         let result = ParserContext::create_with_dialect(sql, &GenericDialect {});
         assert!(result.is_err());
         assert_matches!(
