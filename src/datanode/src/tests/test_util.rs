@@ -155,7 +155,7 @@ pub async fn check_output_stream(output: Output, expected: String) {
         _ => unreachable!(),
     };
     let pretty_print = recordbatches.pretty_print().unwrap();
-    assert_eq!(pretty_print, expected);
+    assert_eq!(pretty_print, expected, "{}", pretty_print);
 }
 
 pub async fn check_unordered_output_stream(output: Output, expected: String) {
