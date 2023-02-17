@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_telemetry::debug;
 use store_api::storage::RegionId;
 use tokio::sync::Notify;
 
@@ -48,6 +49,10 @@ impl Handler for FilePurgeHandler {
         finish_notifier: Arc<Notify>,
     ) -> crate::error::Result<()> {
         req.sst_layer.delete_sst(&req.file_name).await?;
+        debug!(
+            "Successfully deleted SST file: {}, region: {}",
+            req.file_name, req.region_id
+        );
         token.try_release();
         finish_notifier.notify_one();
         Ok(())
@@ -104,7 +109,7 @@ mod tests {
     use crate::file_purger::noop::NoopFilePurgeHandler;
     use crate::memtable::tests::{schema_for_test, write_kvs};
     use crate::memtable::{DefaultMemtableBuilder, IterContext, MemtableBuilder};
-    use crate::scheduler::SchedulerConfig;
+    use crate::scheduler::{Scheduler, SchedulerConfig};
     use crate::sst::{AccessLayer, FileHandle, FileMeta, FsAccessLayer, Source, WriteOptions};
 
     struct MockRateLimitToken;
@@ -116,6 +121,7 @@ mod tests {
     async fn create_sst_file(
         os: ObjectStore,
         sst_file_name: &str,
+        file_purger: FilePurgerRef,
     ) -> (FileHandle, String, AccessLayerRef) {
         let schema = schema_for_test();
         let memtable = DefaultMemtableBuilder::default().build(schema.clone());
@@ -145,10 +151,7 @@ mod tests {
                     level: 0,
                 },
                 layer.clone(),
-                Arc::new(LocalScheduler::new(
-                    SchedulerConfig::default(),
-                    NoopFilePurgeHandler,
-                )),
+                file_purger,
             ),
             sst_path.to_string(),
             layer as _,
@@ -166,7 +169,12 @@ mod tests {
         );
         let sst_file_name = "test-file-purge-handler.parquet";
 
-        let (file, path, layer) = create_sst_file(object_store.clone(), sst_file_name).await;
+        let noop_file_purger = Arc::new(LocalScheduler::new(
+            SchedulerConfig::default(),
+            NoopFilePurgeHandler,
+        ));
+        let (file, path, layer) =
+            create_sst_file(object_store.clone(), sst_file_name, noop_file_purger).await;
         let request = FilePurgeRequest {
             region_id: 0,
             file_name: file.file_name().to_string(),
@@ -188,7 +196,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_purge_loop() {
-        let scheduler = LocalScheduler::new(SchedulerConfig::default(), FilePurgeHandler);
-        // scheduler.schedule();
+        common_telemetry::init_default_ut_logging();
+        let dir = TempDir::new("file-purge").unwrap();
+        let object_store = ObjectStore::new(
+            Builder::default()
+                .root(dir.path().to_str().unwrap())
+                .build()
+                .unwrap(),
+        );
+        let sst_file_name = "test-file-purger.parquet";
+        let scheduler = Arc::new(LocalScheduler::new(
+            SchedulerConfig::default(),
+            FilePurgeHandler,
+        ));
+        let (handle, path, _layer) =
+            create_sst_file(object_store.clone(), sst_file_name, scheduler.clone()).await;
+
+        {
+            // mark file as deleted and drop the handle, we expect the file is deleted.
+            handle.mark_deleted();
+            drop(handle);
+        }
+        scheduler.stop().await.unwrap();
+        assert!(!object_store
+            .object(&format!("{}/{}", path, sst_file_name))
+            .is_exist()
+            .await
+            .unwrap());
     }
 }
