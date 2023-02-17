@@ -317,7 +317,6 @@ mod tests {
 
         match request {
             InsertRequests::Stream(mut stream) => {
-                assert_eq!((1, Some(1)), stream.size_hint());
                 assert!(matches!(
                     stream.next().await.unwrap().unwrap_err(),
                     Error::ColumnTypeMismatch { .. }
@@ -340,7 +339,6 @@ mod tests {
 
         match request {
             InsertRequests::Stream(mut stream) => {
-                assert_eq!((1, Some(1)), stream.size_hint());
                 let mut times = 0;
                 while let Some(Ok(SqlRequest::Insert(req))) = stream.next().await {
                     times += 1;

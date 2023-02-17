@@ -256,7 +256,7 @@ impl SqlHandler {
                         batch,
                         query_ctx.clone(),
                     )
-                })) as _
+                }))
             }
 
             Output::Stream(stream) => Box::pin(stream.map(move |batch| {
