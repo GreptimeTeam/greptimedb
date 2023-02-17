@@ -124,14 +124,16 @@ impl ParquetWriter {
                 }
             }
 
-            if rows == 0 {
-                return Ok(total_rows);
-            }
-
+            let start_row_num = total_rows + 1;
             total_rows += rows;
             arrow_writer.close().context(error::WriteParquetSnafu)?;
 
-            let file_name = format!("{}_{}", self.file_name, total_rows);
+            // if rows == 0, we just end up with a empty file.
+            // 
+            // file_name like:
+            // "file_name_1"            (row num: 1 ~ 1000000),
+            // "file_name_1000001"      (row num: 1000001 ~ max_row_num)
+            let file_name = format!("{}_{}", self.file_name, start_row_num);
             let object = self.object_store.object(&file_name);
             object.write(buf).await.context(error::WriteObjectSnafu {
                 path: object.path(),
