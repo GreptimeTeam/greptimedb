@@ -222,12 +222,9 @@ async fn test_execute_insert_by_select() {
     ));
 
     assert!(matches!(
-        try_execute_sql(
-            &instance,
-            "insert into demo2(host) select memory from demo1"
-        )
-        .await
-        .unwrap_err(),
+        try_execute_sql(&instance, "insert into demo2(ts) select memory from demo1")
+            .await
+            .unwrap_err(),
         Error::ColumnTypeMismatch { .. }
     ));
 

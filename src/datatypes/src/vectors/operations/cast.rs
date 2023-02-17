@@ -23,7 +23,7 @@ macro_rules! cast_non_constant {
         let arrow_array = $vector.to_arrow_array();
         let casted = compute::cast(&arrow_array, &$to_type.as_arrow_type())
             .context(crate::error::ArrowComputeSnafu)?;
-        Ok(Helper::try_into_vector(casted)?)
+        Helper::try_into_vector(casted)
     }};
 }
 

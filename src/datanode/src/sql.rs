@@ -302,7 +302,7 @@ mod tests {
         // test inert into select
 
         // type mismatch
-        let sql = "insert into demo(cpu) select number from numbers limit 3";
+        let sql = "insert into demo(ts) select number from numbers limit 3";
 
         let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
             QueryStatement::Sql(Statement::Insert(i)) => i,
