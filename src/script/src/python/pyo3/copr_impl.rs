@@ -17,15 +17,14 @@ use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::PyValueError;
 use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
 use pyo3::{
-    pyclass as pyo3class, pymethods, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject,
+    pymethods, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject,
 };
 use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
 
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};
 use crate::python::ffi_types::copr::PyQueryEngine;
 use crate::python::ffi_types::{check_args_anno_real_type, select_from_rb, Coprocessor, PyVector};
-use crate::python::pyo3::builtins::greptime_builtins;
-use crate::python::pyo3::utils::pyo3_obj_try_to_typed_val;
+use crate::python::pyo3::utils::{init_cpython_interpreter, pyo3_obj_try_to_typed_val};
 
 #[pymethods]
 impl PyQueryEngine {
@@ -54,14 +53,15 @@ impl PyQueryEngine {
             crate::python::ffi_types::copr::Either::AffectedRows(count) => Ok(count.to_object(py)),
         }
     }
+
+    // TODO: put this into greptime module
 }
 /// Execute a `Coprocessor` with given `RecordBatch`
 pub(crate) fn pyo3_exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
     let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
     check_args_anno_real_type(&args, copr, rb)?;
-    // Just in case python is not inited
-    pyo3::append_to_inittab!(greptime_builtins);
-    pyo3::prepare_freethreaded_python();
+    // Just in case cpython is not inited
+    init_cpython_interpreter();
     Python::with_gil(|py| -> Result<_> {
         let mut cols = (|| -> PyResult<_> {
             let module = PyModule::from_code(py, &copr.script, "<embedded>", "<mod_embed>")?;

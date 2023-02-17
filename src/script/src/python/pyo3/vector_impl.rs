@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion::arrow::compute::kernels::arithmetic;
+use datafusion::arrow::compute::kernels::{arithmetic, comparison};
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::pyclass::CompareOp;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
 
-use crate::python::ffi_types::vector::{wrap_result, PyVector};
+use crate::python::ffi_types::vector::{wrap_result, PyVector, wrap_bool_result};
 use crate::python::pyo3::utils::pyo3_obj_try_to_typed_val;
 
 macro_rules! get_con_type {
@@ -86,7 +87,7 @@ impl PyVector {
 impl PyVector {
     /// create a `PyVector` with a `PyList` that contains only elements of same type
     #[new]
-    fn py_new(iterable: &PyList) -> PyResult<Self> {
+    pub(crate) fn py_new(iterable: &PyList) -> PyResult<Self> {
         let dtype = get_py_type(iterable.get_item(0)?)?;
         let mut buf = dtype.create_mutable_vector(iterable.len());
         for i in 0..iterable.len() {
@@ -98,6 +99,22 @@ impl PyVector {
         }
         Ok(buf.to_vector().into())
     }
+    fn __richcmp__(&self, py: Python<'_>, other: PyObject, op: CompareOp) -> PyResult<Self>{
+        let op_fn = match op{
+            CompareOp::Lt => comparison::lt_dyn,
+            CompareOp::Le => comparison::lt_eq_dyn,
+            CompareOp::Eq => comparison::eq_dyn,
+            CompareOp::Ne => comparison::neq_dyn,
+            CompareOp::Gt => comparison::gt_dyn,
+            CompareOp::Ge => comparison::gt_eq_dyn,
+        };
+        if pyo3_is_obj_scalar(other.as_ref(py)) {
+            self.pyo3_scalar_arith_op(py, other, None, wrap_bool_result(op_fn))
+        } else {
+            self.pyo3_vector_arith_op(py, other, None, wrap_bool_result(op_fn))
+        }
+    }
+
     fn __add__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         if pyo3_is_obj_scalar(other.as_ref(py)) {
             self.pyo3_scalar_arith_op(py, other, None, wrap_result(arithmetic::add_dyn))
@@ -209,6 +226,7 @@ mod test {
     use pyo3::{PyCell, Python};
 
     use crate::python::ffi_types::vector::PyVector;
+    use crate::python::pyo3::init_cpython_interpreter;
     fn sample_vector() -> HashMap<String, PyVector> {
         let mut locals = HashMap::new();
         let b = BooleanVector::from_slice(&[true, false, true, true]);
@@ -228,7 +246,7 @@ mod test {
     }
     #[test]
     fn test_py_vector_api() {
-        pyo3::prepare_freethreaded_python();
+        init_cpython_interpreter();
         Python::with_gil(|py| {
             let module = PyModule::new(py, "gt").unwrap();
             module.add_class::<PyVector>().unwrap();

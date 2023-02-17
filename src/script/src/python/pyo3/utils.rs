@@ -12,18 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Mutex;
+
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{OrderedFloat, Value};
 use datatypes::vectors::Helper;
+use once_cell::sync::Lazy;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList};
 
 use crate::python::ffi_types::utils::{collect_diff_types_string, new_item_field};
 use crate::python::ffi_types::PyVector;
+use crate::python::pyo3::builtins::greptime_builtins;
+
+/// prevent race condition of init cpython
+static START_PYO3: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+
+pub(crate) fn init_cpython_interpreter() {
+    let mut start = START_PYO3.lock().unwrap();
+    if !*start {
+        pyo3::append_to_inittab!(greptime_builtins);
+        pyo3::prepare_freethreaded_python();
+        *start = true;
+    }
+}
 
 pub fn val_to_py_any(py: Python<'_>, val: Value) -> PyResult<PyObject> {
     Ok(match val {

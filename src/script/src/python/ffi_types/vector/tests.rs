@@ -29,6 +29,7 @@ use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::{vm, AsObject};
 
 use crate::python::ffi_types::PyVector;
+use crate::python::pyo3::init_cpython_interpreter;
 use crate::python::pyo3::vector_impl::into_pyo3_cell;
 
 #[derive(Debug, Clone)]
@@ -112,7 +113,7 @@ fn get_test_cases() -> Vec<TestCase> {
 }
 
 fn eval_pyo3(testcase: TestCase, locals: HashMap<String, PyVector>) {
-    pyo3::prepare_freethreaded_python();
+    init_cpython_interpreter();
     Python::with_gil(|py| {
         let locals = {
             let locals_dict = PyDict::new(py);
@@ -148,6 +149,12 @@ fn eval_rspy(testcase: TestCase, locals: HashMap<String, PyVector>) {
             .compile(&testcase.eval, Mode::Eval, "<embedded>".to_owned())
             .map_err(|err| vm.new_syntax_error(&err))
             .unwrap();
-        vm.run_code_obj(code_obj, scope).unwrap();
+        let obj = vm.run_code_obj(code_obj, scope).unwrap();
+        let v = obj.downcast::<PyVector>().unwrap();
+        let result_arr = v.to_arrow_array();
+        let expect_arr = testcase.result.to_arrow_array();
+        if *result_arr != *expect_arr {
+            panic!("{result_arr:?}!={expect_arr:?}")
+        }
     });
 }

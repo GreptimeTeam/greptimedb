@@ -81,6 +81,16 @@ where
     move |left, right| f(left, right).map_err(|e| format!("arithmetic error {e}"))
 }
 
+pub(crate) fn wrap_bool_result<F>(op_bool_arr: F) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>
+where
+    F: Fn(&dyn Array, &dyn Array) -> ArrowResult<BooleanArray>,
+{
+    move |a: &dyn Array, b: &dyn Array| -> Result<ArrayRef, String> {
+        let array = op_bool_arr(a, b).map_err(|e| format!("scalar op error: {e}"))?;
+        Ok(Arc::new(array))
+    }
+}
+
 fn is_float(datatype: &ArrowDataType) -> bool {
     matches!(
         datatype,

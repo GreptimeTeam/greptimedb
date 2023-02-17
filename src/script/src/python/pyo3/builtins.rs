@@ -22,6 +22,7 @@ use datafusion_physical_expr::{math_expressions, AggregateExpr};
 use datatypes::vectors::VectorRef;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 
 use super::utils::scalar_value_to_py_any;
 use crate::python::ffi_types::utils::all_to_f64;
@@ -37,6 +38,7 @@ macro_rules! batch_import {
 }
 
 #[pymodule]
+#[pyo3(name = "greptime")]
 pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     batch_import!(
         m,
@@ -143,6 +145,7 @@ fn eval_aggr_func(py: Python<'_>, name: &str, args: &[&PyVector]) -> PyResult<Py
 }
 
 /// evaluate Aggregate Expr using its backing accumulator
+/// TODO(discord9): cast to f64 before use/Provide cast to f64 function?
 fn eval_aggr_expr<T: AggregateExpr>(
     py: Python<'_>,
     aggr: T,
@@ -175,11 +178,6 @@ macro_rules! bind_call_unary_math_function {
     };
 }
 
-#[pyfunction]
-fn vector() {
-    todo!()
-}
-
 // TODO(discord9): allow thread
 macro_rules! simple_vector_fn {
     ($name: ident, $name_str: tt, [$($arg:ident),*]) => {
@@ -195,6 +193,12 @@ macro_rules! simple_vector_fn {
         }
     };
 }
+
+#[pyfunction]
+fn vector(iterable: &PyList)->PyResult<PyVector>{
+    PyVector::py_new(iterable)
+}
+
 // TODO(discord9): More Aggr functions& allow threads
 simple_vector_fn!(pow, "pow", [v0, v1]);
 simple_vector_fn!(clip, "clip", [v0, v1, v2]);
@@ -256,7 +260,7 @@ macro_rules! bind_aggr_expr {
     };
 }
 /*
-`bind_aggr_fn!(approx_distinct, ApproxDistinct,[v0], v0, expr0=>0);`
+`bind_aggr_expr!(approx_distinct, ApproxDistinct,[v0], v0, expr0=>0);`
 expand into:
 ```
 fn approx_distinct(py: Python<'_>, v0: &PyVector) -> PyResult<PyObject> {
