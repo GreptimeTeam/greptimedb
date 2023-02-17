@@ -45,12 +45,12 @@ use crate::sql::{table_idents_to_full_name, SqlHandler, SqlRequest};
 
 const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
-type InsertRequstStream = Pin<Box<dyn Stream<Item = Result<SqlRequest>> + Send>>;
+type InsertRequestStream = Pin<Box<dyn Stream<Item = Result<SqlRequest>> + Send>>;
 pub(crate) enum InsertRequests {
     // Single request
     Request(SqlRequest),
     // Streaming requests
-    Stream(InsertRequstStream),
+    Stream(InsertRequestStream),
 }
 
 impl SqlHandler {
@@ -226,7 +226,7 @@ impl SqlHandler {
         table: TableRef,
         stmt: Insert,
         query_ctx: QueryContextRef,
-    ) -> Result<InsertRequstStream> {
+    ) -> Result<InsertRequestStream> {
         let query = stmt
             .query_body()
             .context(ParseSqlValueSnafu)?
