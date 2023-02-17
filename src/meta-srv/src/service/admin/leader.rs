@@ -1,11 +1,3 @@
-use std::collections::HashMap;
-
-use tonic::codegen::http;
-
-use crate::error::Result;
-use crate::metasrv::ElectionRef;
-use crate::service::admin::HttpHandler;
-
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,6 +11,14 @@ use crate::service::admin::HttpHandler;
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use std::collections::HashMap;
+
+use tonic::codegen::http;
+
+use crate::error::Result;
+use crate::metasrv::ElectionRef;
+use crate::service::admin::HttpHandler;
+
 pub struct LeaderHandler {
     pub election: Option<ElectionRef>,
 }
