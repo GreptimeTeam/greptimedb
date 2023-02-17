@@ -31,13 +31,9 @@ use store_api::storage::{SchemaRef, SequenceNumber};
 use crate::file_purger::FilePurgerRef;
 use crate::memtable::{MemtableId, MemtableRef, MemtableVersion};
 use crate::metadata::RegionMetadataRef;
-use crate::read::BoxedBatchReader;
 use crate::schema::RegionSchemaRef;
-use crate::sst::{
-    AccessLayer, AccessLayerRef, FileMeta, LevelMetas, ReadOptions, Source, SstInfo, WriteOptions,
-};
+use crate::sst::{AccessLayerRef, FileMeta, LevelMetas};
 use crate::sync::CowCell;
-
 pub const INIT_COMMITTED_SEQUENCE: u64 = 0;
 
 /// Controls version of in memory state for a region.
@@ -167,38 +163,11 @@ pub struct Version {
     // version, so we can know the newest data can read from this version.
 }
 
-#[derive(Debug)]
-struct MockSstLayer;
-
-#[async_trait::async_trait]
-impl AccessLayer for MockSstLayer {
-    async fn write_sst(
-        &self,
-        _file_name: &str,
-        _source: Source,
-        _opts: &WriteOptions,
-    ) -> crate::error::Result<SstInfo> {
-        unimplemented!()
-    }
-
-    async fn read_sst(
-        &self,
-        _file_name: &str,
-        _opts: &ReadOptions,
-    ) -> crate::error::Result<BoxedBatchReader> {
-        unimplemented!()
-    }
-
-    async fn delete_sst(&self, _file_name: &str) -> crate::error::Result<()> {
-        Ok(())
-    }
-}
-
 impl Version {
     /// Create a new `Version` with given `metadata`.
     #[cfg(test)]
     pub fn new(metadata: RegionMetadataRef, memtable: MemtableRef) -> Version {
-        let sst_layer = Arc::new(MockSstLayer) as Arc<_>;
+        let sst_layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer) as Arc<_>;
         let file_purger = Arc::new(crate::scheduler::LocalScheduler::new(
             crate::scheduler::SchedulerConfig::default(),
             crate::file_purger::noop::NoopFilePurgeHandler,

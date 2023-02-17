@@ -420,36 +420,9 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct MockSstLayer;
-
-    #[async_trait::async_trait]
-    impl AccessLayer for MockSstLayer {
-        async fn write_sst(
-            &self,
-            _file_name: &str,
-            _source: Source,
-            _opts: &WriteOptions,
-        ) -> Result<SstInfo> {
-            unimplemented!()
-        }
-
-        async fn read_sst(
-            &self,
-            _file_name: &str,
-            _opts: &ReadOptions,
-        ) -> Result<BoxedBatchReader> {
-            unimplemented!()
-        }
-
-        async fn delete_sst(&self, _file_name: &str) -> Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn test_level_metas_add_and_remove() {
-        let layer = Arc::new(MockSstLayer {});
+        let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
         let purger = Arc::new(LocalScheduler::new(
             SchedulerConfig::default(),
             NoopFilePurgeHandler,

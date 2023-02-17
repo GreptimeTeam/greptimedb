@@ -165,12 +165,11 @@ fn fit_time_bucket(span_sec: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
     use crate::file_purger::noop::new_noop_file_purger;
-    use crate::read::BoxedBatchReader;
-    use crate::sst::{AccessLayer, FileMeta, ReadOptions, Source, SstInfo, WriteOptions};
+    use crate::sst::FileMeta;
 
     #[test]
     fn test_time_bucket_span() {
@@ -228,36 +227,9 @@ mod tests {
         );
     }
 
-    #[derive(Debug)]
-    pub struct MockAccessLayer;
-
-    #[async_trait::async_trait]
-    impl AccessLayer for MockAccessLayer {
-        async fn write_sst(
-            &self,
-            _file_name: &str,
-            _source: Source,
-            _opts: &WriteOptions,
-        ) -> crate::error::Result<SstInfo> {
-            unimplemented!()
-        }
-
-        async fn read_sst(
-            &self,
-            _file_name: &str,
-            _opts: &ReadOptions,
-        ) -> crate::error::Result<BoxedBatchReader> {
-            unimplemented!()
-        }
-
-        async fn delete_sst(&self, _file_name: &str) -> crate::error::Result<()> {
-            Ok(())
-        }
-    }
-
     fn new_file_handle(name: &str, start_ts_millis: i64, end_ts_millis: i64) -> FileHandle {
         let file_purger = new_noop_file_purger();
-        let layer = Arc::new(MockAccessLayer {});
+        let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
         FileHandle::new(
             FileMeta {
                 region_id: 0,

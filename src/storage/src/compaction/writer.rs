@@ -102,40 +102,10 @@ mod tests {
         DefaultMemtableBuilder, IterContext, KeyValues, Memtable, MemtableBuilder,
     };
     use crate::metadata::RegionMetadata;
-    use crate::read::BoxedBatchReader;
     use crate::sst;
     use crate::sst::parquet::ParquetWriter;
-    use crate::sst::{
-        AccessLayer, FileMeta, FsAccessLayer, ReadOptions, Source, SstInfo, WriteOptions,
-    };
+    use crate::sst::{FileMeta, FsAccessLayer, Source, SstInfo, WriteOptions};
     use crate::test_util::descriptor_util::RegionDescBuilder;
-
-    #[derive(Debug)]
-    struct MockAccessLayer;
-
-    #[async_trait::async_trait]
-    impl AccessLayer for MockAccessLayer {
-        async fn write_sst(
-            &self,
-            _file_name: &str,
-            _source: Source,
-            _opts: &WriteOptions,
-        ) -> error::Result<SstInfo> {
-            unimplemented!()
-        }
-
-        async fn read_sst(
-            &self,
-            _file_name: &str,
-            _opts: &ReadOptions,
-        ) -> error::Result<BoxedBatchReader> {
-            unimplemented!()
-        }
-
-        async fn delete_sst(&self, _file_name: &str) -> error::Result<()> {
-            Ok(())
-        }
-    }
 
     fn schema_for_test() -> RegionSchemaRef {
         // Just build a region desc and use its columns metadata.
@@ -262,7 +232,7 @@ mod tests {
                 time_range,
                 level: 0,
             },
-            Arc::new(MockAccessLayer {}),
+            Arc::new(crate::test_util::access_layer_util::MockAccessLayer {}),
             new_noop_file_purger(),
         );
         seq.fetch_add(1, Ordering::Relaxed);
@@ -495,7 +465,7 @@ mod tests {
                         level: 1,
                         time_range: None,
                     },
-                    Arc::new(MockAccessLayer {}),
+                    Arc::new(crate::test_util::access_layer_util::MockAccessLayer {}),
                     new_noop_file_purger(),
                 )
             })
