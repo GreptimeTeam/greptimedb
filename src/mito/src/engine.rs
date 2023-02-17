@@ -169,7 +169,7 @@ struct MitoEngineInner<S: StorageEngine> {
 fn build_row_key_desc(
     mut column_id: ColumnId,
     table_name: &str,
-    table_schema: &SchemaRef,
+    table_schema: &Schema,
     primary_key_indices: &Vec<usize>,
 ) -> Result<(ColumnId, RowKeyDescriptor)> {
     let ts_column_schema = table_schema
@@ -233,7 +233,7 @@ fn build_row_key_desc(
 fn build_column_family(
     mut column_id: ColumnId,
     table_name: &str,
-    table_schema: &SchemaRef,
+    table_schema: &Schema,
     primary_key_indices: &[usize],
 ) -> Result<(ColumnId, ColumnFamilyDescriptor)> {
     let mut builder = ColumnFamilyDescriptorBuilder::default();
@@ -456,7 +456,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
             let Some((manifest, table_info)) = self
                 .recover_table_manifest_and_info(table_name, &table_dir)
-                .await? else { return Ok(None) };
+                .await.map_err(BoxedError::new)
+                .context(TableOperationSnafu)? else { return Ok(None) };
 
             debug!(
                 "Opening table {}, table info recovered: {:?}",
@@ -502,16 +503,14 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         &self,
         table_name: &str,
         table_dir: &str,
-    ) -> TableResult<Option<(TableManifest, TableInfo)>> {
+    ) -> Result<Option<(TableManifest, TableInfo)>> {
         let manifest = MitoTable::<<S as StorageEngine>::Region>::build_manifest(
             table_dir,
             self.object_store.clone(),
         );
         let  Some(table_info) =
             MitoTable::<<S as StorageEngine>::Region>::recover_table_info(table_name, &manifest)
-                .await
-                .map_err(BoxedError::new)
-                .context(TableOperationSnafu)? else { return Ok(None) };
+                .await? else { return Ok(None) };
 
         Ok(Some((manifest, table_info)))
     }
