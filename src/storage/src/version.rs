@@ -28,10 +28,14 @@ use common_telemetry::info;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::{SchemaRef, SequenceNumber};
 
+use crate::file_purger::FilePurgerRef;
 use crate::memtable::{MemtableId, MemtableRef, MemtableVersion};
 use crate::metadata::RegionMetadataRef;
+use crate::read::BoxedBatchReader;
 use crate::schema::RegionSchemaRef;
-use crate::sst::{FileHandle, FileMeta, LevelMetas};
+use crate::sst::{
+    AccessLayer, AccessLayerRef, FileMeta, LevelMetas, ReadOptions, Source, SstInfo, WriteOptions,
+};
 use crate::sync::CowCell;
 
 pub const INIT_COMMITTED_SEQUENCE: u64 = 0;
@@ -163,11 +167,43 @@ pub struct Version {
     // version, so we can know the newest data can read from this version.
 }
 
+#[derive(Debug)]
+struct MockSstLayer;
+
+#[async_trait::async_trait]
+impl AccessLayer for MockSstLayer {
+    async fn write_sst(
+        &self,
+        _file_name: &str,
+        _source: Source,
+        _opts: &WriteOptions,
+    ) -> crate::error::Result<SstInfo> {
+        unimplemented!()
+    }
+
+    async fn read_sst(
+        &self,
+        _file_name: &str,
+        _opts: &ReadOptions,
+    ) -> crate::error::Result<BoxedBatchReader> {
+        unimplemented!()
+    }
+
+    async fn delete_sst(&self, _file_name: &str) -> crate::error::Result<()> {
+        Ok(())
+    }
+}
+
 impl Version {
     /// Create a new `Version` with given `metadata`.
     #[cfg(test)]
     pub fn new(metadata: RegionMetadataRef, memtable: MemtableRef) -> Version {
-        Version::with_manifest_version(metadata, 0, memtable)
+        let sst_layer = Arc::new(MockSstLayer) as Arc<_>;
+        let file_purger = Arc::new(crate::scheduler::LocalScheduler::new(
+            crate::scheduler::SchedulerConfig::default(),
+            crate::file_purger::noop::NoopFilePurgeHandler,
+        ));
+        Version::with_manifest_version(metadata, 0, memtable, sst_layer, file_purger)
     }
 
     /// Create a new `Version` with given `metadata` and initial `manifest_version`.
@@ -175,11 +211,13 @@ impl Version {
         metadata: RegionMetadataRef,
         manifest_version: ManifestVersion,
         mutable_memtable: MemtableRef,
+        sst_layer: AccessLayerRef,
+        file_purger: FilePurgerRef,
     ) -> Version {
         Version {
             metadata,
             memtables: Arc::new(MemtableVersion::new(mutable_memtable)),
-            ssts: Arc::new(LevelMetas::new()),
+            ssts: Arc::new(LevelMetas::new(sst_layer, file_purger)),
             flushed_sequence: 0,
             manifest_version,
         }
@@ -236,11 +274,10 @@ impl Version {
             self.memtables = Arc::new(removed);
         }
 
-        let handles_to_add = edit.files_to_add.into_iter().map(FileHandle::new);
-        let merged_ssts = self.ssts.merge(
-            handles_to_add,
-            edit.files_to_remove.into_iter().map(FileHandle::new),
-        );
+        let handles_to_add = edit.files_to_add.into_iter();
+        let merged_ssts = self
+            .ssts
+            .merge(handles_to_add, edit.files_to_remove.into_iter());
 
         info!(
             "After apply edit, region: {}, SST files: {:?}",

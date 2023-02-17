@@ -174,6 +174,7 @@ impl<S: LogStore> FlushJob<S> {
             return CancelledSnafu {}.fail();
         }
 
+        let region_id = self.shared.id();
         let mut futures = Vec::with_capacity(self.memtables.len());
         let iter_ctx = IterContext {
             for_flush: true,
@@ -198,6 +199,7 @@ impl<S: LogStore> FlushJob<S> {
                     .await?;
 
                 Ok(FileMeta {
+                    region_id,
                     file_name,
                     time_range,
                     level: 0,

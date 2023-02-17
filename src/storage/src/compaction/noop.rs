@@ -82,7 +82,7 @@ where
 {
     type Request = R;
 
-    async fn schedule(&self, _request: Self::Request) -> crate::error::Result<bool> {
+    fn schedule(&self, _request: Self::Request) -> crate::error::Result<bool> {
         Ok(true)
     }
 

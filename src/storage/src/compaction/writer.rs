@@ -97,14 +97,45 @@ mod tests {
     use tempdir::TempDir;
 
     use super::*;
+    use crate::file_purger::noop::new_noop_file_purger;
     use crate::memtable::{
         DefaultMemtableBuilder, IterContext, KeyValues, Memtable, MemtableBuilder,
     };
     use crate::metadata::RegionMetadata;
+    use crate::read::BoxedBatchReader;
     use crate::sst;
     use crate::sst::parquet::ParquetWriter;
-    use crate::sst::{FileMeta, FsAccessLayer, Source, SstInfo, WriteOptions};
+    use crate::sst::{
+        AccessLayer, FileMeta, FsAccessLayer, ReadOptions, Source, SstInfo, WriteOptions,
+    };
     use crate::test_util::descriptor_util::RegionDescBuilder;
+
+    #[derive(Debug)]
+    struct MockAccessLayer;
+
+    #[async_trait::async_trait]
+    impl AccessLayer for MockAccessLayer {
+        async fn write_sst(
+            &self,
+            _file_name: &str,
+            _source: Source,
+            _opts: &WriteOptions,
+        ) -> error::Result<SstInfo> {
+            unimplemented!()
+        }
+
+        async fn read_sst(
+            &self,
+            _file_name: &str,
+            _opts: &ReadOptions,
+        ) -> error::Result<BoxedBatchReader> {
+            unimplemented!()
+        }
+
+        async fn delete_sst(&self, _file_name: &str) -> error::Result<()> {
+            Ok(())
+        }
+    }
 
     fn schema_for_test() -> RegionSchemaRef {
         // Just build a region desc and use its columns metadata.
@@ -224,11 +255,16 @@ mod tests {
             .write_sst(&sst::WriteOptions::default())
             .await
             .unwrap();
-        let handle = FileHandle::new(FileMeta {
-            file_name: sst_file_name.to_string(),
-            time_range,
-            level: 0,
-        });
+        let handle = FileHandle::new(
+            FileMeta {
+                region_id: 0,
+                file_name: sst_file_name.to_string(),
+                time_range,
+                level: 0,
+            },
+            Arc::new(MockAccessLayer {}),
+            new_noop_file_purger(),
+        );
         seq.fetch_add(1, Ordering::Relaxed);
         handle
     }
@@ -452,11 +488,16 @@ mod tests {
         let output_files = ["o1.parquet", "o2.parquet", "o3.parquet"]
             .into_iter()
             .map(|f| {
-                FileHandle::new(FileMeta {
-                    file_name: f.to_string(),
-                    level: 1,
-                    time_range: None,
-                })
+                FileHandle::new(
+                    FileMeta {
+                        region_id: 0,
+                        file_name: f.to_string(),
+                        level: 1,
+                        time_range: None,
+                    },
+                    Arc::new(MockAccessLayer {}),
+                    new_noop_file_purger(),
+                )
             })
             .collect::<Vec<_>>();
 

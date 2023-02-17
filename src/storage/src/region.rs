@@ -31,6 +31,7 @@ use store_api::storage::{
 use crate::compaction::CompactionSchedulerRef;
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
+use crate::file_purger::FilePurgerRef;
 use crate::flush::{FlushSchedulerRef, FlushStrategyRef};
 use crate::manifest::action::{
     RawRegionMetadata, RegionChange, RegionMetaAction, RegionMetaActionList,
@@ -118,6 +119,7 @@ pub struct StoreConfig<S: LogStore> {
     pub flush_strategy: FlushStrategyRef,
     pub compaction_scheduler: CompactionSchedulerRef<S>,
     pub engine_config: Arc<EngineConfig>,
+    pub file_purger: FilePurgerRef,
 }
 
 pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
@@ -147,7 +149,13 @@ impl<S: LogStore> RegionImpl<S> {
         let mutable_memtable = store_config
             .memtable_builder
             .build(metadata.schema().clone());
-        let version = Version::with_manifest_version(metadata, manifest_version, mutable_memtable);
+        let version = Version::with_manifest_version(
+            metadata,
+            manifest_version,
+            mutable_memtable,
+            store_config.sst_layer.clone(),
+            store_config.file_purger.clone(),
+        );
         let region = RegionImpl::new(version, store_config);
 
         Ok(region)
@@ -194,6 +202,8 @@ impl<S: LogStore> RegionImpl<S> {
         let (version, mut recovered_metadata) = match Self::recover_from_manifest(
             &store_config.manifest,
             &store_config.memtable_builder,
+            &store_config.sst_layer,
+            &store_config.file_purger,
         )
         .await?
         {
@@ -285,6 +295,8 @@ impl<S: LogStore> RegionImpl<S> {
     async fn recover_from_manifest(
         manifest: &RegionManifest,
         memtable_builder: &MemtableBuilderRef,
+        sst_layer: &AccessLayerRef,
+        file_purger: &FilePurgerRef,
     ) -> Result<(Option<Version>, RecoveredMetadataMap)> {
         let (start, end) = Self::manifest_scan_range();
         let mut iter = manifest.scan(start, end).await?;
@@ -312,6 +324,8 @@ impl<S: LogStore> RegionImpl<S> {
                             Arc::new(region_metadata),
                             last_manifest_version,
                             memtable,
+                            sst_layer.clone(),
+                            file_purger.clone(),
                         ));
                         for (manifest_version, action) in actions.drain(..) {
                             version = Self::replay_edit(manifest_version, action, version);

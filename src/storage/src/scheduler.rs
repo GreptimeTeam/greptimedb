@@ -62,7 +62,7 @@ pub trait Scheduler: Debug {
     /// Schedules a request.
     /// Returns true if request is scheduled. Returns false if task queue already
     /// contains the request with same key.
-    async fn schedule(&self, request: Self::Request) -> error::Result<bool>;
+    fn schedule(&self, request: Self::Request) -> error::Result<bool>;
 
     /// Stops scheduler.
     async fn stop(&self) -> error::Result<()>;
@@ -110,7 +110,7 @@ where
 {
     type Request = R;
 
-    async fn schedule(&self, request: Self::Request) -> error::Result<bool> {
+    fn schedule(&self, request: Self::Request) -> error::Result<bool> {
         debug!(
             "Schedule request: {:?}, queue size: {}",
             request.key(),

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Debug;
 use std::sync::Arc;
 
 use common_telemetry::{debug, error, info};
@@ -246,15 +245,9 @@ mod tests {
             handler,
         );
 
-        scheduler
-            .schedule(MockRequest { region_id: 1 })
-            .await
-            .unwrap();
+        scheduler.schedule(MockRequest { region_id: 1 }).unwrap();
 
-        scheduler
-            .schedule(MockRequest { region_id: 2 })
-            .await
-            .unwrap();
+        scheduler.schedule(MockRequest { region_id: 2 }).unwrap();
 
         tokio::time::timeout(Duration::from_secs(1), latch.wait())
             .await
@@ -285,7 +278,6 @@ mod tests {
                 .schedule(MockRequest {
                     region_id: i as RegionId,
                 })
-                .await
                 .unwrap();
         }
 
@@ -317,7 +309,6 @@ mod tests {
                 .schedule(MockRequest {
                     region_id: i as RegionId,
                 })
-                .await
                 .unwrap();
         }
 
@@ -327,7 +318,6 @@ mod tests {
                 .schedule(MockRequest {
                     region_id: i as RegionId,
                 })
-                .await
                 .unwrap();
         }
 
@@ -347,11 +337,7 @@ mod tests {
 
         let mut scheduled_task = 0;
         for _ in 0..10 {
-            if scheduler
-                .schedule(MockRequest { region_id: 1 })
-                .await
-                .unwrap()
-            {
+            if scheduler.schedule(MockRequest { region_id: 1 }).unwrap() {
                 scheduled_task += 1;
             }
         }
