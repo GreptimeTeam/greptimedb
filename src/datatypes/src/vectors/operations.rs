@@ -12,18 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod cast;
 mod filter;
 mod find_unique;
 mod replicate;
 
 use common_base::BitVec;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::types::LogicalPrimitiveType;
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
-    BinaryVector, BooleanVector, ListVector, NullVector, PrimitiveVector, StringVector, Vector,
-    VectorRef,
+    BinaryVector, BooleanVector, ConcreteDataType, ListVector, NullVector, PrimitiveVector,
+    StringVector, Vector, VectorRef,
 };
 
 /// Vector compute operations.
@@ -57,6 +58,11 @@ pub trait VectorOp {
     ///
     /// Note that the nulls of `filter` are interpreted as `false` will lead to these elements being masked out.
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef>;
+
+    /// Cast vector to the provided data type and return a new vector with type to_type, if possible.
+    ///
+    /// TODO(dennis) describe behaviors in details.
+    fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef>;
 }
 
 macro_rules! impl_scalar_vector_op {
@@ -73,6 +79,10 @@ macro_rules! impl_scalar_vector_op {
 
             fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
                 filter::filter_non_constant!(self, $VectorType, filter)
+            }
+
+            fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
+                cast::cast_non_constant!(self, to_type)
             }
         }
     )+};
@@ -94,6 +104,10 @@ impl<T: LogicalPrimitiveType> VectorOp for PrimitiveVector<T> {
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
         filter::filter_non_constant!(self, PrimitiveVector<T>, filter)
     }
+
+    fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
+        cast::cast_non_constant!(self, to_type)
+    }
 }
 
 impl VectorOp for NullVector {
@@ -109,6 +123,14 @@ impl VectorOp for NullVector {
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
         filter::filter_non_constant!(self, NullVector, filter)
     }
+    fn cast(&self, _to_type: &ConcreteDataType) -> Result<VectorRef> {
+        // TODO(dennis): impl it when NullVector has other datatype.
+        error::UnsupportedOperationSnafu {
+            op: "cast",
+            vector_type: self.vector_type_name(),
+        }
+        .fail()
+    }
 }
 
 impl VectorOp for ConstantVector {
@@ -123,5 +145,9 @@ impl VectorOp for ConstantVector {
 
     fn filter(&self, filter: &BooleanVector) -> Result<VectorRef> {
         self.filter_vector(filter)
+    }
+
+    fn cast(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
+        self.cast_vector(to_type)
     }
 }

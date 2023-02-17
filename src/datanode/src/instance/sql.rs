@@ -21,6 +21,7 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;
 use common_telemetry::timer;
 use datatypes::schema::Schema;
+use futures::StreamExt;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use servers::error as server_error;
 use servers::promql::PromqlHandler;
@@ -35,6 +36,7 @@ use table::requests::{CreateDatabaseRequest, DropTableRequest};
 use crate::error::{self, BumpTableIdSnafu, ExecuteSqlSnafu, Result, TableIdProviderNotFoundSnafu};
 use crate::instance::Instance;
 use crate::metric;
+use crate::sql::insert::InsertRequests;
 use crate::sql::SqlRequest;
 
 impl Instance {
@@ -56,15 +58,33 @@ impl Instance {
                     .context(ExecuteSqlSnafu)
             }
             QueryStatement::Sql(Statement::Insert(i)) => {
-                let (catalog, schema, table) =
-                    table_idents_to_full_name(i.table_name(), query_ctx.clone())?;
-                let table_ref = TableReference::full(&catalog, &schema, &table);
-                let request = self.sql_handler.insert_to_request(
-                    self.catalog_manager.clone(),
-                    *i,
-                    table_ref,
-                )?;
-                self.sql_handler.execute(request, query_ctx).await
+                let requests = self
+                    .sql_handler
+                    .insert_to_requests(self.catalog_manager.clone(), *i, query_ctx.clone())
+                    .await?;
+
+                match requests {
+                    InsertRequests::Request(request) => {
+                        self.sql_handler.execute(request, query_ctx.clone()).await
+                    }
+
+                    InsertRequests::Stream(mut s) => {
+                        let mut rows = 0;
+                        while let Some(request) = s.next().await {
+                            match self
+                                .sql_handler
+                                .execute(request?, query_ctx.clone())
+                                .await?
+                            {
+                                Output::AffectedRows(n) => {
+                                    rows += n;
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        Ok(Output::AffectedRows(rows))
+                    }
+                }
             }
             QueryStatement::Sql(Statement::Delete(d)) => {
                 let request = SqlRequest::Delete(*d);

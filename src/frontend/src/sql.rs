@@ -38,7 +38,10 @@ pub(crate) fn insert_to_request(
     query_ctx: QueryContextRef,
 ) -> Result<InsertRequest> {
     let columns = stmt.columns();
-    let values = stmt.values().context(error::ParseSqlSnafu)?;
+    let values = stmt
+        .values_body()
+        .context(error::ParseSqlSnafu)?
+        .context(error::MissingInsertValuesSnafu)?;
 
     let (catalog_name, schema_name, table_name) =
         table_idents_to_full_name(stmt.table_name(), query_ctx)

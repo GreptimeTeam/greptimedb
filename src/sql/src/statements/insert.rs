@@ -11,12 +11,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-use sqlparser::ast::{ObjectName, SetExpr, Statement, UnaryOperator, Values};
+use sqlparser::ast::{ObjectName, Query, SetExpr, Statement, UnaryOperator, Values};
 use sqlparser::parser::ParserError;
 
 use crate::ast::{Expr, Value};
 use crate::error::{self, Result};
+use crate::statements::query::Query as GtQuery;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Insert {
@@ -39,15 +39,42 @@ impl Insert {
         }
     }
 
-    pub fn values(&self) -> Result<Vec<Vec<Value>>> {
+    pub fn values_body(&self) -> Result<Option<Vec<Vec<Value>>>> {
         let values = match &self.inner {
-            Statement::Insert { source, .. } => match &*source.body {
-                SetExpr::Values(Values { rows, .. }) => sql_exprs_to_values(rows)?,
-                _ => unreachable!(),
-            },
-            _ => unreachable!(),
+            Statement::Insert {
+                source:
+                    box Query {
+                        body: box SetExpr::Values(Values { rows, .. }),
+                        ..
+                    },
+                ..
+            } => Some(sql_exprs_to_values(rows)?),
+            _ => None,
         };
+
         Ok(values)
+    }
+
+    pub fn query_body(&self) -> Result<Option<GtQuery>> {
+        Ok(match &self.inner {
+            Statement::Insert {
+                source: box query, ..
+            } => Some(query.clone().try_into()?),
+            _ => None,
+        })
+    }
+
+    pub fn is_insert_select(&self) -> bool {
+        matches!(
+            self.inner,
+            Statement::Insert {
+                source: box Query {
+                    body: box SetExpr::Select { .. },
+                    ..
+                },
+                ..
+            }
+        )
     }
 }
 
@@ -113,11 +140,10 @@ mod tests {
 
     use super::*;
     use crate::parser::ParserContext;
+    use crate::statements::statement::Statement;
 
     #[test]
     fn test_insert_value_with_unary_op() {
-        use crate::statements::statement::Statement;
-
         // insert "-1"
         let sql = "INSERT INTO my_table VALUES(-1)";
         let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
@@ -125,7 +151,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values().unwrap();
+                let values = insert.values_body().unwrap().unwrap();
                 assert_eq!(values, vec![vec![Value::Number("-1".to_string(), false)]]);
             }
             _ => unreachable!(),
@@ -138,7 +164,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values().unwrap();
+                let values = insert.values_body().unwrap().unwrap();
                 assert_eq!(values, vec![vec![Value::Number("1".to_string(), false)]]);
             }
             _ => unreachable!(),
@@ -147,8 +173,6 @@ mod tests {
 
     #[test]
     fn test_insert_value_with_default() {
-        use crate::statements::statement::Statement;
-
         // insert "default"
         let sql = "INSERT INTO my_table VALUES(default)";
         let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
@@ -156,7 +180,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values().unwrap();
+                let values = insert.values_body().unwrap().unwrap();
                 assert_eq!(values, vec![vec![Value::Placeholder("default".to_owned())]]);
             }
             _ => unreachable!(),
@@ -165,8 +189,6 @@ mod tests {
 
     #[test]
     fn test_insert_value_with_default_uppercase() {
-        use crate::statements::statement::Statement;
-
         // insert "DEFAULT"
         let sql = "INSERT INTO my_table VALUES(DEFAULT)";
         let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
@@ -174,7 +196,7 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values().unwrap();
+                let values = insert.values_body().unwrap().unwrap();
                 assert_eq!(values, vec![vec![Value::Placeholder("DEFAULT".to_owned())]]);
             }
             _ => unreachable!(),
@@ -183,8 +205,6 @@ mod tests {
 
     #[test]
     fn test_insert_value_with_quoted_string() {
-        use crate::statements::statement::Statement;
-
         // insert "'default'"
         let sql = "INSERT INTO my_table VALUES('default')";
         let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
@@ -192,11 +212,33 @@ mod tests {
             .remove(0);
         match stmt {
             Statement::Insert(insert) => {
-                let values = insert.values().unwrap();
+                let values = insert.values_body().unwrap().unwrap();
                 assert_eq!(
                     values,
                     vec![vec![Value::SingleQuotedString("default".to_owned())]]
                 );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_insert_select() {
+        let sql = "INSERT INTO my_table select * from other_table";
+        let stmt = ParserContext::create_with_dialect(sql, &GenericDialect {})
+            .unwrap()
+            .remove(0);
+        match stmt {
+            Statement::Insert(insert) => {
+                assert!(insert.is_insert_select());
+                let q = insert.query_body().unwrap().unwrap();
+                assert!(matches!(
+                    q.inner,
+                    Query {
+                        body: box SetExpr::Select { .. },
+                        ..
+                    }
+                ));
             }
             _ => unreachable!(),
         }

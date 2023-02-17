@@ -76,6 +76,13 @@ impl ConstantVector {
         }
         Ok(Arc::new(ConstantVector::new(self.inner().clone(), length)))
     }
+
+    pub(crate) fn cast_vector(&self, to_type: &ConcreteDataType) -> Result<VectorRef> {
+        Ok(Arc::new(ConstantVector::new(
+            self.inner().cast(to_type)?,
+            self.length,
+        )))
+    }
 }
 
 impl Vector for ConstantVector {

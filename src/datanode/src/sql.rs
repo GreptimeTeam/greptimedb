@@ -34,7 +34,7 @@ mod alter;
 mod create;
 mod delete;
 mod drop_table;
-mod insert;
+pub(crate) mod insert;
 
 #[derive(Debug)]
 pub enum SqlRequest {
@@ -142,6 +142,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::value::Value;
+    use futures::StreamExt;
     use log_store::NoopLogStore;
     use mito::config::EngineConfig as TableEngineConfig;
     use mito::engine::MitoEngine;
@@ -149,17 +150,19 @@ mod tests {
     use object_store::ObjectStore;
     use query::parser::{QueryLanguageParser, QueryStatement};
     use query::QueryEngineFactory;
+    use session::context::QueryContext;
     use sql::statements::statement::Statement;
     use storage::compaction::noop::NoopCompactionScheduler;
     use storage::config::EngineConfig as StorageEngineConfig;
     use storage::EngineImpl;
-    use table::engine::TableReference;
     use table::error::Result as TableResult;
     use table::metadata::TableInfoRef;
     use table::Table;
     use tempdir::TempDir;
 
     use super::*;
+    use crate::error::Error;
+    use crate::sql::insert::InsertRequests;
 
     struct DemoTable;
 
@@ -255,11 +258,12 @@ mod tests {
             }
         };
         let request = sql_handler
-            .insert_to_request(catalog_list.clone(), *stmt, TableReference::bare("demo"))
+            .insert_to_requests(catalog_list.clone(), *stmt, QueryContext::arc())
+            .await
             .unwrap();
 
         match request {
-            SqlRequest::Insert(req) => {
+            InsertRequests::Request(SqlRequest::Insert(req)) => {
                 assert_eq!(req.table_name, "demo");
                 let columns_values = req.columns_values;
                 assert_eq!(4, columns_values.len());
@@ -293,6 +297,64 @@ mod tests {
             _ => {
                 panic!("Not supposed to reach here")
             }
+        }
+
+        // test inert into select
+
+        // type mismatch
+        let sql = "insert into demo(ts) select number from numbers limit 3";
+
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(Statement::Insert(i)) => i,
+            _ => {
+                unreachable!()
+            }
+        };
+        let request = sql_handler
+            .insert_to_requests(catalog_list.clone(), *stmt, QueryContext::arc())
+            .await
+            .unwrap();
+
+        match request {
+            InsertRequests::Stream(mut stream) => {
+                assert!(matches!(
+                    stream.next().await.unwrap().unwrap_err(),
+                    Error::ColumnTypeMismatch { .. }
+                ));
+            }
+            _ => unreachable!(),
+        }
+
+        let sql = "insert into demo(cpu) select cast(number as double) from numbers limit 3";
+        let stmt = match QueryLanguageParser::parse_sql(sql).unwrap() {
+            QueryStatement::Sql(Statement::Insert(i)) => i,
+            _ => {
+                unreachable!()
+            }
+        };
+        let request = sql_handler
+            .insert_to_requests(catalog_list.clone(), *stmt, QueryContext::arc())
+            .await
+            .unwrap();
+
+        match request {
+            InsertRequests::Stream(mut stream) => {
+                let mut times = 0;
+                while let Some(Ok(SqlRequest::Insert(req))) = stream.next().await {
+                    times += 1;
+                    assert_eq!(req.table_name, "demo");
+                    let columns_values = req.columns_values;
+                    assert_eq!(1, columns_values.len());
+
+                    let memories = &columns_values["cpu"];
+                    assert_eq!(3, memories.len());
+                    assert_eq!(Value::from(0.0f64), memories.get(0));
+                    assert_eq!(Value::from(1.0f64), memories.get(1));
+                    assert_eq!(Value::from(2.0f64), memories.get(2));
+                }
+                assert_eq!(1, times);
+            }
+            _ => unreachable!(),
         }
     }
 }
