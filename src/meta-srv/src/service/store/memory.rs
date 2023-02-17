@@ -271,10 +271,12 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::meta::{
-        BatchPutRequest, CompareAndPutRequest, KeyValue, PutRequest, RangeRequest,
+        BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest, KeyValue, MoveValueRequest,
+        PutRequest, RangeRequest,
     };
 
     use super::MemStore;
+    use crate::service::store::ext::KvStoreExt;
     use crate::service::store::kv::KvStore;
     use crate::util;
 
@@ -471,7 +473,7 @@ mod tests {
             let join = tokio::spawn(async move {
                 let req = CompareAndPutRequest {
                     key: b"key".to_vec(),
-                    expect: b"".to_vec(),
+                    expect: vec![],
                     value: b"val_new".to_vec(),
                     ..Default::default()
                 };
@@ -491,8 +493,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_range() {}
+    async fn test_delete_range() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        let req = DeleteRangeRequest {
+            key: b"key3".to_vec(),
+            range_end: vec![],
+            prev_kv: true,
+            ..Default::default()
+        };
+
+        let resp = kv_store.delete_range(req).await.unwrap();
+        assert_eq!(1, resp.prev_kvs.len());
+        assert_eq!(b"key3".to_vec(), resp.prev_kvs[0].key);
+        assert_eq!(b"val3".to_vec(), resp.prev_kvs[0].value);
+
+        let get_resp = kv_store.get(b"key3".to_vec()).await.unwrap();
+        assert!(get_resp.is_none());
+
+        let req = DeleteRangeRequest {
+            key: b"key2".to_vec(),
+            range_end: vec![],
+            prev_kv: false,
+            ..Default::default()
+        };
+
+        let resp = kv_store.delete_range(req).await.unwrap();
+        assert!(resp.prev_kvs.is_empty());
+
+        let get_resp = kv_store.get(b"key2".to_vec()).await.unwrap();
+        assert!(get_resp.is_none());
+
+        let key = b"key1".to_vec();
+        let range_end = util::get_prefix_end_key(b"key1");
+
+        let req = DeleteRangeRequest {
+            key: key.clone(),
+            range_end: range_end.clone(),
+            prev_kv: true,
+            ..Default::default()
+        };
+        let resp = kv_store.delete_range(req).await.unwrap();
+        assert_eq!(2, resp.prev_kvs.len());
+
+        let req = RangeRequest {
+            key,
+            range_end,
+            ..Default::default()
+        };
+        let resp = kv_store.range(req).await.unwrap();
+        assert!(resp.kvs.is_empty());
+    }
 
     #[tokio::test]
-    async fn test_move_value() {}
+    async fn test_move_value() {
+        let kv_store = mock_mem_store_with_data().await;
+
+        let req = MoveValueRequest {
+            from_key: b"key1".to_vec(),
+            to_key: b"key111".to_vec(),
+            ..Default::default()
+        };
+
+        let resp = kv_store.move_value(req).await.unwrap();
+        assert_eq!(b"key1".to_vec(), resp.kv.as_ref().unwrap().key);
+        assert_eq!(b"val1".to_vec(), resp.kv.as_ref().unwrap().value);
+
+        let kv_store = mock_mem_store_with_data().await;
+
+        let req = MoveValueRequest {
+            from_key: b"notexistkey".to_vec(),
+            to_key: b"key222".to_vec(),
+            ..Default::default()
+        };
+
+        let resp = kv_store.move_value(req).await.unwrap();
+        assert!(resp.kv.is_none());
+    }
 }
