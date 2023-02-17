@@ -19,10 +19,10 @@ use snafu::ResultExt;
 use tonic::codegen::http;
 
 use crate::error::Result;
-use crate::error;
-use crate::util;
 use crate::service::admin::HttpHandler;
+use crate::service::store::ext::KvStoreExt;
 use crate::service::store::kv::KvStoreRef;
+use crate::{error, util};
 
 pub struct CatalogsHandler {
     pub kv_store: KvStoreRef,
@@ -53,16 +53,19 @@ impl HttpHandler for CatalogsHandler {
 
 #[async_trait::async_trait]
 impl HttpHandler for SchemasHandler {
-    async fn handle(&self, _: &str, map: &HashMap<String, String>) -> Result<http::Response<String>> {
+    async fn handle(
+        &self,
+        _: &str,
+        map: &HashMap<String, String>,
+    ) -> Result<http::Response<String>> {
         let mut schema_key_prefix = String::from(SCHEMA_KEY_PREFIX);
         match map.get("catalog_name") {
-            Some(catalog_value) => {
-                schema_key_prefix = schema_key_prefix + catalog_value + "-"
-            }
+            Some(catalog_value) => schema_key_prefix = schema_key_prefix + catalog_value + "-",
             None => {
                 return error::MissingRequiredParameterSnafu {
                     msg: "catalog_name parameter is required".to_string(),
-                }.fail();
+                }
+                .fail();
             }
         }
         get_key_list_response_by_prefix_key(&schema_key_prefix, &self.kv_store).await
@@ -71,27 +74,29 @@ impl HttpHandler for SchemasHandler {
 
 #[async_trait::async_trait]
 impl HttpHandler for TablesHandler {
-    async fn handle(&self, _: &str, map: &HashMap<String, String>) -> Result<http::Response<String>> {
+    async fn handle(
+        &self,
+        _: &str,
+        map: &HashMap<String, String>,
+    ) -> Result<http::Response<String>> {
         let mut table_key_prefix = String::from(TABLE_KEY_PREFIX);
         match map.get("catalog_name") {
-            Some(catalog_value) => {
-                table_key_prefix = table_key_prefix + catalog_value + "-"
-            }
+            Some(catalog_value) => table_key_prefix = table_key_prefix + catalog_value + "-",
             None => {
                 return error::MissingRequiredParameterSnafu {
                     msg: "catalog_name parameter is required".to_string(),
-                }.fail();
+                }
+                .fail();
             }
         }
 
         match map.get("schema_name") {
-            Some(schema_value) => {
-                table_key_prefix = table_key_prefix + schema_value + "-"
-            }
+            Some(schema_value) => table_key_prefix = table_key_prefix + schema_value + "-",
             None => {
                 return error::MissingRequiredParameterSnafu {
                     msg: "schema_name parameter is required".to_string(),
-                }.fail();
+                }
+                .fail();
             }
         }
         get_key_list_response_by_prefix_key(&table_key_prefix, &self.kv_store).await
@@ -100,7 +105,11 @@ impl HttpHandler for TablesHandler {
 
 #[async_trait::async_trait]
 impl HttpHandler for TableHandler {
-    async fn handle(&self, _: &str, map: &HashMap<String, String>) -> Result<http::Response<String>> {
+    async fn handle(
+        &self,
+        _: &str,
+        map: &HashMap<String, String>,
+    ) -> Result<http::Response<String>> {
         let mut table_key_prefix = String::from(TABLE_KEY_PREFIX);
         match map.get("full_table_name") {
             Some(full_table_name) => {
@@ -110,19 +119,16 @@ impl HttpHandler for TableHandler {
             None => {
                 return error::MissingRequiredParameterSnafu {
                     msg: "full_table_name parameter is required".to_string(),
-                }.fail();
+                }
+                .fail();
             }
         }
 
-        let req = RangeRequest {
-            key: table_key_prefix.into_bytes(),
-            ..Default::default()
-        };
-
-        let response: RangeResponse = self.kv_store.range(req).await?;
-
-        let kvs = response.kvs;
-        let value = String::from_utf8(kvs.get_mut(0)).context(error::InvalidUtf8ValueSnafu)?;
+        let response = self.kv_store.get(table_key_prefix.into_bytes()).await?;
+        let mut value: String = "Not found result".to_string();
+        if let Some(key_value) = response {
+            value = String::from_utf8(key_value.value).context(error::InvalidUtf8ValueSnafu)?;
+        }
         Ok(http::Response::builder()
             .status(http::StatusCode::OK)
             .body(value)
@@ -130,7 +136,11 @@ impl HttpHandler for TableHandler {
     }
 }
 
-async fn get_key_list_response_by_prefix_key(key_prefix: &String, kv_store: &KvStoreRef) -> Result<http::Response<String>> {
+/// Get kv_store's key list with http response format by prefix key
+async fn get_key_list_response_by_prefix_key(
+    key_prefix: &String,
+    kv_store: &KvStoreRef,
+) -> Result<http::Response<String>> {
     let keys = get_key_list_by_prefix_key(key_prefix, kv_store).await?;
     let body = serde_json::to_string(&keys).context(error::SerializeToJsonSnafu {
         input: format!("{keys:?}"),
@@ -142,7 +152,11 @@ async fn get_key_list_response_by_prefix_key(key_prefix: &String, kv_store: &KvS
         .unwrap())
 }
 
-async fn get_key_list_by_prefix_key(key_prefix: &String, kv_store: &KvStoreRef) -> Result<Vec<String>> {
+/// Get kv_store's key list by prefix key
+async fn get_key_list_by_prefix_key(
+    key_prefix: &String,
+    kv_store: &KvStoreRef,
+) -> Result<Vec<String>> {
     let key_prefix_u8 = key_prefix.clone().into_bytes();
     let range_end = util::get_prefix_end_key(&key_prefix_u8);
     let req = RangeRequest {

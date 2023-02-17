@@ -314,7 +314,7 @@ impl ErrorExt for Error {
             | Error::ExceededRetryLimit { .. }
             | Error::StartGrpc { .. } => StatusCode::Internal,
             Error::EmptyKey { .. }
-            | Error::MissingRequiredParameter {..}
+            | Error::MissingRequiredParameter { .. }
             | Error::EmptyTableName { .. }
             | Error::InvalidLeaseKey { .. }
             | Error::InvalidStatKey { .. }
