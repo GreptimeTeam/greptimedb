@@ -130,10 +130,10 @@ impl HttpHandler for TableHandler {
         if let Some(key_value) = response {
             value = String::from_utf8(key_value.value).context(error::InvalidUtf8ValueSnafu)?;
         }
-        Ok(http::Response::builder()
+        http::Response::builder()
             .status(http::StatusCode::OK)
             .body(value)
-            .unwrap())
+            .context(error::InvalidHttpBodySnafu)
     }
 }
 
@@ -147,10 +147,10 @@ async fn get_key_list_response_by_prefix_key(
         input: format!("{keys:?}"),
     })?;
 
-    Ok(http::Response::builder()
+    http::Response::builder()
         .status(http::StatusCode::OK)
         .body(body)
-        .unwrap())
+        .context(error::InvalidHttpBodySnafu)
 }
 
 /// Get kv_store's key list by prefix key

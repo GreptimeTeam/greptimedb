@@ -29,14 +29,28 @@ pub struct HeartBeatHandler {
 
 #[async_trait::async_trait]
 impl HttpHandler for HeartBeatHandler {
-    async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
+    async fn handle(
+        &self,
+        _: &str,
+        map: &HashMap<String, String>,
+    ) -> Result<http::Response<String>> {
         let meta_peer_client = self
             .meta_peer_client
             .as_ref()
             .context(error::NoMetaPeerClientSnafu)?;
 
         let stat_kvs = meta_peer_client.get_all_dn_stat_kvs().await?;
-        let stat_vals: Vec<StatValue> = stat_kvs.into_values().collect();
+        let mut stat_vals: Vec<StatValue> = stat_kvs.into_values().collect();
+
+        if let Some(addr) = map.get("addr") {
+            stat_vals.retain(|stat_val| {
+                if let Some(stat) = stat_val.stats.get(0) {
+                    stat.addr == addr.clone()
+                } else {
+                    false
+                }
+            });
+        }
         let result = StatValues { stat_vals }.try_into()?;
 
         http::Response::builder()

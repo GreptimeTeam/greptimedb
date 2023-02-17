@@ -13,9 +13,10 @@
 // limitations under the License.
 use std::collections::HashMap;
 
+use snafu::ResultExt;
 use tonic::codegen::http;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::metasrv::ElectionRef;
 use crate::service::admin::HttpHandler;
 
@@ -29,15 +30,15 @@ impl HttpHandler for LeaderHandler {
         match &self.election {
             Some(election) => {
                 let leader_addr = election.leader().await?.0;
-                Ok(http::Response::builder()
+                http::Response::builder()
                     .status(http::StatusCode::OK)
                     .body(leader_addr)
-                    .unwrap())
+                    .context(error::InvalidHttpBodySnafu)
             }
-            None => Ok(http::Response::builder()
+            None => http::Response::builder()
                 .status(http::StatusCode::OK)
                 .body("election info is None".to_string())
-                .unwrap()),
+                .context(error::InvalidHttpBodySnafu),
         }
     }
 }
