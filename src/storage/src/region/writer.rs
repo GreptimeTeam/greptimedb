@@ -14,10 +14,11 @@
 
 use std::sync::Arc;
 
+use common_error::prelude::BoxedError;
 use common_telemetry::tracing::log::info;
 use common_telemetry::{error, logging};
 use futures::TryStreamExt;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::manifest::{Manifest, ManifestVersion, MetaAction};
 use store_api::storage::{AlterRequest, SequenceNumber, WriteContext, WriteResponse};
@@ -74,6 +75,9 @@ impl RegionWriter {
         writer_ctx: WriterContext<'_, S>,
     ) -> Result<WriteResponse> {
         let mut inner = self.inner.lock().await;
+
+        ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+
         inner
             .write(&self.version_mutex, ctx, request, writer_ctx)
             .await
@@ -155,6 +159,8 @@ impl RegionWriter {
         // alter request to the region.
         let inner = self.inner.lock().await;
 
+        ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
+
         let version_control = alter_ctx.version_control();
 
         let old_metadata = version_control.metadata();
@@ -225,6 +231,43 @@ impl RegionWriter {
 
         Ok(())
     }
+
+    pub async fn close(&self) -> Result<()> {
+        // In order to close a writer
+        // 1. Acquires the write lock.
+        // 2. Sets a memory flag to reject any potential writing.
+        // 3. Waits for the pending flush task.
+        {
+            let mut inner = self.inner.lock().await;
+
+            if inner.is_closed() {
+                return Ok(());
+            }
+
+            inner.mark_closed();
+        }
+        // we release the writer lock once for rejecting any following potential writing requests immediately.
+
+        self.cancel_flush().await?;
+
+        // TODO: canncel the compaction task
+
+        Ok(())
+    }
+
+    /// Cancel flush task if any
+    async fn cancel_flush(&self) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+
+        if let Some(task) = inner.flush_handle.take() {
+            task.cancel()
+                .await
+                .map_err(BoxedError::new)
+                .context(error::CancelFlushSnafu)?;
+        }
+
+        Ok(())
+    }
 }
 
 // Private methods for tests.
@@ -275,6 +318,11 @@ impl<'a, S: LogStore> AlterContext<'a, S> {
 struct WriterInner {
     memtable_builder: MemtableBuilderRef,
     flush_handle: Option<JobHandle>,
+
+    /// `WriterInner` will reject any future writing, if the closed flag is set.
+    ///
+    /// It should protected by upper mutex
+    closed: bool,
     engine_config: Arc<EngineConfig>,
 }
 
@@ -284,6 +332,7 @@ impl WriterInner {
             memtable_builder,
             flush_handle: None,
             engine_config,
+            closed: false,
         }
     }
 
@@ -616,5 +665,15 @@ impl WriterInner {
             }
         });
         Some(schedule_compaction_cb)
+    }
+
+    #[inline]
+    fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    #[inline]
+    fn mark_closed(&mut self) {
+        self.closed = true;
     }
 }

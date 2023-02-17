@@ -14,6 +14,7 @@
 
 pub mod config_util;
 pub mod descriptor_util;
+pub mod flush_switch;
 pub mod read_util;
 pub mod schema_util;
 pub mod write_batch_util;

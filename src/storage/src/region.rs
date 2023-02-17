@@ -103,6 +103,10 @@ impl<S: LogStore> Region for RegionImpl<S> {
     async fn alter(&self, request: AlterRequest) -> Result<()> {
         self.inner.alter(request).await
     }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
 }
 
 /// Storage related config for region.
@@ -508,5 +512,9 @@ impl<S: LogStore> RegionInner<S> {
         };
 
         self.writer.alter(alter_ctx, request).await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.writer.close().await
     }
 }
