@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_telemetry::debug;
+use common_telemetry::{debug, error};
 use store_api::storage::RegionId;
 use tokio::sync::Notify;
 
@@ -48,7 +48,13 @@ impl Handler for FilePurgeHandler {
         token: BoxedRateLimitToken,
         finish_notifier: Arc<Notify>,
     ) -> crate::error::Result<()> {
-        req.sst_layer.delete_sst(&req.file_name).await?;
+        req.sst_layer
+            .delete_sst(&req.file_name)
+            .await
+            .map_err(|e| {
+                error!(e; "Failed to delete SST file, file: {}, region: {}", req.file_name, req.region_id);
+                e
+            })?;
         debug!(
             "Successfully deleted SST file: {}, region: {}",
             req.file_name, req.region_id

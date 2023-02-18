@@ -113,6 +113,8 @@ pub struct CompactionConfig {
     pub max_inflight_task: usize,
     /// Max files in level 0 to trigger compaction.
     pub max_file_in_level0: usize,
+    /// Max task number for SST purge task after compaction.
+    pub max_purge_task: usize,
 }
 
 impl Default for CompactionConfig {
@@ -120,6 +122,7 @@ impl Default for CompactionConfig {
         Self {
             max_inflight_task: 4,
             max_file_in_level0: 8,
+            max_purge_task: 32,
         }
     }
 }
@@ -136,6 +139,7 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
             max_files_in_l0: value.compaction.max_file_in_level0,
+            max_purge_task: value.compaction.max_purge_task,
         }
     }
 }

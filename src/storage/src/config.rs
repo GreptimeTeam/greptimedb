@@ -17,10 +17,14 @@
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub max_files_in_l0: usize,
+    pub max_purge_task: usize,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self { max_files_in_l0: 8 }
+        Self {
+            max_files_in_l0: 8,
+            max_purge_task: 32,
+        }
     }
 }

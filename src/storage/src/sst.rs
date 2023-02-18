@@ -242,7 +242,7 @@ impl Drop for FileHandleInner {
                     );
                 }
                 Err(e) => {
-                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}",self.meta.region_id, self.meta.file_name);
+                    error!(e; "Failed to schedule SST purge task, region: {}, name: {}", self.meta.region_id, self.meta.file_name);
                 }
             }
         }

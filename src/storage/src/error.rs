@@ -411,13 +411,13 @@ pub enum Error {
     #[snafu(display("Scheduler rate limited, msg: {}", msg))]
     RateLimited { msg: String, backtrace: Backtrace },
 
-    #[snafu(display("Failed to stop scheduler, source: {:?}", source))]
+    #[snafu(display("Failed to stop scheduler, source: {}", source))]
     StopScheduler {
         source: JoinError,
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Failed to delete SST file, source: {:?}", source))]
+    #[snafu(display("Failed to delete SST file, source: {}", source))]
     DeleteSst {
         source: object_store::Error,
         backtrace: Backtrace,
