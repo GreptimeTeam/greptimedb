@@ -45,9 +45,9 @@ use crate::python::error::{self, Result};
 
 const PY_ENGINE: &str = "python";
 
-#[derive(Debug)]
 pub struct PyUDF {
     copr: CoprocessorRef,
+    query_engine: QueryEngineRef,
 }
 
 impl std::fmt::Display for PyUDF {
@@ -67,8 +67,8 @@ impl std::fmt::Display for PyUDF {
 }
 
 impl PyUDF {
-    fn from_copr(copr: CoprocessorRef) -> Arc<Self> {
-        Arc::new(Self { copr })
+    fn new(copr: CoprocessorRef, query_engine: QueryEngineRef) -> Arc<Self> {
+        Arc::new(Self { copr, query_engine })
     }
 
     /// Register to `FUNCTION_REGISTRY`
@@ -150,12 +150,13 @@ impl Function for PyUDF {
         let schema = self.fake_schema(columns);
         let columns = columns.to_vec();
         let rb = Some(RecordBatch::new(schema, columns).context(UdfTempRecordBatchSnafu)?);
-        let res = exec_parsed(&self.copr, &rb, &HashMap::new()).map_err(|err| {
-            PyUdfSnafu {
-                msg: format!("{err:#?}"),
-            }
-            .build()
-        })?;
+        let res =
+            exec_parsed(&self.copr, &self.query_engine, &rb, &HashMap::new()).map_err(|err| {
+                PyUdfSnafu {
+                    msg: format!("{err:#?}"),
+                }
+                .build()
+            })?;
         let len = res.columns().len();
         if len == 0 {
             return PyUdfSnafu {
@@ -179,13 +180,14 @@ impl PyScript {
     /// Register Current Script as UDF, register name is same as script name
     /// FIXME(discord9): possible inject attack?
     pub fn register_udf(&self) {
-        let udf = PyUDF::from_copr(self.copr.clone());
+        let udf = PyUDF::new(self.copr.clone(), self.query_engine.clone());
         PyUDF::register_as_udf(udf.clone());
         PyUDF::register_to_query_engine(udf, self.query_engine.clone());
     }
 }
 
 pub struct CoprStream {
+    query_engine: QueryEngineRef,
     stream: SendableRecordBatchStream,
     copr: CoprocessorRef,
     params: HashMap<String, String>,
@@ -204,9 +206,14 @@ impl Stream for CoprStream {
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(recordbatch))) => {
-                let batch = exec_parsed(&self.copr, &Some(recordbatch), &self.params)
-                    .map_err(BoxedError::new)
-                    .context(ExternalSnafu)?;
+                let batch = exec_parsed(
+                    &self.copr,
+                    &self.query_engine,
+                    &Some(recordbatch),
+                    &self.params,
+                )
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
 
                 Poll::Ready(Some(Ok(batch)))
             }
@@ -246,6 +253,7 @@ impl Script for PyScript {
             let copr = self.copr.clone();
             match res {
                 Output::Stream(stream) => Ok(Output::Stream(Box::pin(CoprStream {
+                    query_engine: self.query_engine.clone(),
                     params,
                     copr,
                     stream,
@@ -253,7 +261,7 @@ impl Script for PyScript {
                 _ => unreachable!(),
             }
         } else {
-            let batch = exec_parsed(&self.copr, &None, &params)?;
+            let batch = exec_parsed(&self.copr, &self.query_engine, &None, &params)?;
             let batches = RecordBatches::try_new(batch.schema.clone(), vec![batch]).unwrap();
             Ok(Output::RecordBatches(batches))
         }
@@ -284,10 +292,7 @@ impl ScriptEngine for PyEngine {
     }
 
     async fn compile(&self, script: &str, _ctx: CompileContext) -> Result<PyScript> {
-        let copr = Arc::new(parse::parse_and_compile_copr(
-            script,
-            Some(self.query_engine.clone()),
-        )?);
+        let copr = Arc::new(parse::parse_and_compile_copr(script)?);
 
         Ok(PyScript {
             copr,
@@ -340,7 +345,7 @@ import greptime as gt
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number)->vector[u32]:
-    return query.sql("select * from numbers")[0][0]
+    return __query__.sql("select * from numbers")[0][0]
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())
@@ -396,11 +401,11 @@ def test(**params)->vector[i64]:
 
         let script = r#"
 import greptime as gt
-from data_frame import col
+from dataframe import col
 
 @copr(args=["number"], returns = ["number"], sql = "select * from numbers")
 def test(number)->vector[u32]:
-    return dataframe.filter(col("number")==col("number")).collect()[0][0]
+    return __dataframe__.filter(col("number")==col("number")).collect()[0][0]
 "#;
         let script = script_engine
             .compile(script, CompileContext::default())

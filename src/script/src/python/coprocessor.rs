@@ -14,40 +14,37 @@
 
 pub mod compile;
 pub mod parse;
-
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::result::Result as StdResult;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
-use common_recordbatch::{RecordBatch, RecordBatches};
+use common_recordbatch::RecordBatch;
 use common_telemetry::info;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::compute;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{Helper, VectorRef};
-use query::parser::QueryLanguageParser;
-use query::QueryEngine;
+use query::QueryEngineRef;
 use rustpython_compiler_core::CodeObject;
 use rustpython_vm as vm;
-use rustpython_vm::class::PyClassImpl;
-use rustpython_vm::AsObject;
 #[cfg(test)]
 use serde::Deserialize;
 use snafu::{OptionExt, ResultExt};
-use vm::builtins::{PyBaseExceptionRef, PyDict, PyList, PyListRef, PyStr, PyTuple};
-use vm::convert::ToPyObject;
+use vm::builtins::{PyBaseExceptionRef, PyDict, PyStr, PyTuple};
+use vm::class::PyClassImpl;
 use vm::scope::Scope;
-use vm::{pyclass, Interpreter, PyObjectRef, PyPayload, PyResult, VirtualMachine};
+use vm::{AsObject, Interpreter, PyObjectRef, PyPayload, VirtualMachine};
 
 use crate::python::builtins::greptime_builtin;
 use crate::python::coprocessor::parse::DecoratorArgs;
-use crate::python::dataframe::data_frame::{self, set_dataframe_in_scope};
+use crate::python::dataframe::dataframe_mod::{self, set_dataframe_in_scope, PyDataFrame, PyExpr};
 use crate::python::error::{
     ensure, ret_other_error_with, ArrowSnafu, NewRecordBatchSnafu, OtherSnafu, Result,
     TypeCastSnafu,
 };
+use crate::python::query_engine::{set_query_engine_in_scope, PyQueryEngine};
 use crate::python::utils::{format_py_error, is_instance, py_vec_obj_to_array};
 use crate::python::PyVector;
 
@@ -83,31 +80,6 @@ pub struct Coprocessor {
     // but CodeObject doesn't.
     #[cfg_attr(test, serde(skip))]
     pub code_obj: Option<CodeObject>,
-    #[cfg_attr(test, serde(skip))]
-    pub query_engine: Option<QueryEngineWeakRef>,
-}
-
-#[derive(Clone)]
-pub struct QueryEngineWeakRef(pub Weak<dyn QueryEngine>);
-
-impl From<Weak<dyn QueryEngine>> for QueryEngineWeakRef {
-    fn from(value: Weak<dyn QueryEngine>) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&Arc<dyn QueryEngine>> for QueryEngineWeakRef {
-    fn from(value: &Arc<dyn QueryEngine>) -> Self {
-        Self(Arc::downgrade(value))
-    }
-}
-
-impl std::fmt::Debug for QueryEngineWeakRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("QueryEngineWeakRef")
-            .field(&self.0.upgrade().map(|f| f.name().to_string()))
-            .finish()
-    }
 }
 
 impl PartialEq for Coprocessor {
@@ -348,105 +320,21 @@ fn set_items_in_scope(
 /// You can return constant in python code like `return 1, 1.0, True`
 /// which create a constant array(with same value)(currently support int, float and bool) as column on return
 #[cfg(test)]
-pub fn exec_coprocessor(script: &str, rb: &Option<RecordBatch>) -> Result<RecordBatch> {
+pub fn exec_coprocessor(
+    script: &str,
+    query_engine: &QueryEngineRef,
+    rb: &Option<RecordBatch>,
+) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
-    let copr = parse::parse_and_compile_copr(script, None)?;
-    exec_parsed(&copr, rb, &HashMap::new())
-}
-
-#[pyclass(module = false, name = "query_engine")]
-#[derive(Debug, PyPayload)]
-pub struct PyQueryEngine {
-    inner: QueryEngineWeakRef,
-}
-
-#[pyclass]
-impl PyQueryEngine {
-    // TODO(discord9): find a better way to call sql query api, now we don't if we are in async contex or not
-    /// return sql query results in List[List[PyVector]], or List[usize] for AffectedRows number if no recordbatches is returned
-    #[pymethod]
-    fn sql(&self, s: String, vm: &VirtualMachine) -> PyResult<PyListRef> {
-        enum Either {
-            Rb(RecordBatches),
-            AffectedRows(usize),
-        }
-        let query = self.inner.0.upgrade();
-        let thread_handle = std::thread::spawn(move || -> std::result::Result<_, String> {
-            if let Some(engine) = query {
-                let stmt = QueryLanguageParser::parse_sql(s.as_str()).map_err(|e| e.to_string())?;
-                let plan = engine
-                    .statement_to_plan(stmt, Default::default())
-                    .map_err(|e| e.to_string())?;
-                // To prevent the error of nested creating Runtime, if is nested, use the parent runtime instead
-
-                let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-                let handle = rt.handle().clone();
-                let res = handle.block_on(async {
-                    let res = engine
-                        .clone()
-                        .execute(&plan)
-                        .await
-                        .map_err(|e| e.to_string());
-                    match res {
-                        Ok(common_query::Output::AffectedRows(cnt)) => {
-                            Ok(Either::AffectedRows(cnt))
-                        }
-                        Ok(common_query::Output::RecordBatches(rbs)) => Ok(Either::Rb(rbs)),
-                        Ok(common_query::Output::Stream(s)) => Ok(Either::Rb(
-                            common_recordbatch::util::collect_batches(s).await.unwrap(),
-                        )),
-                        Err(e) => Err(e),
-                    }
-                })?;
-                Ok(res)
-            } else {
-                Err("Query Engine is already dropped".to_string())
-            }
-        });
-        thread_handle
-            .join()
-            .map_err(|e| {
-                vm.new_system_error(format!("Dedicated thread for sql query panic: {e:?}"))
-            })?
-            .map_err(|e| vm.new_system_error(e))
-            .map(|rbs| match rbs {
-                Either::Rb(rbs) => {
-                    let mut top_vec = Vec::with_capacity(rbs.iter().count());
-                    for rb in rbs.iter() {
-                        let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
-                        for v in rb.columns() {
-                            let v = PyVector::from(v.clone());
-                            vec_of_vec.push(v.to_pyobject(vm));
-                        }
-                        let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);
-                        top_vec.push(vec_of_vec);
-                    }
-                    let top_vec = PyList::new_ref(top_vec, vm.as_ref());
-                    top_vec
-                }
-                Either::AffectedRows(cnt) => {
-                    PyList::new_ref(vec![vm.ctx.new_int(cnt).into()], vm.as_ref())
-                }
-            })
-    }
-}
-
-fn set_query_engine_in_scope(
-    scope: &Scope,
-    vm: &VirtualMachine,
-    query_engine: PyQueryEngine,
-) -> Result<()> {
-    scope
-        .locals
-        .as_object()
-        .set_item("query", query_engine.to_pyobject(vm), vm)
-        .map_err(|e| format_py_error(e, vm))
+    let copr = parse::parse_and_compile_copr(script)?;
+    exec_parsed(&copr, query_engine, rb, &HashMap::new())
 }
 
 fn exec_with_cached_vm(
     copr: &Coprocessor,
+    query_engine: &QueryEngineRef,
     rb: &Option<RecordBatch>,
     args: Vec<PyVector>,
     params: &HashMap<String, String>,
@@ -457,7 +345,7 @@ fn exec_with_cached_vm(
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
         if let Some(rb) = rb {
-            set_dataframe_in_scope(&scope, vm, "dataframe", rb)?;
+            set_dataframe_in_scope(&scope, vm, rb)?;
         }
 
         if let Some(arg_names) = &copr.deco_args.arg_names {
@@ -465,15 +353,13 @@ fn exec_with_cached_vm(
             set_items_in_scope(&scope, vm, arg_names, args)?;
         }
 
-        if let Some(engine) = &copr.query_engine {
-            let query_engine = PyQueryEngine {
-                inner: engine.clone(),
-            };
-
-            // put a object named with query of class PyQueryEngine in scope
-            PyQueryEngine::make_class(&vm.ctx);
-            set_query_engine_in_scope(&scope, vm, query_engine)?;
-        }
+        set_query_engine_in_scope(
+            &scope,
+            vm,
+            PyQueryEngine {
+                inner: query_engine.into(),
+            },
+        )?;
 
         if let Some(kwarg) = &copr.kwarg {
             let dict = PyDict::new_ref(&vm.ctx);
@@ -544,12 +430,18 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     // add this line for stdlib, so rustpython can found stdlib's python part in bytecode format
                     vm.add_frozen(rustpython_pylib::frozen_stdlib());
                     // add our own custom datatype and module
-                    PyVector::make_class(&vm.ctx);
-                    vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
 
-                    data_frame::PyDataFrame::make_class(&vm.ctx);
-                    data_frame::PyExpr::make_class(&vm.ctx);
-                    vm.add_native_module("data_frame", Box::new(data_frame::make_module));
+                    // PyVector
+                    PyVector::make_class(&vm.ctx);
+                    // greptime mododule
+                    vm.add_native_module("greptime", Box::new(greptime_builtin::make_module));
+                    // PyQueryEngine
+                    PyQueryEngine::make_class(&vm.ctx);
+
+                    // PyDataframe and dataframe module
+                    PyDataFrame::make_class(&vm.ctx);
+                    PyExpr::make_class(&vm.ctx);
+                    vm.add_native_module("dataframe", Box::new(dataframe_mod::make_module));
                 }));
                 info!("Initialized Python interpreter.");
                 interpreter
@@ -561,6 +453,7 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
 /// using a parsed `Coprocessor` struct as input to execute python code
 pub(crate) fn exec_parsed(
     copr: &Coprocessor,
+    query_engine: &QueryEngineRef,
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
 ) -> Result<RecordBatch> {
@@ -575,7 +468,7 @@ pub(crate) fn exec_parsed(
 
     let interpreter = init_interpreter();
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
-    exec_with_cached_vm(copr, rb, args, params, &interpreter)
+    exec_with_cached_vm(copr, query_engine, rb, args, params, &interpreter)
 }
 
 /// execute script just like [`exec_coprocessor`] do,
@@ -587,11 +480,12 @@ pub(crate) fn exec_parsed(
 #[allow(dead_code)]
 pub fn exec_copr_print(
     script: &str,
+    query_engine: &QueryEngineRef,
     rb: &Option<RecordBatch>,
     ln_offset: usize,
     filename: &str,
 ) -> StdResult<RecordBatch, String> {
-    let res = exec_coprocessor(script, rb);
+    let res = exec_coprocessor(script, query_engine, rb);
     res.map_err(|e| {
         crate::python::error::pretty_print_error_in_src(script, &e, ln_offset, filename)
     })
@@ -613,7 +507,7 @@ def test(a, b, c, **params):
     return add(a, b) / g.sqrt(c)
 "#;
 
-        let copr = parse_and_compile_copr(script, None).unwrap();
+        let copr = parse_and_compile_copr(script).unwrap();
         assert_eq!(copr.name, "test");
         let deco_args = copr.deco_args.clone();
         assert_eq!(

@@ -24,6 +24,7 @@ use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{Float32Vector, Float64Vector, Int64Vector, VectorRef};
+use query::QueryEngineFactory;
 use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
@@ -91,6 +92,10 @@ fn create_sample_recordbatch() -> RecordBatch {
 fn run_ron_testcases() {
     common_telemetry::init_default_ut_logging();
 
+    let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
+    let factory = QueryEngineFactory::new(catalog_list);
+    let query_engine = factory.query_engine();
+
     let loc = Path::new("src/python/testcases.ron");
     let loc = loc.to_str().expect("Fail to parse path");
     let mut file = File::open(loc).expect("Fail to open file");
@@ -103,13 +108,13 @@ fn run_ron_testcases() {
         info!(".ron test {}", testcase.name);
         match testcase.predicate {
             Predicate::ParseIsOk { result } => {
-                let copr = parse_and_compile_copr(&testcase.code, None);
+                let copr = parse_and_compile_copr(&testcase.code);
                 let mut copr = copr.unwrap();
                 copr.script = "".into();
                 assert_eq!(copr, *result);
             }
             Predicate::ParseIsErr { reason } => {
-                let copr = parse_and_compile_copr(&testcase.code, None);
+                let copr = parse_and_compile_copr(&testcase.code);
                 assert!(copr.is_err(), "Expect to be err, actual {copr:#?}");
 
                 let res = &copr.unwrap_err();
@@ -126,7 +131,8 @@ fn run_ron_testcases() {
             }
             Predicate::ExecIsOk { fields, columns } => {
                 let rb = create_sample_recordbatch();
-                let res = coprocessor::exec_coprocessor(&testcase.code, &Some(rb)).unwrap();
+                let res = coprocessor::exec_coprocessor(&testcase.code, &query_engine, &Some(rb))
+                    .unwrap();
                 fields
                     .iter()
                     .zip(res.schema.column_schemas())
@@ -152,7 +158,7 @@ fn run_ron_testcases() {
                 reason: part_reason,
             } => {
                 let rb = create_sample_recordbatch();
-                let res = coprocessor::exec_coprocessor(&testcase.code, &Some(rb));
+                let res = coprocessor::exec_coprocessor(&testcase.code, &query_engine, &Some(rb));
                 assert!(res.is_err(), "{res:#?}\nExpect Err(...), actual Ok(...)");
                 if let Err(res) = res {
                     error!(
@@ -183,7 +189,7 @@ def a(cpu, mem: vector[f64])->(vector[f64|None], vector[f64], vector[_], vector[
     return cpu + mem, cpu - mem, cpu * mem, cpu / mem
 "#;
     let pyast = parser::parse(python_source, parser::Mode::Interactive, "<embedded>").unwrap();
-    let copr = parse_and_compile_copr(python_source, None);
+    let copr = parse_and_compile_copr(python_source);
     dbg!(copr);
 }
 
@@ -254,7 +260,11 @@ def calc_rvs(open_time, close):
         ],
     )
     .unwrap();
-    let ret = coprocessor::exec_coprocessor(python_source, &Some(rb));
+    let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
+    let factory = QueryEngineFactory::new(catalog_list);
+    let query_engine = factory.query_engine();
+
+    let ret = coprocessor::exec_coprocessor(python_source, &query_engine, &Some(rb));
     if let Err(Error::PyParse {
         backtrace: _,
         source,
@@ -304,7 +314,11 @@ def a(cpu, mem):
         ],
     )
     .unwrap();
-    let ret = coprocessor::exec_coprocessor(python_source, &Some(rb));
+    let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
+    let factory = QueryEngineFactory::new(catalog_list);
+    let query_engine = factory.query_engine();
+
+    let ret = coprocessor::exec_coprocessor(python_source, &query_engine, &Some(rb));
     if let Err(Error::PyParse {
         backtrace: _,
         source,

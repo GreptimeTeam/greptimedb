@@ -557,13 +557,13 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     ),
     (
         // constant column(int)
-        name: "test_data_frame",
+        name: "test_dataframe",
         code: r#"
-from data_frame import col
+from dataframe import col
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
-    ret = dataframe.select([col("cpu"), col("mem")]).collect()[0]
+    ret = __dataframe__.select([col("cpu"), col("mem")]).collect()[0]
     return ret[0], ret[1]
 "#,
         predicate: ExecIsOk(
@@ -591,13 +591,13 @@ def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     ),
     (
         // constant column(int)
-        name: "test_data_frame",
+        name: "test_dataframe",
         code: r#"
-from data_frame import col
+from dataframe import col
 @copr(args=["cpu", "mem"], returns=["perf", "what"])
 def a(cpu: vector[f32], mem: vector[f64])->(vector[f64|None],
     vector[f32]):
-    ret = dataframe.filter(col("cpu")>col("mem")).collect()[0]
+    ret = __dataframe__.filter(col("cpu")>col("mem")).collect()[0]
     return ret[0], ret[1]
 "#,
         predicate: ExecIsOk(

@@ -19,6 +19,7 @@ pub(crate) mod coprocessor;
 mod dataframe;
 mod engine;
 pub mod error;
+pub(crate) mod query_engine;
 #[cfg(test)]
 mod test;
 pub(crate) mod utils;

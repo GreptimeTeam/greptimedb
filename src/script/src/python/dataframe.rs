@@ -16,7 +16,7 @@ use rustpython_vm::pymodule as rspymodule;
 
 /// with `register_batch`, and then wrap DataFrame API in it
 #[rspymodule]
-pub(crate) mod data_frame {
+pub(crate) mod dataframe_mod {
     use common_recordbatch::{DfRecordBatch, RecordBatch};
     use datafusion::dataframe::DataFrame as DfDataFrame;
     use datafusion_expr::Expr as DfExpr;
@@ -30,7 +30,7 @@ pub(crate) mod data_frame {
 
     use crate::python::error::DataFusionSnafu;
     use crate::python::utils::block_on_async;
-    #[rspyclass(module = "data_frame", name = "DataFrame")]
+    #[rspyclass(module = "dataframe", name = "DataFrame")]
     #[derive(PyPayload, Debug)]
     pub struct PyDataFrame {
         pub inner: DfDataFrame,
@@ -45,18 +45,16 @@ pub(crate) mod data_frame {
     pub fn set_dataframe_in_scope(
         scope: &rustpython_vm::scope::Scope,
         vm: &VirtualMachine,
-        name: &str,
         rb: &RecordBatch,
     ) -> crate::python::error::Result<()> {
         let df = PyDataFrame::from_record_batch(rb.df_record_batch())?;
         scope
             .locals
-            .set_item(name, vm.new_pyobj(df), vm)
+            .set_item("__dataframe__", vm.new_pyobj(df), vm)
             .map_err(|e| crate::python::utils::format_py_error(e, vm))
     }
     #[rspyclass]
     impl PyDataFrame {
-        /// TODO(discord9): error handling
         fn from_record_batch(rb: &DfRecordBatch) -> crate::python::error::Result<Self> {
             let ctx = datafusion::execution::context::SessionContext::new();
             let inner = ctx.read_batch(rb.clone()).context(DataFusionSnafu)?;
@@ -245,7 +243,7 @@ pub(crate) mod data_frame {
         }
     }
 
-    #[rspyclass(module = "data_frame", name = "Expr")]
+    #[rspyclass(module = "dataframe", name = "Expr")]
     #[derive(PyPayload, Debug, Clone)]
     pub struct PyExpr {
         pub inner: DfExpr,

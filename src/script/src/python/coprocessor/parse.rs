@@ -13,10 +13,8 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use datatypes::prelude::ConcreteDataType;
-use query::QueryEngineRef;
 use rustpython_parser::ast::{Arguments, Location};
 use rustpython_parser::{ast, parser};
 #[cfg(test)]
@@ -422,10 +420,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
 }
 
 /// parse script and return `Coprocessor` struct with info extract from ast
-pub fn parse_and_compile_copr(
-    script: &str,
-    query_engine: Option<QueryEngineRef>,
-) -> Result<Coprocessor> {
+pub fn parse_and_compile_copr(script: &str) -> Result<Coprocessor> {
     let python_ast = parser::parse_program(script, "<embedded>").context(PyParseSnafu)?;
 
     let mut coprocessor = None;
@@ -506,7 +501,6 @@ pub fn parse_and_compile_copr(
                     return_types,
                     kwarg,
                     script: script.to_string(),
-                    query_engine: query_engine.as_ref().map(|e| Arc::downgrade(e).into()),
                 });
             }
         } else if matches!(
