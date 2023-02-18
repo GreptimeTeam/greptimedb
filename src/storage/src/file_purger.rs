@@ -223,7 +223,7 @@ mod tests {
             handle.mark_deleted();
             drop(handle);
         }
-        scheduler.stop().await.unwrap();
+        scheduler.stop(true).await.unwrap();
         assert!(!object_store
             .object(&format!("{}/{}", path, sst_file_name))
             .is_exist()

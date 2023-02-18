@@ -411,6 +411,9 @@ pub enum Error {
     #[snafu(display("Scheduler rate limited, msg: {}", msg))]
     RateLimited { msg: String, backtrace: Backtrace },
 
+    #[snafu(display("Cannot schedule request, scheduler's already stopped"))]
+    IllegalSchedulerState { backtrace: Backtrace },
+
     #[snafu(display("Failed to stop scheduler, source: {}", source))]
     StopScheduler {
         source: JoinError,
@@ -493,6 +496,7 @@ impl ErrorExt for Error {
             RateLimited { .. } => StatusCode::Internal,
             StopScheduler { .. } => StatusCode::Internal,
             DeleteSst { .. } => StatusCode::StorageUnavailable,
+            IllegalSchedulerState { .. } => StatusCode::Unexpected,
         }
     }
 

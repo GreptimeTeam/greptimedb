@@ -86,7 +86,7 @@ where
         Ok(true)
     }
 
-    async fn stop(&self) -> crate::error::Result<()> {
+    async fn stop(&self, _await_termination: bool) -> crate::error::Result<()> {
         Ok(())
     }
 }
