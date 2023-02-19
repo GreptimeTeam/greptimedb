@@ -136,8 +136,8 @@ pub enum Error {
         target_unit: TimeUnit,
     },
 
-    #[snafu(display("Unsupported format: {}", name))]
-    UnsupportedFormat { name: String },
+    #[snafu(display("Unsupported format option: {}", name))]
+    UnsupportedCopyFormatOption { name: String },
 }
 
 impl ErrorExt for Error {
@@ -162,7 +162,7 @@ impl ErrorExt for Error {
             | InvalidTableName { .. }
             | InvalidSqlValue { .. }
             | TimestampOverflow { .. }
-            | UnsupportedFormat { .. } => StatusCode::InvalidArguments,
+            | UnsupportedCopyFormatOption { .. } => StatusCode::InvalidArguments,
 
             UnsupportedAlterTableStatement { .. } => StatusCode::InvalidSyntax,
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),

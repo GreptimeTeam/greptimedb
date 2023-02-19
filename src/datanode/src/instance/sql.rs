@@ -16,7 +16,6 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use common_error::prelude::BoxedError;
-use common_grpc_expr::insert;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging::info;

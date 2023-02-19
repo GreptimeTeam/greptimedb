@@ -450,24 +450,19 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | IncorrectInternalState { .. } => StatusCode::Internal,
 
-            Error::InitBackend { .. }
-            | Error::WriteParquet { .. }
-            | Error::PollStream { .. }
-            | Error::WriteObject { .. } => StatusCode::StorageUnavailable,
-            Error::OpenLogStore { source } => source.status_code(),
-            Error::StartScriptManager { source } => source.status_code(),
-            Error::OpenStorageEngine { source } => source.status_code(),
-            Error::RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
-            Error::MetaClientInit { source, .. } => source.status_code(),
-            Error::TableIdProviderNotFound { .. } => StatusCode::Unsupported,
-            Error::BumpTableId { source, .. } => source.status_code(),
-            Error::MissingNodeId { .. } => StatusCode::InvalidArguments,
-            Error::MissingMetasrvOpts { .. } => StatusCode::InvalidArguments,
-            Error::ColumnDefaultValue { source, .. } => source.status_code(),
-            Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
-
-            Error::CopyTable { source, .. } => source.status_code(),
-            Error::TableScanExec { source, .. } => source.status_code(),
+            InitBackend { .. } | WriteParquet { .. } | PollStream { .. } | WriteObject { .. } => {
+                StatusCode::StorageUnavailable
+            }
+            OpenLogStore { source } => source.status_code(),
+            StartScriptManager { source } => source.status_code(),
+            OpenStorageEngine { source } => source.status_code(),
+            RuntimeResource { .. } => StatusCode::RuntimeResourcesExhausted,
+            MetaClientInit { source, .. } => source.status_code(),
+            TableIdProviderNotFound { .. } => StatusCode::Unsupported,
+            BumpTableId { source, .. } => source.status_code(),
+            ColumnDefaultValue { source, .. } => source.status_code(),
+            CopyTable { source, .. } => source.status_code(),
+            TableScanExec { source, .. } => source.status_code(),
         }
     }
 

@@ -56,7 +56,7 @@ impl TryFrom<String> for Format {
     fn try_from(name: String) -> Result<Self> {
         match name.to_uppercase().as_str() {
             "PARQUET" => Ok(Format::Parquet),
-            _ => error::UnsupportedFormatSnafu { name }.fail(),
+            _ => error::UnsupportedCopyFormatOptionSnafu { name }.fail(),
         }
     }
 }

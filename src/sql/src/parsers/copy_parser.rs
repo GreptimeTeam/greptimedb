@@ -126,7 +126,7 @@ mod tests {
         assert!(result.is_err());
         assert_matches!(
             result.err().unwrap(),
-            error::Error::UnsupportedFormat { .. }
+            error::Error::UnsupportedCopyFormatOption { .. }
         );
     }
 }
