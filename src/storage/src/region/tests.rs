@@ -37,9 +37,12 @@ use store_api::storage::{
 use tempdir::TempDir;
 
 use super::*;
+use crate::file_purger::noop::NoopFilePurgeHandler;
 use crate::manifest::action::{RegionChange, RegionMetaActionList};
 use crate::manifest::test_utils::*;
 use crate::memtable::DefaultMemtableBuilder;
+use crate::scheduler::{LocalScheduler, SchedulerConfig};
+use crate::sst::FsAccessLayer;
 use crate::test_util::descriptor_util::RegionDescBuilder;
 use crate::test_util::{self, config_util, schema_util, write_batch_util};
 
@@ -285,17 +288,25 @@ async fn test_recover_region_manifets() {
             .unwrap(),
     );
 
-    let manifest = RegionManifest::new("/manifest/", object_store);
+    let manifest = RegionManifest::new("/manifest/", object_store.clone());
     let region_meta = Arc::new(build_region_meta());
 
+    let sst_layer = Arc::new(FsAccessLayer::new("sst", object_store)) as _;
+    let file_purger = Arc::new(LocalScheduler::new(
+        SchedulerConfig::default(),
+        NoopFilePurgeHandler,
+    ));
     // Recover from empty
-    assert!(
-        RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest, &memtable_builder)
-            .await
-            .unwrap()
-            .0
-            .is_none()
-    );
+    assert!(RegionImpl::<NoopLogStore>::recover_from_manifest(
+        &manifest,
+        &memtable_builder,
+        &sst_layer,
+        &file_purger
+    )
+    .await
+    .unwrap()
+    .0
+    .is_none());
 
     {
         // save some actions into region_meta
@@ -329,10 +340,14 @@ async fn test_recover_region_manifets() {
     }
 
     // try to recover
-    let (version, recovered_metadata) =
-        RegionImpl::<NoopLogStore>::recover_from_manifest(&manifest, &memtable_builder)
-            .await
-            .unwrap();
+    let (version, recovered_metadata) = RegionImpl::<NoopLogStore>::recover_from_manifest(
+        &manifest,
+        &memtable_builder,
+        &sst_layer,
+        &file_purger,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(42, *recovered_metadata.first_key_value().unwrap().0);
     let version = version.unwrap();

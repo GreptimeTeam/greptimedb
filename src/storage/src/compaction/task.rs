@@ -17,6 +17,7 @@ use std::fmt::{Debug, Formatter};
 
 use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
+use store_api::storage::RegionId;
 use uuid::Uuid;
 
 use crate::compaction::writer::build_sst_reader;
@@ -62,11 +63,12 @@ impl<S: LogStore> CompactionTaskImpl<S> {
     async fn merge_ssts(&mut self) -> Result<(Vec<FileMeta>, Vec<FileMeta>)> {
         let mut futs = Vec::with_capacity(self.outputs.len());
         let mut compacted_inputs = HashSet::new();
-
+        let region_id = self.shared_data.id();
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
             let sst_layer = self.sst_layer.clone();
             compacted_inputs.extend(output.inputs.iter().map(|f| FileMeta {
+                region_id,
                 file_name: f.file_name().to_string(),
                 time_range: *f.time_range(),
                 level: f.level(),
@@ -74,7 +76,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
 
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
             futs.push(async move {
-                match output.build(schema, sst_layer).await {
+                match output.build(region_id, schema, sst_layer).await {
                     Ok(meta) => Ok(meta),
                     Err(e) => Err(e),
                 }
@@ -118,7 +120,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
     fn mark_files_compacting(&self, compacting: bool) {
         for o in &self.outputs {
             for input in &o.inputs {
-                input.set_compacting(compacting);
+                input.mark_compacting(compacting);
             }
         }
     }
@@ -157,7 +159,12 @@ pub struct CompactionOutput {
 }
 
 impl CompactionOutput {
-    async fn build(&self, schema: RegionSchemaRef, sst_layer: AccessLayerRef) -> Result<FileMeta> {
+    async fn build(
+        &self,
+        region_id: RegionId,
+        schema: RegionSchemaRef,
+        sst_layer: AccessLayerRef,
+    ) -> Result<FileMeta> {
         let reader = build_sst_reader(
             schema,
             sst_layer.clone(),
@@ -174,6 +181,7 @@ impl CompactionOutput {
             .await?;
 
         Ok(FileMeta {
+            region_id,
             file_name: output_file_name,
             time_range,
             level: self.output_level,

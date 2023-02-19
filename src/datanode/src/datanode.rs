@@ -110,16 +110,19 @@ impl Default for WalConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct CompactionConfig {
     /// Max task number that can concurrently run.
-    pub max_inflight_task: usize,
+    pub max_inflight_tasks: usize,
     /// Max files in level 0 to trigger compaction.
-    pub max_file_in_level0: usize,
+    pub max_files_in_level0: usize,
+    /// Max task number for SST purge task after compaction.
+    pub max_purge_tasks: usize,
 }
 
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
-            max_inflight_task: 4,
-            max_file_in_level0: 8,
+            max_inflight_tasks: 4,
+            max_files_in_level0: 8,
+            max_purge_tasks: 32,
         }
     }
 }
@@ -127,7 +130,7 @@ impl Default for CompactionConfig {
 impl From<&DatanodeOptions> for SchedulerConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            max_inflight_task: value.compaction.max_inflight_task,
+            max_inflight_tasks: value.compaction.max_inflight_tasks,
         }
     }
 }
@@ -135,7 +138,8 @@ impl From<&DatanodeOptions> for SchedulerConfig {
 impl From<&DatanodeOptions> for StorageEngineConfig {
     fn from(value: &DatanodeOptions) -> Self {
         Self {
-            max_files_in_l0: value.compaction.max_file_in_level0,
+            max_files_in_l0: value.compaction.max_files_in_level0,
+            max_purge_tasks: value.compaction.max_purge_tasks,
         }
     }
 }

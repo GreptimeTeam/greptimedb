@@ -652,7 +652,7 @@ impl WriterInner {
                 );
                 return;
             }
-            match compaction_scheduler.schedule(compaction_request).await {
+            match compaction_scheduler.schedule(compaction_request) {
                 Ok(scheduled) => {
                     info!(
                         "Schedule region {} compaction request result: {}",

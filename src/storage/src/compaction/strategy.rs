@@ -165,9 +165,10 @@ fn fit_time_bucket(span_sec: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
+    use crate::file_purger::noop::new_noop_file_purger;
     use crate::sst::FileMeta;
 
     #[test]
@@ -227,14 +228,21 @@ mod tests {
     }
 
     fn new_file_handle(name: &str, start_ts_millis: i64, end_ts_millis: i64) -> FileHandle {
-        FileHandle::new(FileMeta {
-            file_name: name.to_string(),
-            time_range: Some((
-                Timestamp::new_millisecond(start_ts_millis),
-                Timestamp::new_millisecond(end_ts_millis),
-            )),
-            level: 0,
-        })
+        let file_purger = new_noop_file_purger();
+        let layer = Arc::new(crate::test_util::access_layer_util::MockAccessLayer {});
+        FileHandle::new(
+            FileMeta {
+                region_id: 0,
+                file_name: name.to_string(),
+                time_range: Some((
+                    Timestamp::new_millisecond(start_ts_millis),
+                    Timestamp::new_millisecond(end_ts_millis),
+                )),
+                level: 0,
+            },
+            layer,
+            file_purger,
+        )
     }
 
     fn new_file_handles(input: &[(&str, i64, i64)]) -> Vec<FileHandle> {

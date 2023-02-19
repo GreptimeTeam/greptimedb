@@ -28,11 +28,13 @@ use crate::background::JobPoolImpl;
 use crate::compaction::CompactionSchedulerRef;
 use crate::config::EngineConfig;
 use crate::error::{self, Error, Result};
+use crate::file_purger::{FilePurgeHandler, FilePurgerRef};
 use crate::flush::{FlushSchedulerImpl, FlushSchedulerRef, FlushStrategyRef, SizeBasedStrategy};
 use crate::manifest::region::RegionManifest;
 use crate::memtable::{DefaultMemtableBuilder, MemtableBuilderRef};
 use crate::metadata::RegionMetadata;
 use crate::region::{RegionImpl, StoreConfig};
+use crate::scheduler::{LocalScheduler, SchedulerConfig};
 use crate::sst::FsAccessLayer;
 
 /// [StorageEngine] implementation.
@@ -222,6 +224,7 @@ struct EngineInner<S: LogStore> {
     flush_scheduler: FlushSchedulerRef,
     flush_strategy: FlushStrategyRef,
     compaction_scheduler: CompactionSchedulerRef<S>,
+    file_purger: FilePurgerRef,
     config: Arc<EngineConfig>,
 }
 
@@ -234,6 +237,13 @@ impl<S: LogStore> EngineInner<S> {
     ) -> Self {
         let job_pool = Arc::new(JobPoolImpl {});
         let flush_scheduler = Arc::new(FlushSchedulerImpl::new(job_pool));
+
+        let file_purger = Arc::new(LocalScheduler::new(
+            SchedulerConfig {
+                max_inflight_tasks: config.max_purge_tasks,
+            },
+            FilePurgeHandler,
+        ));
         Self {
             object_store,
             log_store,
@@ -242,6 +252,7 @@ impl<S: LogStore> EngineInner<S> {
             flush_scheduler,
             flush_strategy: Arc::new(SizeBasedStrategy::default()),
             compaction_scheduler,
+            file_purger,
             config: Arc::new(config),
         }
     }
@@ -341,6 +352,7 @@ impl<S: LogStore> EngineInner<S> {
             flush_strategy: self.flush_strategy.clone(),
             compaction_scheduler: self.compaction_scheduler.clone(),
             engine_config: self.config.clone(),
+            file_purger: self.file_purger.clone(),
         }
     }
 }

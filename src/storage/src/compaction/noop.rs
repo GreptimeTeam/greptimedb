@@ -82,11 +82,11 @@ where
 {
     type Request = R;
 
-    async fn schedule(&self, _request: Self::Request) -> crate::error::Result<bool> {
+    fn schedule(&self, _request: Self::Request) -> crate::error::Result<bool> {
         Ok(true)
     }
 
-    async fn stop(&self) -> crate::error::Result<()> {
+    async fn stop(&self, _await_termination: bool) -> crate::error::Result<()> {
         Ok(())
     }
 }
