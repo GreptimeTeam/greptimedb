@@ -240,7 +240,7 @@ impl<S: LogStore> EngineInner<S> {
 
         let file_purger = Arc::new(LocalScheduler::new(
             SchedulerConfig {
-                max_inflight_task: 32, //we allow more file purge tasks to run concurrently.
+                max_inflight_tasks: config.max_purge_tasks,
             },
             FilePurgeHandler,
         ));

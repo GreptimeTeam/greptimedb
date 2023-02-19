@@ -45,16 +45,16 @@ pub type BoxedRateLimiter<R> = Box<dyn RateLimiter<Request = R> + Send + Sync>;
 
 /// Limits max inflight tasks number.
 pub struct MaxInflightTaskLimiter<R> {
-    max_inflight_task: usize,
-    inflight_task: Arc<AtomicUsize>,
+    max_inflight_tasks: usize,
+    inflight_tasks: Arc<AtomicUsize>,
     _phantom_data: PhantomData<R>,
 }
 
 impl<R> MaxInflightTaskLimiter<R> {
-    pub fn new(max_inflight_task: usize) -> Self {
+    pub fn new(max_inflight_tasks: usize) -> Self {
         Self {
-            max_inflight_task,
-            inflight_task: Arc::new(AtomicUsize::new(0)),
+            max_inflight_tasks,
+            inflight_tasks: Arc::new(AtomicUsize::new(0)),
             _phantom_data: Default::default(),
         }
     }
@@ -64,20 +64,20 @@ impl<R> RateLimiter for MaxInflightTaskLimiter<R> {
     type Request = R;
 
     fn acquire_token(&self, _: &Self::Request) -> Result<BoxedRateLimitToken> {
-        if self.inflight_task.fetch_add(1, Ordering::Relaxed) >= self.max_inflight_task {
-            self.inflight_task.fetch_sub(1, Ordering::Relaxed);
+        if self.inflight_tasks.fetch_add(1, Ordering::Relaxed) >= self.max_inflight_tasks {
+            self.inflight_tasks.fetch_sub(1, Ordering::Relaxed);
             return RateLimitedSnafu {
                 msg: format!(
                     "Max inflight task num exceeds, current: {}, max: {}",
-                    self.inflight_task.load(Ordering::Relaxed),
-                    self.max_inflight_task
+                    self.inflight_tasks.load(Ordering::Relaxed),
+                    self.max_inflight_tasks
                 ),
             }
             .fail();
         }
 
         Ok(Box::new(MaxInflightLimiterToken::new(
-            self.inflight_task.clone(),
+            self.inflight_tasks.clone(),
         )))
     }
 }
@@ -160,14 +160,14 @@ mod tests {
     fn test_max_inflight_limiter() {
         let limiter = MaxInflightTaskLimiter::new(3);
         let t1 = limiter.acquire_token(&1).unwrap();
-        assert_eq!(1, limiter.inflight_task.load(Ordering::Relaxed));
+        assert_eq!(1, limiter.inflight_tasks.load(Ordering::Relaxed));
         let _t2 = limiter.acquire_token(&1).unwrap();
-        assert_eq!(2, limiter.inflight_task.load(Ordering::Relaxed));
+        assert_eq!(2, limiter.inflight_tasks.load(Ordering::Relaxed));
         let _t3 = limiter.acquire_token(&1).unwrap();
-        assert_eq!(3, limiter.inflight_task.load(Ordering::Relaxed));
+        assert_eq!(3, limiter.inflight_tasks.load(Ordering::Relaxed));
         assert!(limiter.acquire_token(&1).is_err());
         t1.try_release();
-        assert_eq!(2, limiter.inflight_task.load(Ordering::Relaxed));
+        assert_eq!(2, limiter.inflight_tasks.load(Ordering::Relaxed));
         let _t4 = limiter.acquire_token(&1).unwrap();
     }
 

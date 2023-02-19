@@ -14,7 +14,7 @@
 
 use std::fmt::{Debug, Formatter};
 use std::hash::Hash;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
@@ -73,20 +73,20 @@ pub trait Scheduler: Debug {
 /// Scheduler config.
 #[derive(Debug)]
 pub struct SchedulerConfig {
-    pub max_inflight_task: usize,
+    pub max_inflight_tasks: usize,
 }
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            max_inflight_task: 4,
+            max_inflight_tasks: 4,
         }
     }
 }
 
-const STATE_RUNNING: i32 = 0;
-const STATE_STOP: i32 = 1;
-const STATE_AWAIT_TERMINATION: i32 = 2;
+const STATE_RUNNING: u8 = 0;
+const STATE_STOP: u8 = 1;
+const STATE_AWAIT_TERMINATION: u8 = 2;
 
 /// Request scheduler based on local state.
 pub struct LocalScheduler<R: Request> {
@@ -99,7 +99,7 @@ pub struct LocalScheduler<R: Request> {
     /// Join handle of spawned request handling loop.
     join_handle: Mutex<Option<JoinHandle<()>>>,
     /// State of scheduler.
-    state: Arc<AtomicI32>,
+    state: Arc<AtomicU8>,
 }
 
 impl<R> Debug for LocalScheduler<R>
@@ -160,13 +160,13 @@ where
         let request_queue = Arc::new(RwLock::new(DedupDeque::default()));
         let cancel_token = CancellationToken::new();
         let task_notifier = Arc::new(Notify::new());
-        let state = Arc::new(AtomicI32::new(STATE_RUNNING));
+        let state = Arc::new(AtomicU8::new(STATE_RUNNING));
         let handle_loop = HandlerLoop {
             task_notifier: task_notifier.clone(),
             req_queue: request_queue.clone(),
             cancel_token: cancel_token.child_token(),
             limiter: Arc::new(CascadeRateLimiter::new(vec![Box::new(
-                MaxInflightTaskLimiter::new(config.max_inflight_task),
+                MaxInflightTaskLimiter::new(config.max_inflight_tasks),
             )])),
             request_handler: handler,
             state: state.clone(),
@@ -202,7 +202,7 @@ pub struct HandlerLoop<R: Request, H: Handler> {
     pub task_notifier: Arc<Notify>,
     pub request_handler: H,
     pub limiter: Arc<CascadeRateLimiter<R>>,
-    pub state: Arc<AtomicI32>,
+    pub state: Arc<AtomicU8>,
 }
 
 impl<R, H> HandlerLoop<R, H>
@@ -213,7 +213,7 @@ where
     /// Runs scheduled requests dispatch loop.
     pub async fn run(&self) {
         let limiter = self.limiter.clone();
-        while self.state.load(Ordering::Relaxed) == STATE_RUNNING {
+        while self.running() {
             tokio::select! {
                 _ = self.task_notifier.notified() => {
                     debug!("Notified, queue size: {:?}",self.req_queue.read().unwrap().len());
@@ -229,6 +229,7 @@ where
         if self.state.load(Ordering::Relaxed) == STATE_AWAIT_TERMINATION {
             info!("Waiting for all pending tasks to finish.");
             self.poll_and_execute(&limiter).await;
+            self.state.store(STATE_STOP, Ordering::Relaxed);
         }
         info!("Task scheduler stopped");
     }
@@ -282,6 +283,11 @@ where
         self.request_handler
             .handle_request(req, token, finish_notifier)
             .await
+    }
+
+    #[inline]
+    fn running(&self) -> bool {
+        self.state.load(Ordering::Relaxed) == STATE_RUNNING
     }
 }
 
@@ -354,7 +360,7 @@ mod tests {
             limiter: Arc::new(CascadeRateLimiter::new(vec![Box::new(
                 MaxInflightTaskLimiter::new(3),
             )])),
-            state: Arc::new(AtomicI32::default()),
+            state: Arc::new(AtomicU8::default()),
         });
 
         let handler_cloned = handler.clone();
@@ -419,7 +425,7 @@ mod tests {
         };
         let scheduler: LocalScheduler<MockRequest> = LocalScheduler::new(
             SchedulerConfig {
-                max_inflight_task: 3,
+                max_inflight_tasks: 3,
             },
             handler,
         );
@@ -448,7 +454,7 @@ mod tests {
         };
 
         let config = SchedulerConfig {
-            max_inflight_task: 3,
+            max_inflight_tasks: 3,
         };
         let scheduler = LocalScheduler::new(config, handler);
 
@@ -479,7 +485,7 @@ mod tests {
         };
 
         let config = SchedulerConfig {
-            max_inflight_task: 3,
+            max_inflight_tasks: 3,
         };
         let scheduler = LocalScheduler::new(config, handler);
 
@@ -510,7 +516,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let handler = MockHandler { cb: || {} };
         let config = SchedulerConfig {
-            max_inflight_task: 30,
+            max_inflight_tasks: 30,
         };
         let scheduler = LocalScheduler::new(config, handler);
 
@@ -538,7 +544,7 @@ mod tests {
         };
 
         let config = SchedulerConfig {
-            max_inflight_task: 3,
+            max_inflight_tasks: 3,
         };
         let scheduler = Arc::new(LocalScheduler::new(config, handler));
         let scheduler_cloned = scheduler.clone();
