@@ -32,7 +32,7 @@ impl HttpHandler for HeartBeatHandler {
     async fn handle(
         &self,
         _: &str,
-        map: &HashMap<String, String>,
+        params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
         let meta_peer_client = self
             .meta_peer_client
@@ -42,13 +42,13 @@ impl HttpHandler for HeartBeatHandler {
         let stat_kvs = meta_peer_client.get_all_dn_stat_kvs().await?;
         let mut stat_vals: Vec<StatValue> = stat_kvs.into_values().collect();
 
-        if let Some(addr) = map.get("addr") {
+        if let Some(addr) = params.get("addr") {
             stat_vals.retain(|stat_val| {
-                if let Some(stat) = stat_val.stats.get(0) {
-                    stat.addr == addr.clone()
-                } else {
-                    false
-                }
+                stat_val
+                    .stats
+                    .get(0)
+                    .map(|stat| &stat.addr == addr)
+                    .unwrap_or(false)
             });
         }
         let result = StatValues { stat_vals }.try_into()?;
