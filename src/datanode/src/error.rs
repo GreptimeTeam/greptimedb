@@ -382,7 +382,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Fail to write object into path: {}, source: {}", path, source))]
+    #[snafu(display("Failed to write object into path: {}, source: {}", path, source))]
     WriteObject {
         path: String,
         backtrace: Backtrace,
