@@ -22,7 +22,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
-    AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Extension,
+    AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Cast, Extension,
     LogicalPlan, LogicalPlanBuilder, Operator,
 };
 use datafusion::optimizer::utils;
@@ -30,6 +30,7 @@ use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::planner::ContextProvider;
 use datafusion::sql::TableReference;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use promql_parser::label::{MatchOp, Matchers, METRIC_NAME};
 use promql_parser::parser::{
     token, AggModifier, AggregateExpr, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
@@ -136,7 +137,18 @@ impl<S: ContextProvider> PromPlanner<S> {
                     Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
                 })?
             }
-            PromExpr::Binary(PromBinaryExpr { lhs, rhs, op, .. }) => {
+            PromExpr::Binary(PromBinaryExpr {
+                lhs,
+                rhs,
+                op,
+                modifier,
+            }) => {
+                let should_cast_to_bool = if let Some(modifier) = modifier {
+                    modifier.return_bool && Self::is_token_a_comparison_op(*op)
+                } else {
+                    false
+                };
+
                 match (
                     Self::try_build_literal_expr(lhs),
                     Self::try_build_literal_expr(rhs),
@@ -150,22 +162,36 @@ impl<S: ContextProvider> PromPlanner<S> {
                     (Some(expr), None) => {
                         let input = self.prom_expr_to_plan(*rhs.clone())?;
                         self.projection_for_each_value_column(input, |col| {
-                            Ok(DfExpr::BinaryExpr(BinaryExpr {
+                            let mut binary_expr = DfExpr::BinaryExpr(BinaryExpr {
                                 left: Box::new(expr.clone()),
                                 op: Self::prom_token_to_binary_op(*op)?,
                                 right: Box::new(DfExpr::Column(col.into())),
-                            }))
+                            });
+                            if should_cast_to_bool {
+                                binary_expr = DfExpr::Cast(Cast {
+                                    expr: Box::new(binary_expr),
+                                    data_type: ArrowDataType::Float64,
+                                });
+                            }
+                            Ok(binary_expr)
                         })?
                     }
                     // lhs is a column, rhs is a literal
                     (None, Some(expr)) => {
                         let input = self.prom_expr_to_plan(*lhs.clone())?;
                         self.projection_for_each_value_column(input, |col| {
-                            Ok(DfExpr::BinaryExpr(BinaryExpr {
+                            let mut binary_expr = DfExpr::BinaryExpr(BinaryExpr {
                                 left: Box::new(DfExpr::Column(col.into())),
                                 op: Self::prom_token_to_binary_op(*op)?,
                                 right: Box::new(expr.clone()),
-                            }))
+                            });
+                            if should_cast_to_bool {
+                                binary_expr = DfExpr::Cast(Cast {
+                                    expr: Box::new(binary_expr),
+                                    data_type: ArrowDataType::Float64,
+                                });
+                            }
+                            Ok(binary_expr)
                         })?
                     }
                     // both are columns. join them on time index
@@ -193,11 +219,18 @@ impl<S: ContextProvider> PromPlanner<S> {
                                 .context(DataFusionPlanningSnafu)?
                                 .qualified_column();
 
-                            Ok(DfExpr::BinaryExpr(BinaryExpr {
+                            let mut binary_expr = DfExpr::BinaryExpr(BinaryExpr {
                                 left: Box::new(DfExpr::Column(left_col)),
                                 op: Self::prom_token_to_binary_op(*op)?,
                                 right: Box::new(DfExpr::Column(right_col)),
-                            }))
+                            });
+                            if should_cast_to_bool {
+                                binary_expr = DfExpr::Cast(Cast {
+                                    expr: Box::new(binary_expr),
+                                    data_type: ArrowDataType::Float64,
+                                });
+                            }
+                            Ok(binary_expr)
                         })?
                     }
                 }
@@ -747,6 +780,19 @@ impl<S: ContextProvider> PromPlanner<S> {
             // token::T_POW => Ok(Operator::Power),
             // token::T_ATAN2 => Ok(Operator::Atan2),
             _ => UnexpectedTokenSnafu { token }.fail(),
+        }
+    }
+
+    /// Check if the given op is a [comparison operator](https://prometheus.io/docs/prometheus/latest/querying/operators/#comparison-binary-operators).
+    fn is_token_a_comparison_op(token: TokenType) -> bool {
+        match token.id() {
+            token::T_EQLC
+            | token::T_NEQ
+            | token::T_GTR
+            | token::T_LSS
+            | token::T_GTE
+            | token::T_LTE => true,
+            _ => false,
         }
     }
 
@@ -1363,5 +1409,11 @@ mod test {
         let context_provider = build_test_context_provider("some_metric".to_string(), 1, 1).await;
         let plan_result = PromPlanner::stmt_to_plan(eval_stmt, context_provider);
         assert!(plan_result.is_err());
+    }
+
+    #[test]
+    fn bool_grammar() {
+        let prom_expr = parser::parse("demo_num_cpus + (1 != bool 2)").unwrap();
+        println!("prom_expr: {:#?}", prom_expr);
     }
 }
