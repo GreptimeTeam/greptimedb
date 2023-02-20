@@ -34,9 +34,9 @@ use crate::sql::SqlHandler;
 impl SqlHandler {
     pub(crate) async fn copy_table(&self, req: CopyTableRequest) -> Result<Output> {
         let table_ref = TableReference {
-            catalog: &req.catalog_name.to_string(),
-            schema: &req.schema_name.to_string(),
-            table: &req.table_name.to_string(),
+            catalog: &req.catalog_name,
+            schema: &req.schema_name,
+            table: &req.table_name,
         };
         let table = self.get_table(&table_ref)?;
 
