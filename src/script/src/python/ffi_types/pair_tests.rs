@@ -15,9 +15,8 @@
 mod sample_testcases;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use datatypes::vectors::{Float64Vector, VectorRef};
+use datatypes::vectors::VectorRef;
 use pyo3::types::PyDict;
 use pyo3::Python;
 use rustpython_compiler::Mode;

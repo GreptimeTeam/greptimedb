@@ -28,11 +28,10 @@ use ron::from_str as from_ron_string;
 use rustpython_parser::parser;
 use serde::{Deserialize, Serialize};
 
-use super::error::{get_error_reason_loc, visualize_loc};
-use crate::python::coprocessor;
-use crate::python::coprocessor::parse::parse_and_compile_copr;
-use crate::python::coprocessor::{AnnotationInfo, Coprocessor};
-use crate::python::error::{pretty_print_error_in_src, Error};
+use crate::python::error::{get_error_reason_loc, pretty_print_error_in_src, visualize_loc, Error};
+use crate::python::ffi_types::copr::parse::parse_and_compile_copr;
+use crate::python::ffi_types::copr::{exec_coprocessor, AnnotationInfo};
+use crate::python::ffi_types::Coprocessor;
 
 #[derive(Deserialize, Debug)]
 struct TestCase {
@@ -126,7 +125,7 @@ fn run_ron_testcases() {
             }
             Predicate::ExecIsOk { fields, columns } => {
                 let rb = create_sample_recordbatch();
-                let res = coprocessor::exec_coprocessor(&testcase.code, &rb).unwrap();
+                let res = exec_coprocessor(&testcase.code, &Some(rb)).unwrap();
                 fields
                     .iter()
                     .zip(res.schema.column_schemas())
@@ -152,7 +151,7 @@ fn run_ron_testcases() {
                 reason: part_reason,
             } => {
                 let rb = create_sample_recordbatch();
-                let res = coprocessor::exec_coprocessor(&testcase.code, &rb);
+                let res = exec_coprocessor(&testcase.code, &Some(rb));
                 assert!(res.is_err(), "{res:#?}\nExpect Err(...), actual Ok(...)");
                 if let Err(res) = res {
                     error!(
@@ -254,7 +253,7 @@ def calc_rvs(open_time, close):
         ],
     )
     .unwrap();
-    let ret = coprocessor::exec_coprocessor(python_source, &rb);
+    let ret = exec_coprocessor(python_source, &Some(rb));
     if let Err(Error::PyParse {
         backtrace: _,
         source,
@@ -304,7 +303,7 @@ def a(cpu, mem):
         ],
     )
     .unwrap();
-    let ret = coprocessor::exec_coprocessor(python_source, &rb);
+    let ret = exec_coprocessor(python_source, &Some(rb));
     if let Err(Error::PyParse {
         backtrace: _,
         source,

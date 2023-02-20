@@ -29,7 +29,7 @@ use crate::python::ffi_types::copr::{compile, AnnotationInfo, Coprocessor};
 #[cfg_attr(test, derive(Deserialize))]
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DecoratorArgs {
-    pub arg_names: Vec<String>,
+    pub arg_names: Option<Vec<String>>,
     pub ret_names: Vec<String>,
     pub sql: Option<String>,
     // maybe add a URL for connecting or what?
@@ -46,7 +46,7 @@ pub(crate) fn ret_parse_error(
 
 /// append a `.fail()` after `ret_parse_error`, so compiler can return a Err(this error)
 #[macro_export]
-macro_rules! rspy_fail_parse_error {
+macro_rules! fail_parse_error {
     ($reason:expr, $loc:expr $(,)*) => {
         ret_parse_error($reason, $loc).fail()
     };
@@ -58,9 +58,9 @@ fn py_str_to_string(s: &ast::Expr<()>) -> Result<String> {
         kind: _,
     } = &s.node
     {
-        Ok(v.to_owned())
+        Ok(v.clone())
     } else {
-        rspy_fail_parse_error!(
+        fail_parse_error!(
             format!(
                 "Expect a list of String, found one element to be: \n{:#?}",
                 &s.node
@@ -76,7 +76,7 @@ fn pylist_to_vec(lst: &ast::Expr<()>) -> Result<Vec<String>> {
         let ret = elts.iter().map(py_str_to_string).collect::<Result<_>>()?;
         Ok(ret)
     } else {
-        rspy_fail_parse_error!(
+        fail_parse_error!(
             format!("Expect a list, found \n{:#?}", &lst.node),
             Some(lst.location)
         )
@@ -100,10 +100,7 @@ fn try_into_datatype(ty: &str, loc: &Location) -> Result<Option<ConcreteDataType
         // for any datatype
         "_" => Ok(None),
         // note the different between "_" and _
-        _ => rspy_fail_parse_error!(
-            format!("Unknown datatype: {ty} at {loc:?}"),
-            Some(loc.to_owned())
-        ),
+        _ => fail_parse_error!(format!("Unknown datatype: {ty} at {loc:?}"), Some(*loc)),
     }
 }
 
@@ -115,7 +112,7 @@ fn parse_native_type(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
             datatype: try_into_datatype(id, &sub.location)?,
             is_nullable: false,
         }),
-        _ => rspy_fail_parse_error!(
+        _ => fail_parse_error!(
             format!("Expect types' name, found \n{:#?}", &sub.node),
             Some(sub.location)
         ),
@@ -147,12 +144,12 @@ fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
         let right_is_ty = is_type(right);
         let right_is_none = is_none(right);
         if left_is_ty && right_is_ty || left_is_none && right_is_none {
-            rspy_fail_parse_error!(
+            fail_parse_error!(
                 "Expect one typenames and one `None`".to_string(),
                 Some(bin_op.location)
             )?;
         } else if !(left_is_none && right_is_ty || left_is_ty && right_is_none) {
-            rspy_fail_parse_error!(
+            fail_parse_error!(
                 format!(
                     "Expect a type name and a `None`, found left: \n{:#?} \nand right: \n{:#?}",
                     &left.node, &right.node
@@ -162,7 +159,7 @@ fn check_bin_op(bin_op: &ast::Expr<()>) -> Result<()> {
         }
         Ok(())
     } else {
-        rspy_fail_parse_error!(
+        fail_parse_error!(
             format!(
                 "Expect binary ops like `DataType | None`, found \n{:#?}",
                 bin_op.node
@@ -186,7 +183,7 @@ fn parse_bin_op(bin_op: &ast::Expr<()>) -> Result<AnnotationInfo> {
             right_ty
         } else {
             // deal with errors anyway in case code above changed but forget to modify
-            return rspy_fail_parse_error!(
+            return fail_parse_error!(
                 "Expect a type name, not two `None`".into(),
                 Some(bin_op.location),
             );
@@ -216,14 +213,14 @@ fn check_annotation_ret_slice(sub: &ast::Expr<()>) -> Result<&ast::Expr<()>> {
                 )
             );
         } else {
-            return rspy_fail_parse_error!(
+            return fail_parse_error!(
                 format!("Expect \"vector\", found \n{:#?}", &value.node),
                 Some(value.location)
             );
         }
         Ok(slice)
     } else {
-        rspy_fail_parse_error!(
+        fail_parse_error!(
             format!("Expect type annotation, found \n{:#?}", &sub),
             Some(sub.location)
         )
@@ -250,7 +247,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
                 right: _,
             } => parse_bin_op(slice),
             _ => {
-                rspy_fail_parse_error!(
+                fail_parse_error!(
                     format!("Expect type in `vector[...]`, found \n{:#?}", &slice.node),
                     Some(slice.location),
                 )
@@ -263,7 +260,7 @@ fn parse_annotation(sub: &ast::Expr<()>) -> Result<AnnotationInfo> {
 fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
     // more keys maybe add to this list of `avail_key`(like `sql` for querying and maybe config for connecting to database?), for better extension using a `HashSet` in here
     let avail_key = HashSet::from(["args", "returns", "sql"]);
-    let opt_keys = HashSet::from(["sql"]);
+    let opt_keys = HashSet::from(["sql", "args"]);
     let mut visited_key = HashSet::new();
     let len_min = avail_key.len() - opt_keys.len();
     let len_max = avail_key.len();
@@ -284,13 +281,13 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
             Some(s) => {
                 let s = s.as_str();
                 if visited_key.contains(s) {
-                    return rspy_fail_parse_error!(
+                    return fail_parse_error!(
                         format!("`{s}` occur multiple times in decorator's arguments' list."),
                         Some(kw.location),
                     );
                 }
                 if !avail_key.contains(s) {
-                    return rspy_fail_parse_error!(
+                    return fail_parse_error!(
                         format!("Expect one of {:?}, found `{}`", &avail_key, s),
                         Some(kw.location),
                     );
@@ -298,14 +295,14 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                     visited_key.insert(s);
                 }
                 match s {
-                    "args" => ret_args.arg_names = pylist_to_vec(&kw.node.value)?,
+                    "args" => ret_args.arg_names = Some(pylist_to_vec(&kw.node.value)?),
                     "returns" => ret_args.ret_names = pylist_to_vec(&kw.node.value)?,
                     "sql" => ret_args.sql = Some(py_str_to_string(&kw.node.value)?),
                     _ => unreachable!(),
                 }
             }
             None => {
-                return rspy_fail_parse_error!(
+                return fail_parse_error!(
                     format!(
                         "Expect explicitly set both `args` and `returns`, found \n{:#?}",
                         &kw.node
@@ -318,7 +315,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
     let loc = keywords[0].location;
     for key in avail_key {
         if !visited_key.contains(key) && !opt_keys.contains(key) {
-            return rspy_fail_parse_error!(format!("Expect `{key}` keyword"), Some(loc));
+            return fail_parse_error!(format!("Expect `{key}` keyword"), Some(loc));
         }
     }
     Ok(ret_args)
@@ -354,7 +351,7 @@ fn parse_decorator(decorator: &ast::Expr<()>) -> Result<DecoratorArgs> {
         );
         parse_keywords(keywords)
     } else {
-        rspy_fail_parse_error!(
+        fail_parse_error!(
             format!(
                 "Expect decorator to be a function call(like `@copr(...)`), found \n{:#?}",
                 decorator.node
@@ -389,7 +386,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
             ctx: _,
         } => 1,
         _ => {
-            return rspy_fail_parse_error!(
+            return fail_parse_error!(
                 format!(
                     "Expect `(vector[...], vector[...], ...)` or `vector[...]`, found \n{:#?}",
                     &rets.node
@@ -412,7 +409,7 @@ fn get_return_annotations(rets: &ast::Expr<()>) -> Result<Vec<Option<AnnotationI
             ctx: _,
         } => return_types.push(Some(parse_annotation(rets)?)),
         _ => {
-            return rspy_fail_parse_error!(
+            return fail_parse_error!(
                 format!(
                     "Expect one or many type annotation for the return type, found \n{:#?}",
                     &rets.node
@@ -476,17 +473,19 @@ pub fn parse_and_compile_copr(
 
                 // make sure both arguments&returns in function
                 // and in decorator have same length
-                ensure!(
-                    deco_args.arg_names.len() == arg_types.len(),
-                    CoprParseSnafu {
-                        reason: format!(
-                            "args number in decorator({}) and function({}) doesn't match",
-                            deco_args.arg_names.len(),
-                            arg_types.len()
-                        ),
-                        loc: None
-                    }
-                );
+                if let Some(arg_names) = &deco_args.arg_names {
+                    ensure!(
+                        arg_names.len() == arg_types.len(),
+                        CoprParseSnafu {
+                            reason: format!(
+                                "args number in decorator({}) and function({}) doesn't match",
+                                arg_names.len(),
+                                arg_types.len()
+                            ),
+                            loc: None
+                        }
+                    );
+                }
                 ensure!(
                     deco_args.ret_names.len() == return_types.len(),
                     CoprParseSnafu {
@@ -498,13 +497,15 @@ pub fn parse_and_compile_copr(
                         loc: None
                     }
                 );
+                let kwarg = fn_args.kwarg.as_ref().map(|arg| arg.node.arg.clone());
                 coprocessor = Some(Coprocessor {
-                    code_obj: Some(compile::compile_script(name, &deco_args, script)?),
+                    code_obj: Some(compile::compile_script(name, &deco_args, &kwarg, script)?),
                     name: name.to_string(),
                     deco_args,
                     arg_types,
                     return_types,
-                    script: script.to_owned(),
+                    kwarg,
+                    script: script.to_string(),
                     query_engine: query_engine.as_ref().map(|e| Arc::downgrade(e).into()),
                     backend: Default::default(),
                 });
@@ -515,7 +516,7 @@ pub fn parse_and_compile_copr(
         ) {
             // import statements are allowed.
         } else {
-            return rspy_fail_parse_error!(
+            return fail_parse_error!(
                 format!(
                     "Expect a function definition, but found a \n{:#?}",
                     &stmt.node

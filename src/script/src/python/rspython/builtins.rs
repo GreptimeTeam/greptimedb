@@ -32,7 +32,7 @@ use crate::python::utils::is_instance;
 
 pub fn init_greptime_builtins(module_name: &str, vm: &mut VirtualMachine) {
     vm.add_native_module(
-        module_name.to_owned(),
+        module_name.to_string(),
         Box::new(greptime_builtin::make_module),
     );
 }
@@ -104,7 +104,7 @@ pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResul
             .borrow_vec()
             .iter()
             .map(|obj| -> PyResult<ScalarValue> {
-                let col = try_into_columnar_value(obj.to_owned(), vm)?;
+                let col = try_into_columnar_value(obj.clone(), vm)?;
                 match col {
                     DFColValue::Array(arr) => Err(vm.new_type_error(format!(
                         "Expect only scalar value in a list, found a vector of type {:?} nested in list", arr.data_type()
@@ -250,7 +250,7 @@ macro_rules! bind_aggr_fn {
                 $(
                     Arc::new(expressions::Column::new(stringify!($EXPR_ARGS), 0)) as _,
                 )*
-                    stringify!($AGGR_FUNC), $DATA_TYPE.to_owned()),
+                    stringify!($AGGR_FUNC), $DATA_TYPE.clone()),
             $ARGS, $VM)
     };
 }
@@ -604,7 +604,7 @@ pub(crate) mod greptime_builtin {
                     Arc::new(percent) as _,
                 ],
                 "ApproxPercentileCont",
-                (values.to_arrow_array().data_type()).to_owned(),
+                (values.to_arrow_array().data_type()).clone(),
             )
             .map_err(|err| from_df_err(err, vm))?,
             &[values.to_arrow_array()],
@@ -846,7 +846,7 @@ pub(crate) mod greptime_builtin {
             return Ok(ret.into());
         }
         let cur = cur.slice(0, cur.len() - 1); // except the last one that is
-        let fill = gen_none_array(cur.data_type().to_owned(), 1, vm)?;
+        let fill = gen_none_array(cur.data_type().clone(), 1, vm)?;
         let ret = compute::concat(&[&*fill, &*cur]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
@@ -871,7 +871,7 @@ pub(crate) mod greptime_builtin {
             return Ok(ret.into());
         }
         let cur = cur.slice(1, cur.len() - 1); // except the last one that is
-        let fill = gen_none_array(cur.data_type().to_owned(), 1, vm)?;
+        let fill = gen_none_array(cur.data_type().clone(), 1, vm)?;
         let ret = compute::concat(&[&*cur, &*fill]).map_err(|err| {
             vm.new_runtime_error(format!("Can't concat array[0] with array[0:-1]!{err:#?}"))
         })?;
@@ -1055,7 +1055,7 @@ pub(crate) mod greptime_builtin {
             match (ch.is_ascii_digit(), &state) {
                 (true, State::Separator(_)) => {
                     let res = &input[prev..idx];
-                    let res = State::Separator(res.to_owned());
+                    let res = State::Separator(res.to_string());
                     parsed.push(res);
                     prev = idx;
                     state = State::Num(Default::default());
@@ -1080,7 +1080,7 @@ pub(crate) mod greptime_builtin {
             }
             State::Separator(_) => {
                 let res = &input[prev..];
-                State::Separator(res.to_owned())
+                State::Separator(res.to_string())
             }
         };
         parsed.push(last);

@@ -384,14 +384,14 @@ impl PyVector {
             // Negative step require special treatment
             for i in range.rev().step_by(step.unsigned_abs()) {
                 // Safety: This mutable vector is created from the vector's data type.
-                buf.push_value_ref(vector.get_ref(i)).unwrap();
+                buf.push_value_ref(vector.get_ref(i));
             }
             let v: PyVector = buf.to_vector().into();
             Ok(v.into_pyobject(vm))
         } else {
             for i in range.step_by(step.unsigned_abs()) {
                 // Safety: This mutable vector is created from the vector's data type.
-                buf.push_value_ref(vector.get_ref(i)).unwrap();
+                buf.push_value_ref(vector.get_ref(i));
             }
             let v: PyVector = buf.to_vector().into();
             Ok(v.into_pyobject(vm))

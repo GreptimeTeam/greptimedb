@@ -93,9 +93,7 @@ impl PyVector {
         for i in 0..iterable.len() {
             let element = iterable.get_item(i)?;
             let val = pyo3_obj_try_to_typed_val(element, Some(dtype.clone()))?;
-            buf.push_value_ref(val.as_value_ref())
-                .map_err(|e| e.to_string())
-                .map_err(PyValueError::new_err)?;
+            buf.push_value_ref(val.as_value_ref());
         }
         Ok(buf.to_vector().into())
     }

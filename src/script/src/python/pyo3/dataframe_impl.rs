@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datafusion::dataframe::DataFrame as DfDataFrame;
 use datafusion_expr::Expr as DfExpr;
 use pyo3::exceptions::PyValueError;
@@ -24,7 +23,7 @@ use crate::python::ffi_types::PyVector;
 use crate::python::utils::block_on_async;
 type PyExprRef = Py<PyExpr>;
 #[pyclass]
-struct PyDataFrame {
+pub(crate) struct PyDataFrame {
     inner: DfDataFrame,
 }
 
@@ -214,7 +213,7 @@ impl PyDataFrame {
 }
 
 #[pyclass]
-struct PyExpr {
+pub(crate) struct PyExpr {
     inner: DfExpr,
 }
 
@@ -225,7 +224,7 @@ impl From<datafusion_expr::Expr> for PyExpr {
 }
 
 #[pyfunction]
-fn col(py: Python<'_>, name: String) -> PyExpr {
+pub(crate) fn col(name: String) -> PyExpr {
     let expr: PyExpr = DfExpr::Column(datafusion_common::Column::from_name(name)).into();
     expr
 }

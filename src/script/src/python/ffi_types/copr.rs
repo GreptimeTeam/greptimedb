@@ -15,6 +15,7 @@
 pub mod compile;
 pub mod parse;
 
+use std::collections::HashMap;
 use std::result::Result as StdResult;
 use std::sync::{Arc, Weak};
 
@@ -56,6 +57,8 @@ pub struct AnnotationInfo {
 pub enum BackendType {
     #[default]
     RustPython,
+    // TODO(discord9): intergral test
+    #[allow(unused)]
     CPython,
 }
 
@@ -70,6 +73,8 @@ pub struct Coprocessor {
     pub arg_types: Vec<Option<AnnotationInfo>>,
     /// get from python function returns' annotation, first is type, second is is_nullable
     pub return_types: Vec<Option<AnnotationInfo>>,
+    /// kwargs in coprocessor function's signature
+    pub kwarg: Option<String>,
     /// store its corresponding script, also skip serde when in `cfg(test)` to reduce work in compare
     #[cfg_attr(test, serde(skip))]
     pub script: String,
@@ -104,7 +109,7 @@ impl From<&Arc<dyn QueryEngine>> for QueryEngineWeakRef {
 impl std::fmt::Debug for QueryEngineWeakRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("QueryEngineWeakRef")
-            .field(&self.0.upgrade().map(|f| f.name().to_owned()))
+            .field(&self.0.upgrade().map(|f| f.name().to_string()))
             .finish()
     }
 }
@@ -148,7 +153,7 @@ impl Coprocessor {
                 let AnnotationInfo {
                     datatype: ty,
                     is_nullable,
-                } = anno[idx].to_owned().unwrap_or_else(|| {
+                } = anno[idx].clone().unwrap_or_else(|| {
                     // default to be not nullable and use DataType inferred by PyVector itself
                     AnnotationInfo {
                         datatype: Some(real_ty.clone()),
@@ -226,20 +231,23 @@ pub(crate) fn check_args_anno_real_type(
     rb: &RecordBatch,
 ) -> Result<()> {
     for (idx, arg) in args.iter().enumerate() {
-        let anno_ty = copr.arg_types[idx].to_owned();
-        let real_ty = arg.to_arrow_array().data_type().to_owned();
+        let anno_ty = copr.arg_types[idx].clone();
+        let real_ty = arg.to_arrow_array().data_type().clone();
         let real_ty = ConcreteDataType::from_arrow_type(&real_ty);
         let is_nullable: bool = rb.schema.column_schemas()[idx].is_nullable();
         ensure!(
             anno_ty
                 .to_owned()
                 .map(|v| v.datatype.is_none() // like a vector[_]
-                     || v.datatype == Some(real_ty.to_owned()) && v.is_nullable == is_nullable)
+                     || v.datatype == Some(real_ty.clone()) && v.is_nullable == is_nullable)
                 .unwrap_or(true),
             OtherSnafu {
                 reason: format!(
                     "column {}'s Type annotation is {:?}, but actual type is {:?}",
-                    copr.deco_args.arg_names[idx], anno_ty, real_ty
+                    // It's safe to unwrap here, we already ensure the args and types number is the same when parsing
+                    copr.deco_args.arg_names.as_ref().unwrap()[idx],
+                    anno_ty,
+                    real_ty
                 )
             }
         )
@@ -300,12 +308,12 @@ pub(crate) fn check_args_anno_real_type(
 /// You can return constant in python code like `return 1, 1.0, True`
 /// which create a constant array(with same value)(currently support int, float and bool) as column on return
 #[cfg(test)]
-pub fn exec_coprocessor(script: &str, rb: &RecordBatch) -> Result<RecordBatch> {
+pub fn exec_coprocessor(script: &str, rb: &Option<RecordBatch>) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
     // TODO(discord9): cache the result of parse_copr
     let copr = parse::parse_and_compile_copr(script, None)?;
-    exec_parsed(&copr, rb)
+    exec_parsed(&copr, rb, &HashMap::new())
 }
 
 #[pyo3class(name = "query_engine")]
@@ -380,7 +388,7 @@ impl PyQueryEngine {
                     for rb in rbs.iter() {
                         let mut vec_of_vec = Vec::with_capacity(rb.columns().len());
                         for v in rb.columns() {
-                            let v = PyVector::from(v.to_owned());
+                            let v = PyVector::from(v.clone());
                             vec_of_vec.push(v.to_pyobject(vm));
                         }
                         let vec_of_vec = PyList::new_ref(vec_of_vec, vm.as_ref()).to_pyobject(vm);
@@ -397,10 +405,23 @@ impl PyQueryEngine {
 }
 
 /// using a parsed `Coprocessor` struct as input to execute python code
-pub fn exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
+pub fn exec_parsed(
+    copr: &Coprocessor,
+    rb: &Option<RecordBatch>,
+    params: &HashMap<String, String>,
+) -> Result<RecordBatch> {
     match copr.backend {
-        BackendType::RustPython => rspy_exec_parsed(copr, rb),
-        BackendType::CPython => pyo3_exec_parsed(copr, rb),
+        BackendType::RustPython => rspy_exec_parsed(copr, rb, params),
+        BackendType::CPython => {
+            if let Some(rb) = rb {
+                pyo3_exec_parsed(copr, rb)
+            } else {
+                OtherSnafu {
+                    reason: "CPython doesn't support params yet".to_string(),
+                }
+                .fail()
+            }
+        }
     }
 }
 
@@ -413,7 +434,7 @@ pub fn exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> 
 #[allow(dead_code)]
 pub fn exec_copr_print(
     script: &str,
-    rb: &RecordBatch,
+    rb: &Option<RecordBatch>,
     ln_offset: usize,
     filename: &str,
 ) -> StdResult<RecordBatch, String> {
@@ -434,9 +455,9 @@ def add(a, b):
     return a + b
 
 @copr(args=["a", "b", "c"], returns = ["r"], sql="select number as a,number as b,number as c from numbers limit 100")
-def test(a, b, c):
+def test(a, b, c, **params):
     import greptime as g
-    return add(a, b) / g.sqrt(c)
+    return (a+b) / g.sqrt(c)
 "#;
 
         let copr = parse_and_compile_copr(script, None).unwrap();
@@ -447,9 +468,10 @@ def test(a, b, c):
             "select number as a,number as b,number as c from numbers limit 100"
         );
         assert_eq!(deco_args.ret_names, vec!["r"]);
-        assert_eq!(deco_args.arg_names, vec!["a", "b", "c"]);
+        assert_eq!(deco_args.arg_names.unwrap(), vec!["a", "b", "c"]);
         assert_eq!(copr.arg_types, vec![None, None, None]);
         assert_eq!(copr.return_types, vec![None]);
+        assert_eq!(copr.kwarg, Some("params".to_string()));
         assert_eq!(copr.script, script);
         assert!(copr.code_obj.is_some());
     }

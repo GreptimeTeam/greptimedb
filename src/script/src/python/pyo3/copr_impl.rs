@@ -56,7 +56,15 @@ impl PyQueryEngine {
 }
 /// Execute a `Coprocessor` with given `RecordBatch`
 pub(crate) fn pyo3_exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
-    let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
+    let arg_names = if let Some(names) = &copr.deco_args.arg_names {
+        names
+    } else {
+        return OtherSnafu {
+            reason: "PyO3 Backend doesn't support params yet".to_string(),
+        }
+        .fail();
+    };
+    let args: Vec<PyVector> = select_from_rb(rb, arg_names)?;
     check_args_anno_real_type(&args, copr, rb)?;
     // Just in case cpython is not inited
     init_cpython_interpreter();

@@ -13,18 +13,18 @@
 // limitations under the License.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::result::Result as StdResult;
 use std::sync::Arc;
 
 use common_recordbatch::RecordBatch;
 use common_telemetry::info;
 use datatypes::vectors::VectorRef;
-use rustpython_vm::builtins::{PyBaseExceptionRef, PyTuple};
+use rustpython_vm::builtins::{PyBaseExceptionRef, PyDict, PyStr, PyTuple};
 use rustpython_vm::class::PyClassImpl;
 use rustpython_vm::convert::ToPyObject;
 use rustpython_vm::scope::Scope;
-use rustpython_vm::{vm, AsObject, Interpreter, PyObjectRef, VirtualMachine};
+use rustpython_vm::{vm, AsObject, Interpreter, PyObjectRef, PyPayload, VirtualMachine};
 use snafu::{OptionExt, ResultExt};
 
 use crate::python::error::{ensure, ret_other_error_with, NewRecordBatchSnafu, OtherSnafu, Result};
@@ -38,13 +38,22 @@ use crate::python::rspython::utils::{format_py_error, is_instance, py_vec_obj_to
 thread_local!(static INTERPRETER: RefCell<Option<Arc<Interpreter>>> = RefCell::new(None));
 
 /// Using `RustPython` to run a parsed `Coprocessor` struct as input to execute python code
-pub(crate) fn rspy_exec_parsed(copr: &Coprocessor, rb: &RecordBatch) -> Result<RecordBatch> {
+pub(crate) fn rspy_exec_parsed(
+    copr: &Coprocessor,
+    rb: &Option<RecordBatch>,
+    params: &HashMap<String, String>,
+) -> Result<RecordBatch> {
     // 3. get args from `rb`, and cast them into PyVector
-    let args: Vec<PyVector> = select_from_rb(rb, &copr.deco_args.arg_names)?;
-    check_args_anno_real_type(&args, copr, rb)?;
+    let args: Vec<PyVector> = if let Some(rb) = rb {
+        let args = select_from_rb(rb, copr.deco_args.arg_names.as_ref().unwrap_or(&vec![]))?;
+        check_args_anno_real_type(&args, copr, rb)?;
+        args
+    } else {
+        vec![]
+    };
     let interpreter = init_interpreter();
     // 4. then set args in scope and compile then run `CodeObject` which already append a new `Call` node
-    exec_with_cached_vm(copr, rb, args, &interpreter)
+    exec_with_cached_vm(copr, rb, args, params, &interpreter)
 }
 
 /// set arguments with given name and values in python scopes
@@ -82,21 +91,41 @@ fn set_query_engine_in_scope(
 
 pub(crate) fn exec_with_cached_vm(
     copr: &Coprocessor,
-    rb: &RecordBatch,
+    rb: &Option<RecordBatch>,
     args: Vec<PyVector>,
+    params: &HashMap<String, String>,
     vm: &Arc<Interpreter>,
 ) -> Result<RecordBatch> {
     vm.enter(|vm| -> Result<RecordBatch> {
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
-        set_items_in_scope(&scope, vm, &copr.deco_args.arg_names, args)?;
-        set_dataframe_in_scope(&scope, vm, "dataframe", rb)?;
+        if let Some(rb) = rb {
+            set_dataframe_in_scope(&scope, vm, "dataframe", rb)?;
+        }
+
+        if let Some(arg_names) = &copr.deco_args.arg_names {
+            assert_eq!(arg_names.len(), args.len());
+            set_items_in_scope(&scope, vm, arg_names, args)?;
+        }
 
         if let Some(engine) = &copr.query_engine {
             let query_engine = PyQueryEngine::from_weakref(engine.clone());
 
             // put a object named with query of class PyQueryEngine in scope
             set_query_engine_in_scope(&scope, vm, query_engine)?;
+        }
+
+        if let Some(kwarg) = &copr.kwarg {
+            let dict = PyDict::new_ref(&vm.ctx);
+            for (k, v) in params {
+                dict.set_item(k, PyStr::from(v.clone()).into_pyobject(vm), vm)
+                    .map_err(|e| format_py_error(e, vm))?;
+            }
+            scope
+                .locals
+                .as_object()
+                .set_item(kwarg, vm.new_pyobj(dict), vm)
+                .map_err(|e| format_py_error(e, vm))?;
         }
 
         // It's safe to unwrap code_object, it's already compiled before.
@@ -106,7 +135,7 @@ pub(crate) fn exec_with_cached_vm(
             .map_err(|e| format_py_error(e, vm))?;
 
         // 5. get returns as either a PyVector or a PyTuple, and naming schema them according to `returns`
-        let col_len = rb.num_rows();
+        let col_len = rb.as_ref().map(|rb| rb.num_rows()).unwrap_or(1);
         let mut cols = try_into_columns(&ret, vm, col_len)?;
         ensure!(
             cols.len() == copr.deco_args.ret_names.len(),
@@ -121,6 +150,7 @@ pub(crate) fn exec_with_cached_vm(
 
         // if cols and schema's data types is not match, try coerce it to given type(if annotated)(if error occur, return relevant error with question mark)
         copr.check_and_cast_type(&mut cols)?;
+
         // 6. return a assembled DfRecordBatch
         let schema = copr.gen_schema(&cols)?;
         RecordBatch::new(schema, cols).context(NewRecordBatchSnafu)
@@ -168,7 +198,6 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                     // not using full stdlib to prevent security issue, instead filter out a few simple util module
                     vm.add_native_modules(
                         rustpython_stdlib::get_module_inits()
-                            .into_iter()
                             .filter(|(k, _)| native_module_allow_list.contains(k.as_ref())),
                     );
 
