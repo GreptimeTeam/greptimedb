@@ -42,6 +42,7 @@ opensrv-mysql = { git = "https://github.com/datafuselabs/opensrv", rev = "b44c9d
 pgwire = "0.10"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
+promql-parser = "0.1.0"
 prost.workspace = true
 query = { path = "../query" }
 rand = "0.8"

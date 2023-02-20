@@ -88,7 +88,11 @@ impl QueryLanguageParser {
                 query: &query.query,
             })?;
 
-        let step = promql_parser::util::parse_duration(&query.step)
+        let step = query
+            .step
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .or_else(|_| promql_parser::util::parse_duration(&query.step))
             .map_err(|msg| BoxedError::new(PlainError::new(msg, StatusCode::InvalidArguments)))
             .context(QueryParseSnafu {
                 query: &query.query,

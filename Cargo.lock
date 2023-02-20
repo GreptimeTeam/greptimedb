@@ -6712,6 +6712,7 @@ dependencies = [
  "pgwire",
  "pin-project",
  "postgres-types",
+ "promql-parser",
  "prost 0.11.6",
  "query",
  "rand 0.8.5",
