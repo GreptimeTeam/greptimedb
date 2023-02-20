@@ -76,9 +76,9 @@ impl Drop for ProcedureGuard {
         if !self.finish {
             logging::error!("Procedure {} exits unexpectedly", self.meta.id);
 
-            // Runtime may not abort when the runner task panics. See https://github.com/tokio-rs/tokio/issues/2002 .
-            // Though we set set_panic_hook() in the executable binary but our test don't have panic hook. We
-            // use this guard to update the state of the procedure.
+            // Set state to failed. This is useful in test as runtime may not abort when the runner task panics.
+            // See https://github.com/tokio-rs/tokio/issues/2002 .
+            // We set set_panic_hook() in the application's main function. But our tests don't have this panic hook.
             self.meta.set_state(ProcedureState::Failed);
         }
 

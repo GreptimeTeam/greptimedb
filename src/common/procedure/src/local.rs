@@ -429,6 +429,8 @@ mod test_util {
 
 #[cfg(test)]
 mod tests {
+    use common_error::mock::MockError;
+    use common_error::prelude::StatusCode;
     use tempdir::TempDir;
 
     use super::*;
@@ -498,6 +500,7 @@ mod tests {
     #[derive(Debug)]
     struct ProcedureToLoad {
         content: String,
+        lock_key: LockKey,
     }
 
     #[async_trait]
@@ -515,7 +518,7 @@ mod tests {
         }
 
         fn lock_key(&self) -> LockKey {
-            LockKey::default()
+            self.lock_key.clone()
         }
     }
 
@@ -523,6 +526,7 @@ mod tests {
         fn new(content: &str) -> ProcedureToLoad {
             ProcedureToLoad {
                 content: content.to_string(),
+                lock_key: LockKey::default(),
             }
         }
 
@@ -600,34 +604,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_procedure() {
-        common_telemetry::init_default_ut_logging();
         let dir = TempDir::new("submit").unwrap();
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
         };
         let manager = LocalManager::new(config);
-
-        #[derive(Debug)]
-        struct MockProcedure {}
-
-        #[async_trait]
-        impl Procedure for MockProcedure {
-            fn type_name(&self) -> &str {
-                "MockProcedure"
-            }
-
-            async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
-                Ok(Status::Done)
-            }
-
-            fn dump(&self) -> Result<String> {
-                Ok(String::new())
-            }
-
-            fn lock_key(&self) -> LockKey {
-                LockKey::single("test.submit")
-            }
-        }
 
         let procedure_id = ProcedureId::random();
         assert!(manager
@@ -635,11 +616,14 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        assert!(manager.procedure_watcher(procedure_id).is_none());
 
+        let mut procedure = ProcedureToLoad::new("submit");
+        procedure.lock_key = LockKey::single("test.submit");
         manager
             .submit(ProcedureWithId {
                 id: procedure_id,
-                procedure: Box::new(MockProcedure {}),
+                procedure: Box::new(procedure),
             })
             .await
             .unwrap();
@@ -657,10 +641,69 @@ mod tests {
         let err = manager
             .submit(ProcedureWithId {
                 id: procedure_id,
-                procedure: Box::new(MockProcedure {}),
+                procedure: Box::new(ProcedureToLoad::new("submit")),
             })
             .await
             .unwrap_err();
         assert!(matches!(err, Error::DuplicateProcedure { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_state_changed_on_err() {
+        let dir = TempDir::new("on_err").unwrap();
+        let config = ManagerConfig {
+            object_store: test_util::new_object_store(&dir),
+        };
+        let manager = LocalManager::new(config);
+
+        #[derive(Debug)]
+        struct MockProcedure {
+            panic: bool,
+        }
+
+        #[async_trait]
+        impl Procedure for MockProcedure {
+            fn type_name(&self) -> &str {
+                "MockProcedure"
+            }
+
+            async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+                if self.panic {
+                    // Test the runner can set the state to failed even the procedure
+                    // panics.
+                    panic!();
+                } else {
+                    Err(Error::external(MockError::new(StatusCode::Unexpected)))
+                }
+            }
+
+            fn dump(&self) -> Result<String> {
+                Ok(String::new())
+            }
+
+            fn lock_key(&self) -> LockKey {
+                LockKey::single("test.submit")
+            }
+        }
+
+        let check_procedure = |procedure| {
+            async {
+                let procedure_id = ProcedureId::random();
+                manager
+                    .submit(ProcedureWithId {
+                        id: procedure_id,
+                        procedure: Box::new(procedure),
+                    })
+                    .await
+                    .unwrap();
+                // Wait for the notification.
+                let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
+                watcher.changed().await.unwrap();
+                assert_eq!(ProcedureState::Failed, *watcher.borrow());
+            }
+        };
+
+        check_procedure(MockProcedure { panic: false }).await;
+        check_procedure(MockProcedure { panic: true }).await;
     }
 }
