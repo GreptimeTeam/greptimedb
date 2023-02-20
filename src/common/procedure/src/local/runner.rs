@@ -48,6 +48,58 @@ impl ExecResult {
     }
 }
 
+/// A guard to cleanup procedure state.
+struct ProcedureGuard {
+    meta: ProcedureMetaRef,
+    manager_ctx: Arc<ManagerContext>,
+    finish: bool,
+}
+
+impl ProcedureGuard {
+    /// Returns a new [ProcedureGuard].
+    fn new(meta: ProcedureMetaRef, manager_ctx: Arc<ManagerContext>) -> ProcedureGuard {
+        ProcedureGuard {
+            meta,
+            manager_ctx,
+            finish: false,
+        }
+    }
+
+    /// The procedure is finished successfully.
+    fn finish(mut self) {
+        self.finish = true;
+    }
+}
+
+impl Drop for ProcedureGuard {
+    fn drop(&mut self) {
+        if !self.finish {
+            logging::error!("Procedure {} exits unexpectedly", self.meta.id);
+
+            // Runtime may not abort when the runner task panics. See https://github.com/tokio-rs/tokio/issues/2002 .
+            // Though we set set_panic_hook() in the executable binary but our test don't have panic hook. We
+            // use this guard to update the state of the procedure.
+            self.meta.set_state(ProcedureState::Failed);
+        }
+
+        // Notify parent procedure.
+        if let Some(parent_id) = self.meta.parent_id {
+            self.manager_ctx.notify_by_subprocedure(parent_id);
+        }
+
+        // Release lock in reverse order.
+        for key in self.meta.lock_key.keys_to_unlock() {
+            self.manager_ctx.lock_map.release_lock(key, self.meta.id);
+        }
+
+        // If this is the root procedure, clean up message cache.
+        if self.meta.parent_id.is_none() {
+            let procedure_ids = self.manager_ctx.procedures_in_tree(&self.meta);
+            self.manager_ctx.remove_messages(&procedure_ids);
+        }
+    }
+}
+
 // TODO(yingwen): Support cancellation.
 pub(crate) struct Runner {
     pub(crate) meta: ProcedureMetaRef,
@@ -60,6 +112,9 @@ pub(crate) struct Runner {
 impl Runner {
     /// Run the procedure.
     pub(crate) async fn run(mut self) -> Result<()> {
+        // Ensure we can update the procedure state.
+        let guard = ProcedureGuard::new(self.meta.clone(), self.manager_ctx.clone());
+
         logging::info!(
             "Runner {}-{} starts",
             self.procedure.type_name(),
@@ -83,26 +138,12 @@ impl Runner {
             result = Err(e);
         }
 
-        // Notify parent procedure.
-        if let Some(parent_id) = self.meta.parent_id {
-            self.manager_ctx.notify_by_subprocedure(parent_id);
-        }
-
-        // Release lock in reverse order.
-        for key in self.meta.lock_key.keys_to_unlock() {
-            self.manager_ctx.lock_map.release_lock(key, self.meta.id);
-        }
-
-        // If this is the root procedure, clean up message cache.
-        if self.meta.parent_id.is_none() {
-            let procedure_ids = self.manager_ctx.procedures_in_tree(&self.meta);
-            self.manager_ctx.remove_messages(&procedure_ids);
-        }
-
         // We can't remove the metadata of the procedure now as users and its parent might
         // need to query its state.
         // TODO(yingwen): 1. Add TTL to the metadata; 2. Only keep state in the procedure store
         // so we don't need to always store the metadata in memory after the procedure is done.
+
+        guard.finish();
 
         logging::info!(
             "Runner {}-{} exits",

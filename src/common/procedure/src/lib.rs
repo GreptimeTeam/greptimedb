@@ -22,5 +22,5 @@ mod store;
 pub use crate::error::{Error, Result};
 pub use crate::procedure::{
     BoxedProcedure, Context, ContextProvider, LockKey, Procedure, ProcedureId, ProcedureManager,
-    ProcedureManagerRef, ProcedureState, ProcedureWithId, Status,
+    ProcedureManagerRef, ProcedureState, ProcedureWithId, Status, Watcher,
 };

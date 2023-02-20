@@ -32,7 +32,7 @@ use crate::procedure::BoxedProcedureLoader;
 use crate::store::{ObjectStateStore, ProcedureMessage, ProcedureStore, StateStoreRef};
 use crate::{
     BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
-    ProcedureWithId,
+    ProcedureWithId, Watcher,
 };
 
 /// Shared metadata of a procedure.
@@ -173,6 +173,14 @@ impl ManagerContext {
     fn state(&self, procedure_id: ProcedureId) -> Option<ProcedureState> {
         let procedures = self.procedures.read().unwrap();
         procedures.get(&procedure_id).map(|meta| meta.state())
+    }
+
+    /// Returns the [Watcher] of specific `procedure_id`.
+    fn watcher(&self, procedure_id: ProcedureId) -> Option<Watcher> {
+        let procedures = self.procedures.read().unwrap();
+        procedures
+            .get(&procedure_id)
+            .map(|meta| meta.state_receiver.clone())
     }
 
     /// Notify a suspended parent procedure with specific `procedure_id` by its subprocedure.
@@ -394,6 +402,10 @@ impl ProcedureManager for LocalManager {
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
         Ok(self.manager_ctx.state(procedure_id))
     }
+
+    fn procedure_watcher(&self, procedure_id: ProcedureId) -> Option<Watcher> {
+        self.manager_ctx.watcher(procedure_id)
+    }
 }
 
 /// Create a new [ProcedureMeta] for test purpose.
@@ -588,6 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_submit_procedure() {
+        common_telemetry::init_default_ut_logging();
         let dir = TempDir::new("submit").unwrap();
         let config = ManagerConfig {
             object_store: test_util::new_object_store(&dir),
@@ -604,11 +617,11 @@ mod tests {
             }
 
             async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
-                unimplemented!()
+                Ok(Status::Done)
             }
 
             fn dump(&self) -> Result<String> {
-                unimplemented!()
+                Ok(String::new())
             }
 
             fn lock_key(&self) -> LockKey {
@@ -635,6 +648,10 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+        // Wait for the procedure done.
+        let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
+        watcher.changed().await.unwrap();
+        assert_eq!(ProcedureState::Done, *watcher.borrow());
 
         // Try to submit procedure with same id again.
         let err = manager
