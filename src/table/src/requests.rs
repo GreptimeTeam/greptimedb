@@ -78,7 +78,7 @@ impl TryFrom<&HashMap<String, String>> for TableOptions {
     fn try_from(value: &HashMap<String, String>) -> Result<Self, Self::Error> {
         let mut options = TableOptions::default();
         if let Some(write_buffer_size) = value.get(WRITE_BUFFER_SIZE_KEY) {
-            let size = ReadableSize::from_str(&write_buffer_size).map_err(|_| {
+            let size = ReadableSize::from_str(write_buffer_size).map_err(|_| {
                 ParseTableOptionSnafu {
                     key: WRITE_BUFFER_SIZE_KEY,
                     value: write_buffer_size,

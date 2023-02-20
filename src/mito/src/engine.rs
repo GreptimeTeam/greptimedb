@@ -393,6 +393,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 })?;
             let opts = CreateOptions {
                 parent_dir: table_dir.clone(),
+                write_buffer_size: request
+                    .table_options
+                    .write_buffer_size
+                    .map(|size| size.0 as usize),
+                ttl: request.table_options.ttl,
             };
 
             let region = self
@@ -476,14 +481,21 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let table_id = request.table_id;
             let engine_ctx = StorageEngineContext::default();
             let table_dir = table_dir(catalog_name, schema_name, table_id);
-            let opts = OpenOptions {
-                parent_dir: table_dir.to_string(),
-            };
 
             let Some((manifest, table_info)) = self
                 .recover_table_manifest_and_info(table_name, &table_dir)
                 .await.map_err(BoxedError::new)
                 .context(TableOperationSnafu)? else { return Ok(None) };
+
+            let opts = OpenOptions {
+                parent_dir: table_dir.to_string(),
+                write_buffer_size: table_info
+                    .meta
+                    .options
+                    .write_buffer_size
+                    .map(|s| s.0 as usize),
+                ttl: table_info.meta.options.ttl,
+            };
 
             debug!(
                 "Opening table {}, table info recovered: {:?}",
