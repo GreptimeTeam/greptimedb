@@ -107,15 +107,17 @@ impl ErrorExt for Error {
             | UnsupportedExpr { .. }
             | UnexpectedToken { .. }
             | MultipleVector { .. }
-            | LabelNotFound { .. }
             | ExpectExpr { .. } => StatusCode::InvalidArguments,
+
             UnknownTable { .. }
-            | TableNotFound { .. }
             | DataFusionPlanning { .. }
             | UnexpectedPlanExpr { .. }
             | IllegalRange { .. }
-            | EmptyRange { .. }
-            | TableNameNotFound { .. } => StatusCode::Internal,
+            | EmptyRange { .. } => StatusCode::Internal,
+
+            TableNotFound { .. } | TableNameNotFound { .. } => StatusCode::TableNotFound,
+
+            LabelNotFound { .. } => StatusCode::TableColumnNotFound,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

@@ -495,7 +495,7 @@ impl<S: ContextProvider> PromPlanner<S> {
         let table = self
             .schema_provider
             .get_table_provider(TableReference::Bare { table: &table_name })
-            .context(DataFusionPlanningSnafu)?
+            .context(TableNotFoundSnafu { table: &table_name })?
             .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
