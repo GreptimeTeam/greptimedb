@@ -15,7 +15,9 @@
 #[cfg(test)]
 mod tests;
 mod writer;
+
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -50,7 +52,6 @@ use crate::wal::Wal;
 use crate::write_batch::WriteBatch;
 
 /// [Region] implementation.
-#[derive(Debug)]
 pub struct RegionImpl<S: LogStore> {
     inner: Arc<RegionInner<S>>,
 }
@@ -60,6 +61,21 @@ impl<S: LogStore> Clone for RegionImpl<S> {
         Self {
             inner: self.inner.clone(),
         }
+    }
+}
+
+impl<S: LogStore> fmt::Debug for RegionImpl<S> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("RegionImpl")
+            .field("id", &self.inner.shared.id)
+            .field("name", &self.inner.shared.name)
+            .field("wal", &self.inner.wal)
+            .field("flush_strategy", &self.inner.flush_strategy)
+            .field("flush_scheduler", &self.inner.flush_scheduler)
+            .field("compaction_scheduler", &self.inner.compaction_scheduler)
+            .field("sst_layer", &self.inner.sst_layer)
+            .field("manifest", &self.inner.manifest)
+            .finish()
     }
 }
 
@@ -454,7 +470,6 @@ impl SharedData {
 
 pub type SharedDataRef = Arc<SharedData>;
 
-#[derive(Debug)]
 struct RegionInner<S: LogStore> {
     shared: SharedDataRef,
     writer: RegionWriterRef,

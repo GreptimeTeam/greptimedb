@@ -14,6 +14,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{btree_map, BTreeMap};
+use std::fmt;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
@@ -37,7 +38,6 @@ type RwLockMap = RwLock<BTreeMap<InnerKey, RowValue>>;
 /// A simple memtable implementation based on std's [`BTreeMap`].
 ///
 /// Mainly for test purpose, don't use in production.
-#[derive(Debug)]
 pub struct BTreeMemtable {
     id: MemtableId,
     schema: RegionSchemaRef,
@@ -53,6 +53,20 @@ impl BTreeMemtable {
             map: Arc::new(RwLock::new(BTreeMap::new())),
             estimated_bytes: AtomicUsize::new(0),
         }
+    }
+}
+
+impl fmt::Debug for BTreeMemtable {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let len = self.map.read().unwrap().len();
+
+        f.debug_struct("BTreeMemtable")
+            .field("id", &self.id)
+            // Only show StoreSchema
+            .field("schema", &self.schema)
+            .field("rows", &len)
+            .field("estimated_bytes", &self.estimated_bytes)
+            .finish()
     }
 }
 

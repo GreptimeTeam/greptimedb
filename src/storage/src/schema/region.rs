@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
 
 use common_error::prelude::*;
@@ -32,7 +33,7 @@ use crate::schema::{StoreSchema, StoreSchemaRef};
 ///
 /// The user schema is the schema that only contains columns that user could visit,
 /// as well as what the schema user created.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct RegionSchema {
     /// Schema that only contains columns that user defined, excluding internal columns
     /// that are reserved and used by the storage engine.
@@ -46,6 +47,14 @@ pub struct RegionSchema {
     store_schema: StoreSchemaRef,
     /// Metadata of columns.
     columns: ColumnsMetadataRef,
+}
+
+impl fmt::Debug for RegionSchema {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("RegionSchema")
+            .field("columns", &self.columns)
+            .finish()
+    }
 }
 
 impl RegionSchema {
