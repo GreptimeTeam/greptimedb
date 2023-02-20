@@ -62,17 +62,27 @@ fn eval_rspy(case: TestCase) {
         }
         let code_obj = vm
             .compile(&case.script, Mode::BlockExpr, "<embedded>".to_owned())
-            .map_err(|err| {dbg!(&err);vm.new_syntax_error(&err)})
+            .map_err(|err| {
+                dbg!(&err);
+                vm.new_syntax_error(&err)
+            })
             .unwrap();
         let result_vector = vm
             .run_code_obj(code_obj, scope)
-            .map_err(|e|{dbg!(&e);dbg!(&case.script);e})
+            .map_err(|e| {
+                dbg!(&e);
+                dbg!(&case.script);
+                e
+            })
             .unwrap()
             .downcast::<PyVector>()
             .unwrap();
 
         if !check_equal(result_vector.as_vector_ref(), case.expect.clone()) {
-            panic!("(RsPy)code:{}\nReal: {:?}!=Expected: {:?}", case.script, result_vector, case.expect)
+            panic!(
+                "(RsPy)code:{}\nReal: {:?}!=Expected: {:?}",
+                case.script, result_vector, case.expect
+            )
         }
     });
 }
@@ -91,9 +101,20 @@ fn eval_pyo3(case: TestCase) {
             locals_dict
         };
         py.run(&case.script, None, Some(locals)).unwrap();
-        let res_vec = locals.get_item("ret").unwrap().extract::<PyVector>().map_err(|e|{dbg!(&case.script);e}).unwrap();
+        let res_vec = locals
+            .get_item("ret")
+            .unwrap()
+            .extract::<PyVector>()
+            .map_err(|e| {
+                dbg!(&case.script);
+                e
+            })
+            .unwrap();
         if !check_equal(res_vec.as_vector_ref(), case.expect.clone()) {
-            panic!("(PyO3)code:{}\nReal: {:?}!=Expected: {:?}", case.script, res_vec, case.expect)
+            panic!(
+                "(PyO3)code:{}\nReal: {:?}!=Expected: {:?}",
+                case.script, res_vec, case.expect
+            )
         }
     })
 }

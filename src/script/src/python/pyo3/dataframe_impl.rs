@@ -223,7 +223,7 @@ impl PyExpr {
             CompareOp::Lt => DfExpr::lt,
             CompareOp::Le => DfExpr::lt_eq,
             CompareOp::Eq => DfExpr::eq,
-            CompareOp::Ne =>DfExpr::not_eq,
+            CompareOp::Ne => DfExpr::not_eq,
             CompareOp::Gt => DfExpr::gt,
             CompareOp::Ge => DfExpr::gt_eq,
         };
@@ -232,10 +232,14 @@ impl PyExpr {
     fn alias(&self, name: String) -> PyResult<PyExpr> {
         Ok(self.inner.clone().alias(name).into())
     }
-    fn __and__(&self,py: Python<'_>, other: PyExprRef) -> PyResult<PyExpr> {
-        Ok(self.inner.clone().and(other.borrow(py).inner.clone()).into())
+    fn __and__(&self, py: Python<'_>, other: PyExprRef) -> PyResult<PyExpr> {
+        Ok(self
+            .inner
+            .clone()
+            .and(other.borrow(py).inner.clone())
+            .into())
     }
-    fn __or__(&self,py: Python<'_>, other: PyExprRef) -> PyResult<PyExpr> {
+    fn __or__(&self, py: Python<'_>, other: PyExprRef) -> PyResult<PyExpr> {
         Ok(self.inner.clone().or(other.borrow(py).inner.clone()).into())
     }
     fn __invert__(&self) -> PyResult<PyExpr> {

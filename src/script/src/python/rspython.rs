@@ -21,4 +21,4 @@ pub(crate) mod builtins;
 mod dataframe_impl;
 mod utils;
 
-pub(crate) use copr_impl::{rspy_exec_parsed, init_interpreter};
+pub(crate) use copr_impl::{init_interpreter, rspy_exec_parsed};

@@ -81,7 +81,9 @@ where
     move |left, right| f(left, right).map_err(|e| format!("arithmetic error {e}"))
 }
 
-pub(crate) fn wrap_bool_result<F>(op_bool_arr: F) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>
+pub(crate) fn wrap_bool_result<F>(
+    op_bool_arr: F,
+) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>
 where
     F: Fn(&dyn Array, &dyn Array) -> ArrowResult<BooleanArray>,
 {

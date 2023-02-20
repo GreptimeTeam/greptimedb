@@ -21,7 +21,7 @@ use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
 use pyo3::types::{PyBool, PyFloat, PyInt, PyList, PyString};
 
-use crate::python::ffi_types::vector::{wrap_result, PyVector, wrap_bool_result};
+use crate::python::ffi_types::vector::{wrap_bool_result, wrap_result, PyVector};
 use crate::python::pyo3::utils::pyo3_obj_try_to_typed_val;
 
 macro_rules! get_con_type {
@@ -99,8 +99,8 @@ impl PyVector {
         }
         Ok(buf.to_vector().into())
     }
-    fn __richcmp__(&self, py: Python<'_>, other: PyObject, op: CompareOp) -> PyResult<Self>{
-        let op_fn = match op{
+    fn __richcmp__(&self, py: Python<'_>, other: PyObject, op: CompareOp) -> PyResult<Self> {
+        let op_fn = match op {
             CompareOp::Lt => comparison::lt_dyn,
             CompareOp::Le => comparison::lt_eq_dyn,
             CompareOp::Eq => comparison::eq_dyn,

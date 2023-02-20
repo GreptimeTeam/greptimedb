@@ -16,9 +16,7 @@ use common_recordbatch::RecordBatch;
 use datatypes::vectors::{Helper, VectorRef};
 use pyo3::exceptions::PyValueError;
 use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
-use pyo3::{
-    pymethods, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject,
-};
+use pyo3::{pymethods, PyAny, PyCell, PyObject, PyResult, Python, ToPyObject};
 use snafu::{ensure, Backtrace, GenerateImplicitData, ResultExt};
 
 use crate::python::error::{self, NewRecordBatchSnafu, OtherSnafu, Result};

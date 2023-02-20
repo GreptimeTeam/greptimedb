@@ -323,7 +323,7 @@ impl PyQueryEngine {
     pub(crate) fn from_weakref(inner: QueryEngineWeakRef) -> Self {
         Self { inner }
     }
-    pub(crate) fn get_ref(&self)->Option<Arc<dyn QueryEngine>>{
+    pub(crate) fn get_ref(&self) -> Option<Arc<dyn QueryEngine>> {
         self.inner.0.upgrade()
     }
     pub(crate) fn query_with_new_thread(
