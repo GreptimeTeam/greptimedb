@@ -202,10 +202,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     }
                 }
             }
-            PromExpr::Paren(ParenExpr { .. }) => UnsupportedExprSnafu {
-                name: "Prom Paren Expr",
-            }
-            .fail()?,
+            PromExpr::Paren(ParenExpr { expr }) => self.prom_expr_to_plan(*expr.clone())?,
             PromExpr::Subquery(SubqueryExpr { .. }) => UnsupportedExprSnafu {
                 name: "Prom Subquery",
             }
