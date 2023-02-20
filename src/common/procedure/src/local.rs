@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use object_store::ObjectStore;
 use snafu::ensure;
+use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::Notify;
 
 use crate::error::{DuplicateProcedureSnafu, LoaderConflictSnafu, Result};
@@ -33,24 +34,6 @@ use crate::{
     BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
     ProcedureWithId,
 };
-
-/// Mutable metadata of a procedure during execution.
-#[derive(Debug)]
-struct ExecMeta {
-    /// Current procedure state.
-    state: ProcedureState,
-    /// Id of child procedures.
-    children: Vec<ProcedureId>,
-}
-
-impl Default for ExecMeta {
-    fn default() -> ExecMeta {
-        ExecMeta {
-            state: ProcedureState::Running,
-            children: Vec::new(),
-        }
-    }
-}
 
 /// Shared metadata of a procedure.
 ///
@@ -72,38 +55,55 @@ pub(crate) struct ProcedureMeta {
     child_notify: Notify,
     /// Lock required by this procedure.
     lock_key: LockKey,
-    /// Mutable status during execution.
-    exec_meta: Mutex<ExecMeta>,
+    /// Sender to notify the procedure state.
+    state_sender: Sender<ProcedureState>,
+    /// Receiver to watch the procedure state.
+    state_receiver: Receiver<ProcedureState>,
+    /// Id of child procedures.
+    children: Mutex<Vec<ProcedureId>>,
 }
 
 impl ProcedureMeta {
+    fn new(id: ProcedureId, parent_id: Option<ProcedureId>, lock_key: LockKey) -> ProcedureMeta {
+        let (state_sender, state_receiver) = watch::channel(ProcedureState::Running);
+        ProcedureMeta {
+            id,
+            lock_notify: Notify::new(),
+            parent_id,
+            child_notify: Notify::new(),
+            lock_key,
+            state_sender,
+            state_receiver,
+            children: Mutex::new(Vec::new()),
+        }
+    }
+
     /// Returns current [ProcedureState].
     fn state(&self) -> ProcedureState {
-        let meta = self.exec_meta.lock().unwrap();
-        meta.state.clone()
+        self.state_receiver.borrow().clone()
     }
 
     /// Update current [ProcedureState].
     fn set_state(&self, state: ProcedureState) {
-        let mut meta = self.exec_meta.lock().unwrap();
-        meta.state = state;
+        // Safety: ProcedureMeta also holds the receiver, so `send()` should never fail.
+        self.state_sender.send(state).unwrap();
     }
 
     /// Push `procedure_id` of the subprocedure to the metadata.
     fn push_child(&self, procedure_id: ProcedureId) {
-        let mut meta = self.exec_meta.lock().unwrap();
-        meta.children.push(procedure_id);
+        let mut children = self.children.lock().unwrap();
+        children.push(procedure_id);
     }
 
     /// Append subprocedures to given `buffer`.
     fn list_children(&self, buffer: &mut Vec<ProcedureId>) {
-        let meta = self.exec_meta.lock().unwrap();
-        buffer.extend_from_slice(&meta.children);
+        let children = self.children.lock().unwrap();
+        buffer.extend_from_slice(&children);
     }
 
     /// Returns the number of subprocedures.
     fn num_children(&self) -> usize {
-        self.exec_meta.lock().unwrap().children.len()
+        self.children.lock().unwrap().len()
     }
 }
 
@@ -309,14 +309,7 @@ impl LocalManager {
         step: u32,
         procedure: BoxedProcedure,
     ) -> Result<()> {
-        let meta = Arc::new(ProcedureMeta {
-            id: procedure_id,
-            lock_notify: Notify::new(),
-            parent_id: None,
-            child_notify: Notify::new(),
-            lock_key: procedure.lock_key(),
-            exec_meta: Mutex::new(ExecMeta::default()),
-        });
+        let meta = Arc::new(ProcedureMeta::new(procedure_id, None, procedure.lock_key()));
         let runner = Runner {
             meta: meta.clone(),
             procedure,
@@ -412,14 +405,7 @@ mod test_util {
     use super::*;
 
     pub(crate) fn procedure_meta_for_test() -> ProcedureMeta {
-        ProcedureMeta {
-            id: ProcedureId::random(),
-            lock_notify: Notify::new(),
-            parent_id: None,
-            child_notify: Notify::new(),
-            lock_key: LockKey::default(),
-            exec_meta: Mutex::new(ExecMeta::default()),
-        }
+        ProcedureMeta::new(ProcedureId::random(), None, LockKey::default())
     }
 
     pub(crate) fn new_object_store(dir: &TempDir) -> ObjectStore {

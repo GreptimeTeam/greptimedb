@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::logging;
-use tokio::sync::Notify;
 use tokio::time;
 
 use crate::error::{Error, Result};
-use crate::local::{ExecMeta, ManagerContext, ProcedureMeta, ProcedureMetaRef};
+use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
 use crate::{BoxedProcedure, Context, ProcedureId, ProcedureState, ProcedureWithId, Status};
 
@@ -203,14 +202,11 @@ impl Runner {
             step = loaded_procedure.step;
         }
 
-        let meta = Arc::new(ProcedureMeta {
-            id: procedure_id,
-            lock_notify: Notify::new(),
-            parent_id: Some(self.meta.id),
-            child_notify: Notify::new(),
-            lock_key: procedure.lock_key(),
-            exec_meta: Mutex::new(ExecMeta::default()),
-        });
+        let meta = Arc::new(ProcedureMeta::new(
+            procedure_id,
+            Some(self.meta.id),
+            procedure.lock_key(),
+        ));
         let runner = Runner {
             meta: meta.clone(),
             procedure,
