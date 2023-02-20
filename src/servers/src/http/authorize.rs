@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,8 @@ use std::collections::HashMap;
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use axum::http::{self, Request, StatusCode};
@@ -23,6 +24,7 @@ use session::context::UserInfo;
 use snafu::{OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
+use super::PUBLIC_APIS;
 use crate::auth::Error::IllegalParam;
 use crate::auth::{Identity, IllegalParamSnafu, InternalStateSnafu, UserProviderRef};
 use crate::error::{self, Result};
@@ -63,7 +65,8 @@ where
     fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
         let user_provider = self.user_provider.clone();
         Box::pin(async move {
-            let need_auth = request.uri().path().starts_with(HTTP_API_PREFIX);
+            let need_auth = need_auth(&request);
+
             let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
                 user_provider
             } else {
@@ -209,9 +212,45 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
     error::InvalidAuthorizationHeaderSnafu {}.fail()
 }
 
+fn need_auth<B>(req: &Request<B>) -> bool {
+    let path = req.uri().path();
+
+    for api in PUBLIC_APIS {
+        if path.starts_with(api) {
+            return false;
+        }
+    }
+
+    path.starts_with(HTTP_API_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_need_auth() {
+        let req = Request::builder()
+            .uri("http://127.0.0.1/v1/influxdb/ping")
+            .body(())
+            .unwrap();
+
+        assert!(!need_auth(&req));
+
+        let req = Request::builder()
+            .uri("http://127.0.0.1/v1/influxdb/health")
+            .body(())
+            .unwrap();
+
+        assert!(!need_auth(&req));
+
+        let req = Request::builder()
+            .uri("http://127.0.0.1/v1/influxdb/write")
+            .body(())
+            .unwrap();
+
+        assert!(need_auth(&req));
+    }
 
     #[test]
     fn test_decode_basic() {

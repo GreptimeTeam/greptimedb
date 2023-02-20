@@ -50,7 +50,7 @@ use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
 use self::authorize::HttpAuth;
-use self::influxdb::influxdb_write;
+use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write};
 use crate::auth::UserProviderRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -87,6 +87,9 @@ pub(crate) fn query_context_from_db(
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
+
+// TODO(fys): This is a temporary workaround, it will be improved later
+pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
 
 pub struct HttpServer {
     sql_handler: ServerSqlQueryHandlerRef,
@@ -492,6 +495,8 @@ impl HttpServer {
     fn route_influxdb<S>(&self, influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
         Router::new()
             .route("/write", routing::post(influxdb_write))
+            .route("/ping", routing::get(influxdb_ping))
+            .route("/health", routing::get(influxdb_health))
             .with_state(influxdb_handler)
     }
 
