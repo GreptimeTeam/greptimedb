@@ -59,7 +59,7 @@ impl HttpHandler for SchemasHandler {
             Some(catalog) => catalog,
             None => {
                 return error::MissingRequiredParameterSnafu {
-                    msg: "catalog_name parameter is required".to_string(),
+                    param: "catalog_name",
                 }
                 .fail();
             }
@@ -80,7 +80,7 @@ impl HttpHandler for TablesHandler {
             Some(catalog) => catalog,
             None => {
                 return error::MissingRequiredParameterSnafu {
-                    msg: "catalog_name parameter is required".to_string(),
+                    param: "catalog_name",
                 }
                 .fail();
             }
@@ -90,7 +90,7 @@ impl HttpHandler for TablesHandler {
             Some(schema) => schema,
             None => {
                 return error::MissingRequiredParameterSnafu {
-                    msg: "schema_name parameter is required".to_string(),
+                    param: "schema_name",
                 }
                 .fail();
             }
@@ -111,7 +111,7 @@ impl HttpHandler for TableHandler {
             Some(full_table_name) => full_table_name.replace('.', "-"),
             None => {
                 return error::MissingRequiredParameterSnafu {
-                    msg: "full_table_name parameter is required".to_string(),
+                    param: "full_table_name",
                 }
                 .fail();
             }

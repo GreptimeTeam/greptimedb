@@ -268,8 +268,8 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Missing required parameter, msg: {:?}", msg))]
-    MissingRequiredParameter { msg: String },
+    #[snafu(display("Missing required parameter, param: {:?}", param))]
+    MissingRequiredParameter { param: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
