@@ -21,13 +21,17 @@ use common_telemetry::error;
 use futures::future::BoxFuture;
 use http_body::Body;
 use session::context::UserInfo;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use tower_http::auth::AsyncAuthorizeRequest;
 
 use super::PUBLIC_APIS;
 use crate::auth::Error::IllegalParam;
 use crate::auth::{Identity, IllegalParamSnafu, InternalStateSnafu, UserProviderRef};
-use crate::error::{self, Result};
+use crate::error::Error::Auth;
+use crate::error::{
+    self, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu, Result,
+    UnsupportedAuthSchemeSnafu,
+};
 use crate::http::HTTP_API_PREFIX;
 
 pub struct HttpAuth<RespBody> {
@@ -128,28 +132,80 @@ async fn authorize<B: Send + Sync + 'static>(
     user_provider.authorize(catalog, database, user_info).await
 }
 
+fn get_influxdb_credentials<B: Send + Sync + 'static>(
+    request: &Request<B>,
+) -> Result<Option<(Username, Password)>> {
+    // compat with influxdb v2 and v1
+    if let Some(header) = request.headers().get(http::header::AUTHORIZATION) {
+        // try v2 first
+        let (auth_scheme, credential) = header
+            .to_str()
+            .context(InvisibleASCIISnafu)?
+            .split_once(' ')
+            .context(InvalidAuthorizationHeaderSnafu)?;
+        ensure!(
+            auth_scheme.to_lowercase() == "token",
+            UnsupportedAuthSchemeSnafu { name: auth_scheme }
+        );
+
+        let (username, password) = credential
+            .split_once(':')
+            .context(InvalidAuthorizationHeaderSnafu)?;
+
+        Ok(Some((username.to_string(), password.to_string())))
+    } else {
+        // try v1
+        let Some(query_str) = request.uri().query() else { return Ok(None) };
+
+        // TODO(shuiyisong): remove this for performance optimization
+        // `authorize` would deserialize query from urlencoded again
+        let query = match serde_urlencoded::from_str::<HashMap<String, String>>(query_str) {
+            Ok(query_map) => query_map,
+            Err(e) => IllegalParamSnafu {
+                msg: format!("fail to parse http query: {e}"),
+            }
+            .fail()?,
+        };
+
+        let username = query.get("u");
+        let password = query.get("p");
+
+        match (username, password) {
+            (None, None) => Ok(None),
+            (Some(username), Some(password)) => {
+                Ok(Some((username.to_string(), password.to_string())))
+            }
+            _ => Err(Auth {
+                source: IllegalParam {
+                    msg: "influxdb auth: username and password must be provided together"
+                        .to_string(),
+                },
+            }),
+        }
+    }
+}
+
 async fn authenticate<B: Send + Sync + 'static>(
     user_provider: &UserProviderRef,
     request: &Request<B>,
-) -> crate::auth::Result<UserInfo> {
-    let (scheme, credential) = auth_header(request).map_err(|e| IllegalParam {
-        msg: format!("failed to get http authorize header, err: {e:?}"),
-    })?;
-
-    match scheme {
-        AuthScheme::Basic => {
-            let (username, password) = decode_basic(credential).map_err(|e| IllegalParam {
-                msg: format!("failed to decode basic authorize, err: {e:?}"),
-            })?;
-
-            Ok(user_provider
-                .authenticate(
-                    Identity::UserId(&username, None),
-                    crate::auth::Password::PlainText(&password),
-                )
-                .await?)
+) -> Result<UserInfo> {
+    let (username, password) = if request.uri().path().contains("influxdb") {
+        // compatible with influxdb auth
+        get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
+    } else {
+        // normal http auth
+        let (scheme, credential) = auth_header(request)?;
+        match scheme {
+            AuthScheme::Basic => decode_basic(credential)?,
         }
-    }
+    };
+
+    Ok(user_provider
+        .authenticate(
+            Identity::UserId(&username, None),
+            crate::auth::Password::PlainText(&password),
+        )
+        .await?)
 }
 
 fn unauthorized_resp<RespBody>() -> Response<RespBody>
@@ -172,7 +228,7 @@ impl TryFrom<&str> for AuthScheme {
     fn try_from(value: &str) -> Result<Self> {
         match value.to_lowercase().as_str() {
             "basic" => Ok(AuthScheme::Basic),
-            other => error::UnsupportedAuthSchemeSnafu { name: other }.fail(),
+            other => UnsupportedAuthSchemeSnafu { name: other }.fail(),
         }
     }
 }
@@ -185,14 +241,14 @@ fn auth_header<B>(req: &Request<B>) -> Result<(AuthScheme, Credential)> {
         .get(http::header::AUTHORIZATION)
         .context(error::NotFoundAuthHeaderSnafu)?
         .to_str()
-        .context(error::InvisibleASCIISnafu)?;
+        .context(InvisibleASCIISnafu)?;
 
     let (auth_scheme, encoded_credentials) = auth_header
         .split_once(' ')
-        .context(error::InvalidAuthorizationHeaderSnafu)?;
+        .context(InvalidAuthorizationHeaderSnafu)?;
 
     if encoded_credentials.contains(' ') {
-        return error::InvalidAuthorizationHeaderSnafu {}.fail();
+        return InvalidAuthorizationHeaderSnafu {}.fail();
     }
 
     Ok((auth_scheme.try_into()?, encoded_credentials))
@@ -209,7 +265,7 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
         return Ok((user_id.to_string(), password.to_string()));
     }
 
-    error::InvalidAuthorizationHeaderSnafu {}.fail()
+    InvalidAuthorizationHeaderSnafu {}.fail()
 }
 
 fn need_auth<B>(req: &Request<B>) -> bool {

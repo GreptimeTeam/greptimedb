@@ -219,6 +219,9 @@ pub enum Error {
     #[snafu(display("Not found http authorization header"))]
     NotFoundAuthHeader {},
 
+    #[snafu(display("Not found influx http authorization info"))]
+    NotFoundInfluxAuth {},
+
     #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
     InvisibleASCII {
         source: ToStrError,
@@ -305,7 +308,7 @@ impl ErrorExt for Error {
             Auth { source, .. } => source.status_code(),
             DescribeStatement { source } => source.status_code(),
 
-            NotFoundAuthHeader { .. } => StatusCode::AuthHeaderNotFound,
+            NotFoundAuthHeader { .. } | NotFoundInfluxAuth { .. } => StatusCode::AuthHeaderNotFound,
             InvisibleASCII { .. }
             | UnsupportedAuthScheme { .. }
             | InvalidAuthorizationHeader { .. }
