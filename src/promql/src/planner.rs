@@ -129,10 +129,13 @@ impl<S: ContextProvider> PromPlanner<S> {
                     .build()
                     .context(DataFusionPlanningSnafu)?
             }
-            PromExpr::Unary(UnaryExpr { .. }) => UnsupportedExprSnafu {
-                name: "Prom Unary Expr",
+            PromExpr::Unary(UnaryExpr { expr }) => {
+                // Unary Expr in PromQL implys the `-` operator
+                let input = self.prom_expr_to_plan(*expr.clone())?;
+                self.projection_for_each_value_column(input, |col| {
+                    Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
+                })?
             }
-            .fail()?,
             PromExpr::Binary(PromBinaryExpr { lhs, rhs, op, .. }) => {
                 match (
                     Self::try_build_literal_expr(lhs),
