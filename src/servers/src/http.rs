@@ -37,7 +37,6 @@ use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::info;
 use datatypes::data_type::DataType;
 use futures::FutureExt;
-use once_cell::sync::Lazy;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -89,8 +88,7 @@ pub(crate) fn query_context_from_db(
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
 
-pub static PUBLIC_APIS: Lazy<Vec<&str>> =
-    Lazy::new(|| vec!["/v1/influxdb/ping", "/v1/influxdb/health"]);
+pub static PUBLIC_APIS: [&str; 2] = ["/v1/influxdb/ping", "/v1/influxdb/health"];
 
 pub struct HttpServer {
     sql_handler: ServerSqlQueryHandlerRef,

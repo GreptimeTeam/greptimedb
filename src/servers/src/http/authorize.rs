@@ -215,7 +215,7 @@ fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
 fn need_auth<B>(req: &Request<B>) -> bool {
     let path = req.uri().path();
 
-    for api in &*PUBLIC_APIS {
+    for api in PUBLIC_APIS {
         if path.starts_with(api) {
             return false;
         }
