@@ -103,9 +103,12 @@ impl<S: ContextProvider> PromPlanner<S> {
                 let input = self.prom_expr_to_plan(*expr.clone())?;
 
                 // calculate columns to group by
-                let group_exprs = modifier.as_ref().map_or(Ok(Vec::new()), |m| {
-                    self.agg_modifier_to_col(input.schema(), m)
-                })?;
+                // Need to append time index column into group by columns
+                let group_exprs = modifier
+                    .as_ref()
+                    .map_or(Ok(vec![self.create_time_index_column_expr()?]), |m| {
+                        self.agg_modifier_to_col(input.schema(), m)
+                    })?;
 
                 // convert op and value columns to aggregate exprs
                 let aggr_exprs = self.create_aggregate_exprs(*op, &input)?;
@@ -114,8 +117,14 @@ impl<S: ContextProvider> PromPlanner<S> {
                 self.ctx.time_index_column = None;
 
                 // create plan
+                let group_sort_expr = group_exprs
+                    .clone()
+                    .into_iter()
+                    .map(|expr| expr.sort(true, false));
                 LogicalPlanBuilder::from(input)
                     .aggregate(group_exprs, aggr_exprs)
+                    .context(DataFusionPlanningSnafu)?
+                    .sort(group_sort_expr)
                     .context(DataFusionPlanningSnafu)?
                     .build()
                     .context(DataFusionPlanningSnafu)?
@@ -267,6 +276,7 @@ impl<S: ContextProvider> PromPlanner<S> {
                     })?)?;
                 let mut func_exprs = self.create_function_expr(func, args.literals)?;
                 func_exprs.insert(0, self.create_time_index_column_expr()?);
+                func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
                 LogicalPlanBuilder::from(input)
                     .project(func_exprs)
                     .context(DataFusionPlanningSnafu)?
@@ -302,12 +312,20 @@ impl<S: ContextProvider> PromPlanner<S> {
         let table_name = self.ctx.table_name.clone().unwrap();
 
         // make filter exprs
+        let offset_duration = -match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        };
         let mut filters = self.matchers_to_expr(label_matchers)?;
         filters.push(self.create_time_index_column_expr()?.gt_eq(DfExpr::Literal(
-            ScalarValue::TimestampMillisecond(Some(self.ctx.start), None),
+            ScalarValue::TimestampMillisecond(
+                Some(self.ctx.start - offset_duration - self.ctx.lookback_delta),
+                None,
+            ),
         )));
         filters.push(self.create_time_index_column_expr()?.lt_eq(DfExpr::Literal(
-            ScalarValue::TimestampMillisecond(Some(self.ctx.end), None),
+            ScalarValue::TimestampMillisecond(Some(self.ctx.end - offset_duration), None),
         )));
 
         // make table scan with filter exprs
@@ -328,11 +346,6 @@ impl<S: ContextProvider> PromPlanner<S> {
         });
 
         // make series_normalize plan
-        let offset_duration = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
-        };
         let series_normalize = SeriesNormalize::new(
             offset_duration,
             self.ctx
@@ -344,10 +357,12 @@ impl<S: ContextProvider> PromPlanner<S> {
         let logical_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(series_normalize),
         });
+
         Ok(logical_plan)
     }
 
     /// Convert [AggModifier] to [Column] exprs for aggregation.
+    /// Timestamp column and tag columns will be included.
     ///
     /// # Side effect
     ///
@@ -379,6 +394,9 @@ impl<S: ContextProvider> PromPlanner<S> {
 
                 // change the tag columns in context
                 self.ctx.tag_columns = labels.iter().cloned().collect();
+
+                // add timestamp column
+                exprs.push(self.create_time_index_column_expr()?);
 
                 Ok(exprs)
             }
@@ -415,10 +433,14 @@ impl<S: ContextProvider> PromPlanner<S> {
                 self.ctx.tag_columns = all_fields.iter().map(|col| (*col).clone()).collect();
 
                 // collect remaining fields and convert to col expr
-                let exprs = all_fields
+                let mut exprs = all_fields
                     .into_iter()
                     .map(|c| DfExpr::Column(Column::from(c)))
                     .collect::<Vec<_>>();
+
+                // add timestamp column
+                exprs.push(self.create_time_index_column_expr()?);
+
                 Ok(exprs)
             }
         }
@@ -585,6 +607,15 @@ impl<S: ContextProvider> PromPlanner<S> {
                 .clone()
                 .with_context(|| TimeIndexNotFoundSnafu { table: "unknown" })?,
         )))
+    }
+
+    fn create_tag_column_exprs(&self) -> Result<Vec<DfExpr>> {
+        let mut result = Vec::with_capacity(self.ctx.tag_columns.len());
+        for tag in &self.ctx.tag_columns {
+            let expr = DfExpr::Column(Column::from_name(tag));
+            result.push(expr);
+        }
+        Ok(result)
     }
 
     fn create_tag_and_time_index_column_sort_exprs(&self) -> Result<Vec<DfExpr>> {

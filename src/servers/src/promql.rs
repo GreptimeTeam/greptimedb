@@ -19,7 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::BoxBody;
 use axum::extract::{Query, State};
-use axum::{routing, Json, Router};
+use axum::{routing, Form, Json, Router};
 use common_error::prelude::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -41,6 +41,7 @@ use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, Mutex};
 use tower::ServiceBuilder;
 use tower_http::auth::AsyncRequireAuthorizationLayer;
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::UserProviderRef;
@@ -84,15 +85,16 @@ impl PromqlServer {
 
         let router = Router::new()
             .route("/query", routing::post(instant_query).get(instant_query))
-            .route("/range_query", routing::post(range_query).get(range_query))
+            .route("/query_range", routing::post(range_query).get(range_query))
             .with_state(self.query_handler.clone());
 
         Router::new()
-            .nest(&format!("/{PROMQL_API_VERSION}"), router)
+            .nest(&format!("/api/{PROMQL_API_VERSION}"), router)
             // middlewares
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())
+                    .layer(CompressionLayer::new())
                     // custom layer
                     .layer(AsyncRequireAuthorizationLayer::new(
                         HttpAuth::<BoxBody>::new(self.user_provider.clone()),
@@ -158,8 +160,12 @@ pub struct PromqlData {
 pub struct PromqlJsonResponse {
     status: String,
     data: PromqlData,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "errorType")]
     error_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     warnings: Option<Vec<String>>,
 }
 
@@ -329,16 +335,16 @@ pub async fn instant_query(
 ) -> Json<PromqlJsonResponse> {
     PromqlJsonResponse::error(
         "not implemented",
-        "instant query api `/query` is not implemented. Use `/range_query` instead.",
+        "instant query api `/query` is not implemented. Use `/query_range` instead.",
     )
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct RangeQuery {
-    query: String,
-    start: String,
-    end: String,
-    step: String,
+    query: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+    step: Option<String>,
     timeout: Option<String>,
 }
 
@@ -346,12 +352,13 @@ pub struct RangeQuery {
 pub async fn range_query(
     State(handler): State<PromqlHandlerRef>,
     Query(params): Query<RangeQuery>,
+    Form(form_params): Form<RangeQuery>,
 ) -> Json<PromqlJsonResponse> {
     let prom_query = PromQuery {
-        query: params.query,
-        start: params.start,
-        end: params.end,
-        step: params.step,
+        query: params.query.or(form_params.query).unwrap_or_default(),
+        start: params.start.or(form_params.start).unwrap_or_default(),
+        end: params.end.or(form_params.end).unwrap_or_default(),
+        step: params.step.or(form_params.step).unwrap_or_default(),
     };
     let result = handler.do_query(&prom_query).await;
     let metric_name = retrieve_metric_name(&prom_query.query).unwrap_or_default();
