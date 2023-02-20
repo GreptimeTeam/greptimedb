@@ -211,11 +211,7 @@ async fn authenticate(
     user_provider: Option<&UserProviderRef>,
     request: &Request<Ticket>,
 ) -> TonicResult<UserInfo> {
-    let user_provider = if let Some(user_provider) = user_provider {
-        user_provider
-    } else {
-        return Ok(UserInfo::default());
-    };
+    let Some(user_provider) = user_provider else { return Ok(UserInfo::default()) };
 
     let header = request
         .metadata()
