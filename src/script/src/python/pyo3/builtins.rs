@@ -93,54 +93,59 @@ pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     Ok(())
 }
 
-fn eval_func(name: &str, v: &[&PyVector]) -> PyResult<PyVector> {
-    let v: Vec<VectorRef> = v.iter().map(|v| v.as_vector_ref()).collect();
-    let func: Option<FunctionRef> = FUNCTION_REGISTRY.get_function(name);
-    let res = match func {
-        Some(f) => f.eval(Default::default(), &v),
-        None => return Err(PyValueError::new_err(format!("Can't find function {name}"))),
-    };
-    match res {
-        Ok(v) => Ok(v.into()),
-        Err(err) => Err(PyValueError::new_err(format!(
-            "Fail to evaluate the function,: {err}"
-        ))),
-    }
+fn eval_func(py: Python<'_>, name: &str, v: &[&PyVector]) -> PyResult<PyVector> {
+    py.allow_threads(|| {
+        let v: Vec<VectorRef> = v.iter().map(|v| v.as_vector_ref()).collect();
+        let func: Option<FunctionRef> = FUNCTION_REGISTRY.get_function(name);
+        let res = match func {
+            Some(f) => f.eval(Default::default(), &v),
+            None => return Err(PyValueError::new_err(format!("Can't find function {name}"))),
+        };
+        match res {
+            Ok(v) => Ok(v.into()),
+            Err(err) => Err(PyValueError::new_err(format!(
+                "Fail to evaluate the function,: {err}"
+            ))),
+        }
+    })
 }
 
 fn eval_aggr_func(py: Python<'_>, name: &str, args: &[&PyVector]) -> PyResult<PyObject> {
-    let v: Vec<VectorRef> = args.iter().map(|v| v.as_vector_ref()).collect();
-    let func = FUNCTION_REGISTRY.get_aggr_function(name);
-    let f = match func {
-        Some(f) => f.create().creator(),
-        None => return Err(PyValueError::new_err(format!("Can't find function {name}"))),
-    };
-    let types: Vec<_> = v.iter().map(|v| v.data_type()).collect();
-    let acc = f(&types);
-    let mut acc = match acc {
-        Ok(acc) => acc,
-        Err(err) => {
-            return Err(PyValueError::new_err(format!(
-                "Failed to create accumulator: {err}"
-            )))
-        }
-    };
-    match acc.update_batch(&v) {
-        Ok(_) => (),
-        Err(err) => {
-            return Err(PyValueError::new_err(format!(
-                "Failed to update batch: {err}"
-            )))
-        }
-    };
-    let res = match acc.evaluate() {
-        Ok(r) => r,
-        Err(err) => {
-            return Err(PyValueError::new_err(format!(
-                "Failed to evaluate accumulator: {err}"
-            )))
-        }
-    };
+    let res = py.allow_threads(|| {
+        let v: Vec<VectorRef> = args.iter().map(|v| v.as_vector_ref()).collect();
+        let func = FUNCTION_REGISTRY.get_aggr_function(name);
+        let f = match func {
+            Some(f) => f.create().creator(),
+            None => return Err(PyValueError::new_err(format!("Can't find function {name}"))),
+        };
+        let types: Vec<_> = v.iter().map(|v| v.data_type()).collect();
+        let acc = f(&types);
+        let mut acc = match acc {
+            Ok(acc) => acc,
+            Err(err) => {
+                return Err(PyValueError::new_err(format!(
+                    "Failed to create accumulator: {err}"
+                )))
+            }
+        };
+        match acc.update_batch(&v) {
+            Ok(_) => (),
+            Err(err) => {
+                return Err(PyValueError::new_err(format!(
+                    "Failed to update batch: {err}"
+                )))
+            }
+        };
+        let res = match acc.evaluate() {
+            Ok(r) => r,
+            Err(err) => {
+                return Err(PyValueError::new_err(format!(
+                    "Failed to evaluate accumulator: {err}"
+                )))
+            }
+        };
+        Ok(res)
+    })?;
     val_to_py_any(py, res)
 }
 
@@ -151,15 +156,18 @@ fn eval_aggr_expr<T: AggregateExpr>(
     aggr: T,
     values: &[ArrayRef],
 ) -> PyResult<PyObject> {
-    // acquire the accumulator, where the actual implement of aggregate expr layers
-    let mut acc = aggr
-        .create_accumulator()
-        .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
-    acc.update_batch(values)
-        .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
-    let res = acc
-        .evaluate()
-        .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+    let res = py.allow_threads(|| -> PyResult<_> {
+        // acquire the accumulator, where the actual implement of aggregate expr layers
+        let mut acc = aggr
+            .create_accumulator()
+            .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+        acc.update_batch(values)
+            .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+        let res = acc
+            .evaluate()
+            .map_err(|e| PyValueError::new_err(format!("{e:?}")))?;
+        Ok(res)
+    })?;
     scalar_value_to_py_any(py, res)
 }
 
@@ -182,8 +190,8 @@ macro_rules! bind_call_unary_math_function {
 macro_rules! simple_vector_fn {
     ($name: ident, $name_str: tt, [$($arg:ident),*]) => {
         #[pyfunction]
-        fn $name($($arg: &PyVector),*) -> PyResult<PyVector> {
-            eval_func($name_str, &[$($arg),*])
+        fn $name(py: Python<'_>, $($arg: &PyVector),*) -> PyResult<PyVector> {
+            eval_func(py, $name_str, &[$($arg),*])
         }
     };
     ($name: ident, $name_str: tt, AGG[$($arg:ident),*]) => {
@@ -195,7 +203,7 @@ macro_rules! simple_vector_fn {
 }
 
 #[pyfunction]
-fn vector(iterable: &PyList)->PyResult<PyVector>{
+fn vector(iterable: &PyList) -> PyResult<PyVector> {
     PyVector::py_new(iterable)
 }
 

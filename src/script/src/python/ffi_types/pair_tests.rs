@@ -37,7 +37,7 @@ struct TestCase {
 }
 
 #[test]
-fn test_in_pairs() {
+fn pyo3_rspy_test_in_pairs() {
     let testcases = sample_test_case();
     for case in testcases {
         eval_rspy(case.clone());
