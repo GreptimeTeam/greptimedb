@@ -27,6 +27,7 @@ use tower_http::auth::AsyncAuthorizeRequest;
 use super::PUBLIC_APIS;
 use crate::auth::Error::IllegalParam;
 use crate::auth::{Identity, IllegalParamSnafu, InternalStateSnafu, UserProviderRef};
+use crate::error::Error::Auth;
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu, Result,
     UnsupportedAuthSchemeSnafu,
@@ -154,14 +155,11 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
         Ok(Some((username.to_string(), password.to_string())))
     } else {
         // try v1
-        let query_str = request.uri().query();
-        if query_str.is_none() {
-            return Ok(None);
-        }
+        let Some(query_str) = request.uri().query() else { return Ok(None) };
+
         // TODO(shuiyisong): remove this for performance optimization
         // `authorize` would deserialize query from urlencoded again
-        let query = match serde_urlencoded::from_str::<HashMap<String, String>>(query_str.unwrap())
-        {
+        let query = match serde_urlencoded::from_str::<HashMap<String, String>>(query_str) {
             Ok(query_map) => query_map,
             Err(e) => IllegalParamSnafu {
                 msg: format!("fail to parse http query: {e}"),
@@ -171,15 +169,18 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
 
         let username = query.get("u");
         let password = query.get("p");
-        if username.is_none() && password.is_none() {
-            Ok(None)
-        } else if username.is_some() && password.is_some() {
-            Ok(Some((username.unwrap().clone(), password.unwrap().clone())))
-        } else {
-            IllegalParamSnafu {
-                msg: "influxdb v1 auth: username and password must be provided together",
+
+        match (username, password) {
+            (None, None) => Ok(None),
+            (Some(username), Some(password)) => {
+                Ok(Some((username.to_string(), password.to_string())))
             }
-            .fail()?
+            _ => Err(Auth {
+                source: IllegalParam {
+                    msg: "influxdb auth: username and password must be provided together"
+                        .to_string(),
+                },
+            }),
         }
     }
 }
