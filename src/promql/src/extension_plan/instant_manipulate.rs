@@ -351,7 +351,7 @@ impl InstantManipulateStream {
             .copied()
             .collect::<Vec<_>>();
 
-        let indices_array = UInt64Array::from(take_indices.clone());
+        let indices_array = UInt64Array::from(take_indices);
         let mut arrays = record_batch
             .columns()
             .iter()

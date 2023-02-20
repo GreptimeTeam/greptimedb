@@ -246,9 +246,9 @@ impl SeriesNormalizeStream {
         let mut filter = vec![true; input.num_rows()];
         for column in ordered_batch.columns() {
             if let Some(float_column) = column.as_any().downcast_ref::<Float64Array>() {
-                for i in 0..float_column.len() {
+                for (i, flag) in filter.iter_mut().enumerate() {
                     if float_column.value(i).is_nan() {
-                        filter[i] = false;
+                        *flag = false;
                     }
                 }
             }
