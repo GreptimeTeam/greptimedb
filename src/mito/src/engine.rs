@@ -497,6 +497,16 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 ttl: table_info.meta.options.ttl,
             };
 
+            let opts = OpenOptions {
+                parent_dir: table_dir.to_string(),
+                write_buffer_size: table_info
+                    .meta
+                    .options
+                    .write_buffer_size
+                    .map(|s| s.0 as usize),
+                ttl: table_info.meta.options.ttl,
+            };
+
             debug!(
                 "Opening table {}, table info recovered: {:?}",
                 table_id, table_info

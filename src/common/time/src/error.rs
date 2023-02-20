@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::num::TryFromIntError;
+use std::time::SystemTimeError;
 
 use chrono::ParseError;
 use common_error::ext::ErrorExt;
@@ -24,8 +26,24 @@ use snafu::{Backtrace, ErrorCompat, Snafu};
 pub enum Error {
     #[snafu(display("Failed to parse string to date, raw: {}, source: {}", raw, source))]
     ParseDateStr { raw: String, source: ParseError },
+
     #[snafu(display("Failed to parse a string into Timestamp, raw string: {}", raw))]
     ParseTimestamp { raw: String, backtrace: Backtrace },
+
+    #[snafu(display("Timestamp is not monotonic, source: {}", source))]
+    TimestampNonMonotonic {
+        source: SystemTimeError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Current timestamp overflow, source: {}", source))]
+    TimestampOverflow {
+        source: TryFromIntError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Timestamp arithmetic overflow, msg: {}", msg))]
+    ArithmeticOverflow { msg: String, backtrace: Backtrace },
 }
 
 impl ErrorExt for Error {
@@ -34,6 +52,10 @@ impl ErrorExt for Error {
             Error::ParseDateStr { .. } | Error::ParseTimestamp { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::TimestampOverflow { .. } | Error::TimestampNonMonotonic { .. } => {
+                StatusCode::Internal
+            }
+            Error::ArithmeticOverflow { .. } => StatusCode::InvalidArguments,
         }
     }
 

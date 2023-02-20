@@ -14,14 +14,20 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
-use common_telemetry::debug;
+use common_telemetry::{debug, error};
+use common_time::Timestamp;
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 
 use crate::compaction::scheduler::CompactionRequestImpl;
 use crate::compaction::strategy::{SimpleTimeWindowStrategy, StrategyRef};
 use crate::compaction::task::{CompactionTask, CompactionTaskImpl};
+use crate::error::TtlCalculationSnafu;
 use crate::scheduler::Request;
+use crate::sst::{FileHandle, Level};
+use crate::version::LevelMetasRef;
 
 /// Picker picks input SST files and builds the compaction task.
 /// Different compaction strategy may implement different pickers.
@@ -57,6 +63,25 @@ impl<S> SimplePicker<S> {
             _phantom_data: Default::default(),
         }
     }
+
+    fn get_expired_ssts(
+        &self,
+        levels: &LevelMetasRef,
+        ttl: Option<Duration>,
+    ) -> crate::error::Result<Vec<FileHandle>> {
+        let Some(ttl) = ttl else { return Ok(vec![]); };
+
+        let expire_time = Timestamp::current_millis()
+            .context(TtlCalculationSnafu)?
+            .sub(ttl)
+            .context(TtlCalculationSnafu)?;
+
+        let mut expired_ssts = vec![];
+        for level in 0..levels.level_num() {
+            expired_ssts.extend(levels.level(level as Level).get_expired_files(&expire_time));
+        }
+        Ok(expired_ssts)
+    }
 }
 
 impl<S: LogStore> Picker for SimplePicker<S> {
@@ -69,6 +94,13 @@ impl<S: LogStore> Picker for SimplePicker<S> {
         req: &CompactionRequestImpl<S>,
     ) -> crate::error::Result<Option<CompactionTaskImpl<S>>> {
         let levels = &req.levels();
+        let expired_ssts = self
+            .get_expired_ssts(levels, req.ttl)
+            .map_err(|e| {
+                error!(e;"Failed to get region expired SST files, ttl: {:?}", req.ttl);
+                e
+            })
+            .unwrap_or(vec![]);
 
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
@@ -91,6 +123,7 @@ impl<S: LogStore> Picker for SimplePicker<S> {
                 shared_data: req.shared.clone(),
                 wal: req.wal.clone(),
                 manifest: req.manifest.clone(),
+                expired_ssts,
             }));
         }
 

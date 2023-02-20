@@ -19,6 +19,7 @@ mod writer;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::logging;
@@ -140,6 +141,7 @@ pub struct StoreConfig<S: LogStore> {
     pub compaction_scheduler: CompactionSchedulerRef<S>,
     pub engine_config: Arc<EngineConfig>,
     pub file_purger: FilePurgerRef,
+    pub ttl: Option<Duration>,
 }
 
 pub type RecoverdMetadata = (SequenceNumber, (ManifestVersion, RawRegionMetadata));
@@ -198,6 +200,7 @@ impl<S: LogStore> RegionImpl<S> {
             writer: Arc::new(RegionWriter::new(
                 store_config.memtable_builder,
                 store_config.engine_config.clone(),
+                store_config.ttl,
             )),
             wal,
             flush_strategy: store_config.flush_strategy,
@@ -277,6 +280,7 @@ impl<S: LogStore> RegionImpl<S> {
         let writer = Arc::new(RegionWriter::new(
             store_config.memtable_builder,
             store_config.engine_config.clone(),
+            store_config.ttl,
         ));
         let writer_ctx = WriterContext {
             shared: &shared,

@@ -42,6 +42,7 @@ pub struct CompactionTaskImpl<S: LogStore> {
     pub shared_data: SharedDataRef,
     pub wal: Wal<S>,
     pub manifest: RegionManifest,
+    pub expired_ssts: Vec<FileHandle>,
 }
 
 impl<S: LogStore> Debug for CompactionTaskImpl<S> {
@@ -67,12 +68,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
             let sst_layer = self.sst_layer.clone();
-            compacted_inputs.extend(output.inputs.iter().map(|f| FileMeta {
-                region_id,
-                file_name: f.file_name().to_string(),
-                time_range: *f.time_range(),
-                level: f.level(),
-            }));
+            compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
             futs.push(async move {
@@ -123,6 +119,10 @@ impl<S: LogStore> CompactionTaskImpl<S> {
                 input.mark_compacting(compacting);
             }
         }
+
+        for expired in &self.expired_ssts {
+            expired.mark_compacting(true);
+        }
     }
 }
 
@@ -131,10 +131,11 @@ impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
     async fn run(mut self) -> Result<()> {
         self.mark_files_compacting(true);
 
-        let (output, compacted) = self.merge_ssts().await.map_err(|e| {
+        let (output, mut compacted) = self.merge_ssts().await.map_err(|e| {
             error!(e; "Failed to compact region: {}", self.shared_data.name());
             e
         })?;
+        compacted.extend(self.expired_ssts.iter().map(FileHandle::meta));
         self.write_manifest_and_apply(output, compacted)
             .await
             .map_err(|e| {
