@@ -83,9 +83,9 @@ impl ParquetWriter {
             file_name,
             stream,
             object_store,
-            // TODO(jiachun): make these configurable
+            // TODO(jiachun): make these configurable: WITH (max_row_group_size=xxx, max_rows_in_segment=xxx)
             max_row_group_size: 4096,
-            max_rows_in_segment: 1000000,
+            max_rows_in_segment: 5000000, // default 5M rows per segment
         }
     }
 
