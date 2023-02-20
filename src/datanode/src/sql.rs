@@ -31,6 +31,7 @@ use crate::error::{self, ExecuteSqlSnafu, GetTableSnafu, Result, TableNotFoundSn
 use crate::instance::sql::table_idents_to_full_name;
 
 mod alter;
+mod copy_table;
 mod create;
 mod delete;
 mod drop_table;
@@ -48,6 +49,7 @@ pub enum SqlRequest {
     DescribeTable(DescribeTable),
     Explain(Box<Explain>),
     Delete(Delete),
+    CopyTable(CopyTableRequest),
 }
 
 // Handler to execute SQL except query
@@ -81,31 +83,30 @@ impl SqlHandler {
             SqlRequest::CreateDatabase(req) => self.create_database(req, query_ctx.clone()).await,
             SqlRequest::Alter(req) => self.alter(req).await,
             SqlRequest::DropTable(req) => self.drop_table(req).await,
-            SqlRequest::Delete(stmt) => self.delete(query_ctx.clone(), stmt).await,
-            SqlRequest::ShowDatabases(stmt) => {
-                show_databases(stmt, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
+            SqlRequest::Delete(req) => self.delete(query_ctx.clone(), req).await,
+            SqlRequest::CopyTable(req) => self.copy_table(req).await,
+            SqlRequest::ShowDatabases(req) => {
+                show_databases(req, self.catalog_manager.clone()).context(ExecuteSqlSnafu)
             }
-            SqlRequest::ShowTables(stmt) => {
-                show_tables(stmt, self.catalog_manager.clone(), query_ctx.clone())
+            SqlRequest::ShowTables(req) => {
+                show_tables(req, self.catalog_manager.clone(), query_ctx.clone())
                     .context(ExecuteSqlSnafu)
             }
-            SqlRequest::DescribeTable(stmt) => {
+            SqlRequest::DescribeTable(req) => {
                 let (catalog, schema, table) =
-                    table_idents_to_full_name(stmt.name(), query_ctx.clone())?;
+                    table_idents_to_full_name(req.name(), query_ctx.clone())?;
                 let table = self
                     .catalog_manager
                     .table(&catalog, &schema, &table)
                     .context(error::CatalogSnafu)?
                     .with_context(|| TableNotFoundSnafu {
-                        table_name: stmt.name().to_string(),
+                        table_name: req.name().to_string(),
                     })?;
                 describe_table(table).context(ExecuteSqlSnafu)
             }
-            SqlRequest::Explain(stmt) => {
-                explain(stmt, self.query_engine.clone(), query_ctx.clone())
-                    .await
-                    .context(ExecuteSqlSnafu)
-            }
+            SqlRequest::Explain(req) => explain(req, self.query_engine.clone(), query_ctx.clone())
+                .await
+                .context(ExecuteSqlSnafu),
         };
         if let Err(e) = &result {
             error!(e; "{query_ctx}");

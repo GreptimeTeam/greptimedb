@@ -396,7 +396,8 @@ impl Instance {
             | Statement::Insert(_)
             | Statement::Delete(_)
             | Statement::Alter(_)
-            | Statement::DropTable(_) => self.sql_handler.do_statement_query(stmt, query_ctx).await,
+            | Statement::DropTable(_)
+            | Statement::Copy(_) => self.sql_handler.do_statement_query(stmt, query_ctx).await,
             Statement::Use(db) => self.handle_use(db, query_ctx),
             Statement::ShowCreateTable(_) => NotSupportedSnafu {
                 feat: format!("{stmt:?}"),
@@ -587,6 +588,9 @@ pub fn check_permission(
         }
         Statement::Delete(delete) => {
             validate_param(delete.table_name(), query_ctx)?;
+        }
+        Statement::Copy(stmd) => {
+            validate_param(stmd.table_name(), query_ctx)?;
         }
     }
     Ok(())

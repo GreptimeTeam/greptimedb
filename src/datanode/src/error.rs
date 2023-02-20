@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::prelude::*;
 use common_recordbatch::error::Error as RecordBatchError;
+use datafusion::parquet;
 use datatypes::prelude::ConcreteDataType;
 use storage::error::Error as StorageError;
 use table::error::Error as TableError;
@@ -355,6 +356,38 @@ pub enum Error {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
+
+    #[snafu(display("Failed to copy data from table: {}, source: {}", table_name, source))]
+    CopyTable {
+        table_name: String,
+        #[snafu(backtrace)]
+        source: TableError,
+    },
+
+    #[snafu(display("Failed to execute table scan, source: {}", source))]
+    TableScanExec {
+        #[snafu(backtrace)]
+        source: common_query::error::Error,
+    },
+
+    #[snafu(display("Failed to write parquet file, source: {}", source))]
+    WriteParquet {
+        source: parquet::errors::ParquetError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to poll stream, source: {}", source))]
+    PollStream {
+        source: datatypes::arrow::error::ArrowError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to write object into path: {}, source: {}", path, source))]
+    WriteObject {
+        path: String,
+        backtrace: Backtrace,
+        source: object_store::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -417,7 +450,9 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | IncorrectInternalState { .. } => StatusCode::Internal,
 
-            InitBackend { .. } => StatusCode::StorageUnavailable,
+            InitBackend { .. } | WriteParquet { .. } | PollStream { .. } | WriteObject { .. } => {
+                StatusCode::StorageUnavailable
+            }
             OpenLogStore { source } => source.status_code(),
             StartScriptManager { source } => source.status_code(),
             OpenStorageEngine { source } => source.status_code(),
@@ -426,6 +461,8 @@ impl ErrorExt for Error {
             TableIdProviderNotFound { .. } => StatusCode::Unsupported,
             BumpTableId { source, .. } => source.status_code(),
             ColumnDefaultValue { source, .. } => source.status_code(),
+            CopyTable { source, .. } => source.status_code(),
+            TableScanExec { source, .. } => source.status_code(),
         }
     }
 

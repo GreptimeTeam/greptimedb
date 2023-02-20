@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::statements::alter::AlterTable;
+use crate::statements::copy::CopyTable;
 use crate::statements::create::{CreateDatabase, CreateTable};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
@@ -51,6 +52,8 @@ pub enum Statement {
     // EXPLAIN QUERY
     Explain(Explain),
     Use(String),
+    // COPY
+    Copy(CopyTable),
 }
 
 /// Comment hints from SQL.
