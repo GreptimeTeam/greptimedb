@@ -84,6 +84,12 @@ pub enum Error {
         #[snafu(backtrace)]
         source: api::error::Error,
     },
+
+    #[snafu(display("Unrecognized table option: {}", source))]
+    UnrecognizedTableOption {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -104,6 +110,7 @@ impl ErrorExt for Error {
             Error::MissingField { .. } => StatusCode::InvalidArguments,
             Error::ColumnDefaultConstraint { source, .. } => source.status_code(),
             Error::InvalidColumnDef { source, .. } => source.status_code(),
+            Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
         }
     }
     fn backtrace_opt(&self) -> Option<&Backtrace> {

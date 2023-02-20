@@ -312,6 +312,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
     use table::metadata::{RawTableMeta, TableIdent, TableType};
+    use table::requests::TableOptions;
 
     use super::*;
 
@@ -345,7 +346,7 @@ mod tests {
                 next_column_id: 0,
                 region_numbers: vec![],
                 engine_options: HashMap::new(),
-                options: HashMap::new(),
+                options: TableOptions::default(),
                 created_on: DateTime::default(),
             },
             table_type: TableType::Base,

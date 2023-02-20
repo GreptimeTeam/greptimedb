@@ -21,7 +21,7 @@ use common_telemetry::tracing::log::error;
 use datatypes::schema::RawSchema;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use sql::ast::{ColumnOption, TableConstraint};
+use sql::ast::{ColumnOption, SqlOption, TableConstraint, Value};
 use sql::statements::column_def_to_schema;
 use sql::statements::create::CreateTable;
 use store_api::storage::consts::TIME_INDEX_NAME;
@@ -33,6 +33,7 @@ use crate::error::{
     self, CatalogNotFoundSnafu, CatalogSnafu, ConstraintNotSupportedSnafu, CreateTableSnafu,
     IllegalPrimaryKeysDefSnafu, InsertSystemCatalogSnafu, KeyColumnNotFoundSnafu,
     RegisterSchemaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
+    UnrecognizedTableOptionSnafu,
 };
 use crate::sql::SqlHandler;
 
@@ -238,6 +239,7 @@ impl SqlHandler {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let table_options = stmt_options_to_hashmap(&stmt.options)?;
         let schema = RawSchema::new(columns_schemas);
         let request = CreateTableRequest {
             id: table_id,
@@ -249,16 +251,32 @@ impl SqlHandler {
             region_numbers: vec![0],
             primary_key_indices: primary_keys,
             create_if_not_exists: stmt.if_not_exists,
-            table_options: HashMap::new(),
+            table_options,
         };
         Ok(request)
     }
 }
 
+fn stmt_options_to_hashmap(opts: &[SqlOption]) -> error::Result<TableOptions> {
+    let mut map = HashMap::with_capacity(opts.len());
+    for SqlOption { name, value } in opts {
+        let value_str = match value {
+            Value::SingleQuotedString(s) => s.clone(),
+            Value::DoubleQuotedString(s) => s.clone(),
+            _ => value.to_string(),
+        };
+        map.insert(name.value.clone(), value_str);
+    }
+    let options = TableOptions::try_from(&map).context(UnrecognizedTableOptionSnafu)?;
+    Ok(options)
+}
+
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::time::Duration;
 
+    use common_base::readable_size::ReadableSize;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::Schema;
     use sql::dialect::GenericDialect;
@@ -278,6 +296,23 @@ mod tests {
                 panic!("Unexpected statement!")
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_create_table_with_options() {
+        let sql = r#"CREATE TABLE demo_table (timestamp BIGINT TIME INDEX, value DOUBLE, host STRING PRIMARY KEY) engine=mito with(regions=1, ttl='7days',write_buffer_size='32MB',some='other');"#;
+        let parsed_stmt = sql_to_statement(sql);
+        let handler = create_mock_sql_handler().await;
+        let c = handler
+            .create_to_request(42, parsed_stmt, &TableReference::bare("demo_table"))
+            .unwrap();
+
+        assert_eq!(Some(Duration::from_secs(604800)), c.table_options.ttl);
+        assert_eq!(
+            Some(ReadableSize::mb(32)),
+            c.table_options.write_buffer_size
+        );
+        assert_eq!("other", c.table_options.extra_options.get("some").unwrap());
     }
 
     #[tokio::test]

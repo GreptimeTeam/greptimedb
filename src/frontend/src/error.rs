@@ -348,6 +348,12 @@ pub enum Error {
 
     #[snafu(display("Illegal primary keys definition: {}", msg))]
     IllegalPrimaryKeysDef { msg: String, backtrace: Backtrace },
+
+    #[snafu(display("Unrecognized table option: {}", source))]
+    UnrecognizedTableOption {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -427,6 +433,7 @@ impl ErrorExt for Error {
             Error::DeserializePartition { source, .. } | Error::FindTableRoute { source, .. } => {
                 source.status_code()
             }
+            Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
         }
     }
 

@@ -638,7 +638,7 @@ mod tests {
     use storage::EngineImpl;
     use store_api::manifest::Manifest;
     use store_api::storage::ReadContext;
-    use table::requests::{AddColumnRequest, AlterKind, DeleteRequest};
+    use table::requests::{AddColumnRequest, AlterKind, DeleteRequest, TableOptions};
     use tempdir::TempDir;
 
     use super::*;
@@ -690,7 +690,7 @@ mod tests {
                     schema,
                     create_if_not_exists: true,
                     primary_key_indices: Vec::default(),
-                    table_options: HashMap::new(),
+                    table_options: TableOptions::default(),
                     region_numbers: vec![0],
                 },
             )
@@ -804,7 +804,7 @@ mod tests {
             create_if_not_exists: true,
             // put ts into primary keys
             primary_key_indices: vec![0, 1],
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -965,7 +965,7 @@ mod tests {
             create_if_not_exists: true,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -982,7 +982,7 @@ mod tests {
             create_if_not_exists: false,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -1191,7 +1191,7 @@ mod tests {
             region_numbers: vec![0],
             primary_key_indices: vec![0],
             create_if_not_exists: true,
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
         };
         table_engine
             .create_table(&ctx, req)
@@ -1274,7 +1274,7 @@ mod tests {
             create_if_not_exists: true,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -1307,7 +1307,7 @@ mod tests {
             create_if_not_exists: false,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
         table_engine.create_table(&ctx, request).await.unwrap();

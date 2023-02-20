@@ -147,6 +147,7 @@ impl TableEngine for MockTableEngine {
         let table_id = TableId::from_str(
             request
                 .table_options
+                .extra_options
                 .get("table_id")
                 .unwrap_or(&default_table_id),
         )

@@ -53,6 +53,7 @@ use sql::statements::create::Partitions;
 use sql::statements::sql_value_to_value;
 use sql::statements::statement::Statement;
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
+use table::requests::TableOptions;
 use table::table::AlterContext;
 
 use crate::catalog::FrontendCatalogManager;
@@ -62,7 +63,7 @@ use crate::error::{
     ColumnDataTypeSnafu, DeserializePartitionSnafu, ParseSqlSnafu, PrimaryKeyNotFoundSnafu,
     RequestDatanodeSnafu, RequestMetaSnafu, Result, SchemaExistsSnafu, SchemaNotFoundSnafu,
     StartMetaClientSnafu, TableAlreadyExistSnafu, TableNotFoundSnafu, TableSnafu,
-    ToTableInsertRequestSnafu,
+    ToTableInsertRequestSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
 use crate::instance::parse_stmt;
@@ -605,7 +606,8 @@ fn create_table_info(create_table: &CreateTableExpr) -> Result<RawTableInfo> {
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
         engine_options: HashMap::new(),
-        options: HashMap::new(),
+        options: TableOptions::try_from(&create_table.table_options)
+            .context(UnrecognizedTableOptionSnafu)?,
         created_on: DateTime::default(),
     };
 
