@@ -76,11 +76,7 @@ mod procedure_test_util {
             object_store.clone(),
             compaction_scheduler,
         );
-        let table_engine = MitoEngine::new(
-            EngineConfig::default(),
-            storage_engine.clone(),
-            object_store.clone(),
-        );
+        let table_engine = MitoEngine::new(EngineConfig::default(), storage_engine, object_store);
 
         TestEnv { table_engine, dir }
     }

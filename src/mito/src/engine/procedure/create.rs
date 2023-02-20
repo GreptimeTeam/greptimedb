@@ -257,7 +257,7 @@ impl<S: StorageEngine> CreateMitoTable<S> {
             .tables
             .write()
             .unwrap()
-            .insert(table_ref.to_string(), table.clone());
+            .insert(table_ref.to_string(), table);
 
         Ok(Status::Done)
     }
