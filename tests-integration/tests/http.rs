@@ -290,9 +290,9 @@ pub async fn test_promql_http_api(store_type: StorageType) {
     let client = TestClient::new(app);
 
     // instant query
-    let res = client.get("/v1/query?query=up").send().await;
+    let res = client.get("/api/v1/query?query=up").send().await;
     assert_eq!(res.status(), StatusCode::OK);
-    let res = client.post("/v1/query?query=up").send().await;
+    let res = client.post("/api/v1/query?query=up").send().await;
     assert_eq!(res.status(), StatusCode::OK);
 
     let res = client
@@ -302,6 +302,7 @@ pub async fn test_promql_http_api(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK);
     let res = client
         .post("/api/v1/query_range?query=up&start=1&end=100&step=5")
+        .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK);
