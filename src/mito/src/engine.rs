@@ -410,6 +410,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .engine(MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(request.primary_key_indices.clone())
+            .options(request.table_options)
             .region_numbers(request.region_numbers)
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
