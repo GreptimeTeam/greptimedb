@@ -1,2 +1,5 @@
 [default.extend-words]
 ue = "ue"
+datas = "datas"
+[files]
+extend-exclude = ["corrupted"]

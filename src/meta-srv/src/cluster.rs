@@ -28,13 +28,13 @@ use crate::error::{match_for_io_error, Result};
 use crate::keys::{StatKey, StatValue, DN_STAT_PREFIX};
 use crate::metasrv::ElectionRef;
 use crate::service::store::ext::KvStoreExt;
-use crate::service::store::kv::ResetableKvStoreRef;
+use crate::service::store::kv::ResettableKvStoreRef;
 use crate::{error, util};
 
 #[derive(Builder, Clone)]
 pub struct MetaPeerClient {
     election: Option<ElectionRef>,
-    in_memory: ResetableKvStoreRef,
+    in_memory: ResettableKvStoreRef,
     #[builder(default = "ChannelManager::default()")]
     channel_manager: ChannelManager,
     #[builder(default = "3")]

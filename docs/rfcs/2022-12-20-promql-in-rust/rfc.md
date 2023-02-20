@@ -149,10 +149,10 @@ inputs:
   - title: 'Series Normalize: \noffset = 0'
     operator: prom
     inputs:
-    - title: 'Filter: \ntimetamp > 2022-12-20T10:00:00 && timestamp < 2022-12-21T10:00:00'
+    - title: 'Filter: \ntimestamp > 2022-12-20T10:00:00 && timestamp < 2022-12-21T10:00:00'
       operator: filter
       inputs:
-      - title: 'Table Scan: \ntable = request_duration, timetamp > 2022-12-20T10:00:00 && timestamp < 2022-12-21T10:00:00'
+      - title: 'Table Scan: \ntable = request_duration, timestamp > 2022-12-20T10:00:00 && timestamp < 2022-12-21T10:00:00'
         operator: scan -->
 
 ![example](example.png)

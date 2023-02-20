@@ -35,7 +35,7 @@ use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::SelectorType;
 use crate::service::admin;
 use crate::service::store::etcd::EtcdStore;
-use crate::service::store::kv::ResetableKvStoreRef;
+use crate::service::store::kv::ResettableKvStoreRef;
 use crate::service::store::memory::MemStore;
 use crate::{error, Result};
 
@@ -90,7 +90,7 @@ pub async fn make_meta_srv(opts: MetaSrvOptions) -> Result<MetaSrv> {
         )
     };
 
-    let in_memory = Arc::new(MemStore::default()) as ResetableKvStoreRef;
+    let in_memory = Arc::new(MemStore::default()) as ResettableKvStoreRef;
 
     let meta_peer_client = MetaPeerClientBuilder::default()
         .election(election.clone())

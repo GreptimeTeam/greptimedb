@@ -24,14 +24,14 @@ use crate::lock::DistLockRef;
 use crate::metasrv::{ElectionRef, MetaSrv, MetaSrvOptions, SelectorRef, TABLE_ID_SEQ};
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::sequence::Sequence;
-use crate::service::store::kv::{KvStoreRef, ResetableKvStoreRef};
+use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 use crate::service::store::memory::MemStore;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
     options: Option<MetaSrvOptions>,
     kv_store: Option<KvStoreRef>,
-    in_memory: Option<ResetableKvStoreRef>,
+    in_memory: Option<ResettableKvStoreRef>,
     selector: Option<SelectorRef>,
     handler_group: Option<HeartbeatHandlerGroup>,
     election: Option<ElectionRef>,
@@ -63,7 +63,7 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub fn in_memory(mut self, in_memory: ResetableKvStoreRef) -> Self {
+    pub fn in_memory(mut self, in_memory: ResettableKvStoreRef) -> Self {
         self.in_memory = Some(in_memory);
         self
     }
