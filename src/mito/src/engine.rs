@@ -30,7 +30,7 @@ use store_api::storage::{
     CreateOptions, EngineContext as StorageEngineContext, OpenOptions, Region,
     RegionDescriptorBuilder, RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
-use table::engine::{EngineContext, TableEngine, TableReference};
+use table::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::error::TableOperationSnafu;
 use table::metadata::{
     TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion,
@@ -115,19 +115,6 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .context(table_error::TableOperationSnafu)
     }
 
-    async fn create_table_procedure(
-        &self,
-        _ctx: &EngineContext,
-        request: CreateTableRequest,
-    ) -> TableResult<BoxedProcedure> {
-        validate_create_table_request(&request)
-            .map_err(BoxedError::new)
-            .context(table_error::TableOperationSnafu)?;
-
-        let procedure = Box::new(CreateMitoTable::new(request, self.inner.clone()));
-        Ok(procedure)
-    }
-
     async fn open_table(
         &self,
         ctx: &EngineContext,
@@ -174,6 +161,21 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
             .await
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)
+    }
+}
+
+impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
+    fn create_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        request: CreateTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        validate_create_table_request(&request)
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        let procedure = Box::new(CreateMitoTable::new(request, self.inner.clone()));
+        Ok(procedure)
     }
 }
 

@@ -341,7 +341,7 @@ impl CreateTableData {
 
 #[cfg(test)]
 mod tests {
-    use table::engine::{EngineContext, TableEngine};
+    use table::engine::{EngineContext, TableEngine, TableEngineProcedure};
 
     use super::*;
     use crate::engine::procedure::procedure_test_util::{self, TestEnv};
@@ -358,7 +358,6 @@ mod tests {
 
         let mut procedure = table_engine
             .create_table_procedure(&EngineContext::default(), request.clone())
-            .await
             .unwrap();
         procedure_test_util::execute_procedure_until_done(&mut procedure).await;
 

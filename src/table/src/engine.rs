@@ -71,13 +71,6 @@ pub trait TableEngine: Send + Sync {
         request: CreateTableRequest,
     ) -> Result<TableRef>;
 
-    /// Returns a procedure that creates table by specific `request`.
-    async fn create_table_procedure(
-        &self,
-        ctx: &EngineContext,
-        request: CreateTableRequest,
-    ) -> Result<BoxedProcedure>;
-
     /// Open an existing table by given `request`, returns the opened table. If the table does not
     /// exist, returns an `Ok(None)`.
     async fn open_table(
@@ -114,6 +107,18 @@ pub type TableEngineRef = Arc<dyn TableEngine>;
 /// Table engine context.
 #[derive(Debug, Clone, Default)]
 pub struct EngineContext {}
+
+/// Procedures for table engine.
+pub trait TableEngineProcedure: Send + Sync {
+    /// Returns a procedure that creates table by specific `request`.
+    fn create_table_procedure(
+        &self,
+        ctx: &EngineContext,
+        request: CreateTableRequest,
+    ) -> Result<BoxedProcedure>;
+}
+
+pub type TableEngineProcedureRef = Arc<dyn TableEngineProcedure>;
 
 #[cfg(test)]
 mod tests {
