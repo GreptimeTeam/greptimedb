@@ -37,13 +37,13 @@ use promql_parser::parser::{
     Expr as PromExpr, Function, MatrixSelector, NumberLiteral, Offset, ParenExpr, StringLiteral,
     SubqueryExpr, TokenType, UnaryExpr, VectorSelector,
 };
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    DataFusionPlanningSnafu, ExpectExprSnafu, LabelNotFoundSnafu, MultipleVectorSnafu, Result,
-    TableNameNotFoundSnafu, TableNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedTokenSnafu,
-    UnknownTableSnafu, UnsupportedExprSnafu, ValueNotFoundSnafu,
+    DataFusionPlanningSnafu, ExpectExprSnafu, MultipleVectorSnafu, Result, TableNameNotFoundSnafu,
+    TableNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    UnsupportedExprSnafu, ValueNotFoundSnafu,
 };
 use crate::extension_plan::{
     InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -409,20 +409,10 @@ impl<S: ContextProvider> PromPlanner<S> {
             AggModifier::By(labels) => {
                 let mut exprs = Vec::with_capacity(labels.len());
                 for label in labels {
-                    let field = input_schema
-                        .field_with_unqualified_name(label)
-                        .map_err(|_| {
-                            LabelNotFoundSnafu {
-                                table: self
-                                    .ctx
-                                    .table_name
-                                    .clone()
-                                    .unwrap_or("no_table_name".to_string()),
-                                label: label.clone(),
-                            }
-                            .build()
-                        })?;
-                    exprs.push(DfExpr::Column(Column::from(field.name())));
+                    // nonexistence label will be ignored
+                    if let Ok(field) = input_schema.field_with_unqualified_name(label) {
+                        exprs.push(DfExpr::Column(Column::from(field.name())));
+                    }
                 }
 
                 // change the tag columns in context
@@ -439,21 +429,13 @@ impl<S: ContextProvider> PromPlanner<S> {
                     .iter()
                     .map(|f| f.name())
                     .collect::<BTreeSet<_>>();
+
                 // remove "without"-ed fields
+                // nonexistence label will be ignored
                 for label in labels {
-                    ensure!(
-                        // ensure this field was existed
-                        all_fields.remove(label),
-                        LabelNotFoundSnafu {
-                            table: self
-                                .ctx
-                                .table_name
-                                .clone()
-                                .unwrap_or("no_table_name".to_string()),
-                            label: label.clone(),
-                        }
-                    );
+                    all_fields.remove(label);
                 }
+
                 // remove time index and value fields
                 if let Some(time_index) = &self.ctx.time_index_column {
                     all_fields.remove(time_index);
