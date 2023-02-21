@@ -228,6 +228,8 @@ mod tests {
         UInt32Vector, UInt64Vector, UInt8Vector,
     };
 
+    use crate::FlightContext;
+
     #[test]
     fn test_column_to_vector() {
         let mut column = create_test_column(Arc::new(BooleanVector::from(vec![true])));
@@ -310,5 +312,13 @@ mod tests {
             null_mask: null_mask(&[vector.clone()], vector.len()),
             datatype: wrapper.datatype() as i32,
         }
+    }
+
+    #[test]
+    fn test_flight_ctx() {
+        let mut ctx = FlightContext::new();
+        ctx.insert("a".to_string(), "b".to_string());
+        assert_eq!(ctx.ctx.len(), 1);
+        assert_eq!(ctx.get("a"), Some(&"b".to_string()));
     }
 }
