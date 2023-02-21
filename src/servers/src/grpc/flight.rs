@@ -239,16 +239,14 @@ async fn authorize(
     query_ctx: &QueryContextRef,
     user_info: &UserInfo,
 ) -> TonicResult<()> {
-    if let Some(user_provider) = user_provider {
-        user_provider
-            .authorize(
-                &query_ctx.current_catalog(),
-                &query_ctx.current_schema(),
-                user_info,
-            )
-            .await
-            .map_err(|e| Status::permission_denied(e.to_string()))
-    } else {
-        Ok(())
-    }
+    let Some(user_provider) = user_provider else { return Ok(()) };
+
+    user_provider
+        .authorize(
+            &query_ctx.current_catalog(),
+            &query_ctx.current_schema(),
+            user_info,
+        )
+        .await
+        .map_err(|e| Status::permission_denied(e.to_string()))
 }

@@ -100,7 +100,6 @@ impl Database {
         .await
     }
 
-    // TODO(shuiyisong): add a ctx param to set tonic request metadata if we make Database struct pub
     async fn do_get(&self, request: Request) -> Result<Output> {
         let request = GreptimeRequest {
             header: Some(RequestHeader {
