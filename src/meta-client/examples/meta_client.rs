@@ -26,6 +26,7 @@ use meta_client::rpc::{
     PutRequest, RangeRequest, TableName,
 };
 use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
+use table::requests::TableOptions;
 use tracing::{event, subscriber, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -177,7 +178,7 @@ fn new_table_info() -> RawTableInfo {
             next_column_id: 0,
             region_numbers: vec![],
             engine_options: HashMap::new(),
-            options: HashMap::new(),
+            options: TableOptions::default(),
             created_on: DateTime::default(),
         },
         table_type: TableType::Base,

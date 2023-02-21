@@ -107,6 +107,13 @@ pub enum Error {
 
     #[snafu(display("Unsupported operation: {}", operation))]
     Unsupported { operation: String },
+
+    #[snafu(display("Failed to parse table option, key: {}, value: {}", key, value))]
+    ParseTableOption {
+        key: String,
+        value: String,
+        backtrace: Backtrace,
+    },
 }
 
 impl ErrorExt for Error {
@@ -126,6 +133,7 @@ impl ErrorExt for Error {
             Error::ColumnNotExists { .. } => StatusCode::TableColumnNotFound,
             Error::RegionSchemaMismatch { .. } => StatusCode::StorageUnavailable,
             Error::Unsupported { .. } => StatusCode::Unsupported,
+            Error::ParseTableOption { .. } => StatusCode::InvalidArguments,
         }
     }
 

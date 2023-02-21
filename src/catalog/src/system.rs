@@ -32,7 +32,9 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableInfoRef};
-use table::requests::{CreateTableRequest, DeleteRequest, InsertRequest, OpenTableRequest};
+use table::requests::{
+    CreateTableRequest, DeleteRequest, InsertRequest, OpenTableRequest, TableOptions,
+};
 use table::{Table, TableRef};
 
 use crate::error::{
@@ -109,7 +111,7 @@ impl SystemCatalogTable {
                 region_numbers: vec![0],
                 primary_key_indices: vec![ENTRY_TYPE_INDEX, KEY_INDEX],
                 create_if_not_exists: true,
-                table_options: HashMap::new(),
+                table_options: TableOptions::default(),
             };
 
             let table = engine

@@ -18,11 +18,13 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datatypes::schema::{ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
-use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest};
+use table::requests::{
+    AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest, TableOptions,
+};
 
 use crate::error::{
     ColumnNotFoundSnafu, InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu,
-    Result,
+    Result, UnrecognizedTableOptionSnafu,
 };
 
 /// Convert an [`AlterExpr`] to an [`AlterTableRequest`]
@@ -163,6 +165,8 @@ pub fn create_expr_to_request(
         expr.region_ids
     };
 
+    let table_options =
+        TableOptions::try_from(&expr.table_options).context(UnrecognizedTableOptionSnafu)?;
     Ok(CreateTableRequest {
         id: table_id,
         catalog_name,
@@ -173,7 +177,7 @@ pub fn create_expr_to_request(
         region_numbers: region_ids,
         primary_key_indices,
         create_if_not_exists: expr.create_if_not_exists,
-        table_options: expr.table_options,
+        table_options,
     })
 }
 

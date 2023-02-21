@@ -18,6 +18,8 @@
 //! a [`StorageEngine`] instance manages a bunch of storage unit called [`Region`], which holds
 //! chunks of rows, support operations like PUT/DELETE/SCAN.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
@@ -82,6 +84,10 @@ pub struct EngineContext {}
 pub struct CreateOptions {
     /// Region parent directory
     pub parent_dir: String,
+    /// Region memtable max size in bytes
+    pub write_buffer_size: Option<usize>,
+    /// Region SST files TTL
+    pub ttl: Option<Duration>,
 }
 
 /// Options to open a region.
@@ -89,4 +95,8 @@ pub struct CreateOptions {
 pub struct OpenOptions {
     /// Region parent directory
     pub parent_dir: String,
+    /// Region memtable max size in bytes
+    pub write_buffer_size: Option<usize>,
+    /// Region SST files TTL
+    pub ttl: Option<Duration>,
 }

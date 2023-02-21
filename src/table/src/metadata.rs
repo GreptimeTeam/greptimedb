@@ -25,7 +25,7 @@ use snafu::{ensure, ResultExt};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
 use crate::error::{self, Result};
-use crate::requests::{AddColumnRequest, AlterKind};
+use crate::requests::{AddColumnRequest, AlterKind, TableOptions};
 
 pub type TableId = u32;
 pub type TableVersion = u64;
@@ -87,7 +87,7 @@ pub struct TableMeta {
     pub engine_options: HashMap<String, String>,
     /// Table options.
     #[builder(default)]
-    pub options: HashMap<String, String>,
+    pub options: TableOptions,
     #[builder(default = "Utc::now()")]
     pub created_on: DateTime<Utc>,
 }
@@ -387,7 +387,7 @@ pub struct RawTableMeta {
     pub next_column_id: ColumnId,
     pub region_numbers: Vec<u32>,
     pub engine_options: HashMap<String, String>,
-    pub options: HashMap<String, String>,
+    pub options: TableOptions,
     pub created_on: DateTime<Utc>,
 }
 
