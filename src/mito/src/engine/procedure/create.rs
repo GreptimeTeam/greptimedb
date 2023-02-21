@@ -153,9 +153,13 @@ impl<S: StorageEngine> CreateMitoTable<S> {
         );
         let open_opts = OpenOptions {
             parent_dir: table_dir.clone(),
+            write_buffer_size: None,
+            ttl: None,
         };
         let create_opts = CreateOptions {
             parent_dir: table_dir,
+            write_buffer_size: None,
+            ttl: None,
         };
 
         let table_schema =
