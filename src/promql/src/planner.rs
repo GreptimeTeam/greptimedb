@@ -23,7 +23,7 @@ use datafusion::logical_expr::expr::AggregateFunction;
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Extension,
-    LogicalPlan, LogicalPlanBuilder, Operator,
+    LogicalPlan, LogicalPlanBuilder, Operator, ScalarUDF,
 };
 use datafusion::optimizer::utils;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
@@ -47,6 +47,7 @@ use crate::error::{
 use crate::extension_plan::{
     InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
+use crate::functions::{IDelta, Increase};
 
 const LEFT_PLAN_JOIN_ALIAS: &str = "lhs";
 
@@ -577,21 +578,34 @@ impl<S: ContextProvider> PromPlanner<S> {
 
         // TODO(ruihang): set this according to in-param list
         let value_column_pos = 0;
-        let scalar_func = BuiltinScalarFunction::from_str(func.name).map_err(|_| {
-            UnsupportedExprSnafu {
-                name: func.name.to_string(),
-            }
-            .build()
-        })?;
+        let scalar_func = match func.name {
+            "increase" => ScalarFunc::UDF(Increase::scalar_udf()),
+            "idelta" => ScalarFunc::UDF(IDelta::<false>::scalar_udf()),
+            "irate" => ScalarFunc::UDF(IDelta::<true>::scalar_udf()),
+            _ => ScalarFunc::DataFusionBuiltin(
+                BuiltinScalarFunction::from_str(func.name).map_err(|_| {
+                    UnsupportedExprSnafu {
+                        name: func.name.to_string(),
+                    }
+                    .build()
+                })?,
+            ),
+        };
 
         // TODO(ruihang): handle those functions doesn't require input
         let mut exprs = Vec::with_capacity(self.ctx.value_columns.len());
         for value in &self.ctx.value_columns {
             let col_expr = DfExpr::Column(Column::from_name(value));
             other_input_exprs.insert(value_column_pos, col_expr);
-            let fn_expr = DfExpr::ScalarFunction {
-                fun: scalar_func.clone(),
-                args: other_input_exprs.clone(),
+            let fn_expr = match scalar_func.clone() {
+                ScalarFunc::DataFusionBuiltin(fun) => DfExpr::ScalarFunction {
+                    fun,
+                    args: other_input_exprs.clone(),
+                },
+                ScalarFunc::UDF(fun) => DfExpr::ScalarUDF {
+                    fun: Arc::new(fun),
+                    args: other_input_exprs.clone(),
+                },
             };
             exprs.push(fn_expr);
             other_input_exprs.remove(value_column_pos);
@@ -659,8 +673,8 @@ impl<S: ContextProvider> PromPlanner<S> {
             token::T_MIN => AggregateFunctionEnum::Min,
             token::T_MAX => AggregateFunctionEnum::Max,
             token::T_GROUP => AggregateFunctionEnum::Grouping,
-            token::T_STDDEV => AggregateFunctionEnum::Stddev,
-            token::T_STDVAR => AggregateFunctionEnum::Variance,
+            token::T_STDDEV => AggregateFunctionEnum::StddevPop,
+            token::T_STDVAR => AggregateFunctionEnum::VariancePop,
             token::T_TOPK | token::T_BOTTOMK | token::T_COUNT_VALUES | token::T_QUANTILE => {
                 UnsupportedExprSnafu {
                     name: format!("{op:?}"),
@@ -843,6 +857,12 @@ impl<S: ContextProvider> PromPlanner<S> {
 struct FunctionArgs {
     input: Option<PromExpr>,
     literals: Vec<DfExpr>,
+}
+
+#[derive(Debug, Clone)]
+enum ScalarFunc {
+    DataFusionBuiltin(BuiltinScalarFunction),
+    UDF(ScalarUDF),
 }
 
 #[cfg(test)]
