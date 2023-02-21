@@ -177,7 +177,6 @@ impl Instance {
         };
 
         let procedure_manager = create_procedure_manager(&opts.procedure).await?;
-        // Recover procedures.
         if let Some(procedure_manager) = &procedure_manager {
             table_engine.register_procedure_loaders(&**procedure_manager);
             table_procedure::register_procedure_loaders(
@@ -187,6 +186,7 @@ impl Instance {
                 &**procedure_manager,
             );
 
+            // Recover procedures.
             procedure_manager
                 .recover()
                 .await
