@@ -21,6 +21,7 @@ use axum::body::BoxBody;
 use axum::extract::{Query, State};
 use axum::{routing, Form, Json, Router};
 use common_error::prelude::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::info;
@@ -216,7 +217,22 @@ impl PromqlJsonResponse {
             json
         };
 
-        response.unwrap_or_else(|err| Self::error(err.status_code().to_string(), err.to_string()))
+        match response {
+            Ok(resp) => resp,
+            Err(err) => {
+                // Prometheus won't report error if querying nonexist label and metric
+                if err.status_code() == StatusCode::TableNotFound
+                    || err.status_code() == StatusCode::TableColumnNotFound
+                {
+                    Self::success(PromqlData {
+                        result_type: "matrix".to_string(),
+                        ..Default::default()
+                    })
+                } else {
+                    Self::error(err.status_code().to_string(), err.to_string())
+                }
+            }
+        }
     }
 
     fn record_batches_to_data(batches: RecordBatches, metric_name: String) -> Result<PromqlData> {
