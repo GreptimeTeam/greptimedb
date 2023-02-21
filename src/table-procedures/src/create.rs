@@ -66,7 +66,7 @@ impl Procedure for CreateTableProcedure {
 }
 
 impl CreateTableProcedure {
-    const TYPE_NAME: &str = "table-procedures::CreateTable";
+    const TYPE_NAME: &str = "table-procedures::CreateTableProcedure";
 
     /// Returns a new [CreateTableProcedure].
     pub fn new(
@@ -310,5 +310,88 @@ impl CreateTableData {
             schema: &self.request.schema_name,
             table: &self.request.table_name,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, RawSchema};
+    use table::engine::{EngineContext, TableEngine};
+
+    use super::*;
+    use crate::test_util::TestEnv;
+
+    fn schema_for_test() -> RawSchema {
+        let column_schemas = vec![
+            // Key
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            // Nullable value column: cpu
+            ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), true),
+            // Non-null value column: memory
+            ColumnSchema::new("memory", ConcreteDataType::float64_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            )
+            .with_time_index(true),
+        ];
+
+        RawSchema::new(column_schemas)
+    }
+
+    fn new_create_request(table_name: &str) -> CreateTableRequest {
+        CreateTableRequest {
+            id: 1,
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: table_name.to_string(),
+            desc: Some("a test table".to_string()),
+            schema: schema_for_test(),
+            region_numbers: vec![0, 1],
+            create_if_not_exists: true,
+            primary_key_indices: vec![0],
+            table_options: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_table_procedure() {
+        let TestEnv {
+            dir: _dir,
+            table_engine,
+            procedure_manager,
+            catalog_manager,
+        } = TestEnv::new("create");
+
+        let table_name = "test_create";
+        let request = new_create_request(table_name);
+        let procedure = CreateTableProcedure::new(
+            request.clone(),
+            catalog_manager,
+            table_engine.clone(),
+            table_engine.clone(),
+        );
+
+        let table_ref = TableReference {
+            catalog: &request.catalog_name,
+            schema: &request.schema_name,
+            table: &request.table_name,
+        };
+        let engine_ctx = EngineContext::default();
+        assert!(table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .is_none());
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
+        watcher.changed().await.unwrap();
+
+        assert!(table_engine
+            .get_table(&engine_ctx, &table_ref)
+            .unwrap()
+            .is_some());
     }
 }

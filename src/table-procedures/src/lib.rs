@@ -16,5 +16,7 @@
 
 mod create;
 pub mod error;
+#[cfg(test)]
+mod test_util;
 
 pub use create::CreateTableProcedure;
