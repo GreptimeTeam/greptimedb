@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
 use snafu::{ResultExt, Snafu};
+use tokio::sync::watch::Receiver;
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -209,6 +210,9 @@ pub enum ProcedureState {
     Failed,
 }
 
+/// Watcher to watch procedure state.
+pub type Watcher = Receiver<ProcedureState>;
+
 // TODO(yingwen): Shutdown
 /// `ProcedureManager` executes [Procedure] submitted to it.
 #[async_trait]
@@ -217,7 +221,9 @@ pub trait ProcedureManager: Send + Sync + 'static {
     fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()>;
 
     /// Submits a procedure to execute.
-    async fn submit(&self, procedure: ProcedureWithId) -> Result<()>;
+    ///
+    /// Returns a [Watcher] to watch the created procedure.
+    async fn submit(&self, procedure: ProcedureWithId) -> Result<Watcher>;
 
     /// Recovers unfinished procedures and reruns them.
     ///
@@ -228,6 +234,9 @@ pub trait ProcedureManager: Send + Sync + 'static {
     ///
     /// Returns `Ok(None)` if the procedure doesn't exist.
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>>;
+
+    /// Returns a [Watcher] to watch [ProcedureState] of specific procedure.
+    fn procedure_watcher(&self, procedure_id: ProcedureId) -> Option<Watcher>;
 }
 
 /// Ref-counted pointer to the [ProcedureManager].

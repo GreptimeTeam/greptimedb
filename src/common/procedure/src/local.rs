@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use common_telemetry::logging;
 use object_store::ObjectStore;
 use snafu::ensure;
+use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::Notify;
 
 use crate::error::{DuplicateProcedureSnafu, LoaderConflictSnafu, Result};
@@ -31,26 +32,8 @@ use crate::procedure::BoxedProcedureLoader;
 use crate::store::{ObjectStateStore, ProcedureMessage, ProcedureStore, StateStoreRef};
 use crate::{
     BoxedProcedure, ContextProvider, LockKey, ProcedureId, ProcedureManager, ProcedureState,
-    ProcedureWithId,
+    ProcedureWithId, Watcher,
 };
-
-/// Mutable metadata of a procedure during execution.
-#[derive(Debug)]
-struct ExecMeta {
-    /// Current procedure state.
-    state: ProcedureState,
-    /// Id of child procedures.
-    children: Vec<ProcedureId>,
-}
-
-impl Default for ExecMeta {
-    fn default() -> ExecMeta {
-        ExecMeta {
-            state: ProcedureState::Running,
-            children: Vec::new(),
-        }
-    }
-}
 
 /// Shared metadata of a procedure.
 ///
@@ -72,38 +55,55 @@ pub(crate) struct ProcedureMeta {
     child_notify: Notify,
     /// Lock required by this procedure.
     lock_key: LockKey,
-    /// Mutable status during execution.
-    exec_meta: Mutex<ExecMeta>,
+    /// Sender to notify the procedure state.
+    state_sender: Sender<ProcedureState>,
+    /// Receiver to watch the procedure state.
+    state_receiver: Receiver<ProcedureState>,
+    /// Id of child procedures.
+    children: Mutex<Vec<ProcedureId>>,
 }
 
 impl ProcedureMeta {
+    fn new(id: ProcedureId, parent_id: Option<ProcedureId>, lock_key: LockKey) -> ProcedureMeta {
+        let (state_sender, state_receiver) = watch::channel(ProcedureState::Running);
+        ProcedureMeta {
+            id,
+            lock_notify: Notify::new(),
+            parent_id,
+            child_notify: Notify::new(),
+            lock_key,
+            state_sender,
+            state_receiver,
+            children: Mutex::new(Vec::new()),
+        }
+    }
+
     /// Returns current [ProcedureState].
     fn state(&self) -> ProcedureState {
-        let meta = self.exec_meta.lock().unwrap();
-        meta.state.clone()
+        self.state_receiver.borrow().clone()
     }
 
     /// Update current [ProcedureState].
     fn set_state(&self, state: ProcedureState) {
-        let mut meta = self.exec_meta.lock().unwrap();
-        meta.state = state;
+        // Safety: ProcedureMeta also holds the receiver, so `send()` should never fail.
+        self.state_sender.send(state).unwrap();
     }
 
     /// Push `procedure_id` of the subprocedure to the metadata.
     fn push_child(&self, procedure_id: ProcedureId) {
-        let mut meta = self.exec_meta.lock().unwrap();
-        meta.children.push(procedure_id);
+        let mut children = self.children.lock().unwrap();
+        children.push(procedure_id);
     }
 
     /// Append subprocedures to given `buffer`.
     fn list_children(&self, buffer: &mut Vec<ProcedureId>) {
-        let meta = self.exec_meta.lock().unwrap();
-        buffer.extend_from_slice(&meta.children);
+        let children = self.children.lock().unwrap();
+        buffer.extend_from_slice(&children);
     }
 
     /// Returns the number of subprocedures.
     fn num_children(&self) -> usize {
-        self.exec_meta.lock().unwrap().children.len()
+        self.children.lock().unwrap().len()
     }
 }
 
@@ -173,6 +173,14 @@ impl ManagerContext {
     fn state(&self, procedure_id: ProcedureId) -> Option<ProcedureState> {
         let procedures = self.procedures.read().unwrap();
         procedures.get(&procedure_id).map(|meta| meta.state())
+    }
+
+    /// Returns the [Watcher] of specific `procedure_id`.
+    fn watcher(&self, procedure_id: ProcedureId) -> Option<Watcher> {
+        let procedures = self.procedures.read().unwrap();
+        procedures
+            .get(&procedure_id)
+            .map(|meta| meta.state_receiver.clone())
     }
 
     /// Notify a suspended parent procedure with specific `procedure_id` by its subprocedure.
@@ -308,15 +316,8 @@ impl LocalManager {
         procedure_id: ProcedureId,
         step: u32,
         procedure: BoxedProcedure,
-    ) -> Result<()> {
-        let meta = Arc::new(ProcedureMeta {
-            id: procedure_id,
-            lock_notify: Notify::new(),
-            parent_id: None,
-            child_notify: Notify::new(),
-            lock_key: procedure.lock_key(),
-            exec_meta: Mutex::new(ExecMeta::default()),
-        });
+    ) -> Result<Watcher> {
+        let meta = Arc::new(ProcedureMeta::new(procedure_id, None, procedure.lock_key()));
         let runner = Runner {
             meta: meta.clone(),
             procedure,
@@ -324,6 +325,8 @@ impl LocalManager {
             step,
             store: ProcedureStore::new(self.state_store.clone()),
         };
+
+        let watcher = meta.state_receiver.clone();
 
         // Inserts meta into the manager before actually spawnd the runner.
         ensure!(
@@ -336,7 +339,7 @@ impl LocalManager {
             let _ = runner.run().await;
         });
 
-        Ok(())
+        Ok(watcher)
     }
 }
 
@@ -351,16 +354,14 @@ impl ProcedureManager for LocalManager {
         Ok(())
     }
 
-    async fn submit(&self, procedure: ProcedureWithId) -> Result<()> {
+    async fn submit(&self, procedure: ProcedureWithId) -> Result<Watcher> {
         let procedure_id = procedure.id;
         ensure!(
             !self.manager_ctx.contains_procedure(procedure_id),
             DuplicateProcedureSnafu { procedure_id }
         );
 
-        self.submit_root(procedure.id, 0, procedure.procedure)?;
-
-        Ok(())
+        self.submit_root(procedure.id, 0, procedure.procedure)
     }
 
     async fn recover(&self) -> Result<()> {
@@ -401,6 +402,10 @@ impl ProcedureManager for LocalManager {
     async fn procedure_state(&self, procedure_id: ProcedureId) -> Result<Option<ProcedureState>> {
         Ok(self.manager_ctx.state(procedure_id))
     }
+
+    fn procedure_watcher(&self, procedure_id: ProcedureId) -> Option<Watcher> {
+        self.manager_ctx.watcher(procedure_id)
+    }
 }
 
 /// Create a new [ProcedureMeta] for test purpose.
@@ -412,14 +417,7 @@ mod test_util {
     use super::*;
 
     pub(crate) fn procedure_meta_for_test() -> ProcedureMeta {
-        ProcedureMeta {
-            id: ProcedureId::random(),
-            lock_notify: Notify::new(),
-            parent_id: None,
-            child_notify: Notify::new(),
-            lock_key: LockKey::default(),
-            exec_meta: Mutex::new(ExecMeta::default()),
-        }
+        ProcedureMeta::new(ProcedureId::random(), None, LockKey::default())
     }
 
     pub(crate) fn new_object_store(dir: &TempDir) -> ObjectStore {
@@ -431,6 +429,8 @@ mod test_util {
 
 #[cfg(test)]
 mod tests {
+    use common_error::mock::MockError;
+    use common_error::prelude::StatusCode;
     use tempdir::TempDir;
 
     use super::*;
@@ -500,6 +500,7 @@ mod tests {
     #[derive(Debug)]
     struct ProcedureToLoad {
         content: String,
+        lock_key: LockKey,
     }
 
     #[async_trait]
@@ -517,7 +518,7 @@ mod tests {
         }
 
         fn lock_key(&self) -> LockKey {
-            LockKey::default()
+            self.lock_key.clone()
         }
     }
 
@@ -525,6 +526,7 @@ mod tests {
         fn new(content: &str) -> ProcedureToLoad {
             ProcedureToLoad {
                 content: content.to_string(),
+                lock_key: LockKey::default(),
             }
         }
 
@@ -608,39 +610,20 @@ mod tests {
         };
         let manager = LocalManager::new(config);
 
-        #[derive(Debug)]
-        struct MockProcedure {}
-
-        #[async_trait]
-        impl Procedure for MockProcedure {
-            fn type_name(&self) -> &str {
-                "MockProcedure"
-            }
-
-            async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
-                unimplemented!()
-            }
-
-            fn dump(&self) -> Result<String> {
-                unimplemented!()
-            }
-
-            fn lock_key(&self) -> LockKey {
-                LockKey::single("test.submit")
-            }
-        }
-
         let procedure_id = ProcedureId::random();
         assert!(manager
             .procedure_state(procedure_id)
             .await
             .unwrap()
             .is_none());
+        assert!(manager.procedure_watcher(procedure_id).is_none());
 
+        let mut procedure = ProcedureToLoad::new("submit");
+        procedure.lock_key = LockKey::single("test.submit");
         manager
             .submit(ProcedureWithId {
                 id: procedure_id,
-                procedure: Box::new(MockProcedure {}),
+                procedure: Box::new(procedure),
             })
             .await
             .unwrap();
@@ -649,15 +632,77 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+        // Wait for the procedure done.
+        let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
+        watcher.changed().await.unwrap();
+        assert_eq!(ProcedureState::Done, *watcher.borrow());
 
         // Try to submit procedure with same id again.
         let err = manager
             .submit(ProcedureWithId {
                 id: procedure_id,
-                procedure: Box::new(MockProcedure {}),
+                procedure: Box::new(ProcedureToLoad::new("submit")),
             })
             .await
             .unwrap_err();
         assert!(matches!(err, Error::DuplicateProcedure { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_state_changed_on_err() {
+        let dir = TempDir::new("on_err").unwrap();
+        let config = ManagerConfig {
+            object_store: test_util::new_object_store(&dir),
+        };
+        let manager = LocalManager::new(config);
+
+        #[derive(Debug)]
+        struct MockProcedure {
+            panic: bool,
+        }
+
+        #[async_trait]
+        impl Procedure for MockProcedure {
+            fn type_name(&self) -> &str {
+                "MockProcedure"
+            }
+
+            async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+                if self.panic {
+                    // Test the runner can set the state to failed even the procedure
+                    // panics.
+                    panic!();
+                } else {
+                    Err(Error::external(MockError::new(StatusCode::Unexpected)))
+                }
+            }
+
+            fn dump(&self) -> Result<String> {
+                Ok(String::new())
+            }
+
+            fn lock_key(&self) -> LockKey {
+                LockKey::single("test.submit")
+            }
+        }
+
+        let check_procedure = |procedure| {
+            async {
+                let procedure_id = ProcedureId::random();
+                let mut watcher = manager
+                    .submit(ProcedureWithId {
+                        id: procedure_id,
+                        procedure: Box::new(procedure),
+                    })
+                    .await
+                    .unwrap();
+                // Wait for the notification.
+                watcher.changed().await.unwrap();
+                assert_eq!(ProcedureState::Failed, *watcher.borrow());
+            }
+        };
+
+        check_procedure(MockProcedure { panic: false }).await;
+        check_procedure(MockProcedure { panic: true }).await;
     }
 }

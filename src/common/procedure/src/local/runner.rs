@@ -12,15 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::logging;
-use tokio::sync::Notify;
 use tokio::time;
 
 use crate::error::{Error, Result};
-use crate::local::{ExecMeta, ManagerContext, ProcedureMeta, ProcedureMetaRef};
+use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
 use crate::{BoxedProcedure, Context, ProcedureId, ProcedureState, ProcedureWithId, Status};
 
@@ -49,6 +48,52 @@ impl ExecResult {
     }
 }
 
+/// A guard to cleanup procedure state.
+struct ProcedureGuard {
+    meta: ProcedureMetaRef,
+    manager_ctx: Arc<ManagerContext>,
+    finish: bool,
+}
+
+impl ProcedureGuard {
+    /// Returns a new [ProcedureGuard].
+    fn new(meta: ProcedureMetaRef, manager_ctx: Arc<ManagerContext>) -> ProcedureGuard {
+        ProcedureGuard {
+            meta,
+            manager_ctx,
+            finish: false,
+        }
+    }
+
+    /// The procedure is finished successfully.
+    fn finish(mut self) {
+        self.finish = true;
+    }
+}
+
+impl Drop for ProcedureGuard {
+    fn drop(&mut self) {
+        if !self.finish {
+            logging::error!("Procedure {} exits unexpectedly", self.meta.id);
+
+            // Set state to failed. This is useful in test as runtime may not abort when the runner task panics.
+            // See https://github.com/tokio-rs/tokio/issues/2002 .
+            // We set set_panic_hook() in the application's main function. But our tests don't have this panic hook.
+            self.meta.set_state(ProcedureState::Failed);
+        }
+
+        // Notify parent procedure.
+        if let Some(parent_id) = self.meta.parent_id {
+            self.manager_ctx.notify_by_subprocedure(parent_id);
+        }
+
+        // Release lock in reverse order.
+        for key in self.meta.lock_key.keys_to_unlock() {
+            self.manager_ctx.lock_map.release_lock(key, self.meta.id);
+        }
+    }
+}
+
 // TODO(yingwen): Support cancellation.
 pub(crate) struct Runner {
     pub(crate) meta: ProcedureMetaRef,
@@ -61,6 +106,9 @@ pub(crate) struct Runner {
 impl Runner {
     /// Run the procedure.
     pub(crate) async fn run(mut self) -> Result<()> {
+        // Ensure we can update the procedure state.
+        let guard = ProcedureGuard::new(self.meta.clone(), self.manager_ctx.clone());
+
         logging::info!(
             "Runner {}-{} starts",
             self.procedure.type_name(),
@@ -84,26 +132,19 @@ impl Runner {
             result = Err(e);
         }
 
-        // Notify parent procedure.
-        if let Some(parent_id) = self.meta.parent_id {
-            self.manager_ctx.notify_by_subprocedure(parent_id);
-        }
+        // We can't remove the metadata of the procedure now as users and its parent might
+        // need to query its state.
+        // TODO(yingwen): 1. Add TTL to the metadata; 2. Only keep state in the procedure store
+        // so we don't need to always store the metadata in memory after the procedure is done.
 
-        // Release lock in reverse order.
-        for key in self.meta.lock_key.keys_to_unlock() {
-            self.manager_ctx.lock_map.release_lock(key, self.meta.id);
-        }
+        // Release locks and notify parent procedure.
+        guard.finish();
 
         // If this is the root procedure, clean up message cache.
         if self.meta.parent_id.is_none() {
             let procedure_ids = self.manager_ctx.procedures_in_tree(&self.meta);
             self.manager_ctx.remove_messages(&procedure_ids);
         }
-
-        // We can't remove the metadata of the procedure now as users and its parent might
-        // need to query its state.
-        // TODO(yingwen): 1. Add TTL to the metadata; 2. Only keep state in the procedure store
-        // so we don't need to always store the metadata in memory after the procedure is done.
 
         logging::info!(
             "Runner {}-{} exits",
@@ -203,14 +244,11 @@ impl Runner {
             step = loaded_procedure.step;
         }
 
-        let meta = Arc::new(ProcedureMeta {
-            id: procedure_id,
-            lock_notify: Notify::new(),
-            parent_id: Some(self.meta.id),
-            child_notify: Notify::new(),
-            lock_key: procedure.lock_key(),
-            exec_meta: Mutex::new(ExecMeta::default()),
-        });
+        let meta = Arc::new(ProcedureMeta::new(
+            procedure_id,
+            Some(self.meta.id),
+            procedure.lock_key(),
+        ));
         let runner = Runner {
             meta: meta.clone(),
             procedure,
