@@ -24,6 +24,7 @@ use crate::statements::tql::{Tql, TqlEval, TqlExplain};
 
 pub const TQL: &str = "TQL";
 const EVAL: &str = "EVAL";
+const EVALUATE: &str = "EVALUATE";
 const EXPLAIN: &str = "EXPLAIN";
 use sqlparser::parser::Parser;
 
@@ -35,20 +36,26 @@ impl<'a> ParserContext<'a> {
         self.parser.next_token();
 
         match self.parser.peek_token() {
-            Token::Word(w) => match w.keyword {
-                Keyword::NoKeyword if w.value.to_uppercase() == EVAL && w.quote_style.is_none() => {
-                    self.parser.next_token();
-                    self.parse_tql_eval()
-                        .context(error::SyntaxSnafu { sql: self.sql })
-                }
+            Token::Word(w) => {
+                let uppercase = w.value.to_uppercase();
+                match w.keyword {
+                    Keyword::NoKeyword
+                        if (uppercase == EVAL || uppercase == EVALUATE)
+                            && w.quote_style.is_none() =>
+                    {
+                        self.parser.next_token();
+                        self.parse_tql_eval()
+                            .context(error::SyntaxSnafu { sql: self.sql })
+                    }
 
-                Keyword::EXPLAIN => {
-                    self.parser.next_token();
-                    self.parse_tql_explain()
-                }
+                    Keyword::EXPLAIN => {
+                        self.parser.next_token();
+                        self.parse_tql_explain()
+                    }
 
-                _ => self.unsupported(self.peek_token_as_string()),
-            },
+                    _ => self.unsupported(self.peek_token_as_string()),
+                }
+            }
             unexpected => self.unsupported(unexpected.to_string()),
         }
     }
@@ -150,7 +157,7 @@ mod tests {
         assert_eq!(1, result.len());
 
         let statement = result.remove(0);
-        match statement {
+        match statement.clone() {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(eval.start, "1676887657.1");
                 assert_eq!(eval.end, "1676887659.5");
@@ -159,6 +166,14 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        let sql = "TQL EVALUATE (1676887657.1, 1676887659.5, 30.3) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
+
+        let mut result = ParserContext::create_with_dialect(sql, &GenericDialect {}).unwrap();
+        assert_eq!(1, result.len());
+
+        let statement2 = result.remove(0);
+        assert_eq!(statement, statement2);
 
         let sql = "tql eval ('2015-07-01T20:10:30.781Z', '2015-07-01T20:11:00.781Z', '30s') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
 

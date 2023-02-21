@@ -93,7 +93,8 @@ where
         match statement {
             Statement::Query(qb) => self.query_to_plan(qb),
             Statement::Explain(explain) => self.explain_to_plan(explain),
-            Statement::Tql(_tql) => todo!(),
+            // The TQL has it's a dedicated planner
+            Statement::Tql(_tql) => unreachable!(),
             Statement::ShowTables(_)
             | Statement::Delete(_)
             | Statement::ShowDatabases(_)
