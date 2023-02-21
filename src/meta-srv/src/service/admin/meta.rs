@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use api::v1::meta::{RangeRequest, RangeResponse};
 use catalog::helper::{CATALOG_KEY_PREFIX, SCHEMA_KEY_PREFIX, TABLE_GLOBAL_KEY_PREFIX};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 
 use crate::error::Result;
@@ -55,15 +55,11 @@ impl HttpHandler for SchemasHandler {
         _: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let catalog = match params.get("catalog_name") {
-            Some(catalog) => catalog,
-            None => {
-                return error::MissingRequiredParameterSnafu {
-                    param: "catalog_name",
-                }
-                .fail();
-            }
-        };
+        let catalog = params
+            .get("catalog_name")
+            .context(error::MissingRequiredParameterSnafu {
+                param: "catalog_name",
+            })?;
         let prefix = format!("{SCHEMA_KEY_PREFIX}-{catalog}",);
         get_http_response_by_prefix(prefix, &self.kv_store).await
     }
@@ -76,25 +72,17 @@ impl HttpHandler for TablesHandler {
         _: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let catalog = match params.get("catalog_name") {
-            Some(catalog) => catalog,
-            None => {
-                return error::MissingRequiredParameterSnafu {
-                    param: "catalog_name",
-                }
-                .fail();
-            }
-        };
+        let catalog = params
+            .get("catalog_name")
+            .context(error::MissingRequiredParameterSnafu {
+                param: "catalog_name",
+            })?;
 
-        let schema = match params.get("schema_name") {
-            Some(schema) => schema,
-            None => {
-                return error::MissingRequiredParameterSnafu {
-                    param: "schema_name",
-                }
-                .fail();
-            }
-        };
+        let schema = params
+            .get("schema_name")
+            .context(error::MissingRequiredParameterSnafu {
+                param: "schema_name",
+            })?;
         let prefix = format!("{TABLE_GLOBAL_KEY_PREFIX}-{catalog}-{schema}",);
         get_http_response_by_prefix(prefix, &self.kv_store).await
     }
@@ -107,15 +95,12 @@ impl HttpHandler for TableHandler {
         _: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let table_name = match params.get("full_table_name") {
-            Some(full_table_name) => full_table_name.replace('.', "-"),
-            None => {
-                return error::MissingRequiredParameterSnafu {
-                    param: "full_table_name",
-                }
-                .fail();
-            }
-        };
+        let table_name = params
+            .get("full_table_name")
+            .map(|full_table_name| full_table_name.replace('.', "-"))
+            .context(error::MissingRequiredParameterSnafu {
+                param: "full_table_name",
+            })?;
         let table_key = format!("{TABLE_GLOBAL_KEY_PREFIX}-{table_name}");
 
         let response = self.kv_store.get(table_key.into_bytes()).await?;

@@ -29,15 +29,14 @@ impl HttpHandler for LeaderHandler {
     async fn handle(&self, _: &str, _: &HashMap<String, String>) -> Result<http::Response<String>> {
         if let Some(election) = &self.election {
             let leader_addr = election.leader().await?.0;
-            http::Response::builder()
+            return http::Response::builder()
                 .status(http::StatusCode::OK)
                 .body(leader_addr)
-                .context(error::InvalidHttpBodySnafu)
-        } else {
-            http::Response::builder()
-                .status(http::StatusCode::OK)
-                .body("election info is None".to_string())
-                .context(error::InvalidHttpBodySnafu)
+                .context(error::InvalidHttpBodySnafu);
         }
+        http::Response::builder()
+            .status(http::StatusCode::OK)
+            .body("election info is None".to_string())
+            .context(error::InvalidHttpBodySnafu)
     }
 }
