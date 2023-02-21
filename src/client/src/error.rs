@@ -26,6 +26,16 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    #[snafu(display("Invalid tonic metadata key: {}", source))]
+    InvalidTonicMetaKey {
+        source: tonic::metadata::errors::InvalidMetadataKey,
+    },
+
+    #[snafu(display("Invalid tonic metadata value: {}", source))]
+    InvalidTonicMetaValue {
+        source: tonic::metadata::errors::InvalidMetadataValue,
+    },
+
     #[snafu(display(
         "Failed to do Flight get, addr: {}, code: {}, source: {}",
         addr,
@@ -80,7 +90,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::IllegalFlightMessages { .. }
+            Error::InvalidTonicMetaKey { .. }
+            | Error::InvalidTonicMetaValue { .. }
+            | Error::IllegalFlightMessages { .. }
             | Error::ColumnDataType { .. }
             | Error::MissingField { .. } => StatusCode::Internal,
             Error::FlightGet { source, .. } => source.status_code(),

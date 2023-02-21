@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use api::v1::ddl_request::Expr as DdlExpr;
@@ -29,8 +30,12 @@ use common_query::Output;
 use futures_util::{TryFutureExt, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, ResultExt};
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue};
 
-use crate::error::{ConvertFlightDataSnafu, IllegalFlightMessagesSnafu};
+use crate::error::{
+    ConvertFlightDataSnafu, IllegalFlightMessagesSnafu, InvalidTonicMetaKeySnafu,
+    InvalidTonicMetaValueSnafu,
+};
 use crate::{error, Client, Result};
 
 #[derive(Clone, Debug)]
@@ -61,46 +66,61 @@ impl Database {
         self.schema = schema.into();
     }
 
-    pub async fn insert(&self, request: InsertRequest) -> Result<Output> {
-        self.do_get(Request::Insert(request)).await
+    pub async fn insert(&self, request: InsertRequest, ctx: FlightContext) -> Result<Output> {
+        self.do_get(Request::Insert(request), ctx).await
     }
 
-    pub async fn sql(&self, sql: &str) -> Result<Output> {
-        self.do_get(Request::Query(QueryRequest {
-            query: Some(Query::Sql(sql.to_string())),
-        }))
+    pub async fn sql(&self, sql: &str, ctx: FlightContext) -> Result<Output> {
+        self.do_get(
+            Request::Query(QueryRequest {
+                query: Some(Query::Sql(sql.to_string())),
+            }),
+            ctx,
+        )
         .await
     }
 
-    pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
-        self.do_get(Request::Query(QueryRequest {
-            query: Some(Query::LogicalPlan(logical_plan)),
-        }))
+    pub async fn logical_plan(&self, logical_plan: Vec<u8>, ctx: FlightContext) -> Result<Output> {
+        self.do_get(
+            Request::Query(QueryRequest {
+                query: Some(Query::LogicalPlan(logical_plan)),
+            }),
+            ctx,
+        )
         .await
     }
 
-    pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
-        self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::CreateTable(expr)),
-        }))
+    pub async fn create(&self, expr: CreateTableExpr, ctx: FlightContext) -> Result<Output> {
+        self.do_get(
+            Request::Ddl(DdlRequest {
+                expr: Some(DdlExpr::CreateTable(expr)),
+            }),
+            ctx,
+        )
         .await
     }
 
-    pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
-        self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::Alter(expr)),
-        }))
+    pub async fn alter(&self, expr: AlterExpr, ctx: FlightContext) -> Result<Output> {
+        self.do_get(
+            Request::Ddl(DdlRequest {
+                expr: Some(DdlExpr::Alter(expr)),
+            }),
+            ctx,
+        )
         .await
     }
 
-    pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
-        self.do_get(Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::DropTable(expr)),
-        }))
+    pub async fn drop_table(&self, expr: DropTableExpr, ctx: FlightContext) -> Result<Output> {
+        self.do_get(
+            Request::Ddl(DdlRequest {
+                expr: Some(DdlExpr::DropTable(expr)),
+            }),
+            ctx,
+        )
         .await
     }
 
-    async fn do_get(&self, request: Request) -> Result<Output> {
+    async fn do_get(&self, request: Request, ctx: FlightContext) -> Result<Output> {
         let request = GreptimeRequest {
             header: Some(RequestHeader {
                 catalog: self.catalog.clone(),
@@ -111,6 +131,14 @@ impl Database {
         let request = Ticket {
             ticket: request.encode_to_vec(),
         };
+        let mut request = tonic::Request::new(request);
+        // insert metadata
+        for (key, value) in ctx.ctx {
+            request.metadata_mut().insert(
+                AsciiMetadataKey::from_str(key.as_str()).context(InvalidTonicMetaKeySnafu)?,
+                AsciiMetadataValue::try_from(value).context(InvalidTonicMetaValueSnafu)?,
+            );
+        }
 
         let mut client = self.client.make_client()?;
 
@@ -162,6 +190,27 @@ fn get_metadata_value(e: &tonic::Status, key: &str) -> Option<String> {
     e.metadata()
         .get(key)
         .and_then(|v| String::from_utf8(v.as_bytes().to_vec()).ok())
+}
+
+#[derive(Default, Clone)]
+pub struct FlightContext {
+    ctx: HashMap<String, String>,
+}
+
+impl FlightContext {
+    pub fn new() -> Self {
+        Self {
+            ctx: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, key: String, value: String) {
+        self.ctx.insert(key, value);
+    }
+
+    pub fn get(&self, key: &str) -> Option<&String> {
+        self.ctx.get(key)
+    }
 }
 
 #[cfg(test)]
