@@ -1363,9 +1363,8 @@ mod test {
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
 
-    #[tokio::test]
-    async fn binary_op_literal_column() {
-        let prom_expr = parser::parse(r#"1 + some_metric{tag_0="bar"}"#).unwrap();
+    async fn indie_query_plan_compare(query: &str, expected: String) {
+        let prom_expr = parser::parse(query).unwrap();
         let eval_stmt = EvalStmt {
             expr: prom_expr,
             start: UNIX_EPOCH,
@@ -1379,7 +1378,13 @@ mod test {
         let context_provider = build_test_context_provider("some_metric".to_string(), 1, 1).await;
         let plan = PromPlanner::stmt_to_plan(eval_stmt, context_provider).unwrap();
 
-        let  expected = String::from(
+        assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn binary_op_literal_column() {
+        let query = r#"1 + some_metric{tag_0="bar"}"#;
+        let expected = String::from(
             "Projection: some_metric.tag_0, some_metric.timestamp, Float64(1) + some_metric.field_0 AS Float64(1) + field_0 [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), Float64(1) + field_0:Float64;N]\
             \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
             \n    PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
@@ -1389,31 +1394,56 @@ mod test {
             \n            TableScan: some_metric, unsupported_filters=[tag_0 = Utf8(\"bar\"), timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
         );
 
-        assert_eq!(plan.display_indent_schema().to_string(), expected);
+        indie_query_plan_compare(query, expected).await;
     }
 
-    // TODO(ruihang): pure literal arithmetic is not supported yet.
     #[tokio::test]
+    #[ignore = "pure literal arithmetic is not supported yet"]
     async fn binary_op_literal_literal() {
-        let prom_expr = parser::parse(r#"1 + 1"#).unwrap();
-        let eval_stmt = EvalStmt {
-            expr: prom_expr,
-            start: UNIX_EPOCH,
-            end: UNIX_EPOCH
-                .checked_add(Duration::from_secs(100_000))
-                .unwrap(),
-            interval: Duration::from_secs(5),
-            lookback_delta: Duration::from_secs(1),
-        };
+        let query = r#"1 + 1"#;
+        let expected = String::from("");
 
-        let context_provider = build_test_context_provider("some_metric".to_string(), 1, 1).await;
-        let plan_result = PromPlanner::stmt_to_plan(eval_stmt, context_provider);
-        assert!(plan_result.is_err());
+        indie_query_plan_compare(query, expected).await;
     }
 
-    #[test]
-    fn bool_grammar() {
-        let prom_expr = parser::parse("demo_num_cpus + (1 != bool 2)").unwrap();
-        println!("prom_expr: {:#?}", prom_expr);
+    #[tokio::test]
+    async fn simple_bool_grammar() {
+        let query = "some_metric != bool 1.2345";
+        let expected = String::from(
+            "Projection: some_metric.tag_0, some_metric.timestamp, CAST(some_metric.field_0 != Float64(1.2345) AS Float64) AS field_0 != Float64(1.2345) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0 != Float64(1.2345):Float64;N]\
+            \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n    PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n        Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n          Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+        );
+
+        indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "pure literal arithmetic is not supported yet"]
+    async fn bool_with_additional_arithmetic() {
+        let query = "some_metric + (1 == bool 2)";
+        let expected = String::from("");
+
+        indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn simple_unary() {
+        let query = "-some_metric";
+        let expected = String::from(
+            "Projection: some_metric.tag_0, some_metric.timestamp, (- some_metric.field_0) AS (- field_0) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), (- field_0):Float64;N]\
+            \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n    PromSeriesNormalize: offset=[0], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n        Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n          Filter: some_metric.timestamp >= TimestampMillisecond(-1000, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n            TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100000000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+        );
+
+        indie_query_plan_compare(query, expected).await;
     }
 }
