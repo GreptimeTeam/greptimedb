@@ -271,8 +271,8 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::meta::{
-        BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest, KeyValue, MoveValueRequest,
-        PutRequest, RangeRequest,
+        BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest, KeyValue,
+        MoveValueRequest, PutRequest, RangeRequest,
     };
 
     use super::MemStore;
@@ -344,8 +344,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(b"key11".to_vec(), resp.prev_kv.as_ref().unwrap().key);
-        assert_eq!(b"val12".to_vec(), resp.prev_kv.as_ref().unwrap().value);
+        assert_eq!(b"key11".as_slice(), resp.prev_kv.as_ref().unwrap().key);
+        assert_eq!(b"val12".as_slice(), resp.prev_kv.as_ref().unwrap().value);
     }
 
     #[tokio::test]
@@ -367,10 +367,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(2, resp.kvs.len());
-        assert_eq!(b"key1".to_vec(), resp.kvs[0].key);
-        assert_eq!(b"val1".to_vec(), resp.kvs[0].value);
-        assert_eq!(b"key11".to_vec(), resp.kvs[1].key);
-        assert_eq!(b"val11".to_vec(), resp.kvs[1].value);
+        assert_eq!(b"key1".as_slice(), resp.kvs[0].key);
+        assert_eq!(b"val1".as_slice(), resp.kvs[0].value);
+        assert_eq!(b"key11".as_slice(), resp.kvs[1].key);
+        assert_eq!(b"val11".as_slice(), resp.kvs[1].value);
 
         let resp = kv_store
             .range(RangeRequest {
@@ -384,10 +384,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(2, resp.kvs.len());
-        assert_eq!(b"key1".to_vec(), resp.kvs[0].key);
-        assert_eq!(b"".to_vec(), resp.kvs[0].value);
-        assert_eq!(b"key11".to_vec(), resp.kvs[1].key);
-        assert_eq!(b"".to_vec(), resp.kvs[1].value);
+        assert_eq!(b"key1".as_slice(), resp.kvs[0].key);
+        assert_eq!(b"".as_slice(), resp.kvs[0].value);
+        assert_eq!(b"key11".as_slice(), resp.kvs[1].key);
+        assert_eq!(b"".as_slice(), resp.kvs[1].value);
 
         let resp = kv_store
             .range(RangeRequest {
@@ -400,8 +400,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(1, resp.kvs.len());
-        assert_eq!(b"key1".to_vec(), resp.kvs[0].key);
-        assert_eq!(b"val1".to_vec(), resp.kvs[0].value);
+        assert_eq!(b"key1".as_slice(), resp.kvs[0].key);
+        assert_eq!(b"val1".as_slice(), resp.kvs[0].value);
 
         let resp = kv_store
             .range(RangeRequest {
@@ -415,8 +415,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(1, resp.kvs.len());
-        assert_eq!(b"key1".to_vec(), resp.kvs[0].key);
-        assert_eq!(b"val1".to_vec(), resp.kvs[0].value);
+        assert_eq!(b"key1".as_slice(), resp.kvs[0].key);
+        assert_eq!(b"val1".as_slice(), resp.kvs[0].value);
     }
 
     #[tokio::test]
@@ -425,7 +425,7 @@ mod tests {
 
         let keys = vec![];
         let batch_resp = kv_store
-            .batch_get(api::v1::meta::BatchGetRequest {
+            .batch_get(BatchGetRequest {
                 keys,
                 ..Default::default()
             })
@@ -436,7 +436,7 @@ mod tests {
 
         let keys = vec![b"key10".to_vec()];
         let batch_resp = kv_store
-            .batch_get(api::v1::meta::BatchGetRequest {
+            .batch_get(BatchGetRequest {
                 keys,
                 ..Default::default()
             })
@@ -447,7 +447,7 @@ mod tests {
 
         let keys = vec![b"key1".to_vec(), b"key3".to_vec(), b"key4".to_vec()];
         let batch_resp = kv_store
-            .batch_get(api::v1::meta::BatchGetRequest {
+            .batch_get(BatchGetRequest {
                 keys,
                 ..Default::default()
             })
@@ -455,10 +455,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(2, batch_resp.kvs.len());
-        assert_eq!(b"key1".to_vec(), batch_resp.kvs[0].key);
-        assert_eq!(b"val1".to_vec(), batch_resp.kvs[0].value);
-        assert_eq!(b"key3".to_vec(), batch_resp.kvs[1].key);
-        assert_eq!(b"val3".to_vec(), batch_resp.kvs[1].value);
+        assert_eq!(b"key1".as_slice(), batch_resp.kvs[0].key);
+        assert_eq!(b"val1".as_slice(), batch_resp.kvs[0].value);
+        assert_eq!(b"key3".as_slice(), batch_resp.kvs[1].key);
+        assert_eq!(b"val3".as_slice(), batch_resp.kvs[1].value);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -505,8 +505,8 @@ mod tests {
 
         let resp = kv_store.delete_range(req).await.unwrap();
         assert_eq!(1, resp.prev_kvs.len());
-        assert_eq!(b"key3".to_vec(), resp.prev_kvs[0].key);
-        assert_eq!(b"val3".to_vec(), resp.prev_kvs[0].value);
+        assert_eq!(b"key3".as_slice(), resp.prev_kvs[0].key);
+        assert_eq!(b"val3".as_slice(), resp.prev_kvs[0].value);
 
         let get_resp = kv_store.get(b"key3".to_vec()).await.unwrap();
         assert!(get_resp.is_none());
@@ -556,8 +556,8 @@ mod tests {
         };
 
         let resp = kv_store.move_value(req).await.unwrap();
-        assert_eq!(b"key1".to_vec(), resp.kv.as_ref().unwrap().key);
-        assert_eq!(b"val1".to_vec(), resp.kv.as_ref().unwrap().value);
+        assert_eq!(b"key1".as_slice(), resp.kv.as_ref().unwrap().key);
+        assert_eq!(b"val1".as_slice(), resp.kv.as_ref().unwrap().value);
 
         let kv_store = mock_mem_store_with_data().await;
 
