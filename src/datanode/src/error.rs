@@ -400,6 +400,21 @@ pub enum Error {
         #[snafu(backtrace)]
         source: common_procedure::error::Error,
     },
+
+    #[snafu(display("Failed to submit procedure, source: {}", source))]
+    SubmitProcedure {
+        #[snafu(backtrace)]
+        source: common_procedure::error::Error,
+    },
+
+    #[snafu(display("Failed to wait procedure done, source: {}", source))]
+    WaitProcedure {
+        source: tokio::sync::watch::error::RecvError,
+        backtrace: Backtrace,
+    },
+
+    #[snafu(display("Failed to execute procedure"))]
+    ProcedureExec {},
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -476,7 +491,11 @@ impl ErrorExt for Error {
             CopyTable { source, .. } => source.status_code(),
             TableScanExec { source, .. } => source.status_code(),
             UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
-            RecoverProcedure { source, .. } => source.status_code(),
+            RecoverProcedure { source, .. } | SubmitProcedure { source, .. } => {
+                source.status_code()
+            }
+            WaitProcedure { .. } => StatusCode::Internal,
+            ProcedureExec { .. } => StatusCode::Internal,
         }
     }
 
