@@ -102,10 +102,15 @@ impl<S: LogStore> Picker for SimplePicker<S> {
             })
             .unwrap_or(vec![]);
 
-        info!(
-            "Expired SSTs in region {}: {:?}",
-            req.region_id, expired_ssts
-        );
+        if !expired_ssts.is_empty() {
+            info!(
+                "Expired SSTs in region {}: {:?}",
+                req.region_id, expired_ssts
+            );
+            // here we mark expired SSTs as compacting to avoid them being picked.
+            expired_ssts.iter().for_each(|f| f.mark_compacting(true));
+        }
+
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
             let outputs = self.strategy.pick(ctx, level);

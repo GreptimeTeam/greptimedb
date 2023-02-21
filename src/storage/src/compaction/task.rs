@@ -119,10 +119,6 @@ impl<S: LogStore> CompactionTaskImpl<S> {
                 input.mark_compacting(compacting);
             }
         }
-
-        for expired in &self.expired_ssts {
-            expired.mark_compacting(true);
-        }
     }
 }
 
