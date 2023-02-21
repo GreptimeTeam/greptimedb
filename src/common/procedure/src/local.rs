@@ -316,7 +316,7 @@ impl LocalManager {
         procedure_id: ProcedureId,
         step: u32,
         procedure: BoxedProcedure,
-    ) -> Result<()> {
+    ) -> Result<Watcher> {
         let meta = Arc::new(ProcedureMeta::new(procedure_id, None, procedure.lock_key()));
         let runner = Runner {
             meta: meta.clone(),
@@ -325,6 +325,8 @@ impl LocalManager {
             step,
             store: ProcedureStore::new(self.state_store.clone()),
         };
+
+        let watcher = meta.state_receiver.clone();
 
         // Inserts meta into the manager before actually spawnd the runner.
         ensure!(
@@ -337,7 +339,7 @@ impl LocalManager {
             let _ = runner.run().await;
         });
 
-        Ok(())
+        Ok(watcher)
     }
 }
 
@@ -352,16 +354,14 @@ impl ProcedureManager for LocalManager {
         Ok(())
     }
 
-    async fn submit(&self, procedure: ProcedureWithId) -> Result<()> {
+    async fn submit(&self, procedure: ProcedureWithId) -> Result<Watcher> {
         let procedure_id = procedure.id;
         ensure!(
             !self.manager_ctx.contains_procedure(procedure_id),
             DuplicateProcedureSnafu { procedure_id }
         );
 
-        self.submit_root(procedure.id, 0, procedure.procedure)?;
-
-        Ok(())
+        self.submit_root(procedure.id, 0, procedure.procedure)
     }
 
     async fn recover(&self) -> Result<()> {
@@ -689,7 +689,7 @@ mod tests {
         let check_procedure = |procedure| {
             async {
                 let procedure_id = ProcedureId::random();
-                manager
+                let mut watcher = manager
                     .submit(ProcedureWithId {
                         id: procedure_id,
                         procedure: Box::new(procedure),
@@ -697,7 +697,6 @@ mod tests {
                     .await
                     .unwrap();
                 // Wait for the notification.
-                let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
                 watcher.changed().await.unwrap();
                 assert_eq!(ProcedureState::Failed, *watcher.borrow());
             }

@@ -221,7 +221,9 @@ pub trait ProcedureManager: Send + Sync + 'static {
     fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()>;
 
     /// Submits a procedure to execute.
-    async fn submit(&self, procedure: ProcedureWithId) -> Result<()>;
+    ///
+    /// Returns a [Watcher] to watch the created procedure.
+    async fn submit(&self, procedure: ProcedureWithId) -> Result<Watcher>;
 
     /// Recovers unfinished procedures and reruns them.
     ///
