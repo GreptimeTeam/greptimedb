@@ -239,7 +239,6 @@ fn stmt_options_to_table_options(opts: &[SqlOption]) -> error::Result<TableOptio
 #[cfg(test)]
 mod tests {
     use session::context::QueryContext;
-    use sql::ast::Ident;
     use sql::dialect::GenericDialect;
     use sql::parser::ParserContext;
     use sql::statements::statement::Statement;

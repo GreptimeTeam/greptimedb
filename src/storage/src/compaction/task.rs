@@ -61,7 +61,7 @@ impl<S: LogStore> Drop for CompactionTaskImpl<S> {
 
 impl<S: LogStore> CompactionTaskImpl<S> {
     /// Compacts inputs SSTs, returns `(output file, compacted input file)`.
-    async fn merge_ssts(&mut self) -> Result<(Vec<FileMeta>, Vec<FileMeta>)> {
+    async fn merge_ssts(&mut self) -> Result<(HashSet<FileMeta>, HashSet<FileMeta>)> {
         let mut futs = Vec::with_capacity(self.outputs.len());
         let mut compacted_inputs = HashSet::new();
         let region_id = self.shared_data.id();
@@ -90,8 +90,8 @@ impl<S: LogStore> CompactionTaskImpl<S> {
     /// Writes updated SST info into manifest.
     async fn write_manifest_and_apply(
         &self,
-        output: Vec<FileMeta>,
-        input: Vec<FileMeta>,
+        output: HashSet<FileMeta>,
+        input: HashSet<FileMeta>,
     ) -> Result<()> {
         let version = &self.shared_data.version_control;
         let region_version = version.metadata().version();
@@ -99,8 +99,8 @@ impl<S: LogStore> CompactionTaskImpl<S> {
         let edit = RegionEdit {
             region_version,
             flushed_sequence: None,
-            files_to_add: output,
-            files_to_remove: input,
+            files_to_add: Vec::from_iter(output.into_iter()),
+            files_to_remove: Vec::from_iter(input.into_iter()),
         };
         info!(
             "Compacted region: {}, region edit: {:?}",

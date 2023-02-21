@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, info};
 use common_time::Timestamp;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -97,11 +97,15 @@ impl<S: LogStore> Picker for SimplePicker<S> {
         let expired_ssts = self
             .get_expired_ssts(levels, req.ttl)
             .map_err(|e| {
-                error!(e;"Failed to get region expired SST files, ttl: {:?}", req.ttl);
+                error!(e;"Failed to get region expired SST files, region: {}, ttl: {:?}", req.region_id, req.ttl);
                 e
             })
             .unwrap_or(vec![]);
 
+        info!(
+            "Expired SSTs in region {}: {:?}",
+            req.region_id, expired_ssts
+        );
         for level_num in 0..levels.level_num() {
             let level = levels.level(level_num as u8);
             let outputs = self.strategy.pick(ctx, level);
