@@ -181,7 +181,7 @@ impl Timestamp {
 
     pub fn to_chrono_datetime(&self) -> LocalResult<DateTime<Utc>> {
         let (sec, nsec) = self.split();
-        Utc.timestamp_opt(sec, nsec as u32)
+        Utc.timestamp_opt(sec, nsec)
     }
 }
 
