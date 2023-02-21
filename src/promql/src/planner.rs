@@ -767,15 +767,15 @@ impl<S: ContextProvider> PromPlanner<S> {
 
     /// Check if the given op is a [comparison operator](https://prometheus.io/docs/prometheus/latest/querying/operators/#comparison-binary-operators).
     fn is_token_a_comparison_op(token: TokenType) -> bool {
-        match token.id() {
+        matches!(
+            token.id(),
             token::T_EQLC
-            | token::T_NEQ
-            | token::T_GTR
-            | token::T_LSS
-            | token::T_GTE
-            | token::T_LTE => true,
-            _ => false,
-        }
+                | token::T_NEQ
+                | token::T_GTR
+                | token::T_LSS
+                | token::T_GTE
+                | token::T_LTE
+        )
     }
 
     /// Build a inner join on time index column and tag columns to concat two logical plans.
