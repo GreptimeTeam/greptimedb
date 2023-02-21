@@ -42,6 +42,68 @@ pub(super) fn sample_test_case() -> Vec<TestCase> {
     vec![
         TestCase {
             input: ronish! {
+                "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0])
+            },
+            script: r#"
+from greptime import *
+ret = a+3.0
+ret = ret * 2.0
+ret = ret / 2.0
+ret = ret - 3.0
+ret"#
+                .to_string(),
+            expect: vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
+        },
+        TestCase {
+            input: ronish! {
+                "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
+                "b": vector!(Float64Vector, [3.0f64, 2.0, 1.0])
+            },
+            script: r#"
+from greptime import *
+ret = a+b
+ret"#
+                .to_string(),
+            expect: vector!(Float64Vector, [4.0f64, 4.0, 4.0]),
+        },
+        TestCase {
+            input: ronish! {
+                "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
+                "b": vector!(Float64Vector, [3.0f64, 2.0, 1.0])
+            },
+            script: r#"
+from greptime import *
+ret = a-b
+ret"#
+                .to_string(),
+            expect: vector!(Float64Vector, [-2.0f64, 0.0, 2.0]),
+        },
+        TestCase {
+            input: ronish! {
+                "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
+                "b": vector!(Float64Vector, [3.0f64, 2.0, 1.0])
+            },
+            script: r#"
+from greptime import *
+ret = a*b
+ret"#
+                .to_string(),
+            expect: vector!(Float64Vector, [3.0f64, 4.0, 3.0]),
+        },
+        TestCase {
+            input: ronish! {
+                "a": vector!(Float64Vector, [1.0f64, 2.0, 3.0]),
+                "b": vector!(Float64Vector, [3.0f64, 2.0, 1.0])
+            },
+            script: r#"
+from greptime import *
+ret = a/b
+ret"#
+                .to_string(),
+            expect: vector!(Float64Vector, [1. / 3., 1.0, 3.0]),
+        },
+        TestCase {
+            input: ronish! {
                 "values": vector!(Float64Vector, [1.0f64, 2.0, 3.0])
             },
             script: r#"

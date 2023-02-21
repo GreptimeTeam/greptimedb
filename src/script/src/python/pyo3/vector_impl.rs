@@ -60,11 +60,13 @@ impl PyVector {
         op: F,
     ) -> PyResult<Self>
     where
-        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
+        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String> + Send,
     {
         let right = pyo3_obj_try_to_typed_val(right.as_ref(py), None)?;
-        self.scalar_arith_op(right, target_type, op)
-            .map_err(PyValueError::new_err)
+        py.allow_threads(|| {
+            self.scalar_arith_op(right, target_type, op)
+                .map_err(PyValueError::new_err)
+        })
     }
     fn pyo3_vector_arith_op<F>(
         &self,
@@ -74,11 +76,13 @@ impl PyVector {
         op: F,
     ) -> PyResult<Self>
     where
-        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
+        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String> + Send,
     {
         let right = right.extract::<PyVector>(py)?;
-        self.vector_arith_op(&right, target_type, op)
-            .map_err(PyValueError::new_err)
+        py.allow_threads(|| {
+            self.vector_arith_op(&right, target_type, op)
+                .map_err(PyValueError::new_err)
+        })
     }
 }
 
