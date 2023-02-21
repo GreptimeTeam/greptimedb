@@ -22,10 +22,10 @@ pub struct TqlEval {
     pub start: String,
     pub end: String,
     pub step: String,
-    pub expr: String,
+    pub query: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TqlExplain {
-    pub expr: String,
+    pub query: String,
 }

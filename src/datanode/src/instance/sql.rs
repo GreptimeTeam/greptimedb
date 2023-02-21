@@ -30,6 +30,7 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use sql::ast::ObjectName;
 use sql::statements::statement::Statement;
+use sql::statements::tql::Tql;
 use table::engine::TableReference;
 use table::requests::{CopyTableRequest, CreateDatabaseRequest, DropTableRequest};
 
@@ -198,7 +199,33 @@ impl Instance {
                     .execute(SqlRequest::CopyTable(req), query_ctx)
                     .await
             }
-            QueryStatement::Sql(Statement::Tql(_tql)) => todo!(),
+            QueryStatement::Sql(Statement::Tql(tql)) => self.execute_tql(tql, query_ctx).await,
+        }
+    }
+
+    pub(crate) async fn execute_tql(&self, tql: Tql, query_ctx: QueryContextRef) -> Result<Output> {
+        match tql {
+            Tql::Eval(eval) => {
+                let promql = PromQuery {
+                    start: eval.start,
+                    end: eval.end,
+                    step: eval.step,
+                    query: eval.query,
+                };
+                let stmt = QueryLanguageParser::parse_promql(&promql).context(ExecuteSqlSnafu)?;
+                let logical_plan = self
+                    .query_engine
+                    .statement_to_plan(stmt, query_ctx)
+                    .context(ExecuteSqlSnafu)?;
+
+                self.query_engine
+                    .execute(&logical_plan)
+                    .await
+                    .context(ExecuteSqlSnafu)
+            }
+            Tql::Explain(_explain) => {
+                todo!("waiting for promql-parser ast adding a explain node")
+            }
         }
     }
 

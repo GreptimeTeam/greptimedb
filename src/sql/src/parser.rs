@@ -120,7 +120,9 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::COPY => self.parse_copy(),
 
-                    Keyword::NoKeyword if w.value == tql_parser::TQL && w.quote_style.is_none() => {
+                    Keyword::NoKeyword
+                        if w.value.to_uppercase() == tql_parser::TQL && w.quote_style.is_none() =>
+                    {
                         self.parse_tql()
                     }
 
