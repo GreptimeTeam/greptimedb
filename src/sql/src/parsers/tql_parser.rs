@@ -104,7 +104,7 @@ impl<'a> ParserContext<'a> {
 
             while parser.next_token() != Token::EOF {
                 // consume all tokens
-                // TODO(dennis): supports multi TQL statements seperated by ';'?
+                // TODO(dennis): supports multi TQL statements separated by ';'?
             }
 
             Ok(query.trim().to_string())
