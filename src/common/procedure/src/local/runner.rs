@@ -44,10 +44,6 @@ impl ExecResult {
         matches!(self, ExecResult::Done)
     }
 
-    fn is_retry_later(&self) -> bool {
-        matches!(self, ExecResult::RetryLater)
-    }
-
     fn is_failed(&self) -> bool {
         matches!(self, ExecResult::Failed(_))
     }

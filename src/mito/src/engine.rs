@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod procedure;
+
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use common_procedure::{BoxedProcedure, ProcedureManager};
 use common_telemetry::tracing::log::info;
 use common_telemetry::{debug, logging};
-use datatypes::schema::{Schema, SchemaRef};
+use datatypes::schema::Schema;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{
@@ -27,7 +30,7 @@ use store_api::storage::{
     CreateOptions, EngineContext as StorageEngineContext, OpenOptions, Region,
     RegionDescriptorBuilder, RegionId, RowKeyDescriptor, RowKeyDescriptorBuilder, StorageEngine,
 };
-use table::engine::{EngineContext, TableEngine, TableReference};
+use table::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::error::TableOperationSnafu;
 use table::metadata::{
     TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType, TableVersion,
@@ -40,6 +43,7 @@ use table::{error as table_error, Result as TableResult, Table};
 use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
+use crate::engine::procedure::CreateMitoTable;
 use crate::error::{
     self, BuildColumnDescriptorSnafu, BuildColumnFamilyDescriptorSnafu, BuildRegionDescriptorSnafu,
     BuildRowKeyDescriptorSnafu, InvalidPrimaryKeySnafu, InvalidRawSchemaSnafu,
@@ -82,6 +86,14 @@ impl<S: StorageEngine> MitoEngine<S> {
         Self {
             inner: Arc::new(MitoEngineInner::new(config, storage_engine, object_store)),
         }
+    }
+
+    /// Register all procedure loaders to the procedure manager.
+    ///
+    /// # Panics
+    /// Panics on error.
+    pub fn register_procedure_loaders(&self, procedure_manager: &dyn ProcedureManager) {
+        procedure::register_procedure_loaders(self.inner.clone(), procedure_manager);
     }
 }
 
@@ -152,7 +164,22 @@ impl<S: StorageEngine> TableEngine for MitoEngine<S> {
     }
 }
 
-struct MitoEngineInner<S: StorageEngine> {
+impl<S: StorageEngine> TableEngineProcedure for MitoEngine<S> {
+    fn create_table_procedure(
+        &self,
+        _ctx: &EngineContext,
+        request: CreateTableRequest,
+    ) -> TableResult<BoxedProcedure> {
+        validate_create_table_request(&request)
+            .map_err(BoxedError::new)
+            .context(table_error::TableOperationSnafu)?;
+
+        let procedure = Box::new(CreateMitoTable::new(request, self.inner.clone()));
+        Ok(procedure)
+    }
+}
+
+pub(crate) struct MitoEngineInner<S: StorageEngine> {
     /// All tables opened by the engine. Map key is formatted [TableReference].
     ///
     /// Writing to `tables` should also hold the `table_mutex`.
@@ -167,7 +194,7 @@ struct MitoEngineInner<S: StorageEngine> {
 fn build_row_key_desc(
     mut column_id: ColumnId,
     table_name: &str,
-    table_schema: &SchemaRef,
+    table_schema: &Schema,
     primary_key_indices: &Vec<usize>,
 ) -> Result<(ColumnId, RowKeyDescriptor)> {
     let ts_column_schema = table_schema
@@ -231,7 +258,7 @@ fn build_row_key_desc(
 fn build_column_family(
     mut column_id: ColumnId,
     table_name: &str,
-    table_schema: &SchemaRef,
+    table_schema: &Schema,
     primary_key_indices: &[usize],
 ) -> Result<(ColumnId, ColumnFamilyDescriptor)> {
     let mut builder = ColumnFamilyDescriptorBuilder::default();
@@ -454,7 +481,8 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
             let Some((manifest, table_info)) = self
                 .recover_table_manifest_and_info(table_name, &table_dir)
-                .await? else { return Ok(None) };
+                .await.map_err(BoxedError::new)
+                .context(TableOperationSnafu)? else { return Ok(None) };
 
             debug!(
                 "Opening table {}, table info recovered: {:?}",
@@ -500,16 +528,14 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         &self,
         table_name: &str,
         table_dir: &str,
-    ) -> TableResult<Option<(TableManifest, TableInfo)>> {
+    ) -> Result<Option<(TableManifest, TableInfo)>> {
         let manifest = MitoTable::<<S as StorageEngine>::Region>::build_manifest(
             table_dir,
             self.object_store.clone(),
         );
         let  Some(table_info) =
             MitoTable::<<S as StorageEngine>::Region>::recover_table_info(table_name, &manifest)
-                .await
-                .map_err(BoxedError::new)
-                .context(TableOperationSnafu)? else { return Ok(None) };
+                .await? else { return Ok(None) };
 
         Ok(Some((manifest, table_info)))
     }

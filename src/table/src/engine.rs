@@ -15,6 +15,8 @@
 use std::fmt::{self, Display};
 use std::sync::Arc;
 
+use common_procedure::BoxedProcedure;
+
 use crate::error::Result;
 use crate::requests::{AlterTableRequest, CreateTableRequest, DropTableRequest, OpenTableRequest};
 use crate::TableRef;
@@ -102,9 +104,21 @@ pub trait TableEngine: Send + Sync {
 
 pub type TableEngineRef = Arc<dyn TableEngine>;
 
-/// Storage engine context.
+/// Table engine context.
 #[derive(Debug, Clone, Default)]
 pub struct EngineContext {}
+
+/// Procedures for table engine.
+pub trait TableEngineProcedure: Send + Sync {
+    /// Returns a procedure that creates table by specific `request`.
+    fn create_table_procedure(
+        &self,
+        ctx: &EngineContext,
+        request: CreateTableRequest,
+    ) -> Result<BoxedProcedure>;
+}
+
+pub type TableEngineProcedureRef = Arc<dyn TableEngineProcedure>;
 
 #[cfg(test)]
 mod tests {
