@@ -48,6 +48,7 @@ pub enum LogicalTypeId {
     TimestampNanosecond,
 
     List,
+    Dictionary,
 }
 
 impl LogicalTypeId {
@@ -88,6 +89,10 @@ impl LogicalTypeId {
             LogicalTypeId::List => {
                 ConcreteDataType::list_datatype(ConcreteDataType::null_datatype())
             }
+            LogicalTypeId::Dictionary => ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::null_datatype(),
+                ConcreteDataType::null_datatype(),
+            ),
         }
     }
 }

@@ -285,7 +285,7 @@ fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Date(_) => Ok(Type::DATE),
         &ConcreteDataType::DateTime(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
-        &ConcreteDataType::List(_) => error::InternalSnafu {
+        &ConcreteDataType::List(_) | &ConcreteDataType::Dictionary(_) => error::InternalSnafu {
             err_msg: format!("not implemented for column datatype {origin:?}"),
         }
         .fail(),

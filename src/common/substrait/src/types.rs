@@ -131,7 +131,9 @@ pub fn from_concrete_type(ty: ConcreteDataType, nullability: Option<bool>) -> Re
         ConcreteDataType::Timestamp(_) => {
             build_substrait_kind!(Timestamp, Timestamp, nullability, 0)
         }
-        ConcreteDataType::List(_) => UnsupportedConcreteTypeSnafu { ty }.fail()?,
+        ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
+            UnsupportedConcreteTypeSnafu { ty }.fail()?
+        }
     };
 
     Ok(SType { kind })

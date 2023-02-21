@@ -97,7 +97,9 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 TimestampType::Microsecond(_) => ColumnDataType::TimestampMicrosecond,
                 TimestampType::Nanosecond(_) => ColumnDataType::TimestampNanosecond,
             },
-            ConcreteDataType::Null(_) | ConcreteDataType::List(_) => {
+            ConcreteDataType::Null(_)
+            | ConcreteDataType::List(_)
+            | ConcreteDataType::Dictionary(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
             }
         });

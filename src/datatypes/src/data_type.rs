@@ -22,10 +22,10 @@ use serde::{Deserialize, Serialize};
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
-    BinaryType, BooleanType, DateTimeType, DateType, Float32Type, Float64Type, Int16Type,
-    Int32Type, Int64Type, Int8Type, ListType, NullType, StringType, TimestampMicrosecondType,
-    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
-    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+    BinaryType, BooleanType, DateTimeType, DateType, DictionaryType, Float32Type, Float64Type,
+    Int16Type, Int32Type, Int64Type, Int8Type, ListType, NullType, StringType,
+    TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+    TimestampSecondType, TimestampType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -59,6 +59,7 @@ pub enum ConcreteDataType {
 
     // Compound types:
     List(ListType),
+    Dictionary(DictionaryType),
 }
 
 // TODO(yingwen): Refactor these `is_xxx()` methods, such as adding a `properties()` method
@@ -169,6 +170,11 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::List(field) => Self::List(ListType::new(
                 ConcreteDataType::from_arrow_type(field.data_type()),
             )),
+            ArrowDataType::Dictionary(key_type, value_type) => {
+                let key_type = ConcreteDataType::from_arrow_type(key_type);
+                let value_type = ConcreteDataType::from_arrow_type(value_type);
+                Self::Dictionary(DictionaryType::new(key_type, value_type))
+            }
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
                     arrow_type: dt.clone(),
@@ -242,6 +248,13 @@ impl ConcreteDataType {
 
     pub fn list_datatype(item_type: ConcreteDataType) -> ConcreteDataType {
         ConcreteDataType::List(ListType::new(item_type))
+    }
+
+    pub fn dictionary_datatype(
+        key_type: ConcreteDataType,
+        value_type: ConcreteDataType,
+    ) -> ConcreteDataType {
+        ConcreteDataType::Dictionary(DictionaryType::new(key_type, value_type))
     }
 }
 
