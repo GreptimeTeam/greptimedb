@@ -144,6 +144,27 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcedureConfig {
+    /// Storage config for procedure manager.
+    pub store: ObjectStoreConfig,
+}
+
+impl Default for ProcedureConfig {
+    fn default() -> ProcedureConfig {
+        ProcedureConfig::from_file_path("/tmp/greptimedb/procedure/".to_string())
+    }
+}
+
+impl ProcedureConfig {
+    pub fn from_file_path(path: String) -> ProcedureConfig {
+        ProcedureConfig {
+            store: ObjectStoreConfig::File(FileConfig { data_dir: path }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DatanodeOptions {
@@ -159,6 +180,7 @@ pub struct DatanodeOptions {
     pub wal: WalConfig,
     pub storage: ObjectStoreConfig,
     pub compaction: CompactionConfig,
+    pub procedure: Option<ProcedureConfig>,
 }
 
 impl Default for DatanodeOptions {
@@ -176,6 +198,7 @@ impl Default for DatanodeOptions {
             wal: WalConfig::default(),
             storage: ObjectStoreConfig::default(),
             compaction: CompactionConfig::default(),
+            procedure: None,
         }
     }
 }

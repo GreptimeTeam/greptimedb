@@ -2186,6 +2186,7 @@ dependencies = [
  "common-error",
  "common-grpc",
  "common-grpc-expr",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-runtime",

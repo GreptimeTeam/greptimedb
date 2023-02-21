@@ -140,7 +140,13 @@ pub async fn create_mock_sql_handler() -> SqlHandler {
     let catalog_list = catalog::local::new_memory_catalog_list().unwrap();
     let factory = QueryEngineFactory::new(catalog_list);
 
-    SqlHandler::new(mock_engine, catalog_manager, factory.query_engine())
+    SqlHandler::new(
+        mock_engine.clone(),
+        catalog_manager,
+        factory.query_engine(),
+        mock_engine,
+        None,
+    )
 }
 
 pub(crate) async fn setup_test_instance(test_name: &str) -> MockInstance {
