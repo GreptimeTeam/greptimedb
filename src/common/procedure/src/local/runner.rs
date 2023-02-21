@@ -91,12 +91,6 @@ impl Drop for ProcedureGuard {
         for key in self.meta.lock_key.keys_to_unlock() {
             self.manager_ctx.lock_map.release_lock(key, self.meta.id);
         }
-
-        // If this is the root procedure, clean up message cache.
-        if self.meta.parent_id.is_none() {
-            let procedure_ids = self.manager_ctx.procedures_in_tree(&self.meta);
-            self.manager_ctx.remove_messages(&procedure_ids);
-        }
     }
 }
 
@@ -143,7 +137,14 @@ impl Runner {
         // TODO(yingwen): 1. Add TTL to the metadata; 2. Only keep state in the procedure store
         // so we don't need to always store the metadata in memory after the procedure is done.
 
+        // Release locks and notify parent procedure.
         guard.finish();
+
+        // If this is the root procedure, clean up message cache.
+        if self.meta.parent_id.is_none() {
+            let procedure_ids = self.manager_ctx.procedures_in_tree(&self.meta);
+            self.manager_ctx.remove_messages(&procedure_ids);
+        }
 
         logging::info!(
             "Runner {}-{} exits",
