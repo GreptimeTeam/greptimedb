@@ -93,6 +93,7 @@ where
         match statement {
             Statement::Query(qb) => self.query_to_plan(qb),
             Statement::Explain(explain) => self.explain_to_plan(explain),
+            Statement::Tql(_tql) => todo!(),
             Statement::ShowTables(_)
             | Statement::Delete(_)
             | Statement::ShowDatabases(_)

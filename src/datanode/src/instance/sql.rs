@@ -198,6 +198,7 @@ impl Instance {
                     .execute(SqlRequest::CopyTable(req), query_ctx)
                     .await
             }
+            QueryStatement::Sql(Statement::Tql(_tql)) => todo!(),
         }
     }
 
