@@ -223,5 +223,5 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./lcov.info
           flags: rust
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           verbose: true
