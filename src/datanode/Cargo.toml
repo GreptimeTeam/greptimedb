@@ -53,6 +53,7 @@ storage = { path = "../storage" }
 store-api = { path = "../store-api" }
 substrait = { path = "../common/substrait" }
 table = { path = "../table" }
+table-procedure = { path = "../table-procedure" }
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic.workspace = true
