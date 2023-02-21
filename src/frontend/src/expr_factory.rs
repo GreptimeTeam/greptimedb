@@ -83,7 +83,7 @@ pub(crate) fn create_to_expr(
             .context(error::ExternalSnafu)?;
 
     let time_index = find_time_index(&create.constraints)?;
-    let table_options = HashMap::from(&stmt_options_to_hashmap(&create.options)?);
+    let table_options = HashMap::from(&stmt_options_to_table_options(&create.options)?);
     let expr = CreateTableExpr {
         catalog_name,
         schema_name,
@@ -222,13 +222,12 @@ fn columns_to_expr(
 
 // TODO(hl): This function is intentionally duplicated with that one in src/datanode/src/sql/create.rs:261
 // since we are going to remove the statement parsing stuff from datanode.
-// Refer:https://github.com/GreptimeTeam/greptimedb/issues/1010
-fn stmt_options_to_hashmap(opts: &[SqlOption]) -> error::Result<TableOptions> {
+// Refer: https://github.com/GreptimeTeam/greptimedb/issues/1010
+fn stmt_options_to_table_options(opts: &[SqlOption]) -> error::Result<TableOptions> {
     let mut map = HashMap::with_capacity(opts.len());
     for SqlOption { name, value } in opts {
         let value_str = match value {
-            Value::SingleQuotedString(s) => s.clone(),
-            Value::DoubleQuotedString(s) => s.clone(),
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone(),
             _ => value.to_string(),
         };
         map.insert(name.value.clone(), value_str);

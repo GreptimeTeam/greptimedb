@@ -239,7 +239,7 @@ impl SqlHandler {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let table_options = stmt_options_to_hashmap(&stmt.options)?;
+        let table_options = stmt_options_to_table_options(&stmt.options)?;
         let schema = RawSchema::new(columns_schemas);
         let request = CreateTableRequest {
             id: table_id,
@@ -257,7 +257,7 @@ impl SqlHandler {
     }
 }
 
-fn stmt_options_to_hashmap(opts: &[SqlOption]) -> error::Result<TableOptions> {
+fn stmt_options_to_table_options(opts: &[SqlOption]) -> error::Result<TableOptions> {
     let mut map = HashMap::with_capacity(opts.len());
     for SqlOption { name, value } in opts {
         let value_str = match value {
