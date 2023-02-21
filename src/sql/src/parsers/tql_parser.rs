@@ -78,7 +78,7 @@ impl<'a> ParserContext<'a> {
             Token::DoubleQuotedString(s) | Token::SingleQuotedString(s) => s,
             unexpected => {
                 return Err(ParserError::ParserError(format!(
-                    "Expect number or string, but is {unexpected}"
+                    "Expect number or string, but is {unexpected:?}"
                 )));
             }
         };
