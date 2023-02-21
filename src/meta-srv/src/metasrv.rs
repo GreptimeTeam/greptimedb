@@ -27,7 +27,7 @@ use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::selector::{Selector, SelectorType};
 use crate::sequence::SequenceRef;
-use crate::service::store::kv::{KvStoreRef, ResetableKvStoreRef};
+use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 
 pub const TABLE_ID_SEQ: &str = "table_id";
 
@@ -59,7 +59,7 @@ impl Default for MetaSrvOptions {
 pub struct Context {
     pub datanode_lease_secs: i64,
     pub server_addr: String,
-    pub in_memory: ResetableKvStoreRef,
+    pub in_memory: ResettableKvStoreRef,
     pub kv_store: KvStoreRef,
     pub election: Option<ElectionRef>,
     pub skip_all: Arc<AtomicBool>,
@@ -93,7 +93,7 @@ pub struct MetaSrv {
     options: MetaSrvOptions,
     // It is only valid at the leader node and is used to temporarily
     // store some data that will not be persisted.
-    in_memory: ResetableKvStoreRef,
+    in_memory: ResettableKvStoreRef,
     kv_store: KvStoreRef,
     table_id_sequence: SequenceRef,
     selector: SelectorRef,
@@ -142,7 +142,7 @@ impl MetaSrv {
     }
 
     #[inline]
-    pub fn in_memory(&self) -> ResetableKvStoreRef {
+    pub fn in_memory(&self) -> ResettableKvStoreRef {
         self.in_memory.clone()
     }
 

@@ -19,6 +19,10 @@ clean: ## Clean the project.
 fmt: ## Format all the Rust code.
 	cargo fmt --all
 
+.PHONY: fmt-toml
+fmt-toml: ## Format all TOML files.
+	taplo format --check --option "indent_string=    "
+
 .PHONY: docker-image
 docker-image: ## Build docker image.
 	docker build --network host -f docker/Dockerfile -t ${IMAGE_REGISTRY}:${IMAGE_TAG} .

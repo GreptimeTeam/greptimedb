@@ -101,7 +101,7 @@ impl<'a> ParquetWriter<'a> {
 
         // TODO(hl): Since OpenDAL's writer is async and ArrowWriter requires a `std::io::Write`,
         // here we use a Vec<u8> to buffer all parquet bytes in memory and write to object store
-        // at a time. Maybe we should find a better way to brige ArrowWriter and OpenDAL's object.
+        // at a time. Maybe we should find a better way to bridge ArrowWriter and OpenDAL's object.
         let mut buf = vec![];
         let mut arrow_writer = ArrowWriter::try_new(&mut buf, schema.clone(), Some(writer_props))
             .context(WriteParquetSnafu)?;

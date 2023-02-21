@@ -23,7 +23,7 @@ use api::v1::meta::{
 use crate::error::Result;
 
 pub type KvStoreRef = Arc<dyn KvStore>;
-pub type ResetableKvStoreRef = Arc<dyn ResetableKvStore>;
+pub type ResettableKvStoreRef = Arc<dyn ResettableKvStore>;
 
 #[async_trait::async_trait]
 pub trait KvStore: Send + Sync {
@@ -40,6 +40,6 @@ pub trait KvStore: Send + Sync {
     async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse>;
 }
 
-pub trait ResetableKvStore: KvStore {
+pub trait ResettableKvStore: KvStore {
     fn reset(&self);
 }
