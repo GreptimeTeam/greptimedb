@@ -311,7 +311,7 @@ pub(crate) fn check_args_anno_real_type(
 pub fn exec_coprocessor(script: &str, rb: &Option<RecordBatch>) -> Result<RecordBatch> {
     // 1. parse the script and check if it's only a function with `@coprocessor` decorator, and get `args` and `returns`,
     // 2. also check for exist of `args` in `rb`, if not found, return error
-    // TODO(discord9): cache the result of parse_copr
+    // cache the result of parse_copr
     let copr = parse::parse_and_compile_copr(script, None)?;
     exec_parsed(&copr, rb, &HashMap::new())
 }

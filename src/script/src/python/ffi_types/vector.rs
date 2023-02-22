@@ -432,8 +432,6 @@ impl PyVector {
 }
 
 /// get corresponding arrow op function according to given PyComaprsionOp
-///
-/// TODO(discord9): impl scalar version function
 fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef> {
     let op_bool_arr = match op {
         PyComparisonOp::Eq => comparison::eq_dyn,
@@ -451,8 +449,6 @@ fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> ArrowR
 }
 
 /// get corresponding arrow scalar op function according to given PyComaprsionOp
-///
-/// TODO(discord9): impl scalar version function
 fn get_arrow_scalar_op(
     op: PyComparisonOp,
 ) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String> {

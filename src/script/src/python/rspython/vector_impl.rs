@@ -299,7 +299,6 @@ impl Comparable for PyVector {
         op: PyComparisonOp,
         vm: &VirtualMachine,
     ) -> PyResult<Either<PyObjectRef, PyComparisonValue>> {
-        // TODO(discord9): return a boolean array of compare result
         if let Some(zelf) = zelf.downcast_ref::<Self>() {
             let ret: PyVector = zelf.richcompare(other.to_owned(), op, vm)?;
             let ret = ret.into_pyobject(vm);

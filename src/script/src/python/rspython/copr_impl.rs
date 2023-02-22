@@ -189,7 +189,7 @@ pub(crate) fn init_interpreter() -> Arc<Interpreter> {
                 let native_module_allow_list = HashSet::from([
                     "array", "cmath", "gc", "hashlib", "_json", "_random", "math",
                 ]);
-                // TODO(discord9): edge cases, can't use "..Default::default" because Settings is `#[non_exhaustive]`
+                // edge cases, can't use "..Default::default" because Settings is `#[non_exhaustive]`
                 // so more in here: https://internals.rust-lang.org/t/allow-constructing-non-exhaustive-structs-using-default-default/13868
                 let mut settings = vm::Settings::default();
                 // disable SIG_INT handler so our own binary can take ctrl_c handler

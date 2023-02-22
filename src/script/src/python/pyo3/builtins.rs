@@ -188,7 +188,6 @@ macro_rules! bind_call_unary_math_function {
     };
 }
 
-// TODO(discord9): allow thread
 macro_rules! simple_vector_fn {
     ($name: ident, $name_str: tt, [$($arg:ident),*]) => {
         #[pyfunction]

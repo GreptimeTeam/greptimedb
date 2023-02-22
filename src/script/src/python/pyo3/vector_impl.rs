@@ -51,7 +51,6 @@ fn pyo3_is_obj_scalar(obj: &PyAny) -> bool {
 }
 
 impl PyVector {
-    /// TODO(discord9): `allow_thread` it
     fn pyo3_scalar_arith_op<F>(
         &self,
         py: Python<'_>,
@@ -86,7 +85,6 @@ impl PyVector {
     }
 }
 
-/// TODO(discord9): add similar methods
 #[pymethods]
 impl PyVector {
     /// create a `PyVector` with a `PyList` that contains only elements of same type

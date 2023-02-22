@@ -36,7 +36,6 @@ macro_rules! ronish {
 }
 
 /// Using a function to generate testcase instead of `.ron` configure file because it's more flexible and we are in #[cfg(test)] so no binary bloat worrying
-/// TODO(discord): move +-*/ to here from vector tests
 #[allow(clippy::approx_constant)]
 pub(super) fn sample_test_case() -> Vec<TestCase> {
     vec![
