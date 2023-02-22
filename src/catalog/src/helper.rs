@@ -24,10 +24,10 @@ use serde::{Deserialize, Serialize, Serializer};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::{RawTableInfo, TableId, TableVersion};
 
-const CATALOG_KEY_PREFIX: &str = "__c";
-const SCHEMA_KEY_PREFIX: &str = "__s";
-const TABLE_GLOBAL_KEY_PREFIX: &str = "__tg";
-const TABLE_REGIONAL_KEY_PREFIX: &str = "__tr";
+pub const CATALOG_KEY_PREFIX: &str = "__c";
+pub const SCHEMA_KEY_PREFIX: &str = "__s";
+pub const TABLE_GLOBAL_KEY_PREFIX: &str = "__tg";
+pub const TABLE_REGIONAL_KEY_PREFIX: &str = "__tr";
 
 const ALPHANUMERICS_NAME_PATTERN: &str = "[a-zA-Z_][a-zA-Z0-9_]*";
 

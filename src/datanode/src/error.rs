@@ -388,6 +388,12 @@ pub enum Error {
         backtrace: Backtrace,
         source: object_store::Error,
     },
+
+    #[snafu(display("Unrecognized table option: {}", source))]
+    UnrecognizedTableOption {
+        #[snafu(backtrace)]
+        source: table::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -463,6 +469,7 @@ impl ErrorExt for Error {
             ColumnDefaultValue { source, .. } => source.status_code(),
             CopyTable { source, .. } => source.status_code(),
             TableScanExec { source, .. } => source.status_code(),
+            UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
         }
     }
 

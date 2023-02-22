@@ -114,6 +114,7 @@ pub(crate) async fn create_datanode_client(
     // https://github.com/hyperium/tonic/blob/master/examples/src/mock/mock.rs
     let datanode_service = GrpcServer::new(
         ServerGrpcQueryHandlerAdaptor::arc(datanode_instance),
+        None,
         runtime,
     )
     .create_service();

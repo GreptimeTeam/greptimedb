@@ -397,6 +397,7 @@ impl Instance {
             | Statement::Delete(_)
             | Statement::Alter(_)
             | Statement::DropTable(_)
+            | Statement::Tql(_)
             | Statement::Copy(_) => self.sql_handler.do_statement_query(stmt, query_ctx).await,
             Statement::Use(db) => self.handle_use(db, query_ctx),
             Statement::ShowCreateTable(_) => NotSupportedSnafu {
@@ -560,8 +561,8 @@ pub fn check_permission(
     }
 
     match stmt {
-        // query and explain will be checked in QueryEngineState
-        Statement::Query(_) | Statement::Explain(_) => {}
+        // query,explain and tql will be checked in QueryEngineState
+        Statement::Query(_) | Statement::Explain(_) | Statement::Tql(_) => {}
         // database ops won't be checked
         Statement::CreateDatabase(_) | Statement::ShowDatabases(_) | Statement::Use(_) => {}
         // show create table and alter are not supported yet

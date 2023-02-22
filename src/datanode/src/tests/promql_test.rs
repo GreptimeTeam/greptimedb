@@ -53,6 +53,74 @@ async fn create_insert_query_assert(
     check_unordered_output_stream(query_output, expected).await;
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn create_insert_tql_assert(create: &str, insert: &str, tql: &str, expected: &str) {
+    let instance = setup_test_instance("test_execute_insert").await;
+    let query_ctx = QueryContext::arc();
+    instance
+        .inner()
+        .execute_sql(create, query_ctx.clone())
+        .await
+        .unwrap();
+
+    instance
+        .inner()
+        .execute_sql(insert, query_ctx.clone())
+        .await
+        .unwrap();
+
+    let query_output = instance
+        .inner()
+        .execute_sql(tql, query_ctx.clone())
+        .await
+        .unwrap();
+    let expected = String::from(expected);
+    check_unordered_output_stream(query_output, expected).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sql_insert_tql_query_ceil() {
+    create_insert_tql_assert(
+        r#"create table http_requests_total (
+            host string,
+            cpu double,
+            memory double,
+            ts timestamp TIME INDEX,
+            PRIMARY KEY (host),
+        );"#,
+        r#"insert into http_requests_total(host, cpu, memory, ts) values
+            ('host1', 66.6, 1024, 0),
+            ('host1', 66.6, 2048, 2000),
+            ('host1', 66.6, 4096, 5000),
+            ('host1', 43.1, 8192, 7000),
+            ('host1', 19.1, 10240, 9000),
+            ('host1', 99.1, 20480, 10000),
+            ('host1', 999.9, 40960, 21000),
+            ('host1', 31.9,  8192, 22000),
+            ('host1', 95.4,  333.3, 32000),
+            ('host1', 12423.1,  1333.3, 49000),
+            ('host1', 0,  2333.3, 80000),
+            ('host1', 49,  3333.3, 99000);
+        "#,
+        "TQL EVAL (0,100,10) ceil(http_requests_total{host=\"host1\"})",
+        "+---------------------+-------------------------------+----------------------------------+-------+\
+        \n| ts                  | ceil(http_requests_total.cpu) | ceil(http_requests_total.memory) | host  |\
+        \n+---------------------+-------------------------------+----------------------------------+-------+\
+        \n| 1970-01-01T00:00:00 | 67                            | 1024                             | host1 |\
+        \n| 1970-01-01T00:00:10 | 100                           | 20480                            | host1 |\
+        \n| 1970-01-01T00:00:20 | 100                           | 20480                            | host1 |\
+        \n| 1970-01-01T00:00:30 | 32                            | 8192                             | host1 |\
+        \n| 1970-01-01T00:00:40 | 96                            | 334                              | host1 |\
+        \n| 1970-01-01T00:00:50 | 12424                         | 1334                             | host1 |\
+        \n| 1970-01-01T00:01:00 | 12424                         | 1334                             | host1 |\
+        \n| 1970-01-01T00:01:10 | 12424                         | 1334                             | host1 |\
+        \n| 1970-01-01T00:01:20 | 0                             | 2334                             | host1 |\
+        \n| 1970-01-01T00:01:30 | 0                             | 2334                             | host1 |\
+        \n| 1970-01-01T00:01:40 | 49                            | 3334                             | host1 |\
+        \n+---------------------+-------------------------------+----------------------------------+-------+")
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sql_insert_promql_query_ceil() {
     create_insert_query_assert(

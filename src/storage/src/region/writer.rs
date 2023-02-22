@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_error::prelude::BoxedError;
 use common_telemetry::tracing::log::info;
@@ -60,9 +61,13 @@ pub struct RegionWriter {
 }
 
 impl RegionWriter {
-    pub fn new(memtable_builder: MemtableBuilderRef, config: Arc<EngineConfig>) -> RegionWriter {
+    pub fn new(
+        memtable_builder: MemtableBuilderRef,
+        config: Arc<EngineConfig>,
+        ttl: Option<Duration>,
+    ) -> RegionWriter {
         RegionWriter {
-            inner: Mutex::new(WriterInner::new(memtable_builder, config)),
+            inner: Mutex::new(WriterInner::new(memtable_builder, config, ttl)),
             version_mutex: Mutex::new(()),
         }
     }
@@ -324,15 +329,21 @@ struct WriterInner {
     /// It should protected by upper mutex
     closed: bool,
     engine_config: Arc<EngineConfig>,
+    ttl: Option<Duration>,
 }
 
 impl WriterInner {
-    fn new(memtable_builder: MemtableBuilderRef, engine_config: Arc<EngineConfig>) -> WriterInner {
+    fn new(
+        memtable_builder: MemtableBuilderRef,
+        engine_config: Arc<EngineConfig>,
+        ttl: Option<Duration>,
+    ) -> WriterInner {
         WriterInner {
             memtable_builder,
             flush_handle: None,
             engine_config,
             closed: false,
+            ttl,
         }
     }
 
@@ -596,7 +607,7 @@ impl WriterInner {
             return Ok(());
         }
 
-        let cb = Self::build_flush_callback(&current_version, ctx, &self.engine_config);
+        let cb = Self::build_flush_callback(&current_version, ctx, &self.engine_config, self.ttl);
 
         let flush_req = FlushJob {
             max_memtable_id: max_memtable_id.unwrap(),
@@ -624,6 +635,7 @@ impl WriterInner {
         version: &VersionRef,
         ctx: &WriterContext<S>,
         config: &Arc<EngineConfig>,
+        ttl: Option<Duration>,
     ) -> Option<FlushCallback> {
         let region_id = version.metadata().id();
         let compaction_request = CompactionRequestImpl {
@@ -633,6 +645,7 @@ impl WriterInner {
             shared: ctx.shared.clone(),
             manifest: ctx.manifest.clone(),
             wal: ctx.wal.clone(),
+            ttl,
         };
         let compaction_scheduler = ctx.compaction_scheduler.clone();
         let shared_data = ctx.shared.clone();

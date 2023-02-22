@@ -11,16 +11,21 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tql {
+    Eval(TqlEval),
+    Explain(TqlExplain),
+}
 
-//! Common traits and structures for the procedure framework.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TqlEval {
+    pub start: String,
+    pub end: String,
+    pub step: String,
+    pub query: String,
+}
 
-pub mod error;
-pub mod local;
-mod procedure;
-mod store;
-
-pub use crate::error::{Error, Result};
-pub use crate::procedure::{
-    BoxedProcedure, Context, ContextProvider, LockKey, Procedure, ProcedureId, ProcedureManager,
-    ProcedureManagerRef, ProcedureState, ProcedureWithId, Status, Watcher,
-};
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TqlExplain {
+    pub query: String,
+}

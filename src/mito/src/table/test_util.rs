@@ -28,7 +28,7 @@ use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
 use table::engine::{EngineContext, TableEngine};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
-use table::requests::{CreateTableRequest, InsertRequest};
+use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 use table::TableRef;
 use tempdir::TempDir;
 
@@ -113,7 +113,7 @@ pub fn new_create_request(schema: SchemaRef) -> CreateTableRequest {
         region_numbers: vec![0],
         create_if_not_exists: true,
         primary_key_indices: vec![0],
-        table_options: HashMap::new(),
+        table_options: TableOptions::default(),
     }
 }
 

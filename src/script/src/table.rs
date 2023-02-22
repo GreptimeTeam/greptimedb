@@ -30,7 +30,7 @@ use query::parser::QueryLanguageParser;
 use query::QueryEngineRef;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
-use table::requests::{CreateTableRequest, InsertRequest};
+use table::requests::{CreateTableRequest, InsertRequest, TableOptions};
 
 use crate::error::{
     CastTypeSnafu, CollectRecordsSnafu, FindScriptSnafu, FindScriptsTableSnafu, InsertScriptSnafu,
@@ -64,7 +64,7 @@ impl ScriptsTable {
             //schema and name as primary key
             primary_key_indices: vec![0, 1],
             create_if_not_exists: true,
-            table_options: HashMap::default(),
+            table_options: TableOptions::default(),
         };
 
         catalog_manager

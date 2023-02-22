@@ -393,6 +393,11 @@ impl<S: StorageEngine> MitoEngineInner<S> {
                 })?;
             let opts = CreateOptions {
                 parent_dir: table_dir.clone(),
+                write_buffer_size: request
+                    .table_options
+                    .write_buffer_size
+                    .map(|size| size.0 as usize),
+                ttl: request.table_options.ttl,
             };
 
             let region = self
@@ -410,6 +415,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             .engine(MITO_ENGINE)
             .next_column_id(next_column_id)
             .primary_key_indices(request.primary_key_indices.clone())
+            .options(request.table_options)
             .region_numbers(request.region_numbers)
             .build()
             .context(error::BuildTableMetaSnafu { table_name })?;
@@ -475,14 +481,21 @@ impl<S: StorageEngine> MitoEngineInner<S> {
             let table_id = request.table_id;
             let engine_ctx = StorageEngineContext::default();
             let table_dir = table_dir(catalog_name, schema_name, table_id);
-            let opts = OpenOptions {
-                parent_dir: table_dir.to_string(),
-            };
 
             let Some((manifest, table_info)) = self
                 .recover_table_manifest_and_info(table_name, &table_dir)
                 .await.map_err(BoxedError::new)
                 .context(TableOperationSnafu)? else { return Ok(None) };
+
+            let opts = OpenOptions {
+                parent_dir: table_dir.to_string(),
+                write_buffer_size: table_info
+                    .meta
+                    .options
+                    .write_buffer_size
+                    .map(|s| s.0 as usize),
+                ttl: table_info.meta.options.ttl,
+            };
 
             debug!(
                 "Opening table {}, table info recovered: {:?}",
@@ -638,7 +651,7 @@ mod tests {
     use storage::EngineImpl;
     use store_api::manifest::Manifest;
     use store_api::storage::ReadContext;
-    use table::requests::{AddColumnRequest, AlterKind, DeleteRequest};
+    use table::requests::{AddColumnRequest, AlterKind, DeleteRequest, TableOptions};
     use tempdir::TempDir;
 
     use super::*;
@@ -690,7 +703,7 @@ mod tests {
                     schema,
                     create_if_not_exists: true,
                     primary_key_indices: Vec::default(),
-                    table_options: HashMap::new(),
+                    table_options: TableOptions::default(),
                     region_numbers: vec![0],
                 },
             )
@@ -804,7 +817,7 @@ mod tests {
             create_if_not_exists: true,
             // put ts into primary keys
             primary_key_indices: vec![0, 1],
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -965,7 +978,7 @@ mod tests {
             create_if_not_exists: true,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -982,7 +995,7 @@ mod tests {
             create_if_not_exists: false,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -1191,7 +1204,7 @@ mod tests {
             region_numbers: vec![0],
             primary_key_indices: vec![0],
             create_if_not_exists: true,
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
         };
         table_engine
             .create_table(&ctx, req)
@@ -1274,7 +1287,7 @@ mod tests {
             create_if_not_exists: true,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
 
@@ -1307,7 +1320,7 @@ mod tests {
             create_if_not_exists: false,
             desc: None,
             primary_key_indices: Vec::default(),
-            table_options: HashMap::new(),
+            table_options: TableOptions::default(),
             region_numbers: vec![0],
         };
         table_engine.create_table(&ctx, request).await.unwrap();

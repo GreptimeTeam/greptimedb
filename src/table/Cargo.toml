@@ -8,6 +8,7 @@ license.workspace = true
 anymap = "1.0.0-beta.2"
 async-trait = "0.1"
 chrono.workspace = true
+common-base = { path = "../common/base" }
 common-catalog = { path = "../common/catalog" }
 common-error = { path = "../common/error" }
 common-procedure = { path = "../common/procedure" }
@@ -21,6 +22,8 @@ datafusion-expr.workspace = true
 datatypes = { path = "../datatypes" }
 derive_builder = "0.11"
 futures.workspace = true
+humantime = "2.1"
+humantime-serde = "1.1"
 parquet-format-async-temp = "0.2"
 paste = "1.0"
 serde = "1.0.136"
@@ -32,3 +35,4 @@ tokio.workspace = true
 parquet = { workspace = true, features = ["async"] }
 tempdir = "0.3"
 tokio-util = { version = "0.7", features = ["compat"] }
+serde_json.workspace = true

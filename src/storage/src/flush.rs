@@ -54,6 +54,15 @@ pub struct SizeBasedStrategy {
     mutable_limitation: usize,
 }
 
+impl SizeBasedStrategy {
+    pub fn new(max_write_buffer_size: usize) -> Self {
+        Self {
+            max_write_buffer_size,
+            mutable_limitation: get_mutable_limitation(max_write_buffer_size),
+        }
+    }
+}
+
 #[inline]
 fn get_mutable_limitation(max_write_buffer_size: usize) -> usize {
     // Inspired by RocksDB

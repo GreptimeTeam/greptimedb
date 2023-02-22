@@ -18,11 +18,11 @@ pub mod kv;
 pub mod memory;
 
 use api::v1::meta::{
-    store_server, BatchPutRequest, BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse,
-    DeleteRangeRequest, DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest,
-    PutResponse, RangeRequest, RangeResponse,
+    store_server, BatchGetRequest, BatchGetResponse, BatchPutRequest, BatchPutResponse,
+    CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest, DeleteRangeResponse,
+    MoveValueRequest, MoveValueResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
-use tonic::{Request, Response};
+use tonic::{Request, Response, Status};
 
 use crate::metasrv::MetaSrv;
 use crate::service::GrpcResult;
@@ -41,6 +41,14 @@ impl store_server::Store for MetaSrv {
         let res = self.kv_store().put(req).await?;
 
         Ok(Response::new(res))
+    }
+
+    async fn batch_get(
+        &self,
+        _request: Request<BatchGetRequest>,
+    ) -> Result<Response<BatchGetResponse>, Status> {
+        // TODO(fys): please fix this
+        unimplemented!()
     }
 
     async fn batch_put(&self, req: Request<BatchPutRequest>) -> GrpcResult<BatchPutResponse> {

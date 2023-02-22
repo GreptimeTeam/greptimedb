@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::logging::info;
@@ -289,7 +290,8 @@ impl<S: LogStore> EngineInner<S> {
 
         let mut guard = SlotGuard::new(name, &self.regions);
 
-        let store_config = self.region_store_config(&opts.parent_dir, name);
+        let store_config =
+            self.region_store_config(&opts.parent_dir, opts.write_buffer_size, name, opts.ttl);
 
         let region = match RegionImpl::open(name.to_string(), store_config, opts).await? {
             None => return Ok(None),
@@ -319,7 +321,12 @@ impl<S: LogStore> EngineInner<S> {
                 .context(error::InvalidRegionDescSnafu {
                     region: &region_name,
                 })?;
-        let store_config = self.region_store_config(&opts.parent_dir, &region_name);
+        let store_config = self.region_store_config(
+            &opts.parent_dir,
+            opts.write_buffer_size,
+            &region_name,
+            opts.ttl,
+        );
 
         let region = RegionImpl::create(metadata, store_config).await?;
 
@@ -335,7 +342,13 @@ impl<S: LogStore> EngineInner<S> {
         slot.get_ready_region()
     }
 
-    fn region_store_config(&self, parent_dir: &str, region_name: &str) -> StoreConfig<S> {
+    fn region_store_config(
+        &self,
+        parent_dir: &str,
+        write_buffer_size: Option<usize>,
+        region_name: &str,
+        ttl: Option<Duration>,
+    ) -> StoreConfig<S> {
         let parent_dir = util::normalize_dir(parent_dir);
 
         let sst_dir = &region_sst_dir(&parent_dir, region_name);
@@ -343,16 +356,21 @@ impl<S: LogStore> EngineInner<S> {
         let manifest_dir = region_manifest_dir(&parent_dir, region_name);
         let manifest = RegionManifest::new(&manifest_dir, self.object_store.clone());
 
+        let flush_strategy = write_buffer_size
+            .map(|size| Arc::new(SizeBasedStrategy::new(size)) as Arc<_>)
+            .unwrap_or_else(|| self.flush_strategy.clone());
+
         StoreConfig {
             log_store: self.log_store.clone(),
             sst_layer,
             manifest,
             memtable_builder: self.memtable_builder.clone(),
             flush_scheduler: self.flush_scheduler.clone(),
-            flush_strategy: self.flush_strategy.clone(),
+            flush_strategy,
             compaction_scheduler: self.compaction_scheduler.clone(),
             engine_config: self.config.clone(),
             file_purger: self.file_purger.clone(),
+            ttl,
         }
     }
 }
