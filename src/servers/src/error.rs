@@ -222,7 +222,7 @@ pub enum Error {
     NotFoundInfluxAuth {},
 
     #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
-    HttpInvisibleASCII {
+    InvisibleASCII {
         source: hyper::header::ToStrError,
         backtrace: Backtrace,
     },
@@ -308,7 +308,7 @@ impl ErrorExt for Error {
             DescribeStatement { source } => source.status_code(),
 
             NotFoundAuthHeader { .. } | NotFoundInfluxAuth { .. } => StatusCode::AuthHeaderNotFound,
-            HttpInvisibleASCII { .. }
+            InvisibleASCII { .. }
             | UnsupportedAuthScheme { .. }
             | InvalidAuthorizationHeader { .. }
             | InvalidBase64Value { .. }

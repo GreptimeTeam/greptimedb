@@ -29,8 +29,8 @@ use crate::auth::Error::IllegalParam;
 use crate::auth::{Identity, IllegalParamSnafu, InternalStateSnafu, UserProviderRef};
 use crate::error::Error::Auth;
 use crate::error::{
-    self, HttpInvisibleASCIISnafu, InvalidAuthorizationHeaderSnafu, NotFoundInfluxAuthSnafu,
-    Result, UnsupportedAuthSchemeSnafu,
+    self, InvalidAuthorizationHeaderSnafu, InvisibleASCIISnafu, NotFoundInfluxAuthSnafu, Result,
+    UnsupportedAuthSchemeSnafu,
 };
 use crate::http::HTTP_API_PREFIX;
 
@@ -140,7 +140,7 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
         // try v2 first
         let (auth_scheme, credential) = header
             .to_str()
-            .context(HttpInvisibleASCIISnafu)?
+            .context(InvisibleASCIISnafu)?
             .split_once(' ')
             .context(InvalidAuthorizationHeaderSnafu)?;
         ensure!(
@@ -253,7 +253,7 @@ fn auth_header<B>(req: &Request<B>) -> Result<AuthScheme> {
         .get(http::header::AUTHORIZATION)
         .context(error::NotFoundAuthHeaderSnafu)?
         .to_str()
-        .context(error::HttpInvisibleASCIISnafu)?;
+        .context(InvisibleASCIISnafu)?;
 
     auth_header.try_into()
 }
