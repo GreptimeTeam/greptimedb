@@ -413,6 +413,7 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
+    // TODO(yingwen): Use procedure's error.
     #[snafu(display("Failed to execute procedure"))]
     ProcedureExec {},
 }
@@ -494,8 +495,7 @@ impl ErrorExt for Error {
             RecoverProcedure { source, .. } | SubmitProcedure { source, .. } => {
                 source.status_code()
             }
-            WaitProcedure { .. } => StatusCode::Internal,
-            ProcedureExec { .. } => StatusCode::Internal,
+            WaitProcedure { .. } | ProcedureExec { .. } => StatusCode::Internal,
         }
     }
 
