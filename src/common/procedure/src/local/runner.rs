@@ -744,11 +744,11 @@ mod tests {
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_retry_later(), "{res:?}");
-        assert_eq!(ProcedureState::Running, meta.state());
+        assert!(meta.state().is_running());
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_done(), "{res:?}");
-        assert_eq!(ProcedureState::Done, meta.state());
+        assert!(meta.state().is_done());
         check_files(&object_store, ctx.procedure_id, &["0000000000.commit"]).await;
     }
 

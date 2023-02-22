@@ -36,7 +36,7 @@ use crate::sql::SqlHandler;
 pub(crate) struct MockInstance {
     instance: Instance,
     _guard: TestGuard,
-    procedure_dir: Option<TempDir>,
+    _procedure_dir: Option<TempDir>,
 }
 
 impl MockInstance {
@@ -49,7 +49,7 @@ impl MockInstance {
         MockInstance {
             instance,
             _guard,
-            procedure_dir: None,
+            _procedure_dir: None,
         }
     }
 
@@ -68,7 +68,7 @@ impl MockInstance {
         MockInstance {
             instance,
             _guard,
-            procedure_dir: None,
+            _procedure_dir: Some(procedure_dir),
         }
     }
 

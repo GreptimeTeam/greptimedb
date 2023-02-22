@@ -423,7 +423,7 @@ pub(crate) async fn create_log_store(wal_config: &WalConfig) -> Result<RaftEngin
     Ok(logstore)
 }
 
-async fn create_procedure_manager(
+pub(crate) async fn create_procedure_manager(
     procedure_config: &Option<ProcedureConfig>,
 ) -> Result<Option<ProcedureManagerRef>> {
     let Some(procedure_config) = procedure_config else {
