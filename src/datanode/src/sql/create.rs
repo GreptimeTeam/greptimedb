@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use catalog::{RegisterSchemaRequest, RegisterTableRequest};
-use common_procedure::{ProcedureManagerRef, ProcedureState, ProcedureWithId};
+use common_procedure::{ProcedureManagerRef, ProcedureWithId, StateKind};
 use common_query::Output;
 use common_telemetry::tracing::{error, info};
 use datatypes::schema::RawSchema;
@@ -154,12 +154,12 @@ impl SqlHandler {
             .await
             .context(SubmitProcedureSnafu)?;
 
-        // TODO(yingwen): Wrap this into a function and add error to ProcedureState::Failed.
+        // TODO(yingwen): Wrap this into a function and add error to StateKind::Failed.
         loop {
             watcher.changed().await.context(WaitProcedureSnafu)?;
-            match *watcher.borrow() {
-                ProcedureState::Running => (),
-                ProcedureState::Done => {
+            match watcher.borrow().kind() {
+                StateKind::Running => (),
+                StateKind::Done => {
                     return Ok(Output::AffectedRows(0));
                 }
                 ProcedureState::Failed => {

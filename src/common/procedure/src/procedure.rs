@@ -23,7 +23,7 @@ use snafu::{ResultExt, Snafu};
 use tokio::sync::watch::Receiver;
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Procedure execution status.
 #[derive(Debug)]
@@ -198,16 +198,72 @@ impl FromStr for ProcedureId {
 /// Loader to recover the [Procedure] instance from serialized data.
 pub type BoxedProcedureLoader = Box<dyn Fn(&str) -> Result<BoxedProcedure> + Send>;
 
-// TODO(yingwen): Find a way to return the error message if the procedure is failed.
-/// State of a submitted procedure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProcedureState {
+/// State kind of a submitted procedure.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum StateKind {
     /// The procedure is running.
+    #[default]
     Running,
     /// The procedure is finished.
     Done,
     /// The procedure is failed and cannot proceed anymore.
     Failed,
+}
+
+/// State of a submitted procedure.
+#[derive(Debug, Default, Clone)]
+pub struct ProcedureState {
+    /// Current state kind.
+    kind: StateKind,
+    /// Latest error during execution.
+    error: Option<Arc<Error>>,
+}
+
+impl ProcedureState {
+    /// Returns a [ProcedureState] with [Running](StateKind::Running) state.
+    pub fn running() -> ProcedureState {
+        ProcedureState {
+            kind: StateKind::Running,
+            error: None,
+        }
+    }
+
+    /// Returns a [ProcedureState] with [Running](StateKind::Done) state.
+    pub fn done() -> ProcedureState {
+        ProcedureState {
+            kind: StateKind::Done,
+            error: None,
+        }
+    }
+
+    /// Returns a [ProcedureState] with [Running](StateKind::Failed) state.
+    pub fn failed() -> ProcedureState {
+        ProcedureState {
+            kind: StateKind::Failed,
+            error: None,
+        }
+    }
+
+    /// Attaches [Error] to the [ProcedureState].
+    pub fn with_error(mut self, err: Arc<Error>) -> ProcedureState {
+        self.error = Some(err);
+        self
+    }
+
+    /// Returns the [StateKind].
+    pub fn kind(&self) -> StateKind {
+        self.kind
+    }
+
+    /// Returns true if the procedure state kind is [StateKind::Failed].
+    pub fn is_failed(&self) -> bool {
+        self.kind == StateKind::Failed
+    }
+
+    /// Returns the latest error.
+    pub fn error(&self) -> Option<&Arc<Error>> {
+        self.error.as_ref()
+    }
 }
 
 /// Watcher to watch procedure state.
@@ -244,6 +300,9 @@ pub type ProcedureManagerRef = Arc<dyn ProcedureManager>;
 
 #[cfg(test)]
 mod tests {
+    use common_error::mock::MockError;
+    use common_error::prelude::StatusCode;
+
     use super::*;
 
     #[test]
@@ -310,5 +369,27 @@ mod tests {
 
         let parsed = serde_json::from_str(&json).unwrap();
         assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_state_kind_default() {
+        assert_eq!(StateKind::Running, StateKind::default());
+    }
+
+    #[test]
+    fn test_procedure_state() {
+        let state = ProcedureState::running();
+        assert_eq!(StateKind::Running, state.kind());
+
+        let state = ProcedureState::done();
+        assert_eq!(StateKind::Done, state.kind());
+
+        let state = ProcedureState::failed();
+        assert_eq!(StateKind::Failed, state.kind());
+        assert!(state.error().is_none());
+        let state = state.with_error(Arc::new(Error::external(MockError::new(
+            StatusCode::Unexpected,
+        ))));
+        assert!(state.error().is_some());
     }
 }

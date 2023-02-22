@@ -65,7 +65,7 @@ pub(crate) struct ProcedureMeta {
 
 impl ProcedureMeta {
     fn new(id: ProcedureId, parent_id: Option<ProcedureId>, lock_key: LockKey) -> ProcedureMeta {
-        let (state_sender, state_receiver) = watch::channel(ProcedureState::Running);
+        let (state_sender, state_receiver) = watch::channel(ProcedureState::running());
         ProcedureMeta {
             id,
             lock_notify: Notify::new(),
@@ -434,7 +434,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::{Context, Procedure, Status};
+    use crate::{Context, Procedure, StateKind, Status};
 
     #[test]
     fn test_manager_context() {
@@ -447,9 +447,9 @@ mod tests {
         assert!(ctx.try_insert_procedure(meta.clone()));
         assert!(ctx.contains_procedure(meta.id));
 
-        assert_eq!(ProcedureState::Running, ctx.state(meta.id).unwrap());
-        meta.set_state(ProcedureState::Done);
-        assert_eq!(ProcedureState::Done, ctx.state(meta.id).unwrap());
+        assert_eq!(StateKind::Running, ctx.state(meta.id).unwrap().kind());
+        meta.set_state(ProcedureState::done());
+        assert_eq!(StateKind::Done, ctx.state(meta.id).unwrap().kind());
     }
 
     #[test]
@@ -634,7 +634,7 @@ mod tests {
         // Wait for the procedure done.
         let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
         watcher.changed().await.unwrap();
-        assert_eq!(ProcedureState::Done, *watcher.borrow());
+        assert_eq!(StateKind::Done, watcher.borrow().kind());
 
         // Try to submit procedure with same id again.
         let err = manager
@@ -697,7 +697,7 @@ mod tests {
                     .unwrap();
                 // Wait for the notification.
                 watcher.changed().await.unwrap();
-                assert_eq!(ProcedureState::Failed, *watcher.borrow());
+                assert_eq!(StateKind::Failed, watcher.borrow().kind());
             }
         };
 
